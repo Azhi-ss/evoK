@@ -1,0 +1,9 @@
+{
+  "name": "evok",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json"
+  }
+}
