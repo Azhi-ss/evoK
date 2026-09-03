@@ -539,3 +539,5 @@ export function createToyMission(options: ToyMissionOptions): ToyCompetitionHarn
 export function replayToyMission(events: readonly MissionEvent[]): MissionState {
   return ToyCompetitionHarness.replay(events);
 }
+
+export * from "./team-execution";
