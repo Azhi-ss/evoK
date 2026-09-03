@@ -5,5 +5,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0"
   }
 }
