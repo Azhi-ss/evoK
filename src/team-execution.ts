@@ -1,4 +1,6 @@
 import { DAGScheduler, MissionQueue, type DagRunResult, type DagSchedulerOptions, type DagTaskExecutor } from "./dag-scheduler";
+import { SandboxViolation } from "./security-boundary";
+import { normalizeVerificationResult, type VerificationRole } from "./verification-gates";
 
 export interface ExecutionPlan {
   readonly version: number;
@@ -116,17 +118,30 @@ export interface Falsifier {
   falsify(artifact: Readonly<ArtifactReference>): FalsifierResult | Promise<FalsifierResult>;
 }
 
+export interface BranchVerificationInput {
+  readonly branch: Branch;
+  readonly artifact: Readonly<ArtifactReference>;
+}
+
+export type BranchVerification = (input: BranchVerificationInput) => unknown | Promise<unknown>;
+
 export interface ScheduledBranchResult {
   readonly branch: Branch;
   readonly artifact?: Readonly<ArtifactReference>;
   readonly objections: readonly string[];
-  readonly status: "COMPLETED" | "REJECTED";
+  readonly status: "COMPLETED" | "REJECTED" | "QUARANTINED";
+  readonly verification?: Partial<Record<VerificationRole, boolean>>;
 }
 
 export interface ScheduleOptions {
   readonly branchIds: readonly string[];
   readonly execute: (branch: Branch) => ArtifactReference | Promise<ArtifactReference>;
+  readonly selfVerify?: (branch: Branch) => unknown | Promise<unknown>;
   readonly falsifier: (branch: Branch) => FalsifierResult | Promise<FalsifierResult>;
+  readonly critic?: BranchVerification;
+  readonly challenger?: BranchVerification;
+  readonly auditor?: BranchVerification;
+  readonly successAuditor?: BranchVerification;
 }
 
 function assertBranchIds(branchIds: readonly string[]): void {
@@ -240,22 +255,46 @@ export class DeterministicScheduler {
     const branches = this.createBranches(plan, options.branchIds);
     // The branch list is created in input order; Promise.all preserves that order while allowing fan-out.
     return Promise.all(branches.map(async (branch): Promise<ScheduledBranchResult> => {
-      if (!branch.consumeAttempt()) return { branch, objections: ["branch budget exhausted"], status: "REJECTED" };
+      const verification: Partial<Record<VerificationRole, boolean>> = {};
+      if (!branch.consumeAttempt()) return { branch, objections: ["branch budget exhausted"], status: "REJECTED", verification };
       try {
+        if (options.selfVerify) {
+          const check = normalizeVerificationResult(await options.selfVerify(branch), "SelfVerifier");
+          verification.SelfVerifier = check.ok;
+          branch.objections = [...check.objections];
+          if (!check.ok) return { branch, objections: branch.objections, status: "REJECTED", verification };
+        }
         const artifact = immutableArtifact(await options.execute(branch));
         assertArtifactOwnership(artifact, branch.branchId);
-        branch.falsifier = { branchId: branch.branchId, falsify: () => options.falsifier(branch) };
-        const falsification = await branch.falsifier.falsify(artifact);
-        branch.objections = [...falsification.objections];
-        return {
-          branch,
-          artifact,
-          objections: branch.objections,
-          status: falsification.ok ? "COMPLETED" : "REJECTED",
+        const runRole = async (role: VerificationRole, callback: BranchVerification | undefined): Promise<boolean> => {
+          if (!callback) return true;
+          const result = normalizeVerificationResult(await callback({ branch, artifact }), role);
+          verification[role] = result.ok;
+          branch.objections = [...result.objections];
+          return result.ok;
         };
+        branch.falsifier = {
+          branchId: branch.branchId,
+          falsify: async () => normalizeVerificationResult(await options.falsifier(branch), "Falsifier"),
+        };
+        if (!(await runRole("Falsifier", async () => branch.falsifier.falsify(artifact)))) {
+          return { branch, artifact, objections: branch.objections, status: "REJECTED", verification };
+        }
+        if (!(await runRole("Critic", options.critic))
+          || !(await runRole("Challenger", options.challenger))
+          || !(await runRole("Auditor", options.auditor))
+          || !(await runRole("SuccessAuditor", options.successAuditor))) {
+          return { branch, artifact, objections: branch.objections, status: "REJECTED", verification };
+        }
+        return { branch, artifact, objections: branch.objections, status: "COMPLETED", verification };
       } catch (error) {
         branch.objections = [error instanceof Error ? error.message : "branch execution failed"];
-        return { branch, objections: branch.objections, status: "REJECTED" };
+        return {
+          branch,
+          objections: branch.objections,
+          status: error instanceof SandboxViolation ? "QUARANTINED" : "REJECTED",
+          verification,
+        };
       }
     }));
   }

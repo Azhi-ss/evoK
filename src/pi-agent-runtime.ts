@@ -3,9 +3,19 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { TaskContract, ToyAgentRuntime } from "./toy-harness";
 import {
+  restrictSandboxPolicy,
+  SandboxBoundary,
+  SandboxViolation,
+  SecretRedactor,
+  type SandboxPolicy,
+} from "./security-boundary";
+import { verificationRoleContract, type VerificationRole } from "./verification-gates";
+import {
   createAgentSession,
+  DefaultResourceLoader,
   SessionManager,
   type CreateAgentSessionOptions,
+  type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -21,6 +31,9 @@ export interface RolePlan {
   readonly name: string;
   readonly instructions?: string;
   readonly tools?: readonly string[];
+  /** Team verification roles are constrained to their declared capabilities. */
+  readonly verificationRole?: VerificationRole;
+  readonly allowTestExecution?: boolean;
   /** Coding tools require both this explicit grant and an approved isolated workspace. */
   readonly allowCodingTools?: boolean;
 }
@@ -29,12 +42,14 @@ export interface ApprovedWorkspace {
   readonly path: string;
   readonly isolated: boolean;
   readonly approved: boolean;
+  readonly sandbox?: SandboxPolicy;
 }
 
 export interface PiAgentRuntimeRequest {
   readonly task: TaskPlan;
   readonly role: RolePlan;
   readonly workspace?: ApprovedWorkspace;
+  readonly secrets?: readonly string[];
 }
 
 export interface RuntimeUsage {
@@ -87,12 +102,18 @@ export interface AgentRuntimeSession {
   getSessionStats?(): unknown;
 }
 
-export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd" | "tools"> & Partial<CreateAgentSessionOptions>) => Promise<AgentRuntimeSession>;
+export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd" | "tools"> & Partial<CreateAgentSessionOptions> & {
+  readonly sandbox?: SandboxPolicy;
+  readonly redactor?: SecretRedactor;
+}) => Promise<AgentRuntimeSession>;
 
 export interface PiAgentRuntimeOptions {
   readonly workspaceRoot?: string;
   readonly sessionFactory?: AgentSessionFactory;
   readonly sessionOptions?: Omit<CreateAgentSessionOptions, "cwd" | "tools" | "sessionManager">;
+  readonly sandbox?: SandboxPolicy;
+  readonly secrets?: readonly string[];
+  readonly redactor?: SecretRedactor;
   readonly onDispose?: () => void;
 }
 
@@ -179,13 +200,38 @@ const NORMALIZED_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
   "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "error",
 ]);
 
-function toolsFor(role: RolePlan, workspace: ApprovedWorkspace): string[] {
+function toolsFor(role: RolePlan, workspace: ApprovedWorkspace, sandboxPolicy: SandboxPolicy): string[] {
+  if (role.tools !== undefined && !Array.isArray(role.tools)) throw new TypeError("role tools must be an array");
   const requested = role.tools ? [...role.tools] : [...READ_ONLY_TOOLS];
+  if (requested.some((tool) => typeof tool !== "string" || tool.trim() === "")) throw new TypeError("role tools must contain non-empty strings");
+  if (new Set(requested).size !== requested.length) throw new TypeError("role tools must be unique");
   if (requested.some((tool) => !(READ_ONLY_TOOLS as readonly string[]).includes(tool) && !(CODING_TOOLS as readonly string[]).includes(tool))) {
     throw new Error("role requests an unknown tool");
   }
+  if (sandboxPolicy.allowedTools && requested.some((tool) => !sandboxPolicy.allowedTools!.includes(tool))) {
+    throw new Error("role requests a tool outside the sandbox allowlist");
+  }
+  if (requested.includes("bash") && sandboxPolicy.allowBash !== true) {
+    throw new Error("bash requires an explicitly enabled sandbox policy");
+  }
   if (role.allowCodingTools !== undefined && typeof role.allowCodingTools !== "boolean") {
     throw new TypeError("allowCodingTools must be a boolean");
+  }
+  if (role.allowTestExecution !== undefined && typeof role.allowTestExecution !== "boolean") {
+    throw new TypeError("allowTestExecution must be a boolean");
+  }
+  if (role.verificationRole !== undefined) {
+    const contract = verificationRoleContract(role.verificationRole);
+    const coding = requested.some((tool) => (CODING_TOOLS as readonly string[]).includes(tool));
+    if (coding && role.verificationRole !== "Falsifier" && role.verificationRole !== "Critic" && role.verificationRole !== "Challenger") {
+      throw new Error(`${contract.role} is read-only`);
+    }
+    if (coding && requested.some((tool) => tool === "edit" || tool === "write")) {
+      throw new Error(`${contract.role} cannot modify a candidate workspace`);
+    }
+    if (requested.includes("bash") && (role.allowTestExecution !== true || sandboxPolicy.allowBash !== true)) {
+      throw new Error(`${contract.role} may run tests only through an explicitly sandboxed command policy`);
+    }
   }
   const coding = requested.some((tool) => (CODING_TOOLS as readonly string[]).includes(tool));
   if (coding && (role.allowCodingTools !== true || workspace.approved !== true || workspace.isolated !== true)) {
@@ -194,10 +240,10 @@ function toolsFor(role: RolePlan, workspace: ApprovedWorkspace): string[] {
   return requested;
 }
 
-function promptFor(input: PiAgentRuntimeRequest): string {
-  const constraints = input.task.constraints ? `\nConstraints: ${JSON.stringify(input.task.constraints)}` : "";
-  const outputs = input.task.expectedOutputs?.length ? `\nExpected outputs: ${input.task.expectedOutputs.join(", ")}` : "";
-  return `Task objective: ${input.task.objective}\nRole: ${input.role.name}${input.role.instructions ? `\nRole instructions: ${input.role.instructions}` : ""}${constraints}${outputs}`;
+function promptFor(input: PiAgentRuntimeRequest, redactor: SecretRedactor): string {
+  const constraints = input.task.constraints ? `\nConstraints: ${JSON.stringify(redactor.redact(input.task.constraints))}` : "";
+  const outputs = input.task.expectedOutputs?.length ? `\nExpected outputs: ${input.task.expectedOutputs.map((output) => redactor.redactText(output)).join(", ")}` : "";
+  return redactor.redactText(`Task objective: ${input.task.objective}\nRole: ${input.role.name}${input.role.instructions ? `\nRole instructions: ${input.role.instructions}` : ""}${constraints}${outputs}`);
 }
 
 function objectFromText(text: string | undefined): Record<string, unknown> | undefined {
@@ -214,22 +260,54 @@ function objectFromText(text: string | undefined): Record<string, unknown> | und
 
 function verificationFromText(text: string | undefined, stage: string): { ok: boolean; objections: string[] } {
   const parsed = objectFromText(text);
-  if (!parsed || typeof parsed.ok !== "boolean") {
-    return { ok: false, objections: [`${stage} output must be a JSON object with boolean ok`] };
+  if (!parsed || typeof parsed.ok !== "boolean"
+    || parsed.objections !== undefined && (!Array.isArray(parsed.objections) || parsed.objections.some((value) => typeof value !== "string"))) {
+    return { ok: false, objections: [`${stage} output must be a JSON object with boolean ok and string objections`] };
   }
-  return {
-    ok: parsed.ok,
-    objections: Array.isArray(parsed.objections)
-      ? parsed.objections.filter((value): value is string => typeof value === "string")
-      : [],
-  };
+  const objections = (parsed.objections as string[] | undefined) ?? [];
+  return { ok: parsed.ok, objections: parsed.ok || objections.length > 0 ? objections : [`${stage} rejected the candidate`] };
 }
 
 const defaultFactory: AgentSessionFactory = async (options) => {
+  const { sandbox, redactor, ...sdkOptions } = options;
+  const cwd = sdkOptions.cwd!;
+  const agentDir = sdkOptions.agentDir ?? join(tmpdir(), "evok-pi-agent");
+  const boundary = new SandboxBoundary({
+    ...(sandbox ?? {}),
+    root: cwd,
+    allowedTools: sdkOptions.tools,
+    allowBash: sandbox?.allowBash === true,
+  });
+  const securityExtension: InlineExtension = {
+    name: "evok-sandbox-boundary",
+    hidden: true,
+    factory(pi) {
+      pi.on("tool_call", (event) => {
+        try {
+          boundary.assertToolCall(event.toolName, event.input);
+          return { block: false };
+        } catch (error) {
+          return { block: true, reason: redactor?.error(error).message ?? "sandbox policy denied the tool call" };
+        }
+      });
+    },
+  };
+  const resourceLoader = sdkOptions.resourceLoader ?? new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noContextFiles: true,
+    extensionFactories: [securityExtension],
+  });
+  if (!sdkOptions.resourceLoader) await resourceLoader.reload();
   const result = await createAgentSession({
-    ...options,
-    agentDir: options.agentDir ?? join(tmpdir(), "evok-pi-agent"),
-    sessionManager: SessionManager.inMemory(options.cwd),
+    ...sdkOptions,
+    agentDir,
+    resourceLoader,
+    customTools: [],
+    sessionManager: SessionManager.inMemory(cwd),
   });
   return result.session;
 };
@@ -240,6 +318,9 @@ export class PiAgentRuntime {
   private readonly sessionOptions: PiAgentRuntimeOptions["sessionOptions"];
   private readonly usedWorkspaces = new Set<string>();
   private readonly usedSessions = new Set<string>();
+  private readonly sandboxPolicy: SandboxPolicy;
+  private readonly redactor: SecretRedactor;
+  private readonly secrets: readonly string[];
   private readonly onDispose?: () => void;
   private harnessRun = 0;
 
@@ -247,7 +328,14 @@ export class PiAgentRuntime {
     this.root = resolve(options.workspaceRoot ?? tmpdir());
     this.factory = options.sessionFactory ?? defaultFactory;
     this.sessionOptions = options.sessionOptions;
+    this.sandboxPolicy = restrictSandboxPolicy(options.sandbox ?? {});
+    this.secrets = Object.freeze([...(options.secrets ?? [])]);
+    this.redactor = options.redactor ?? new SecretRedactor(this.secrets);
     this.onDispose = options.onDispose;
+  }
+
+  private redactorFor(input: PiAgentRuntimeRequest): SecretRedactor {
+    return input.secrets?.length ? new SecretRedactor([...this.secrets, ...input.secrets]) : this.redactor;
   }
 
   async execute(input: PiAgentRuntimeRequest, signal?: AbortSignal): Promise<AgentRuntimeResult> {
@@ -260,30 +348,43 @@ export class PiAgentRuntime {
     }
     if (signal?.aborted) throw abortError();
 
+    const redactor = this.redactorFor(input);
+    const requestedPolicy: SandboxPolicy = restrictSandboxPolicy(this.sandboxPolicy, input.workspace.sandbox ?? {});
     const requestedRoot = resolve(input.workspace.path);
-    if (!isAbsolute(input.workspace.path) || !within(this.root, requestedRoot)) throw new Error("workspace path escapes the approved workspace root");
+    if (!isAbsolute(input.workspace.path) || !within(this.root, requestedRoot)) throw new SandboxViolation("path-traversal", "workspace path escapes the approved workspace root");
     if (this.usedWorkspaces.has(requestedRoot)) throw new Error("workspace/session reuse is not allowed");
-    const tools = toolsFor(input.role, input.workspace);
+    const rootBoundary = new SandboxBoundary({ ...requestedPolicy, root: this.root });
+    await rootBoundary.assertPathAsync(input.workspace.path, "write");
+    const tools = toolsFor(input.role, input.workspace, requestedPolicy);
     await mkdir(requestedRoot, { recursive: true });
     const approvedRoot = await realpath(requestedRoot);
     const approvedWorkspaceRoot = await realpath(this.root);
-    if (!within(approvedWorkspaceRoot, approvedRoot)) throw new Error("workspace path escapes the approved workspace root");
+    if (!within(approvedWorkspaceRoot, approvedRoot)) throw new SandboxViolation("symlink", "workspace path escapes the approved workspace root");
     if (this.usedWorkspaces.has(approvedRoot)) throw new Error("workspace/session reuse is not allowed");
     this.usedWorkspaces.add(approvedRoot);
     const workspace = await realpath(await mkdtemp(join(approvedRoot, "run-")));
+    const boundary = new SandboxBoundary({
+      ...requestedPolicy,
+      root: workspace,
+      allowedTools: tools,
+      allowBash: requestedPolicy.allowBash === true,
+    });
     const events: RuntimeEvent[] = [];
     const seen = new Set<string>();
-    const session = await this.factory({ cwd: workspace, tools, ...this.sessionOptions });
+    const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
+    const session = await this.factory({ ...sessionOptions, customTools: [], cwd: workspace, tools, sandbox: boundary.policy, redactor });
     const sessionId = session.sessionId;
     if (typeof sessionId !== "string" || sessionId.trim() === "" || this.usedSessions.has(sessionId)) {
       try { session.dispose(); } finally { this.onDispose?.(); }
       throw new Error("workspace/session reuse is not allowed");
     }
     this.usedSessions.add(sessionId);
-    const add = (event: RuntimeEvent, key = JSON.stringify([event.type, event.toolCallId, event.toolName, event.reason, event.isError, event.raw])) => {
-      if (seen.has(key)) return;
-      seen.add(key);
-      events.push(event);
+    const add = (event: RuntimeEvent, key?: string) => {
+      const safeEvent = redactor.redact(event) as RuntimeEvent;
+      const eventKey = key ?? JSON.stringify([safeEvent.type, safeEvent.toolCallId, safeEvent.toolName, safeEvent.reason, safeEvent.isError, safeEvent.raw]);
+      if (seen.has(eventKey)) return;
+      seen.add(eventKey);
+      events.push(safeEvent);
     };
     add({ type: "session_start", sessionId });
     let completionUsage: RuntimeUsage | undefined;
@@ -295,6 +396,14 @@ export class PiAgentRuntime {
     const unsubscribe = session.subscribe((raw) => {
       if (!isRecord(raw) || typeof raw.type !== "string") return;
       const type = raw.type;
+      if (type === "tool_execution_start") {
+        try {
+          boundary.assertToolCall(String(raw.toolName ?? ""), isRecord(raw.args) ? raw.args : {});
+        } catch (error) {
+          eventError = error instanceof SandboxViolation ? error : redactor.error(error);
+          abortPromise ??= session.abort();
+        }
+      }
       if (type === "agent_end") {
         const messages = Array.isArray(raw.messages) ? raw.messages : [];
         for (const message of messages) {
@@ -308,23 +417,23 @@ export class PiAgentRuntime {
         }
         const assistant = messages.findLast((message) => isRecord(message) && message.role === "assistant");
         if (isRecord(assistant)) {
-          completionText = textFromMessage(assistant) || completionText;
-          if (typeof assistant.stopReason === "string") stopReason = assistant.stopReason;
+          completionText = redactor.redactText(textFromMessage(assistant)) || completionText;
+          if (typeof assistant.stopReason === "string") stopReason = redactor.redactText(assistant.stopReason);
           if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-            eventError = new Error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`));
+            eventError = redactor.error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`));
           }
         }
       }
-      if (type === "tool_execution_end" && raw.isError === true) eventError = new Error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`);
-      if (type === "error" || type === "session_error") eventError = new Error(String(raw.message ?? raw.errorMessage ?? "agent session failed"));
+      if (type === "tool_execution_end" && raw.isError === true) eventError = redactor.error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`);
+      if (type === "error" || type === "session_error") eventError = redactor.error(String(raw.message ?? raw.errorMessage ?? "agent session failed"));
       const normalizedType = type === "session_error" ? "error" : type;
       if (!NORMALIZED_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) return;
       add({
-        type: normalizedType as RuntimeEvent["type"], sessionId, raw,
-        toolCallId: typeof raw.toolCallId === "string" ? raw.toolCallId : undefined,
-        toolName: typeof raw.toolName === "string" ? raw.toolName : undefined,
+        type: normalizedType as RuntimeEvent["type"], sessionId, raw: redactor.redact(raw),
+        toolCallId: typeof raw.toolCallId === "string" ? redactor.redactText(raw.toolCallId) : undefined,
+        toolName: typeof raw.toolName === "string" ? redactor.redactText(raw.toolName) : undefined,
         isError: typeof raw.isError === "boolean" ? raw.isError : undefined,
-        reason: typeof raw.reason === "string" ? raw.reason : undefined,
+        reason: typeof raw.reason === "string" ? redactor.redactText(raw.reason) : undefined,
       });
     });
     const onAbort = () => { abortPromise ??= session.abort(); };
@@ -335,9 +444,14 @@ export class PiAgentRuntime {
         await abortPromise;
         throw abortError();
       }
-      await session.prompt(promptFor(input));
-      if (abortPromise || signal?.aborted) throw abortError();
+      try {
+        await session.prompt(promptFor(input, redactor));
+      } catch (error) {
+        if (eventError) throw eventError;
+        throw error;
+      }
       if (eventError) throw eventError;
+      if (abortPromise || signal?.aborted) throw abortError();
       const stats = session.getSessionStats?.();
       completionUsage = usageFromStats(stats) ?? completionUsage;
       if (!completionUsage) throw new Error("agent completion is missing usage/cost data");
@@ -345,9 +459,10 @@ export class PiAgentRuntime {
       add({ type: "session_end", sessionId, reason: stopReason });
       return { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText };
     } catch (error) {
-      if (abortPromise) await abortPromise;
+      if (abortPromise) await abortPromise.catch(() => undefined);
       if (signal?.aborted) throw abortError();
-      throw error;
+      if (error instanceof SandboxViolation) throw new SandboxViolation(error.kind, redactor.redactText(error.message));
+      throw redactor.error(error);
     } finally {
       signal?.removeEventListener("abort", onAbort);
       unsubscribe();
@@ -370,7 +485,13 @@ export class PiAgentRuntime {
     const workspace = join(this.root, ".evok-harness", encodeURIComponent(input.missionId), encodeURIComponent(input.branchId), `${this.harnessRun++}-${input.stage}`);
     return this.execute({
       task: { objective: input.taskContract.objective, constraints: input.taskContract.constraints, expectedOutputs: input.expectedOutputs },
-      role: { name: input.stage, instructions: input.instructions, tools: [...READ_ONLY_TOOLS] },
+      role: {
+        name: input.stage,
+        instructions: input.instructions,
+        tools: [...READ_ONLY_TOOLS],
+        ...(input.stage === "self-verify" ? { verificationRole: "SelfVerifier" as const }
+          : input.stage === "falsify" ? { verificationRole: "Falsifier" as const } : {}),
+      },
       workspace: { path: workspace, isolated: true, approved: true },
     });
   }
