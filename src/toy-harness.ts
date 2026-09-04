@@ -1059,3 +1059,4 @@ export * from "./branch-recovery";
 export * from "./dag-scheduler";
 export * from "./security-boundary";
 export * from "./verification-gates";
+export * from "./research-loop";
