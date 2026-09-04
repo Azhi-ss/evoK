@@ -33,3 +33,10 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/do
 - After all completion gates pass, the current Pi may act as a one-shot dispatcher: use the session-resolved Orca CLI to create a new `pi` terminal in the active worktree, send it a complete prompt for the next eligible ticket, then stop. Never dispatch before validation, commit, and issue closure succeed.
 - Continue only serially. Skip spec/epic/map parents, `ready-for-human` issues, and tickets with open blockers; stop when no eligible ticket remains or when the current ticket has a failure, unexplained dirty worktree, ambiguity, or launch failure.
 - An eligible ticket is open, explicitly labelled `ready-for-agent`, unassigned, and free of blockers in its issue body. Do not rely on GitHub's dependency summary alone; current blockers may be recorded under `## Blocked by`.
+
+## Goal usage
+
+- Start each ticket in a fresh Pi terminal with the literal `/goal ...` command; do not send `GOAL ...` as ordinary text.
+- Keep one goal scoped to one ticket and include its issue number, acceptance criteria, validation gates, and stop conditions. Use `/goal --tokens ...` when an explicit token budget is needed.
+- `/goal` continues the current Pi session; it does not create or inherit a new terminal. After successful completion, use Orca to create the next fresh Pi and send it a new `/goal ...` command.
+- Call `goal_complete` only after requirement-by-requirement evidence is verified; use `goal_wait` only for an arranged external wake, and `goal_blocked` only for the same evidenced blocker recurring across at least three goal turns.
