@@ -81,6 +81,26 @@ export interface EvaluationResult {
   contractDigest?: string;
 }
 
+export interface CompetitionAdapterDescription {
+  readonly name: string;
+  readonly input: Readonly<Record<string, unknown>>;
+  readonly rules: readonly string[];
+  readonly artifacts: readonly string[];
+  readonly metric: string;
+}
+
+export interface CompetitionRuleValidation {
+  readonly ok: boolean;
+  readonly violations: readonly string[];
+}
+
+export interface CompetitionArtifactReference {
+  readonly artifactId: string;
+  readonly address: string;
+  readonly digest: string;
+  readonly kind?: string;
+}
+
 export interface CandidateVerificationInput {
   missionId: string;
   branchId: string;
@@ -118,14 +138,44 @@ export interface ToyAgentRuntime {
 
 export interface ToyCompetitionAdapter {
   readonly name?: string;
+  readonly describe?: () => CompetitionAdapterDescription;
+  readonly validateRules?: (snapshot: Readonly<CandidateSnapshot>) => CompetitionRuleValidation;
+  readonly collectArtifacts?: (snapshot: Readonly<CandidateSnapshot>) => readonly CompetitionArtifactReference[];
   evaluate(snapshot: Readonly<CandidateSnapshot>): EvaluationResult | Promise<EvaluationResult>;
 }
 
 /** A deliberately small reference adapter: the candidate's `score` file is the score. */
 export class ScoreFileToyCompetitionAdapter implements ToyCompetitionAdapter {
+  readonly name = "score-file";
+
   constructor(readonly scoreFile = "score") {}
 
+  describe(): CompetitionAdapterDescription {
+    return deepFreeze({
+      name: "score-file",
+      input: { scoreFile: this.scoreFile },
+      rules: [`${this.scoreFile} must contain a finite numeric score`],
+      artifacts: [this.scoreFile],
+      metric: "score (higher is better)",
+    });
+  }
+
+  validateRules(snapshot: Readonly<CandidateSnapshot>): CompetitionRuleValidation {
+    const raw = snapshot.files[this.scoreFile];
+    const score = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+    const violations = Number.isFinite(score) ? [] : [`${this.scoreFile} is missing or not finite`];
+    return deepFreeze({ ok: violations.length === 0, violations });
+  }
+
+  collectArtifacts(snapshot: Readonly<CandidateSnapshot>): readonly CompetitionArtifactReference[] {
+    const content = snapshot.files[this.scoreFile] ?? "";
+    const digest = digestValue(content);
+    return deepFreeze([{ artifactId: `${this.scoreFile}:${digest}`, address: `artifact://${this.scoreFile}/${digest}`, digest, kind: "score" }]);
+  }
+
   evaluate(snapshot: Readonly<CandidateSnapshot>): EvaluationResult {
+    const validation = this.validateRules(snapshot);
+    if (!validation.ok) throw new Error(`rule validation failed: ${validation.violations.join("; ")}`);
     const score = Number(snapshot.files[this.scoreFile]);
     return {
       score,
@@ -1060,3 +1110,4 @@ export * from "./dag-scheduler";
 export * from "./security-boundary";
 export * from "./verification-gates";
 export * from "./research-loop";
+export * from "./second-toy-adapter";
