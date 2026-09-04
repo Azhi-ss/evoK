@@ -81,4 +81,13 @@ describe("security boundary", () => {
     const decision = gate.accept({ championDigest: "abc", acceptedBy: "operator", decisionId: "d1" });
     expect(decision).toMatchObject({ championDigest: "abc", acceptedBy: "operator", decisionId: "d1" });
   });
+
+  test("binds acceptance to a request and rejects invalid expiry windows", () => {
+    const gate = new HumanAcceptanceGate();
+    expect(() => gate.accept({ championDigest: "abc", acceptedBy: "operator", acceptedAt: 5, expiresAt: 5 })).toThrow();
+    const decision = gate.accept({ championDigest: "abc", acceptedBy: "operator", requestId: "submission-1", acceptedAt: 5, expiresAt: 10, token: "do-not-copy" } as unknown as Parameters<HumanAcceptanceGate["accept"]>[0]);
+    expect(decision).toMatchObject({ requestId: "submission-1", acceptedAt: 5, expiresAt: 10 });
+    expect((decision as Record<string, unknown>).token).toBeUndefined();
+    expect(Object.isFrozen(decision)).toBe(true);
+  });
 });

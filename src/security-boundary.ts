@@ -58,10 +58,12 @@ function clone<T>(value: T): T {
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, clone(entry)])) as T;
 }
 
-export function deepFreeze<T>(value: T): Readonly<T> {
+export function deepFreeze<T>(value: T, seen = new WeakSet<object>()): Readonly<T> {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value as Readonly<T>;
+  if (seen.has(value as object)) return value as Readonly<T>;
+  seen.add(value as object);
   for (const key of Reflect.ownKeys(value as object)) {
-    deepFreeze((value as Record<PropertyKey, unknown>)[key]);
+    deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
   }
   return Object.freeze(value) as Readonly<T>;
 }
@@ -79,6 +81,11 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function ownValue(value: object, key: PropertyKey): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
 function safeInteger(name: string, value: number, minimum: number): void {
@@ -542,29 +549,54 @@ export async function evaluateTrustedSnapshot<
 
 export interface HumanAcceptanceRequest {
   readonly championDigest: string;
+  readonly artifactDigest?: string;
   readonly acceptedBy: string;
+  readonly requestId?: string;
   readonly decisionId?: string;
   readonly acceptedAt?: number;
+  readonly expiresAt?: number;
   readonly reason?: string;
 }
 
 export interface HumanAcceptanceDecision extends HumanAcceptanceRequest {
   readonly decisionId: string;
   readonly acceptedAt: number;
+  readonly expiresAt?: number;
 }
 
 export class HumanAcceptanceGate {
   private nextDecision = 1;
 
   accept(request: HumanAcceptanceRequest): Readonly<HumanAcceptanceDecision> {
-    if (!request || typeof request.championDigest !== "string" || request.championDigest.trim() === "") throw new TypeError("champion digest is required");
-    if (typeof request.acceptedBy !== "string" || request.acceptedBy.trim() === "") throw new TypeError("human acceptance identity is required");
-    const acceptedAt = request.acceptedAt ?? Date.now();
-    if (!Number.isFinite(acceptedAt)) throw new RangeError("acceptedAt must be finite");
+    if (!plainRecord(request)) throw new TypeError("human acceptance must be an ordinary object");
+    const championDigest = ownValue(request, "championDigest");
+    const artifactDigest = ownValue(request, "artifactDigest");
+    const acceptedBy = ownValue(request, "acceptedBy");
+    const requestId = ownValue(request, "requestId");
+    const decisionId = ownValue(request, "decisionId");
+    const acceptedAtValue = ownValue(request, "acceptedAt");
+    const expiresAt = ownValue(request, "expiresAt");
+    const reason = ownValue(request, "reason");
+    if (typeof championDigest !== "string" || championDigest.trim() === "") throw new TypeError("champion digest is required");
+    if (artifactDigest !== undefined && (typeof artifactDigest !== "string" || artifactDigest.trim() === "")) throw new TypeError("artifact digest must be a non-empty string");
+    if (typeof acceptedBy !== "string" || acceptedBy.trim() === "") throw new TypeError("human acceptance identity is required");
+    if (requestId !== undefined && (typeof requestId !== "string" || requestId.trim() === "")) throw new TypeError("acceptance requestId must be a non-empty string");
+    if (decisionId !== undefined && (typeof decisionId !== "string" || decisionId.trim() === "")) throw new TypeError("decisionId must be a non-empty string");
+    if (reason !== undefined && typeof reason !== "string") throw new TypeError("acceptance reason must be a string");
+    const acceptedAt = acceptedAtValue === undefined ? Date.now() : acceptedAtValue;
+    if (typeof acceptedAt !== "number" || !Number.isFinite(acceptedAt)) throw new RangeError("acceptedAt must be finite");
+    if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= acceptedAt)) {
+      throw new RangeError("expiresAt must be finite and after acceptedAt");
+    }
     return deepFreeze({
-      ...request,
-      decisionId: request.decisionId ?? `human-acceptance-${this.nextDecision++}`,
+      championDigest,
+      ...(artifactDigest === undefined ? {} : { artifactDigest }),
+      acceptedBy,
+      ...(requestId === undefined ? {} : { requestId }),
+      decisionId: decisionId ?? `human-acceptance-${this.nextDecision++}`,
       acceptedAt,
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+      ...(reason === undefined ? {} : { reason }),
     });
   }
 }

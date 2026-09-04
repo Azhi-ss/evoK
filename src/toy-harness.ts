@@ -19,6 +19,11 @@ import {
   type VerificationRole,
 } from "./verification-gates";
 import type { HumanAcceptanceDecision } from "./security-boundary";
+import {
+  SubmissionBroker,
+  type SubmissionBrokerOptions,
+  type SubmissionChampion,
+} from "./submission-broker";
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -214,6 +219,10 @@ export type MissionEventType =
   | "BRANCH_REJECTED"
   | "BRANCH_QUARANTINED"
   | "HUMAN_ACCEPTED"
+  | "SUBMISSION_REQUESTED"
+  | "SUBMISSION_APPROVED"
+  | "SUBMISSION_REJECTED"
+  | "SUBMISSION_RESULT"
   | "RETRY_SCHEDULED"
   | "MISSION_COMPLETED"
   | "MISSION_STOPPED"
@@ -251,6 +260,7 @@ export interface MissionState {
   constraints: Record<string, unknown>;
   budget: MissionBudget;
   adapterName: string;
+  competitionId: string;
   quorum: number;
   verificationRoles: readonly VerificationRole[];
   contractDigest: string;
@@ -272,6 +282,7 @@ export interface ToyMissionOptions {
   budget?: MissionBudget;
   adapter?: ToyCompetitionAdapter;
   competitionAdapter?: ToyCompetitionAdapter;
+  competitionId?: string;
   taskContract?: TaskContract;
   branchIds?: string[];
   runtime: ToyAgentRuntime;
@@ -408,6 +419,7 @@ function initialState(event: MissionEvent): MissionState {
     constraints: clone((p.constraints as Record<string, unknown>) ?? {}),
     budget: clone((p.budget as MissionBudget) ?? {}),
     adapterName: String(p.adapterName ?? "toy"),
+    competitionId: String(p.competitionId ?? p.adapterName ?? "toy"),
     quorum,
     verificationRoles: Object.freeze(roles),
     contractDigest: p.contractDigest,
@@ -486,7 +498,9 @@ function project(events: readonly MissionEvent[]): MissionState {
     if (!isPlainRecord(event) || event.sequence !== expectedSequence || typeof event.type !== "string" || !isPlainRecord(event.payload)) break;
     expectedSequence += 1;
     const p = event.payload;
-    if ((state.phase === "COMPLETED" || state.phase === "STOPPED") && event.type !== "HUMAN_ACCEPTED") continue;
+    if ((state.phase === "COMPLETED" || state.phase === "STOPPED")
+      && event.type !== "HUMAN_ACCEPTED"
+      && !["SUBMISSION_REQUESTED", "SUBMISSION_APPROVED", "SUBMISSION_REJECTED", "SUBMISSION_RESULT"].includes(event.type)) continue;
     const branchScoped = Object.prototype.hasOwnProperty.call(p, "branchId");
     if (branchScoped && typeof p.branchId !== "string") continue;
     const branch = branchScoped ? state.branches[p.branchId as string] : undefined;
@@ -660,9 +674,12 @@ function project(events: readonly MissionEvent[]): MissionState {
           && isFiniteNumber(p.acceptedAt)) {
           state.humanAcceptance = freeze({
             championDigest: p.championDigest,
+            ...(typeof p.artifactDigest === "string" ? { artifactDigest: p.artifactDigest } : {}),
             acceptedBy: p.acceptedBy,
             decisionId: p.decisionId,
             acceptedAt: p.acceptedAt,
+            ...(typeof p.requestId === "string" ? { requestId: p.requestId } : {}),
+            ...(isFiniteNumber(p.expiresAt) ? { expiresAt: p.expiresAt } : {}),
             ...(typeof p.reason === "string" ? { reason: p.reason } : {}),
           });
         }
@@ -696,6 +713,7 @@ export class ToyCompetitionHarness {
 
   constructor(options: ToyMissionOptions) {
     if (typeof options.missionId !== "string" || options.missionId.trim() === "") throw new TypeError("missionId is required");
+    if (options.competitionId !== undefined && (typeof options.competitionId !== "string" || options.competitionId.trim() === "")) throw new TypeError("competitionId must be a non-empty string");
     this.options = options;
     this.sandbox = new SandboxBoundary({ ...options.sandbox, root: options.sandbox?.root ?? `/tmp/evok-${encodeURIComponent(options.missionId)}` });
     this.redactor = new SecretRedactor(options.secrets ?? []);
@@ -725,7 +743,8 @@ export class ToyCompetitionHarness {
       type: "MISSION_CREATED",
       payload: {
         missionId: options.missionId, objective: contract.objective, constraints: clone(contract.constraints ?? options.constraints ?? {}),
-        budget: clone(this.effectiveBudget), branchIds, adapterName: this.adapter.name ?? "toy", quorum,
+        budget: clone(this.effectiveBudget), branchIds, adapterName: this.adapter.name ?? "toy",
+        competitionId: options.competitionId ?? this.adapter.name ?? "toy", quorum,
         contract: clone(contract), contractDigest: digestValue(contract),
         verificationRoles: configuredVerificationRoles(options),
       },
@@ -852,9 +871,86 @@ export class ToyCompetitionHarness {
     if (!state.champion) throw new Error("cannot accept a mission without a local champion");
     const digest = request.championDigest ?? state.champion.snapshot.digest;
     if (!digest || digest !== state.champion.snapshot.digest) throw new TrustViolation("human acceptance must name the current champion digest");
-    const decision = this.humanAcceptance.accept({ ...request, championDigest: digest });
+    let artifactDigest: string | undefined;
+    if (request.requestId !== undefined || request.artifactDigest !== undefined) {
+      artifactDigest = digest;
+      if (this.adapter.collectArtifacts) {
+        const references = this.adapter.collectArtifacts(state.champion.snapshot);
+        const reference = references?.[0];
+        if (!Array.isArray(references) || !isPlainRecord(reference) || typeof reference.digest !== "string" || reference.digest.trim() === "") {
+          throw new TrustViolation("human acceptance could not bind an artifact digest");
+        }
+        artifactDigest = reference.digest;
+      }
+      if (request.artifactDigest !== undefined && request.artifactDigest !== artifactDigest) {
+        throw new TrustViolation("human acceptance must name the current artifact digest");
+      }
+    }
+    const decision = this.humanAcceptance.accept({
+      ...request,
+      championDigest: digest,
+      ...(artifactDigest === undefined ? {} : { artifactDigest }),
+    });
     this.append("HUMAN_ACCEPTED", decision as Record<string, unknown>);
     return decision;
+  }
+
+  createSubmissionBroker(options: Omit<SubmissionBrokerOptions, "ledger" | "championProvider">): SubmissionBroker {
+    const missionId = this.options.missionId;
+    const ledger = {
+      append: (event: { readonly type: "SUBMISSION_REQUESTED" | "HUMAN_ACCEPTED" | "SUBMISSION_APPROVED" | "SUBMISSION_REJECTED" | "SUBMISSION_RESULT"; readonly payload: Record<string, unknown> }) => {
+        this.append(event.type as MissionEventType, { ...event.payload });
+      },
+      events: () => this.events() as unknown as import("./submission-broker").SubmissionEvent[],
+    };
+    return new SubmissionBroker({
+      ...options,
+      secrets: [...(this.options.secrets ?? []), ...(options.secrets ?? [])],
+      ledger,
+      championProvider: (requestedMissionId): SubmissionChampion | undefined => {
+        if (requestedMissionId !== missionId) return undefined;
+        const state = this.state();
+        const champion = state.champion;
+        if (!champion) return undefined;
+        const branch = state.branches[champion.branchId];
+        const digest = champion.snapshot.digest;
+        if (!branch || typeof digest !== "string" || digest.trim() === "") return undefined;
+        let artifact = {
+          artifactId: champion.snapshot.provenance.candidateId,
+          address: `artifact://${state.competitionId}/${digest}`,
+          digest,
+          payload: champion.snapshot,
+        };
+        if (this.adapter.collectArtifacts) {
+          let references: readonly CompetitionArtifactReference[];
+          try { references = this.adapter.collectArtifacts(champion.snapshot); } catch { return undefined; }
+          const reference = references?.[0];
+          if (!Array.isArray(references) || !isPlainRecord(reference) || typeof reference.artifactId !== "string" || reference.artifactId.trim() === ""
+            || typeof reference.address !== "string" || reference.address.trim() === ""
+            || typeof reference.digest !== "string" || reference.digest.trim() === "") return undefined;
+          artifact = {
+            artifactId: reference.artifactId,
+            address: reference.address,
+            digest: reference.digest,
+            payload: champion.snapshot,
+          };
+        }
+        return {
+          missionId,
+          competition: state.competitionId,
+          branchId: champion.branchId,
+          championDigest: digest,
+          artifactDigest: artifact.digest,
+          artifact,
+          snapshot: champion.snapshot,
+          evaluatorSucceeded: branch.evaluatorSucceeded,
+          successAuditorPassed: branch.verification.SuccessAuditor === true,
+          promotionApproved: branch.status === "PROMOTED_LOCAL",
+          verification: branch.verification,
+          status: branch.status,
+        };
+      },
+    });
   }
 
   private async processBranch(branchId: string): Promise<void> {
@@ -1108,6 +1204,7 @@ export * from "./pi-agent-runtime";
 export * from "./branch-recovery";
 export * from "./dag-scheduler";
 export * from "./security-boundary";
+export * from "./submission-broker";
 export * from "./verification-gates";
 export * from "./research-loop";
 export * from "./second-toy-adapter";
