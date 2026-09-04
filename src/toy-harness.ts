@@ -449,23 +449,34 @@ export class ToyCompetitionHarness {
         throw new Error("simulated crash");
       }
       if (!snapshot) {
-        const workspace: Record<string, string> = {};
-        const context: Record<string, unknown> = {};
-        const check = await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract: this.contract, context, workspace });
-        if (!check.ok) {
-          this.append("PREFLIGHT_SELF_CHECK_FAILED", { branchId, fencingToken, objections: check.objections ?? [], reason: "self-check failed" });
-          return;
+        try {
+          const workspace: Record<string, string> = {};
+          const context: Record<string, unknown> = {};
+          const check = await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract: this.contract, context, workspace });
+          if (!check.ok) {
+            this.append("PREFLIGHT_SELF_CHECK_FAILED", { branchId, fencingToken, objections: check.objections ?? [], reason: "self-check failed" });
+            return;
+          }
+          this.append("PREFLIGHT_SELF_CHECK_PASSED", { branchId, fencingToken });
+          const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract: this.contract, workspace });
+          this.append("AGENT_COMPLETED", { branchId, fencingToken, ok: true });
+          this.append("CANDIDATE_GENERATED", { branchId, fencingToken, files: proposal.files });
+          this.append("CANDIDATE_MATERIALIZED", { branchId, fencingToken });
+          snapshot = freeze({
+            missionId: this.options.missionId, branchId, attempt, files: clone(proposal.files), contract: clone(this.contract),
+            provenance: { runId: `${this.options.missionId}:${branchId}:${attempt}`, candidateId: `${branchId}:${attempt}`, fencingToken },
+          });
+          this.append("SNAPSHOT_COMMITTED", { branchId, fencingToken, snapshot });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "branch preparation failed";
+          if (!(error instanceof InfrastructureError) || attempt >= maxAttempts) {
+            this.append("BRANCH_REJECTED", { branchId, fencingToken, reason });
+            return;
+          }
+          this.append("RETRY_SCHEDULED", { branchId, fencingToken, nextAttempt: attempt + 1, reason });
+          recoveredStage = undefined;
+          continue;
         }
-        this.append("PREFLIGHT_SELF_CHECK_PASSED", { branchId, fencingToken });
-        const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract: this.contract, workspace });
-        this.append("AGENT_COMPLETED", { branchId, fencingToken, ok: true });
-        this.append("CANDIDATE_GENERATED", { branchId, fencingToken, files: proposal.files });
-        this.append("CANDIDATE_MATERIALIZED", { branchId, fencingToken });
-        snapshot = freeze({
-          missionId: this.options.missionId, branchId, attempt, files: clone(proposal.files), contract: clone(this.contract),
-          provenance: { runId: `${this.options.missionId}:${branchId}:${attempt}`, candidateId: `${branchId}:${attempt}`, fencingToken },
-        });
-        this.append("SNAPSHOT_COMMITTED", { branchId, fencingToken, snapshot });
       }
       if (!evaluationAlreadyStarted) this.append("EVALUATION_STARTED", { branchId, fencingToken });
       try {
@@ -543,3 +554,4 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
 export * from "./team-execution";
 export * from "./pi-agent-runtime";
 export * from "./branch-recovery";
+export * from "./dag-scheduler";

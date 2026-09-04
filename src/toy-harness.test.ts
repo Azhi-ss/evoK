@@ -37,6 +37,30 @@ function runtimeFor(scores: Record<string, number>, falsified = new Set<string>(
 }
 
 describe("ToyCompetitionHarness", () => {
+  test("contains branch preparation failures in branch state and mission events", async () => {
+    const runtime: ToyAgentRuntime = {
+      selfVerify: () => { throw new Error("preflight failed"); },
+      propose: () => ({ files: { score: "1" } }),
+      falsify: () => ({ ok: true, objections: [] }),
+    };
+    const harness = new ToyCompetitionHarness({
+      missionId: "preflight-failure",
+      taskContract: contract,
+      branchIds: ["a"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+    });
+
+    const result = await harness.run();
+
+    expect(result.phase).toBe("STOPPED");
+    expect(result.branches.a.status).toBe("REJECTED");
+    expect(result.branches.a.rejectionReason).toBe("preflight failed");
+    expect(harness.events().some((event) => event.type === "BRANCH_REJECTED")).toBe(true);
+    expect(harness.events().at(-1)?.type).toBe("MISSION_STOPPED");
+  });
+
   test("isolates competitive branches, runs dedicated falsifiers, and fans in the best result", async () => {
     const { runtime, workspaces, falsifierCalls } = runtimeFor(
       { a: 4, b: 7, bad: 100 },

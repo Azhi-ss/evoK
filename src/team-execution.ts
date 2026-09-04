@@ -1,3 +1,5 @@
+import { DAGScheduler, MissionQueue, type DagRunResult, type DagSchedulerOptions, type DagTaskExecutor } from "./dag-scheduler";
+
 export interface ExecutionPlan {
   readonly version: number;
   readonly branchWidth: number;
@@ -188,7 +190,10 @@ function budgetView(state: MutableBranchBudget): BranchBudget {
 }
 
 export class DeterministicScheduler {
-  constructor(private readonly guard: PolicyGuard) {}
+  constructor(
+    private readonly guard: PolicyGuard,
+    private readonly missionQueue = new MissionQueue<DagRunResult>(),
+  ) {}
 
   createBranches(plan: ExecutionPlan, branchIds: readonly string[]): Branch[] {
     const approved = this.guard.validate(plan);
@@ -223,6 +228,12 @@ export class DeterministicScheduler {
       Object.defineProperty(branch, "budget", { value: budget, writable: false, configurable: false, enumerable: true });
       return branch;
     });
+  }
+
+  runDag(options: DagSchedulerOptions, fallback?: DagTaskExecutor): Promise<DagRunResult> {
+    const result = this.missionQueue.enqueue(options.missionId, () => new DAGScheduler(options).run(fallback));
+    void this.missionQueue.drain().catch(() => undefined);
+    return result;
   }
 
   async run(plan: ExecutionPlan, options: ScheduleOptions): Promise<ScheduledBranchResult[]> {
@@ -302,3 +313,4 @@ export class ArtifactFanIn {
 }
 
 export { Coordinator as TeamCoordinator };
+export * from "./dag-scheduler";
