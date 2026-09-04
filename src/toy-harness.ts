@@ -542,3 +542,4 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
 
 export * from "./team-execution";
 export * from "./pi-agent-runtime";
+export * from "./branch-recovery";
