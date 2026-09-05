@@ -329,6 +329,47 @@ describe("forced_tier (Policy Guard + budget gated)", () => {
   });
 });
 
+describe("crossModelConfigs (promotion-gate dual-tier bindings, #31)", () => {
+  test("configured fast+deep returns both ModelConfigs", () => {
+    const configs = dualTiers().crossModelConfigs();
+    expect(configs).toEqual({ fast: FLASH, deep: PRO });
+  });
+
+  test("unconfigured orchestra returns undefined (no dual path without tiers)", () => {
+    expect(orchestra(undefined).crossModelConfigs()).toBeUndefined();
+    expect(orchestra(null).crossModelConfigs()).toBeUndefined();
+    expect(orchestra({}).crossModelConfigs()).toBeUndefined();
+  });
+
+  test("missing deep binding fails closed", () => {
+    expect(() => orchestra({ fast: FLASH.id }).crossModelConfigs()).toThrow(OrchestraValidationError);
+    expect(() => orchestra({ fast: FLASH.id }).crossModelConfigs()).toThrow(/deep/);
+  });
+
+  test("returns fresh copies (no shared mutable configs)", () => {
+    const instance = dualTiers();
+    const first = instance.crossModelConfigs()!;
+    (first.fast as { provider: string }).provider = "mutated";
+    const second = instance.crossModelConfigs()!;
+    expect(second.fast).toEqual(FLASH);
+    expect(second.deep).toEqual(PRO);
+  });
+
+  test("identical fast/deep bindings fail closed (agreement would be vacuous)", () => {
+    expect(() => orchestra({ fast: FLASH.id, deep: FLASH.id }).crossModelConfigs())
+      .toThrow(OrchestraValidationError);
+    expect(() => orchestra({ fast: FLASH.id, deep: FLASH.id }).crossModelConfigs())
+      .toThrow(/different models/);
+  });
+
+  test("supplies configs only: never evaluates, promotes, or submits", () => {
+    // The dual bindings carry no verdict — agreement and promotion authority
+    // stay with the harness promotion gate (spec #27 decision 7).
+    const configs = dualTiers().crossModelConfigs()!;
+    expect(Object.keys(configs).sort()).toEqual(["deep", "fast"]);
+  });
+});
+
 describe("createPiModelCatalog (Pi SDK models.json)", () => {
   const model = (id: string, reasoning = false): Record<string, unknown> => ({
     id,

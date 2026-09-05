@@ -307,6 +307,26 @@ export class ModelOrchestra {
     }
     return this.boundTier(tier, reason);
   }
+
+  /**
+   * Promotion-gate dual-tier bindings for a cross-model agreement check
+   * (promotion_cross_model=both, spec #27 decision 7): the ModelConfigs a
+   * harness requests for the two tiered evaluation attempts. Supplies
+   * configs only — it never evaluates, agrees, or decides promotion.
+   *
+   * Returns undefined when the orchestra is unconfigured (no dual path
+   * without tier bindings); throws OrchestraValidationError when a required
+   * tier is unbound, so misconfig fails closed.
+   */
+  crossModelConfigs(): { fast: ModelConfig; deep: ModelConfig } | undefined {
+    if (!this.configured) return undefined;
+    const fast = this.boundTier("fast", "mix").model;
+    const deep = this.boundTier("deep", "mix").model;
+    if (fast.id === deep.id) {
+      throw new OrchestraValidationError("cross-model tiers must bind different models: fast and deep resolve to the same model");
+    }
+    return { fast, deep };
+  }
 }
 
 export interface PiModelCatalogOptions {

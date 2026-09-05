@@ -230,6 +230,29 @@ export interface ToyAgentRuntime {
   challenger?: (input: CandidateVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   auditor?: (input: EvidenceVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   successAuditor?: (input: EvidenceVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
+  /**
+   * Promotion-gate cross-model agreement check (promotion_cross_model=both):
+   * the runtime requests one tiered evaluation attempt per supplied
+   * ModelConfig and reports whether the two tiers agree. It only observes —
+   * promotion and submission authority stay with the harness.
+   */
+  crossModelCheck?: (input: CrossModelCheckInput) => CrossModelCheckResult | Promise<CrossModelCheckResult>;
+}
+
+export interface CrossModelCheckInput {
+  missionId: string;
+  branchId: string;
+  snapshot: Readonly<CandidateSnapshot>;
+  evaluation: Readonly<EvaluationResult>;
+  /** Both tier ModelConfigs resolved by the mission seam (fast + deep). */
+  models: { readonly fast: ModelConfig; readonly deep: ModelConfig };
+}
+
+export interface CrossModelCheckResult {
+  /** True when the fast and deep tiered attempts agree. */
+  readonly agreed: boolean;
+  /** Required explicit reason when agreed is false. */
+  readonly reason?: string;
 }
 
 export interface ToyCompetitionAdapter {
@@ -330,6 +353,7 @@ export type MissionEventType =
   | "SUBMISSION_RESULT"
   | "RETRY_SCHEDULED"
   | "MODEL_RESOLVED"
+  | "CROSS_MODEL_CHECK_COMPLETED"
   | "MISSION_COMPLETED"
   | "MISSION_STOPPED"
   | "LATE_EVENT_REJECTED";
@@ -512,6 +536,15 @@ export interface ToyMissionOptions {
   pattern?: PatternModelPolicy;
   /** Operator tier override for every role session; honored only when Policy Guard + budget allow. */
   forcedTier?: TierId;
+  /**
+   * Promotion-gate cross-model agreement (spec #27 decision 7): the harness
+   * requests two tiered evaluation attempts (fast + deep ModelConfigs) and
+   * requires agreement before the existing promotion policy may run. The
+   * orchestra only supplies the two ModelConfigs — it never decides the
+   * champion or a submission. Requires modelCatalog + bound fast/deep tiers
+   * and a runtime.crossModelCheck port; misconfig fails closed.
+   */
+  promotionCrossModel?: "both";
   secrets?: readonly string[];
 }
 
@@ -1228,6 +1261,24 @@ export class ToyCompetitionHarness {
     } else if (options.orchestra !== undefined && options.orchestra !== null) {
       throw new TypeError("modelCatalog is required when orchestra tiers are configured");
     }
+    if (options.promotionCrossModel !== undefined) {
+      if (options.promotionCrossModel !== "both") {
+        throw new TypeError('promotionCrossModel must be "both"');
+      }
+      if (!this.orchestra) {
+        throw new TypeError("modelCatalog and orchestra tiers are required when promotionCrossModel is configured");
+      }
+      if ((options.pattern?.modelMix ?? DEFAULT_MODEL_MIX) === "flash_only") {
+        throw new TypeError('promotionCrossModel "both" requires a model_mix that permits deep routing');
+      }
+      if (typeof options.runtime.crossModelCheck !== "function") {
+        throw new TypeError("runtime.crossModelCheck is required when promotionCrossModel is configured");
+      }
+      // Fail closed: the dual fast+deep path must actually be bound.
+      if (!this.orchestra.crossModelConfigs()) {
+        throw new TypeError('promotionCrossModel "both" requires bound fast and deep tiers');
+      }
+    }
     this.sandbox = new SandboxBoundary({ ...options.sandbox, root: options.sandbox?.root ?? `/tmp/evok-${encodeURIComponent(options.missionId)}` });
     this.redactor = new SecretRedactor(options.secrets ?? []);
     this.adapter = options.adapter ?? options.competitionAdapter ?? { name: "toy", evaluate: options.evaluate ?? new ScoreFileToyCompetitionAdapter().evaluate.bind(new ScoreFileToyCompetitionAdapter()) };
@@ -1606,6 +1657,54 @@ export class ToyCompetitionHarness {
     this.append("BRANCH_QUARANTINED", { branchId, fencingToken, reason: safe.message, objections: [safe.message] });
   }
 
+  /**
+   * Promotion-gate cross-model agreement (promotion_cross_model=both): the
+   * mission seam resolves both tier ModelConfigs and requests two tiered
+   * evaluation attempts from the runtime. Disagreement must carry an explicit
+   * reason (fail closed otherwise). The orchestra supplies configs only —
+   * evaluation, agreement recording, and the promotion decision stay here.
+   *
+   * ponytail: v0 runs the dual check regardless of budget pressure; the
+   * harness has no budget→allowDeep plumbing yet and the promotion policy
+   * remains the final authority. Add a budget gate when deep spend limits
+   * reach the mission seam.
+   */
+  private async runCrossModelCheck(
+    branchId: string,
+    fencingToken: number,
+    snapshot: Readonly<CandidateSnapshot>,
+    evaluation: Readonly<EvaluationResult>,
+  ): Promise<{ agreed: boolean; reason?: string }> {
+    // Construction validated both tiers are bound when promotionCrossModel is set.
+    const models = this.orchestra!.crossModelConfigs()!;
+    const result = await this.options.runtime.crossModelCheck!({
+      missionId: this.options.missionId,
+      branchId,
+      snapshot,
+      evaluation,
+      models,
+    });
+    if (!isPlainRecord(result) || typeof result.agreed !== "boolean") {
+      throw new TrustViolation("cross-model check returned a malformed result");
+    }
+    const reason = result.reason;
+    if (!result.agreed && (typeof reason !== "string" || reason.trim() === "")) {
+      throw new TrustViolation("cross-model disagreement must carry an explicit reason");
+    }
+    const agreed = result.agreed;
+    this.append("CROSS_MODEL_CHECK_COMPLETED", {
+      branchId,
+      fencingToken,
+      agreed,
+      ...(agreed ? {} : { reason }),
+      fastModel: models.fast.id,
+      deepModel: models.deep.id,
+      snapshotDigest: snapshot.digest,
+      contractDigest: snapshot.contractDigest,
+    });
+    return { agreed, ...(agreed ? {} : { reason }) };
+  }
+
   acceptChampion(request: Omit<Parameters<HumanAcceptanceGate["accept"]>[0], "championDigest"> & { championDigest?: string }): Readonly<HumanAcceptanceDecision> {
     const state = this.state();
     if (!state.champion) throw new Error("cannot accept a mission without a local champion");
@@ -1949,7 +2048,20 @@ export class ToyCompetitionHarness {
             }
           }
         }
-        const decision = this.promotionDecision(candidate, promotionState);
+        if (this.options.promotionCrossModel === "both") {
+          // Cross-model agreement is required before the promotion policy may
+          // run. Agreement only keeps the candidate eligible — it never
+          // auto-promotes and never submits.
+          const agreement = await this.runCrossModelCheck(branchId, fencingToken, snapshot, evaluation);
+          if (!agreement.agreed) {
+            this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: `cross-model disagreement: ${agreement.reason}` });
+            return;
+          }
+        }
+        // Re-read the state: the cross-model check awaited, so a sibling
+        // branch may have promoted in the meantime and promotionState above
+        // is stale.
+        const decision = this.promotionDecision(candidate, this.state());
         if (decision.approved) {
           this.append("PROMOTED_LOCAL", {
             branchId,
