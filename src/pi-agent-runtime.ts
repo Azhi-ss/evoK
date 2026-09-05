@@ -14,6 +14,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
+  SettingsManager,
   type CreateAgentSessionOptions,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
@@ -74,7 +75,10 @@ export type RuntimeEvent = {
     | "session_start" | "session_end" | "agent_start" | "agent_end"
     | "turn_start" | "turn_end" | "agent_settled"
     | "message_start" | "message_update" | "message_end"
-    | "tool_execution_start" | "tool_execution_update" | "tool_execution_end" | "error";
+    | "tool_execution_start" | "tool_execution_update" | "tool_execution_end" | "error"
+    | "compaction_start" | "compaction_end"
+    | "auto_retry_start" | "auto_retry_end"
+    | "summarization_retry_scheduled" | "summarization_retry_attempt_start" | "summarization_retry_finished";
   readonly sessionId: string;
   readonly raw?: unknown;
   readonly reason?: string;
@@ -198,7 +202,36 @@ function textFromMessage(message: Record<string, unknown>): string {
 const NORMALIZED_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
   "session_start", "session_end", "agent_start", "agent_end", "turn_start", "turn_end", "agent_settled",
   "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "error",
+  "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+  "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
 ]);
+
+/**
+ * Lifecycle events that must never fire under the runtime policy
+ * (compaction and retry are runtime-disabled). Receiving one means SDK
+ * policy drift or a config bypass: the Run must fail closed.
+ */
+const POLICY_VIOLATION_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
+  "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+  "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
+]);
+
+const RUNTIME_SESSION_POLICY = { compaction: { enabled: false }, retry: { enabled: false } } as const;
+
+export class SessionPolicyViolation extends Error {
+  readonly kind = "session-policy-violation" as const;
+  readonly eventType: string;
+  readonly raw: unknown;
+  /** Redacted run event ledger at detection time (kept live as later events are redacted). */
+  readonly events: readonly RuntimeEvent[];
+  constructor(eventType: string, raw: unknown, events: readonly RuntimeEvent[] = []) {
+    super(`pi session policy violation: received ${eventType} lifecycle event while compaction/retry are runtime-disabled`);
+    this.name = "SessionPolicyViolation";
+    this.eventType = eventType;
+    this.raw = raw;
+    this.events = events;
+  }
+}
 
 function toolsFor(role: RolePlan, workspace: ApprovedWorkspace, sandboxPolicy: SandboxPolicy): string[] {
   if (role.tools !== undefined && !Array.isArray(role.tools)) throw new TypeError("role tools must be an array");
@@ -268,7 +301,7 @@ function verificationFromText(text: string | undefined, stage: string): { ok: bo
   return { ok: parsed.ok, objections: parsed.ok || objections.length > 0 ? objections : [`${stage} rejected the candidate`] };
 }
 
-const defaultFactory: AgentSessionFactory = async (options) => {
+export const defaultSessionFactory: AgentSessionFactory = async (options) => {
   const { sandbox, redactor, ...sdkOptions } = options;
   const cwd = sdkOptions.cwd!;
   const agentDir = sdkOptions.agentDir ?? join(tmpdir(), "evok-pi-agent");
@@ -307,6 +340,7 @@ const defaultFactory: AgentSessionFactory = async (options) => {
     agentDir,
     resourceLoader,
     customTools: [],
+    settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
     sessionManager: SessionManager.inMemory(cwd),
   });
   return result.session;
@@ -326,7 +360,7 @@ export class PiAgentRuntime {
 
   constructor(options: PiAgentRuntimeOptions = {}) {
     this.root = resolve(options.workspaceRoot ?? tmpdir());
-    this.factory = options.sessionFactory ?? defaultFactory;
+    this.factory = options.sessionFactory ?? defaultSessionFactory;
     this.sessionOptions = options.sessionOptions;
     this.sandboxPolicy = restrictSandboxPolicy(options.sandbox ?? {});
     this.secrets = Object.freeze([...(options.secrets ?? [])]);
@@ -372,7 +406,15 @@ export class PiAgentRuntime {
     const events: RuntimeEvent[] = [];
     const seen = new Set<string>();
     const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
-    const session = await this.factory({ ...sessionOptions, customTools: [], cwd: workspace, tools, sandbox: boundary.policy, redactor });
+    const session = await this.factory({
+      ...sessionOptions,
+      customTools: [],
+      settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
+      cwd: workspace,
+      tools,
+      sandbox: boundary.policy,
+      redactor,
+    });
     const sessionId = session.sessionId;
     if (typeof sessionId !== "string" || sessionId.trim() === "" || this.usedSessions.has(sessionId)) {
       try { session.dispose(); } finally { this.onDispose?.(); }
@@ -392,6 +434,10 @@ export class PiAgentRuntime {
     let stopReason: string | undefined;
     let completionText: string | undefined;
     let eventError: Error | undefined;
+    const setEventError = (error: Error) => {
+      if (eventError instanceof SessionPolicyViolation) return;
+      eventError ??= error;
+    };
     let abortPromise: Promise<void> | undefined;
     const unsubscribe = session.subscribe((raw) => {
       if (!isRecord(raw) || typeof raw.type !== "string") return;
@@ -400,7 +446,7 @@ export class PiAgentRuntime {
         try {
           boundary.assertToolCall(String(raw.toolName ?? ""), isRecord(raw.args) ? raw.args : {});
         } catch (error) {
-          eventError = error instanceof SandboxViolation ? error : redactor.error(error);
+          setEventError(error instanceof SandboxViolation ? error : redactor.error(error));
           abortPromise ??= session.abort();
         }
       }
@@ -420,14 +466,22 @@ export class PiAgentRuntime {
           completionText = redactor.redactText(textFromMessage(assistant)) || completionText;
           if (typeof assistant.stopReason === "string") stopReason = redactor.redactText(assistant.stopReason);
           if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-            eventError = redactor.error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`));
+            setEventError(redactor.error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`)));
           }
         }
       }
-      if (type === "tool_execution_end" && raw.isError === true) eventError = redactor.error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`);
-      if (type === "error" || type === "session_error") eventError = redactor.error(String(raw.message ?? raw.errorMessage ?? "agent session failed"));
+      if (type === "tool_execution_end" && raw.isError === true) setEventError(redactor.error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`));
+      if (type === "error" || type === "session_error") setEventError(redactor.error(String(raw.message ?? raw.errorMessage ?? "agent session failed")));
       const normalizedType = type === "session_error" ? "error" : type;
       if (!NORMALIZED_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) return;
+      if (POLICY_VIOLATION_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) {
+        // Fail closed: the redacted event is recorded below; keep the first violation
+        // and its live event ledger so later evidence is never silently dropped.
+        eventError = eventError instanceof SessionPolicyViolation
+          ? eventError
+          : new SessionPolicyViolation(normalizedType, redactor.redact(raw), events);
+        abortPromise ??= session.abort();
+      }
       add({
         type: normalizedType as RuntimeEvent["type"], sessionId, raw: redactor.redact(raw),
         toolCallId: typeof raw.toolCallId === "string" ? redactor.redactText(raw.toolCallId) : undefined,
@@ -462,6 +516,7 @@ export class PiAgentRuntime {
       if (abortPromise) await abortPromise.catch(() => undefined);
       if (signal?.aborted) throw abortError();
       if (error instanceof SandboxViolation) throw new SandboxViolation(error.kind, redactor.redactText(error.message));
+      if (error instanceof SessionPolicyViolation) throw error; // evidence already redacted
       throw redactor.error(error);
     } finally {
       signal?.removeEventListener("abort", onAbort);

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
   PiAgentRuntime,
+  SessionPolicyViolation,
+  defaultSessionFactory,
   type AgentRuntimeResult,
   type AgentRuntimeSession,
   type PiAgentRuntimeRequest,
@@ -35,6 +39,21 @@ function assertExternalCompletion(result: AgentRuntimeResult, approvedRoot: stri
     "session_start", "agent_start", "tool_execution_start", "tool_execution_end", "agent_end", "session_end",
   ]));
 }
+
+const POLICY_LIFECYCLE_TYPES = [
+  "compaction_start",
+  "compaction_end",
+  "auto_retry_start",
+  "auto_retry_end",
+  "summarization_retry_scheduled",
+  "summarization_retry_attempt_start",
+  "summarization_retry_finished",
+] as const;
+
+const completeEnd = {
+  type: "agent_end",
+  messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop" }],
+};
 
 function fakeSession(events: readonly Record<string, unknown>[], stats = {
   tokens: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 },
@@ -257,6 +276,178 @@ describe("PiAgentRuntime", () => {
     expect(usedAgentSession).toBe(true);
     assertExternalCompletion(result, approvedRoot);
     expect(result.text).toBe("approved plan complete");
+  });
+
+  test("compaction/retry lifecycle events fail the run with redacted policy-violation evidence, never silent success", async () => {
+    for (const type of POLICY_LIFECYCLE_TYPES) {
+      let disposed = false;
+      const fake = fakeSession([
+        { type, reason: "threshold", attempt: 1, errorMessage: "provider failed with token super-secret" },
+        completeEnd,
+      ]);
+      const runtime = new PiAgentRuntime({
+        secrets: ["super-secret"],
+        workspaceRoot: "/tmp",
+        sessionFactory: async () => ({ ...fake.session, sessionId: `policy-${type}` }),
+        onDispose: () => { disposed = true; },
+      });
+      const error = await runtime.execute(request()).catch((caught) => caught);
+      expect(error).toBeInstanceOf(SessionPolicyViolation);
+      expect((error as SessionPolicyViolation).kind).toBe("session-policy-violation");
+      expect((error as SessionPolicyViolation).eventType).toBe(type);
+      expect((error as SessionPolicyViolation).message).toContain(type);
+      expect(JSON.stringify((error as SessionPolicyViolation).raw)).not.toContain("super-secret");
+      expect((error as SessionPolicyViolation).events.map((event) => event.type)).toContain(type);
+      expect(JSON.stringify((error as SessionPolicyViolation).events)).not.toContain("super-secret");
+      expect(fake.wasAborted()).toBe(true);
+      expect(disposed).toBe(true);
+    }
+  });
+
+  test("a policy violation is not clobbered by the aborted agent_end that follows the fail-closed abort", async () => {
+    const fake = fakeSession([
+      { type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 10, errorMessage: "transient" },
+      { type: "agent_end", messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "agent aborted", usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }] },
+    ]);
+    const runtime = new PiAgentRuntime({ sessionFactory: async () => fake.session });
+    const error = await runtime.execute(request()).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SessionPolicyViolation);
+    expect((error as SessionPolicyViolation).eventType).toBe("auto_retry_start");
+  });
+
+  test("a policy violation supersedes an earlier sandbox violation as the fail-closed evidence", async () => {
+    const fake = fakeSession([
+      { type: "tool_execution_start", toolCallId: "1", toolName: "write", args: { path: "out.txt" } },
+      { type: "compaction_start", reason: "threshold" },
+      completeEnd,
+    ]);
+    const runtime = new PiAgentRuntime({ sessionFactory: async () => fake.session });
+    const error = await runtime.execute(request()).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SessionPolicyViolation);
+    expect((error as SessionPolicyViolation).eventType).toBe("compaction_start");
+    expect((error as SessionPolicyViolation).events.map((event) => event.type)).toContain("compaction_start");
+  });
+
+  test("sessionOptions cannot re-enable compaction or retry: runtime policy wins", async () => {
+    let captured: SettingsManager | undefined;
+    const fake = fakeSession([completeEnd]);
+    const runtime = new PiAgentRuntime({
+      sessionOptions: {
+        settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true } }),
+      },
+      sessionFactory: async (options) => {
+        captured = options.settingsManager;
+        return fake.session;
+      },
+    });
+    await runtime.execute(request());
+    expect(captured?.getCompactionEnabled()).toBe(false);
+    expect(captured?.getRetryEnabled()).toBe(false);
+  });
+
+  test("default factory injects a runtime policy that overrides caller settings on a real Pi session", async () => {
+    const faux = fauxProvider({ api: "evok-policy", provider: "evok-policy", models: [{ id: "deterministic" }] });
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    const cwd = await mkdtemp(join(tmpdir(), "evok-default-factory-"));
+    const session = await defaultSessionFactory({
+      cwd,
+      tools: ["read"],
+      model: faux.getModel(),
+      modelRuntime,
+      sessionManager: SessionManager.inMemory(cwd),
+      settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true } }),
+    });
+    const settings = (session as unknown as { settingsManager: SettingsManager }).settingsManager;
+    expect(settings.getCompactionEnabled()).toBe(false);
+    expect(settings.getRetryEnabled()).toBe(false);
+  });
+
+  test("transient provider failure is not SDK-auto-retried and a caller retry is a new run/session/workspace", async () => {
+    const faux = fauxProvider({ api: "evok-transient", provider: "evok-transient", models: [{ id: "deterministic" }] });
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    faux.setResponses([
+      () => { throw new Error("transient provider failure"); },
+      fauxAssistantMessage("caller retry succeeded"),
+    ]);
+    const sessionIds: string[] = [];
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: "/tmp",
+      sessionFactory: async (options) => {
+        await writeFile(`${options.cwd}/fixture.txt`, "fixture");
+        const { session } = await createAgentSession({
+          ...options,
+          model: faux.getModel(),
+          modelRuntime,
+          sessionManager: SessionManager.inMemory(options.cwd),
+        });
+        sessionIds.push(session.sessionId);
+        return session;
+      },
+    });
+    const firstRoot = `/tmp/evok-transient-${Date.now()}`;
+    await expect(runtime.execute(request({ workspace: workspace(firstRoot) }))).rejects.toThrow();
+    expect(faux.state.callCount).toBe(1); // no SDK auto-retry inside one Run
+    // a retry cannot continue the failed Run's workspace: the caller must create a new Run
+    await expect(runtime.execute(request({ workspace: workspace(firstRoot) }))).rejects.toThrow("reuse");
+    const secondRoot = `/tmp/evok-transient-2-${Date.now()}`;
+    const result = await runtime.execute(request({ workspace: workspace(secondRoot) }));
+    expect(result.text).toBe("caller retry succeeded");
+    expect(result.workspace).toContain(`${secondRoot}/run-`);
+    expect(new Set(sessionIds).size).toBe(2); // fresh session per Run
+    expect(faux.state.callCount).toBe(2);
+  });
+
+  test("sandbox violations never auto-retry and session cleanup happens in finally", async () => {
+    let disposed = false;
+    const fake = fakeSession([
+      { type: "tool_execution_start", toolCallId: "1", toolName: "write", args: { path: "out.txt" } },
+      { type: "tool_execution_end", toolCallId: "1", toolName: "write", isError: true },
+      completeEnd,
+    ]);
+    const runtime = new PiAgentRuntime({
+      sessionFactory: async () => fake.session,
+      onDispose: () => { disposed = true; },
+    });
+    await expect(runtime.execute(request())).rejects.toMatchObject({ name: "SandboxViolation" });
+    expect(fake.wasAborted()).toBe(true);
+    expect(disposed).toBe(true);
+  });
+
+  test("multi-turn real SDK run emits no compaction/summarization events and context overflow fails explicitly", async () => {
+    const faux = fauxProvider({ api: "evok-overflow", provider: "evok-overflow", models: [{ id: "deterministic", contextWindow: 500 }] });
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read", { path: "fixture.txt" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: "fixture.txt" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("provider error", { stopReason: "error", errorMessage: "context window exceeded for model deterministic" }),
+    ]);
+    const rawTypes: string[] = [];
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: "/tmp",
+      sessionFactory: async (options) => {
+        await writeFile(`${options.cwd}/fixture.txt`, "tool result fixture");
+        const { session } = await createAgentSession({
+          ...options,
+          model: faux.getModel(),
+          modelRuntime,
+          sessionManager: SessionManager.inMemory(options.cwd),
+        });
+        session.subscribe((event) => {
+          const record = event as Record<string, unknown>;
+          if (typeof record?.type === "string") rawTypes.push(record.type);
+        });
+        return session;
+      },
+    });
+    const root = `/tmp/evok-overflow-${Date.now()}`;
+    await expect(runtime.execute(request({ workspace: workspace(root) }))).rejects.toThrow("context window");
+    expect(rawTypes).toContain("tool_execution_start");
+    const forbidden = rawTypes.filter((type) => type.startsWith("compaction") || type.startsWith("auto_retry") || type.startsWith("summarization_retry"));
+    expect(forbidden).toEqual([]);
+    expect(faux.state.callCount).toBe(3); // two tool turns + final error turn, no hidden extra LLM calls
   });
 
   test("rejects workspace reuse, duplicate events, and missing completion facts", async () => {
