@@ -565,4 +565,27 @@ describe("ToyCompetitionHarness", () => {
     expect(result.stopReason).toBe("join quorum not met");
     expect(mutationBlocked).toBe(true);
   });
+
+  test("task contract idea type must be registered and is carried onto the candidate snapshot", async () => {
+    expect(() => new ToyCompetitionHarness({
+      prediction,
+      missionId: "typed-contract",
+      taskContract: { objective: "maximize", ideaType: "not-a-kind" },
+      branchIds: ["a"],
+      runtime: runtimeFor({ a: 5 }).runtime,
+      evaluate: () => ({ score: 1 }),
+    })).toThrow(/registered idea type/);
+
+    const { runtime } = runtimeFor({ a: 7 });
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "typed-contract-2",
+      taskContract: { objective: "maximize", ideaType: "algorithmic" },
+      branchIds: ["a"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+    });
+    await harness.run();
+    expect(harness.state().branches.a.snapshot?.ideaType).toBe("algorithmic");
+  });
 });

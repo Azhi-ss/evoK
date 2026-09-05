@@ -4,6 +4,7 @@ import {
   Coordinator,
   DeterministicScheduler,
   PolicyGuard,
+  registerIdeaType,
   type ArtifactReference,
   type ExecutionPlan,
 } from "./toy-harness";
@@ -233,5 +234,118 @@ describe("adaptive team execution", () => {
     await expect(fanIn.reconcile([artifact as unknown as ArtifactReference])).rejects.toThrow();
     expect(evaluated).toEqual([]);
     expect(promoted).toEqual([]);
+  });
+
+  describe("idea typing and search diversity", () => {
+    const diversityGuard = new PolicyGuard({
+      maxBranchWidth: 3,
+      maxAttempts: 2,
+      maxBranchBudget: 10,
+      permissions: ["read"],
+      resources: ["cpu"],
+      mandatoryVerificationGates: ["self-check", "falsifier"],
+      diversity: { minIdeaTypes: 2 },
+    });
+
+    const allSystemsMicroTweaks = (): ExecutionPlan => plan({
+      branches: [
+        { branchId: "a", ideaType: "systems", focus: "micro-tweak" },
+        { branchId: "b", ideaType: "systems", focus: "micro-tweak" },
+      ],
+    });
+
+    const mixedPlan = (): ExecutionPlan => plan({
+      branches: [
+        { branchId: "a", ideaType: "systems", focus: "micro-tweak" },
+        { branchId: "b", ideaType: "algorithmic" },
+      ],
+    });
+
+    test("guard rejects a fan-out where every branch is one near-identical idea type and accepts a mixed-type plan", () => {
+      expect(() => diversityGuard.validate(allSystemsMicroTweaks())).toThrow(/idea type diversity/);
+      expect(() => diversityGuard.validate(mixedPlan())).not.toThrow();
+    });
+
+    test("guard enforces the per-kind branch quota on top of the distinct-type minimum", () => {
+      const quotaGuard = new PolicyGuard({
+        maxBranchWidth: 3,
+        maxAttempts: 2,
+        maxBranchBudget: 10,
+        permissions: ["read"],
+        resources: ["cpu"],
+        mandatoryVerificationGates: ["self-check", "falsifier"],
+        diversity: { minIdeaTypes: 2, maxBranchesPerKind: 1 },
+      });
+      registerIdeaType("systems:augmentation", "systems");
+      const sameKind = plan({
+        branchWidth: 3,
+        branches: [
+          { branchId: "a", ideaType: "systems" },
+          { branchId: "b", ideaType: "systems:augmentation" },
+          { branchId: "c", ideaType: "algorithmic" },
+        ],
+      });
+      expect(() => quotaGuard.validate(sameKind)).toThrow(/one base kind/);
+      expect(() => quotaGuard.validate(mixedPlan())).not.toThrow();
+    });
+
+    test("guard demands typed branches covering the full plan width when diversity is declared", () => {
+      expect(() => diversityGuard.validate(plan())).toThrow(/typed branches/);
+      expect(() => diversityGuard.validate(plan({
+        branches: [{ branchId: "a", ideaType: "systems" }, { branchId: "b", ideaType: "algorithmic" }],
+      }))).not.toThrow();
+      expect(() => diversityGuard.validate(plan({
+        branchWidth: 3,
+        branches: [
+          { branchId: "a", ideaType: "systems" },
+          { branchId: "b", ideaType: "algorithmic" },
+          { branchId: "c", ideaType: "open-search" },
+        ],
+      }))).not.toThrow();
+    });
+
+    test("guard rejects idea types that are not registered under a base kind", () => {
+      const unregistered = plan({
+        branches: [
+          { branchId: "a", ideaType: "systems" },
+          { branchId: "b", ideaType: "vibes" },
+        ],
+      });
+      expect(() => diversityGuard.validate(unregistered)).toThrow(/registered idea type/);
+      expect(() => registerIdeaType("systems", "algorithmic")).toThrow();
+    });
+
+    test("diversity guard blocks branch creation before any candidate work and promotion stays behind the evaluator gate", async () => {
+      const scheduler = new DeterministicScheduler(diversityGuard);
+      expect(() => scheduler.createBranches(allSystemsMicroTweaks(), ["a", "b"])).toThrow();
+
+      let executed = 0;
+      const result = await scheduler.run(mixedPlan(), {
+        branchIds: ["a", "b"],
+        execute: (branch) => { executed += 1; return ref(branch.branchId); },
+        falsifier: () => ({ ok: true, objections: [] }),
+      });
+      expect(executed).toBe(2);
+      expect(result.every((entry) => entry.status === "COMPLETED")).toBe(true);
+
+      // A diverse batch alone promotes nothing: the independent evaluator and the promotion
+      // policy remain the only route to promotion.
+      const evaluated: string[] = [];
+      const fanIn = new ArtifactFanIn(
+        async (artifact) => { evaluated.push(artifact.artifactId); return { score: 1 }; },
+        () => false,
+        ["a", "b"],
+      );
+      const fanInResult = await fanIn.reconcile([ref("a"), ref("b")]);
+      expect(evaluated).toEqual(["a-1", "b-1"]);
+      expect(fanInResult.promoted).toBeUndefined();
+    });
+
+    test("scheduler carries branch idea type and focus into the branch context", () => {
+      const scheduler = new DeterministicScheduler(guard);
+      const branches = scheduler.createBranches(mixedPlan(), ["a", "b"]);
+      expect(branches[0].context).toEqual({ ideaType: "systems", focus: "micro-tweak" });
+      expect(branches[1].context).toEqual({ ideaType: "algorithmic" });
+    });
   });
 });

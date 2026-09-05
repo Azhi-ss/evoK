@@ -4,8 +4,7 @@ import {
   type ResearchEvent,
   type ResearchTask,
   type TaskCompletion,
-} from "./research-loop";
-import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+} from "./research-loop";import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
 
 // Signed independent-evaluator proof bound to the registered "artifact-1" digest; missions register only
 // the evaluator's public key, so completions cannot forge the gate.
@@ -60,6 +59,27 @@ function completion(): TaskCompletion {
       status: "inconclusive", observationRefs: ["observation-1"], artifactRefs: ["artifact-1"], evidenceRefs: ["observation-1"],
       evaluatorId: "independent-evaluator", independentEvaluator: true, evidenceGatePassed: true,
     },
+  };
+}
+
+const typedTasks: readonly ResearchTask[] = [
+  { taskId: "baseline", objective: "measure the baseline", estimatedCost: 2, priority: 3, ideaType: "systems", prediction: {
+    predictionId: "baseline-prediction", hypothesis: "the baseline is measurable", expectedObservation: "the evaluator returns a baseline", failureModes: ["evaluator unavailable"],
+  } },
+  { taskId: "cheap-check", objective: "check a cheap alternative", estimatedCost: 1, priority: 2, ideaType: "algorithmic", prediction: {
+    predictionId: "cheap-prediction", hypothesis: "the cheap alternative works", expectedObservation: "the evaluator returns a cheaper score", failureModes: ["evaluator unavailable"],
+  } },
+  { taskId: "open-search", objective: "search the open space", estimatedCost: 1, priority: 1, ideaType: "open-search", prediction: {
+    predictionId: "search-prediction", hypothesis: "open search finds something", expectedObservation: "the evaluator returns a search score", failureModes: ["evaluator unavailable"],
+  } },
+];
+
+function typedPrediction(taskId: string): ResearchTask["prediction"] {
+  return {
+    predictionId: `${taskId}-prediction`,
+    hypothesis: `${taskId} hypothesis`,
+    expectedObservation: `the evaluator returns the ${taskId} score`,
+    failureModes: ["evaluator unavailable"],
   };
 }
 
@@ -215,5 +235,69 @@ describe("long-running research loop", () => {
     });
     expect(director.state().candidates).toHaveLength(1);
     expect(director.state().artifacts).toHaveLength(1);
+  });
+
+  test("task and candidate idea types must be registered; candidate promotion flags are booleans", () => {
+    expect(() => new MissionDirector({
+      missionId: "typed-registry", objective: "learn", budget: 5,
+      tasks: [{ ...typedTasks[0]!, ideaType: "vibes" }],
+    })).toThrow(/registered idea type/);
+
+    const director = new MissionDirector({ missionId: "typed-registry-2", objective: "learn", budget: 5, tasks: typedTasks });
+    director.selectNextTask();
+    expect(() => director.completeTask("baseline", {
+      operationId: "typed-candidate",
+      candidates: [{ candidateId: "candidate-1", digest: "candidate-digest", ideaType: "unregistered" }],
+      reconcile: { status: "inconclusive", observationRefs: [], artifactRefs: [], evidenceRefs: [], independentEvaluator: false, evidenceGatePassed: false },
+    })).toThrow(/registered idea type/);
+    expect(() => director.completeTask("baseline", {
+      operationId: "typed-candidate-2",
+      candidates: [{ candidateId: "candidate-1", digest: "candidate-digest", ideaType: "systems", promoted: "yes" as unknown as boolean }],
+      reconcile: { status: "inconclusive", observationRefs: [], artifactRefs: [], evidenceRefs: [], independentEvaluator: false, evidenceGatePassed: false },
+    })).toThrow(/promoted/);
+  });
+
+  test("mission status counts attempts and promotion rates per idea type for bias audit", () => {
+    const director = new MissionDirector({ missionId: "typed-stats", objective: "learn", budget: 20, tasks: typedTasks });
+    director.selectNextTask();
+    director.completeTask("baseline", {
+      operationId: "typed-stats-completion",
+      candidates: [
+        { candidateId: "sys-1", digest: "sys-digest-1", ideaType: "systems" },
+        { candidateId: "sys-2", digest: "sys-digest-2", ideaType: "systems", promoted: true },
+        { candidateId: "alg-1", digest: "alg-digest-1", ideaType: "algorithmic", promoted: true },
+      ],
+      reconcile: { status: "inconclusive", observationRefs: [], artifactRefs: [], evidenceRefs: [], independentEvaluator: false, evidenceGatePassed: false },
+    });
+    expect(director.state().ideaTypeStats).toEqual([
+      { ideaType: "algorithmic", attempts: 1, promoted: 1, promotionRate: 1 },
+      { ideaType: "systems", attempts: 2, promoted: 1, promotionRate: 0.5 },
+    ]);
+  });
+
+  test("default soft preference admits algorithmic and open-search tasks into selection", () => {
+    const director = new MissionDirector({
+      missionId: "typed-soft", objective: "learn", budget: 20,
+      tasks: [
+        { taskId: "sys-1", objective: "tune", estimatedCost: 1, priority: 9, ideaType: "systems", prediction: typedPrediction("sys-1") },
+        { taskId: "sys-2", objective: "tune more", estimatedCost: 1, priority: 8, ideaType: "systems", prediction: typedPrediction("sys-2") },
+        { taskId: "alg-1", objective: "new algorithm", estimatedCost: 1, priority: 1, ideaType: "algorithmic", prediction: typedPrediction("alg-1") },
+      ],
+    });
+    expect(director.selectNextTask()?.taskId).toBe("sys-1");
+    expect(director.selectNextTask()?.taskId).toBe("alg-1");
+    expect(director.selectNextTask()?.taskId).toBe("sys-2");
+  });
+
+  test("explicit idea type preference overrides the default rotation", () => {
+    const director = new MissionDirector({
+      missionId: "typed-explicit", objective: "learn", budget: 20,
+      ideaTypePreference: ["open-search"],
+      tasks: [
+        { taskId: "sys-1", objective: "tune", estimatedCost: 1, priority: 9, ideaType: "systems", prediction: typedPrediction("sys-1") },
+        { taskId: "search-1", objective: "open search", estimatedCost: 1, priority: 1, ideaType: "open-search", prediction: typedPrediction("search-1") },
+      ],
+    });
+    expect(director.selectNextTask()?.taskId).toBe("search-1");
   });
 });

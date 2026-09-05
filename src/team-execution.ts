@@ -1,6 +1,22 @@
 import { DAGScheduler, MissionQueue, type DagRunResult, type DagSchedulerOptions, type DagTaskExecutor } from "./dag-scheduler";
+import { ideaTypeKind, requireIdeaType } from "./idea-types";
 import { SandboxViolation } from "./security-boundary";
 import { normalizeVerificationResult, type VerificationRole } from "./verification-gates";
+
+/** One typed branch declaration inside an ExecutionPlan: the idea direction a branch pursues. */
+export interface BranchPlan {
+  readonly branchId: string;
+  readonly ideaType: string;
+  readonly focus?: string;
+}
+
+/** Diversity constraint a fan-out or tournament policy can declare over branch idea types. */
+export interface DiversityPolicy {
+  /** Minimum number of distinct registered idea types across the plan's branches. */
+  readonly minIdeaTypes: number;
+  /** Optional per-batch quota on how many branches may share one base kind. */
+  readonly maxBranchesPerKind?: number;
+}
 
 export interface ExecutionPlan {
   readonly version: number;
@@ -10,6 +26,8 @@ export interface ExecutionPlan {
   readonly permissions: readonly string[];
   readonly resources: readonly string[];
   readonly verificationGates: readonly string[];
+  /** Optional per-branch idea typing; required when the guard policy declares a diversity constraint. */
+  readonly branches?: readonly BranchPlan[];
 }
 
 export interface CoordinatorInput {
@@ -48,6 +66,8 @@ export interface PolicyLimits {
   readonly permissions: readonly string[];
   readonly resources: readonly string[];
   readonly mandatoryVerificationGates: readonly string[];
+  /** Optional diversity policy applied to typed plans (plans carrying per-branch idea types). */
+  readonly diversity?: DiversityPolicy;
 }
 
 function validPositiveInteger(name: string, value: number): void {
@@ -79,7 +99,45 @@ export class PolicyGuard {
     if (!includesAll(plan.verificationGates, this.limits.mandatoryVerificationGates)) {
       throw new Error("execution plan omits a mandatory verification gate");
     }
+    this.validateDiversity(plan);
     return plan;
+  }
+
+  /**
+   * Applies the policy's diversity constraint to typed plans. The diversity signal only vetoes
+   * plans here: it never scores or promotes anything, so the independent evaluator and the
+   * promotion gate remain the only promotion route.
+   */
+  private validateDiversity(plan: ExecutionPlan): void {
+    const diversity = this.limits.diversity;
+    if (!diversity) return;
+    validPositiveInteger("diversity.minIdeaTypes", diversity.minIdeaTypes);
+    if (diversity.maxBranchesPerKind !== undefined) validPositiveInteger("diversity.maxBranchesPerKind", diversity.maxBranchesPerKind);
+    const branches = plan.branches;
+    // A declared diversity constraint must cover every planned branch: an untyped (or partially
+    // typed) plan must not be able to slip past the constraint by omitting its types.
+    if (!branches || branches.length === 0) throw new Error("execution plan must declare typed branches under the diversity policy");
+    if (branches.length !== plan.branchWidth) throw new Error("execution plan must type every declared branch under the diversity policy");
+    const branchIds = new Set<string>();
+    const types = new Set<string>();
+    const kindCounts = new Map<string, number>();
+    for (const branch of branches) {
+      if (typeof branch.branchId !== "string" || branch.branchId.trim() === "") throw new TypeError("branch plan branchId must be a non-empty string");
+      if (branchIds.has(branch.branchId)) throw new RangeError("branch plan branchIds must be unique");
+      branchIds.add(branch.branchId);
+      requireIdeaType(branch.ideaType);
+      types.add(branch.ideaType);
+      const kind = ideaTypeKind(branch.ideaType)!;
+      kindCounts.set(kind, (kindCounts.get(kind) ?? 0) + 1);
+    }
+    if (types.size < diversity.minIdeaTypes) {
+      throw new Error("execution plan lacks idea type diversity: every branch shares one near-identical idea type");
+    }
+    if (diversity.maxBranchesPerKind !== undefined) {
+      for (const [kind, count] of kindCounts) {
+        if (count > diversity.maxBranchesPerKind) throw new Error(`execution plan concentrates too many branches in one base kind: ${kind}`);
+      }
+    }
   }
 }
 
@@ -214,6 +272,7 @@ export class DeterministicScheduler {
     const approved = this.guard.validate(plan);
     assertBranchIds(branchIds);
     if (branchIds.length > approved.branchWidth) throw new RangeError("branch count exceeds execution plan width");
+    const typedBranches = new Map((approved.branches ?? []).map((branchPlan) => [branchPlan.branchId, branchPlan]));
     return branchIds.map((branchId) => {
       const budgetState: MutableBranchBudget = {
         maxAttempts: approved.maxAttempts,
@@ -222,11 +281,12 @@ export class DeterministicScheduler {
         remainingUnits: approved.branchBudget,
       };
       const budget = budgetView(budgetState);
+      const typed = typedBranches.get(branchId);
       const branch: Branch = {
         branchId,
         sessionId: `${branchId}:session`,
         workspace: {},
-        context: {},
+        context: typed === undefined ? {} : { ideaType: typed.ideaType, ...(typed.focus === undefined ? {} : { focus: typed.focus }) },
         budget,
         falsifier: {
           branchId,

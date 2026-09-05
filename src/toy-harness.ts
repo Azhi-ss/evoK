@@ -19,6 +19,7 @@ import {
   type VerificationHooks,
   type VerificationRole,
 } from "./verification-gates";
+import { requireIdeaType } from "./idea-types";
 import type { HumanAcceptanceDecision } from "./security-boundary";
 import {
   SubmissionBroker,
@@ -97,6 +98,8 @@ export interface TaskContract {
   constraints?: Record<string, unknown>;
   budget?: MissionBudget;
   expectedOutputs?: string[];
+  /** Registered idea type (systems | algorithmic | open-search, or a registered extension). */
+  ideaType?: string;
 }
 
 export interface MissionBudget {
@@ -111,6 +114,8 @@ export interface CandidateSnapshot {
   attempt: number;
   files: Record<string, string>;
   contract: TaskContract;
+  /** The registered idea type this candidate pursues; mirrors the task contract. */
+  ideaType?: string;
   /** Integrity fields are present on snapshots created by the harness. */
   digest?: string;
   filesDigest?: string;
@@ -688,7 +693,8 @@ function isValidSnapshot(snapshot: unknown, state: MissionState, branch: BranchS
     && typeof candidate.filesDigest === "string"
     && typeof candidate.contractDigest === "string"
     && candidate.contractDigest === state.contractDigest
-    && branch.candidateFilesDigest === candidate.filesDigest)) return false;
+    && branch.candidateFilesDigest === candidate.filesDigest
+    && (candidate.ideaType === undefined || candidate.ideaType === candidate.contract.ideaType))) return false;
   try {
     assertSnapshotIntegrity(candidate);
     return true;
@@ -1225,6 +1231,7 @@ export class ToyCompetitionHarness {
         budget: clone(this.options.budget ?? {}),
       };
       this.contractValue = deepFreeze(this.redactor.redact(clone(contract))) as Readonly<TaskContract>;
+      if (this.contractValue.ideaType !== undefined) requireIdeaType(this.contractValue.ideaType);
     }
     return this.contractValue as TaskContract;
   }
@@ -1682,6 +1689,7 @@ export class ToyCompetitionHarness {
           snapshot = createTrustedSnapshot({
             missionId: this.options.missionId,
             branchId,
+            ...(this.contract.ideaType === undefined ? {} : { ideaType: this.contract.ideaType }),
             attempt,
             files,
             contract: clone(taskContract),
@@ -1945,6 +1953,7 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
   return ToyCompetitionHarness.replay(events);
 }
 
+export * from "./idea-types";
 export * from "./team-execution";
 export * from "./pi-agent-runtime";
 export * from "./predict-reconcile";

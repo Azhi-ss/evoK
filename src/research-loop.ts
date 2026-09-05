@@ -1,4 +1,5 @@
 import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
+import { requireIdeaType } from "./idea-types";
 import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "./security-boundary";
 
 export type { ClaimCard, PredictionArtifact, ReconcileInput, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
@@ -75,6 +76,14 @@ export interface ResearchCandidateRef {
   readonly candidateId: string;
   readonly digest: string;
   readonly address?: string;
+  /**
+   * Registered idea type of the attempted candidate. When true, `promoted` records that the
+   * candidate passed the promotion gate; it is caller-supplied audit input recorded with the
+   * task completion, so verify it against the promotion-gate records before relying on the
+   * derived promotion rate.
+   */
+  readonly ideaType?: string;
+  readonly promoted?: boolean;
 }
 
 export interface ResearchArtifactRef {
@@ -92,6 +101,8 @@ export interface ResearchTask {
   readonly uncertainty?: number;
   readonly estimatedCost?: number;
   readonly tags?: readonly string[];
+  /** Registered idea type (systems | algorithmic | open-search, or a registered extension). */
+  readonly ideaType?: string;
   readonly prediction?: PredictionArtifact;
 }
 
@@ -132,6 +143,14 @@ export interface ResearchBudgetState {
   readonly remaining: number;
 }
 
+/** Per-idea-type attempt and promotion counts for bias auditing. */
+export interface IdeaTypeStats {
+  readonly ideaType: string;
+  readonly attempts: number;
+  readonly promoted: number;
+  readonly promotionRate: number;
+}
+
 export type ResearchBudgetInput = number | { readonly total?: number; readonly maxUnits?: number; readonly units?: number };
 
 export interface ResearchMissionState {
@@ -145,6 +164,7 @@ export interface ResearchMissionState {
   readonly tasks: Readonly<Record<string, ResearchTaskState>>;
   readonly candidates: readonly ResearchCandidateRef[];
   readonly artifacts: readonly ResearchArtifactRef[];
+  readonly ideaTypeStats: readonly IdeaTypeStats[];
   readonly predictions: readonly PredictionArtifact[];
   readonly reconciles: readonly ReconcileRecord[];
   readonly worldModel: readonly ClaimCard[];
@@ -194,6 +214,12 @@ export interface MissionDirectorOptions {
   readonly clock?: () => number;
   /** Mission trust root: independent evaluators whose signed proofs may gate WORLD_MODEL admission. */
   readonly trustedEvaluators?: readonly TrustedEvaluator[];
+  /**
+   * Explicit user instruction for task selection: ordered preferred idea types. When absent,
+   * the default soft preference rotates idea types so systems-heavy plans cannot starve
+   * algorithmic / open-search tasks out of the ready set.
+   */
+  readonly ideaTypePreference?: readonly string[];
 }
 
 export interface TrustedEvaluator {
@@ -324,6 +350,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
     ...(task.uncertainty === undefined ? {} : { uncertainty: task.uncertainty }),
     estimatedCost,
     ...(tags.length === 0 ? {} : { tags: Object.freeze(tags) }),
+    ...(task.ideaType === undefined ? {} : { ideaType: requireIdeaType(task.ideaType) }),
     ...(prediction === undefined ? {} : { prediction }),
   });
 }
@@ -339,7 +366,15 @@ function normalizeCandidates(value: readonly ResearchCandidateRef[] | undefined)
     if (ids.has(candidate.candidateId)) throw new RangeError("candidate refs must be unique");
     ids.add(candidate.candidateId);
     if (candidate.address !== undefined) nonEmpty("candidate address", candidate.address);
-    return Object.freeze({ candidateId: candidate.candidateId, digest: candidate.digest, ...(candidate.address === undefined ? {} : { address: candidate.address }) });
+    const ideaType = candidate.ideaType === undefined ? undefined : requireIdeaType(candidate.ideaType);
+    if (candidate.promoted !== undefined && typeof candidate.promoted !== "boolean") throw new TypeError("candidate promoted must be boolean");
+    return Object.freeze({
+      candidateId: candidate.candidateId,
+      digest: candidate.digest,
+      ...(candidate.address === undefined ? {} : { address: candidate.address }),
+      ...(ideaType === undefined ? {} : { ideaType }),
+      ...(candidate.promoted === undefined ? {} : { promoted: candidate.promoted }),
+    });
   });
 }
 
@@ -670,6 +705,7 @@ function taskPlan(task: ResearchTask): ResearchTask {
     ...(task.uncertainty === undefined ? {} : { uncertainty: task.uncertainty }),
     ...(task.estimatedCost === undefined ? {} : { estimatedCost: task.estimatedCost }),
     ...(task.tags === undefined ? {} : { tags: [...task.tags] }),
+    ...(task.ideaType === undefined ? {} : { ideaType: task.ideaType }),
     ...(task.prediction === undefined ? {} : { prediction: clone(task.prediction) }),
   };
 }
@@ -898,6 +934,57 @@ function refreshStatuses(state: MutableResearchState): void {
   }
 }
 
+/** Derives per-idea-type attempt and promotion counts from the candidate registry for bias auditing. */
+function ideaTypeStats(state: MutableResearchState): readonly IdeaTypeStats[] {
+  const counts = new Map<string, { attempts: number; promoted: number }>();
+  for (const candidate of state.candidates.values()) {
+    const ideaType = candidate.ideaType ?? "untyped";
+    const entry = counts.get(ideaType) ?? { attempts: 0, promoted: 0 };
+    entry.attempts += 1;
+    if (candidate.promoted === true) entry.promoted += 1;
+    counts.set(ideaType, entry);
+  }
+  return frozenArray([...counts]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([ideaType, entry]) => ({
+      ideaType,
+      attempts: entry.attempts,
+      promoted: entry.promoted,
+      promotionRate: entry.attempts === 0 ? 0 : entry.promoted / entry.attempts,
+    })));
+}
+
+/** Idea type of the most recently selected task, when one exists. */
+function lastSelectedIdeaType(events: readonly ResearchEvent[], tasks: Readonly<Record<string, ResearchTaskState>>): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "TASK_SELECTED") continue;
+    const taskId = event.payload.taskId;
+    if (typeof taskId === "string") return tasks[taskId]?.ideaType;
+  }
+  return undefined;
+}
+
+/**
+ * Applies the idea type preference to the eligible ready tasks. An explicit ordered preference
+ * list (a user instruction) wins; otherwise the default soft preference rotates away from the
+ * most recently selected idea type so a systems-heavy backlog cannot starve algorithmic /
+ * open-search tasks out of the ready set. This is a soft tie-break over priority order only:
+ * it never changes which tasks are ready and never touches evaluation or promotion gates.
+ */
+function preferByIdeaType(
+  eligible: readonly ResearchTaskState[],
+  explicit: readonly string[] | undefined,
+  lastType: string | undefined,
+): ResearchTaskState | undefined {
+  if (eligible.length === 0) return undefined;
+  if (explicit !== undefined && explicit.length > 0) {
+    return eligible.find((task) => task.ideaType !== undefined && explicit.includes(task.ideaType!)) ?? eligible[0];
+  }
+  if (lastType === undefined) return eligible[0];
+  return eligible.find((task) => task.ideaType !== undefined && task.ideaType !== lastType) ?? eligible[0];
+}
+
 function priorityScore(state: MutableResearchState, task: MutableTaskState): number {
   let score = task.task.priority ?? 0;
   score += task.task.uncertainty ?? 0;
@@ -937,6 +1024,7 @@ function publicState(state: MutableResearchState): ResearchMissionState {
     tasks: Object.fromEntries([...state.tasks].map(([id, task]) => [id, taskState(state, task)])),
     candidates: frozenArray([...state.candidates.values()]),
     artifacts: frozenArray([...state.artifacts.values()]),
+    ideaTypeStats: ideaTypeStats(state),
     predictions: frozenArray([...state.predictions.values()]),
     reconciles: frozenArray([...state.reconciles.values()]),
     worldModel: frozenArray([...state.worldModel.values()]),
@@ -1248,6 +1336,7 @@ export class MissionDirector {
   readonly ledger: ResearchLedger;
   private readonly missionId: string;
   private readonly clock: () => number;
+  private readonly ideaTypePreference: readonly string[] | undefined;
   private nextOperation = 1;
 
   constructor(options: MissionDirectorOptions, ledger: ResearchLedger = new InMemoryResearchLedger()) {
@@ -1258,6 +1347,7 @@ export class MissionDirector {
     this.missionId = options.missionId;
     this.clock = options.clock ?? (() => Date.now());
     this.ledger = ledger;
+    this.ideaTypePreference = options.ideaTypePreference === undefined ? undefined : Object.freeze([...options.ideaTypePreference].map(requireIdeaType));
     const trustedEvaluators = normalizeTrustedEvaluators(options.trustedEvaluators);
     if (ledger.events().length === 0) {
       const tasks = validateTaskGraph(options.tasks ?? []);
@@ -1344,7 +1434,8 @@ export class MissionDirector {
     const current = this.state();
     if (current.phase === "STOPPED") return undefined;
     const ready = this.readyTasks();
-    const selected = ready.find((task) => task.status === "READY" && current.budget.consumed + (task.estimatedCost ?? 1) <= current.budget.total);
+    const eligible = ready.filter((task) => task.status === "READY" && current.budget.consumed + (task.estimatedCost ?? 1) <= current.budget.total);
+    const selected = preferByIdeaType(eligible, this.ideaTypePreference, lastSelectedIdeaType(this.ledger.events(), current.tasks));
     if (!selected) return undefined;
     this.append("TASK_SELECTED", { taskId: selected.taskId, selectedAt: this.clock() }, this.operation(`select-${selected.taskId}`));
     return this.state().tasks[selected.taskId];
