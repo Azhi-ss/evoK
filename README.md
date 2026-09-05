@@ -16,7 +16,11 @@ The Orchestra config (RunPolicy) only **binds tiers to model ids already registe
 ```
 
 - Omitted/null/empty orchestra → every RoleSession uses Pi's current/default model (`settings.json` `defaultModel`), reason `unconfigured`.
-- Configured → each tier resolves independently to its registered model. `mid` is a reserved schema slot: it may be bound and is validated, but v0 has no policy that selects it.
+- Configured → Flash-first binding resolves each session deterministically. `mid` is a reserved schema slot: it may be bound and is validated, but v0 has no policy that selects it.
+- Pattern `model_mix`: `flash_only` (always fast) | `flash_primary` (default; everything fast unless a deep gate elevates) | `flash_deep_mix` (orchestration defaults deep as a soft fallback; execution/adversarial stay fast). Default mix is `flash_primary`.
+- Named `deep_gates` (registered in the harness gate catalog: `strategy_synthesis`, `join_reduce`, `success_audit`, `cross_model_check`) open deep routing for any role class; unknown gates fail validation.
+- `forced_tier` overrides automatic resolution only when Policy Guard (mix feasibility) and budget allow; otherwise the override is rejected — no silent deep.
+- Budget pressure (`allowDeep: false`) downgrades automatic deep selections to fast, reason `budget`. Decision reasons: `unconfigured`, `mix`, `role`, `gate`, `forced`, `budget`.
 - Unknown tier ids, tier values that aren't registered model ids, or ambiguous bare ids **fail closed before a mission starts** (`OrchestraValidationError`).
 - To add a model: edit `models.json` (or use Pi's `/model` flow). An evoK command, when it exists, only edits tier bindings.
 - Orchestra only picks model tiers — it never schedules tasks, spends budget, or changes the mission objective.
