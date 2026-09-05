@@ -103,6 +103,8 @@ export interface ResearchTask {
   readonly tags?: readonly string[];
   /** Registered idea type (systems | algorithmic | open-search, or a registered extension). */
   readonly ideaType?: string;
+  /** Macro campaign this task is tagged to; its cost draws the campaign envelope on selection. */
+  readonly campaignId?: string;
   readonly prediction?: PredictionArtifact;
 }
 
@@ -151,6 +153,61 @@ export interface IdeaTypeStats {
   readonly promotionRate: number;
 }
 
+/**
+ * Completion condition of one campaign milestone. Parts are optional and combine with AND; each
+ * declared part must be satisfied. A verifier threshold only counts evaluation evidence whose
+ * digest-verified proof carries a signature from a trusted evaluator.
+ */
+export interface MilestoneCondition {
+  readonly evidenceRefs?: readonly string[];
+  readonly worldModelClaimIds?: readonly string[];
+  readonly verifierThreshold?: { readonly fact: string; readonly minimum: number };
+}
+
+export interface CampaignMilestone {
+  readonly milestoneId: string;
+  readonly description: string;
+  readonly condition: MilestoneCondition;
+}
+
+/**
+ * A macro campaign: an explicit goal with allowed idea types, its own budget envelope, milestones,
+ * and stop conditions. Campaigns ride the mission ledger as declarations on MISSION_CREATED and
+ * PLAN_REVISED events; there is no separate authority state store.
+ */
+export interface Campaign {
+  readonly campaignId: string;
+  readonly goal: string;
+  /** Allowed task idea types; when non-empty, tagged tasks must declare one of them. */
+  readonly ideaTypes?: readonly string[];
+  /** Campaign budget envelope: caps the total estimatedCost of selected tasks tagged to it. */
+  readonly budget: number;
+  readonly milestones: readonly CampaignMilestone[];
+  /** Milestone ids whose joint completion marks the campaign goal as met. */
+  readonly stopConditions?: readonly string[];
+}
+
+export interface CampaignMilestoneState extends CampaignMilestone {
+  readonly completed: boolean;
+  readonly completedVia: readonly ("evidence" | "world-model" | "verifier")[];
+}
+
+export interface CampaignState {
+  readonly campaignId: string;
+  readonly goal: string;
+  readonly ideaTypes: readonly string[];
+  readonly budget: ResearchBudgetState;
+  readonly milestones: readonly CampaignMilestoneState[];
+  readonly stopConditionsMet: boolean;
+  readonly exhausted: boolean;
+}
+
+/** Ledger-visible macro vs micro spend split; macro spend also draws the mission budget. */
+export interface ResearchSpendState {
+  readonly micro: number;
+  readonly macro: number;
+}
+
 export type ResearchBudgetInput = number | { readonly total?: number; readonly maxUnits?: number; readonly units?: number };
 
 export interface ResearchMissionState {
@@ -174,6 +231,8 @@ export interface ResearchMissionState {
   readonly pitfalls: readonly Pitfall[];
   readonly decisions: readonly ResearchDecision[];
   readonly trustedEvaluators: readonly TrustedEvaluator[];
+  readonly campaigns: readonly CampaignState[];
+  readonly spend: ResearchSpendState;
   readonly suggestedAction?: ResearchDecisionAction;
   readonly suggestedStopReason?: string;
   readonly stopReason?: string;
@@ -186,6 +245,10 @@ export interface ResearchDecision {
   readonly reason: string;
   readonly stopReason?: string;
   readonly taskId?: string;
+  /** Campaigns the decision references; a decision with campaign refs is a macro decision. */
+  readonly campaignIds?: readonly string[];
+  /** Ledger-visible macro vs micro decision classification, derived from campaign refs. */
+  readonly scope?: "macro" | "micro";
 }
 
 export interface ResearchPlanProposal {
@@ -196,6 +259,8 @@ export interface ResearchPlanProposal {
   readonly evidenceRefs: readonly string[];
   readonly reason: string;
   readonly operationId?: string;
+  /** Redeclared campaign set; omitted keeps the current campaigns unchanged. */
+  readonly campaigns?: readonly Campaign[];
 }
 
 export interface GenerateTasksInput {
@@ -212,6 +277,8 @@ export interface MissionDirectorOptions {
   readonly tasks?: readonly ResearchTask[];
   readonly scope?: EvidenceScope;
   readonly clock?: () => number;
+  /** Declared macro campaigns; defaults to none. */
+  readonly campaigns?: readonly Campaign[];
   /** Mission trust root: independent evaluators whose signed proofs may gate WORLD_MODEL admission. */
   readonly trustedEvaluators?: readonly TrustedEvaluator[];
   /**
@@ -341,6 +408,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
   if (typeof estimatedCost !== "number" || !Number.isFinite(estimatedCost) || estimatedCost <= 0) {
     throw new RangeError("task estimatedCost must be finite and > 0");
   }
+  if (task.campaignId !== undefined) nonEmpty("task campaignId", task.campaignId);
   return Object.freeze({
     taskId: task.taskId,
     objective: task.objective,
@@ -351,6 +419,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
     estimatedCost,
     ...(tags.length === 0 ? {} : { tags: Object.freeze(tags) }),
     ...(task.ideaType === undefined ? {} : { ideaType: requireIdeaType(task.ideaType) }),
+    ...(task.campaignId === undefined ? {} : { campaignId: task.campaignId }),
     ...(prediction === undefined ? {} : { prediction }),
   });
 }
@@ -494,14 +563,17 @@ function normalizeDecision(value: unknown): ResearchDecision {
   nonEmpty("decision reason", value.reason);
   if (value.stopReason !== undefined) nonEmpty("decision stopReason", value.stopReason);
   if (value.taskId !== undefined) nonEmpty("decision taskId", value.taskId);
+  const campaignIds = strings("decision campaignIds", value.campaignIds as string[] | undefined);
   const stopReason = value.action === "Stop" ? value.stopReason ?? value.reason : value.stopReason;
   return deepFreeze({
     decisionId: value.decisionId,
     action: value.action,
     evidenceRefs,
     reason: value.reason,
+    scope: campaignIds.length === 0 ? "micro" : "macro",
     ...(stopReason === undefined ? {} : { stopReason }),
     ...(value.taskId === undefined ? {} : { taskId: value.taskId }),
+    ...(campaignIds.length === 0 ? {} : { campaignIds: Object.freeze(campaignIds) }),
   }) as ResearchDecision;
 }
 
@@ -678,6 +750,8 @@ interface MutableResearchState {
   scope?: EvidenceScope;
   budgetTotal: number;
   budgetConsumed: number;
+  campaigns: Map<string, Campaign>;
+  campaignConsumed: Map<string, number>;
   planVersion: number;
   planDigest: string;
   tasks: Map<string, MutableTaskState>;
@@ -695,6 +769,63 @@ interface MutableResearchState {
   operations: Map<string, { type: ResearchEventType; payload: Readonly<Record<string, unknown>> }>;
 }
 
+function normalizeMilestone(value: unknown): CampaignMilestone {
+  if (!isPlainRecord(value)) throw new TypeError("milestone must be an ordinary object");
+  nonEmpty("milestoneId", value.milestoneId);
+  nonEmpty("milestone description", value.description);
+  if (!isPlainRecord(value.condition)) throw new TypeError("milestone condition must be an ordinary object");
+  const evidenceRefs = strings("milestone evidenceRefs", value.condition.evidenceRefs as string[] | undefined);
+  const worldModelClaimIds = strings("milestone worldModelClaimIds", value.condition.worldModelClaimIds as string[] | undefined);
+  let verifierThreshold: { fact: string; minimum: number } | undefined;
+  if (value.condition.verifierThreshold !== undefined) {
+    const threshold = value.condition.verifierThreshold;
+    if (!isPlainRecord(threshold)) throw new TypeError("milestone verifierThreshold must be an ordinary object");
+    nonEmpty("verifierThreshold fact", threshold.fact);
+    finiteNonNegative("verifierThreshold minimum", threshold.minimum);
+    verifierThreshold = { fact: threshold.fact, minimum: threshold.minimum };
+  }
+  if (evidenceRefs.length === 0 && worldModelClaimIds.length === 0 && verifierThreshold === undefined) {
+    throw new Error("milestone condition requires evidence refs, world model claims, or a verifier threshold");
+  }
+  return Object.freeze({
+    milestoneId: value.milestoneId,
+    description: value.description,
+    condition: Object.freeze({
+      ...(evidenceRefs.length === 0 ? {} : { evidenceRefs: Object.freeze(evidenceRefs) }),
+      ...(worldModelClaimIds.length === 0 ? {} : { worldModelClaimIds: Object.freeze(worldModelClaimIds) }),
+      ...(verifierThreshold === undefined ? {} : { verifierThreshold: Object.freeze(verifierThreshold) }),
+    }),
+  }) as CampaignMilestone;
+}
+
+function normalizeCampaigns(value: unknown): Map<string, Campaign> {
+  const result = new Map<string, Campaign>();
+  if (value === undefined) return result;
+  if (!Array.isArray(value)) throw new TypeError("campaigns must be an array");
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) throw new TypeError("campaign must be an ordinary object");
+    nonEmpty("campaignId", entry.campaignId);
+    nonEmpty("campaign goal", entry.goal);
+    if (result.has(entry.campaignId)) throw new RangeError(`duplicate campaign: ${String(entry.campaignId)}`);
+    const ideaTypes = strings("campaign ideaTypes", entry.ideaTypes as string[] | undefined).map(requireIdeaType);
+    finiteNonNegative("campaign budget", entry.budget);
+    if (!Array.isArray(entry.milestones)) throw new TypeError("campaign milestones must be an array");
+    const milestones = entry.milestones.map(normalizeMilestone);
+    const milestoneIds = new Set(milestones.map((milestone) => milestone.milestoneId));
+    const stopConditions = strings("campaign stopConditions", entry.stopConditions as string[] | undefined);
+    for (const id of stopConditions) if (!milestoneIds.has(id)) throw new RangeError(`campaign stop condition references an unknown milestone: ${id}`);
+    result.set(entry.campaignId, Object.freeze({
+      campaignId: entry.campaignId,
+      goal: entry.goal,
+      ...(ideaTypes.length === 0 ? {} : { ideaTypes: Object.freeze(ideaTypes) }),
+      budget: entry.budget,
+      milestones: Object.freeze(milestones),
+      ...(stopConditions.length === 0 ? {} : { stopConditions: Object.freeze(stopConditions) }),
+    }) as Campaign);
+  }
+  return result;
+}
+
 function taskPlan(task: ResearchTask): ResearchTask {
   return {
     taskId: task.taskId,
@@ -706,20 +837,43 @@ function taskPlan(task: ResearchTask): ResearchTask {
     ...(task.estimatedCost === undefined ? {} : { estimatedCost: task.estimatedCost }),
     ...(task.tags === undefined ? {} : { tags: [...task.tags] }),
     ...(task.ideaType === undefined ? {} : { ideaType: task.ideaType }),
+    ...(task.campaignId === undefined ? {} : { campaignId: task.campaignId }),
     ...(task.prediction === undefined ? {} : { prediction: clone(task.prediction) }),
   };
 }
 
-function planDigest(objective: string, totalBudget: number, tasks: readonly ResearchTask[], scope: EvidenceScope | undefined): string {
-  return digestValue({ objective, totalBudget, tasks: tasks.map(taskPlan), scope });
+function campaignPlan(campaign: Campaign): Campaign {
+  return {
+    campaignId: campaign.campaignId,
+    goal: campaign.goal,
+    ...(campaign.ideaTypes === undefined ? {} : { ideaTypes: [...campaign.ideaTypes] }),
+    budget: campaign.budget,
+    milestones: campaign.milestones.map((milestone) => ({ milestoneId: milestone.milestoneId, description: milestone.description, condition: { ...milestone.condition } })),
+    ...(campaign.stopConditions === undefined ? {} : { stopConditions: [...campaign.stopConditions] }),
+  };
 }
 
-function validateTaskGraph(tasks: readonly ResearchTask[], externalIds: ReadonlySet<string> = new Set()): ResearchTask[] {
+function planDigest(objective: string, totalBudget: number, tasks: readonly ResearchTask[], scope: EvidenceScope | undefined, campaigns: readonly Campaign[] = []): string {
+  return digestValue({ objective, totalBudget, tasks: tasks.map(taskPlan), scope, campaigns: campaigns.map(campaignPlan) });
+}
+
+function validateTaskGraph(tasks: readonly ResearchTask[], externalIds: ReadonlySet<string> = new Set(), campaigns?: ReadonlyMap<string, Campaign>): ResearchTask[] {
   const normalized = tasks.map(normalizeTask);
   const ids = new Set<string>();
   for (const task of normalized) {
     if (ids.has(task.taskId)) throw new RangeError(`duplicate research task: ${task.taskId}`);
     ids.add(task.taskId);
+  }
+  if (campaigns !== undefined) {
+    for (const task of normalized) {
+      if (task.campaignId === undefined) continue;
+      const campaign = campaigns.get(task.campaignId);
+      if (!campaign) throw new RangeError(`task ${task.taskId} references an unknown campaign: ${task.campaignId}`);
+      const allowed = campaign.ideaTypes ?? [];
+      if (allowed.length > 0 && (task.ideaType === undefined || !allowed.includes(task.ideaType))) {
+        throw new RangeError(`task ${task.taskId} idea type is not allowed by campaign ${task.campaignId}`);
+      }
+    }
   }
   for (const task of normalized) {
     for (const dependency of task.dependencies ?? []) {
@@ -746,12 +900,13 @@ function initialMutable(event: ResearchEvent): MutableResearchState {
   nonEmpty("missionId", p.missionId);
   nonEmpty("mission objective", p.objective);
   finiteNonNegative("mission budget", p.totalBudget);
-  const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : []);
+  const campaigns = normalizeCampaigns(p.campaigns);
+  const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(), campaigns);
   if (tasks.length === 0) throw new RangeError("research mission requires at least one task");
   const scope = normalizeScope(p.scope as EvidenceScope | undefined);
   if (p.planVersion !== 1) throw new Error("mission plan version must start at 1");
   if (p.operationId !== undefined) nonEmpty("mission operationId", p.operationId);
-  if (typeof p.planDigest !== "string" || p.planDigest !== planDigest(p.objective, p.totalBudget, tasks, scope)) {
+  if (typeof p.planDigest !== "string" || p.planDigest !== planDigest(p.objective, p.totalBudget, tasks, scope, [...campaigns.values()])) {
     throw new Error("mission plan digest does not match its contents");
   }
   const state: MutableResearchState = {
@@ -761,6 +916,8 @@ function initialMutable(event: ResearchEvent): MutableResearchState {
     ...(scope === undefined ? {} : { scope }),
     budgetTotal: p.totalBudget,
     budgetConsumed: 0,
+    campaigns,
+    campaignConsumed: new Map(),
     planVersion: 1,
     planDigest: p.planDigest,
     tasks: new Map(tasks.map((task) => [task.taskId, queuedTask(task)])),
@@ -954,6 +1111,94 @@ function ideaTypeStats(state: MutableResearchState): readonly IdeaTypeStats[] {
     })));
 }
 
+/**
+ * A verifier threshold only counts evaluation evidence whose proof digest recomputes, whose
+ * snapshot digest belongs to the mission artifact registry, and whose signature verifies against
+ * an evaluator registered in the mission trust root: raw self-reports, unregistered snapshots, or
+ * forged signatures cannot complete a milestone.
+ */
+function verifierThresholdMet(memory: EvidenceMemory, trustedEvaluators: ReadonlyMap<string, string>, artifactDigests: ReadonlySet<string>, threshold: { readonly fact: string; readonly minimum: number }): boolean {
+  for (const record of memory.records()) {
+    const metadata = record.metadata;
+    if (!metadata || typeof metadata.evaluationDigest !== "string" || typeof metadata.signature !== "string") continue;
+    const proof = evaluationProof(metadata.evaluation);
+    if (!proof) continue;
+    const fact = proof.facts[threshold.fact];
+    if (typeof fact !== "number" || fact < threshold.minimum || !artifactDigests.has(proof.snapshotDigest)) continue;
+    const publicKey = trustedEvaluators.get(proof.evaluatorId);
+    if (publicKey === undefined) continue;
+    try {
+      if (digestValue(proof) === metadata.evaluationDigest && verifyEvaluationDigest(metadata.evaluationDigest, metadata.signature, publicKey)) return true;
+    } catch {
+      // Malformed proof cannot satisfy a verifier threshold.
+    }
+  }
+  return false;
+}
+
+/** Derives one milestone's completion from the mission memory, WORLD_MODEL, and verifier evidence. */
+function milestoneState(state: MutableResearchState, milestone: CampaignMilestone): CampaignMilestoneState {
+  const condition = milestone.condition;
+  const via: ("evidence" | "world-model" | "verifier")[] = [];
+  const evidenceRefs = condition.evidenceRefs ?? [];
+  const worldModelClaimIds = condition.worldModelClaimIds ?? [];
+  const evidenceMet = evidenceRefs.length === 0 || evidenceRefs.every((ref) => state.memory.has(ref));
+  if (evidenceMet && evidenceRefs.length > 0) via.push("evidence");
+  const worldModelMet = worldModelClaimIds.length === 0 || worldModelClaimIds.every((id) => state.worldModel.has(id));
+  if (worldModelMet && worldModelClaimIds.length > 0) via.push("world-model");
+  const verifierMet = condition.verifierThreshold === undefined
+    || verifierThresholdMet(state.memory, state.trustedEvaluators, new Set([...state.artifacts.values()].map((artifact) => artifact.digest)), condition.verifierThreshold);
+  if (verifierMet && condition.verifierThreshold !== undefined) via.push("verifier");
+  return {
+    milestoneId: milestone.milestoneId,
+    description: milestone.description,
+    condition: milestone.condition,
+    completed: evidenceMet && worldModelMet && verifierMet,
+    completedVia: Object.freeze(via),
+  };
+}
+
+/** Derived campaign view: envelope accounting plus milestone and stop-condition status. */
+function campaignState(state: MutableResearchState, campaign: Campaign): CampaignState {
+  const consumed = state.campaignConsumed.get(campaign.campaignId) ?? 0;
+  const milestones = campaign.milestones.map((milestone) => milestoneState(state, milestone));
+  const stop = campaign.stopConditions ?? [];
+  return {
+    campaignId: campaign.campaignId,
+    goal: campaign.goal,
+    ideaTypes: Object.freeze([...(campaign.ideaTypes ?? [])]),
+    budget: { total: campaign.budget, consumed, remaining: campaign.budget - consumed },
+    milestones,
+    stopConditionsMet: stop.length > 0 && stop.every((id) => milestones.some((milestone) => milestone.milestoneId === id && milestone.completed)),
+    exhausted: campaign.budget - consumed <= 0,
+  };
+}
+
+/** Whether a task's campaign envelope still covers its estimated cost. */
+function campaignAllows(state: MutableResearchState, task: MutableTaskState): boolean {
+  const campaignId = task.task.campaignId;
+  if (campaignId === undefined) return true;
+  const campaign = state.campaigns.get(campaignId);
+  return campaign !== undefined && (state.campaignConsumed.get(campaignId) ?? 0) + (task.task.estimatedCost ?? 1) <= campaign.budget;
+}
+
+/** Shared PLAN_REVISED guards: active tasks must survive unchanged and spent campaign envelopes must not shrink. */
+function assertActiveTasksPreserved(state: MutableResearchState, preserved: readonly MutableTaskState[], tasks: readonly ResearchTask[], errorPrefix: string): void {
+  if (preserved.some((task) => !tasks.some((candidate) => candidate.taskId === task.task.taskId))) throw new Error(`${errorPrefix} drops an active task`);
+  for (const task of preserved) {
+    const replacement = tasks.find((candidate) => candidate.taskId === task.task.taskId);
+    if (!replacement || !same(replacement, task.task)) throw new Error(`${errorPrefix} rewrites active task ${task.task.taskId}`);
+  }
+}
+
+function assertCampaignEnvelopesPreserved(state: MutableResearchState, campaigns: ReadonlyMap<string, Campaign>, errorPrefix: string): void {
+  for (const [campaignId, consumed] of state.campaignConsumed) {
+    if (consumed <= 0) continue;
+    const campaign = campaigns.get(campaignId);
+    if (!campaign || campaign.budget < consumed) throw new Error(`${errorPrefix} drops or shrinks a campaign with consumed budget: ${campaignId}`);
+  }
+}
+
 /** Idea type of the most recently selected task, when one exists. */
 function lastSelectedIdeaType(events: readonly ResearchEvent[], tasks: Readonly<Record<string, ResearchTaskState>>): string | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -985,6 +1230,21 @@ function preferByIdeaType(
   return eligible.find((task) => task.ideaType !== undefined && task.ideaType !== lastType) ?? eligible[0];
 }
 
+/**
+ * When the most recent Scale decision names campaigns, prefer ready tasks inside those campaigns
+ * (which by readiness still have envelope margin) over deepening micro search. Soft selection
+ * preference only: it never changes readiness, evaluation, or promotion gates.
+ */
+function preferScaledCampaign(eligible: readonly ResearchTaskState[], decisions: readonly ResearchDecision[]): ResearchTaskState | undefined {
+  for (let index = decisions.length - 1; index >= 0; index -= 1) {
+    const decision = decisions[index]!;
+    if (decision.action !== "Scale" || (decision.campaignIds ?? []).length === 0) continue;
+    const pick = eligible.find((task) => task.campaignId !== undefined && decision.campaignIds!.includes(task.campaignId));
+    if (pick !== undefined) return pick;
+  }
+  return undefined;
+}
+
 function priorityScore(state: MutableResearchState, task: MutableTaskState): number {
   let score = task.task.priority ?? 0;
   score += task.task.uncertainty ?? 0;
@@ -1013,6 +1273,7 @@ function taskState(state: MutableResearchState, task: MutableTaskState): Researc
 
 function publicState(state: MutableResearchState): ResearchMissionState {
   refreshStatuses(state);
+  const macroSpend = [...state.campaignConsumed.values()].reduce((sum, value) => sum + value, 0);
   return deepFreeze({
     missionId: state.missionId,
     phase: state.phase,
@@ -1034,6 +1295,8 @@ function publicState(state: MutableResearchState): ResearchMissionState {
     pitfalls: state.memory.pitfalls(),
     decisions: frozenArray(state.decisions),
     trustedEvaluators: frozenArray([...state.trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey }))),
+    campaigns: frozenArray([...state.campaigns.values()].map((campaign) => campaignState(state, campaign))),
+    spend: { micro: state.budgetConsumed - macroSpend, macro: macroSpend },
     ...(state.suggestedAction === undefined ? {} : { suggestedAction: state.suggestedAction }),
     ...(state.suggestedStopReason === undefined ? {} : { suggestedStopReason: state.suggestedStopReason }),
     ...(state.stopReason === undefined ? {} : { stopReason: state.stopReason }),
@@ -1142,6 +1405,12 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       if (!taskReady(state, task)) throw new Error(`TASK_SELECTED references a task that is not ready: ${task.task.taskId}`);
       const cost = task.task.estimatedCost ?? 1;
       if (state.budgetConsumed + cost > state.budgetTotal) throw new Error(`TASK_SELECTED exceeds the mission budget: ${task.task.taskId}`);
+      if (task.task.campaignId !== undefined) {
+        const campaign = state.campaigns.get(task.task.campaignId)!; // task declaration validated the campaign
+        const consumed = state.campaignConsumed.get(task.task.campaignId) ?? 0;
+        if (consumed + cost > campaign.budget) throw new Error(`TASK_SELECTED exceeds the campaign budget envelope: ${task.task.taskId}`);
+        state.campaignConsumed.set(task.task.campaignId, consumed + cost);
+      }
       task.status = "RUNNING";
       state.budgetConsumed += cost;
       break;
@@ -1198,12 +1467,12 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       if (evidenceRefs.length === 0) throw new Error("TASKS_GENERATED requires evidence references");
       requireRefs(state, evidenceRefs);
       requireTaskEvidence(state, source, evidenceRefs);
-      const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(state.tasks.keys()));
+      const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(state.tasks.keys()), state.campaigns);
       if (typeof p.planVersion !== "number" || p.planVersion !== state.planVersion + 1 || typeof p.planDigest !== "string") {
         throw new Error("TASKS_GENERATED plan version or digest is invalid");
       }
       const allTasks = [...state.tasks.values()].map((value) => value.task).concat(tasks);
-      if (p.planDigest !== planDigest(state.objective, state.budgetTotal, allTasks, state.scope)) {
+      if (p.planDigest !== planDigest(state.objective, state.budgetTotal, allTasks, state.scope, [...state.campaigns.values()])) {
         throw new Error("TASKS_GENERATED plan digest does not match its contents");
       }
       for (const task of tasks) {
@@ -1254,22 +1523,20 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
         || typeof p.planDigest !== "string") {
         throw new Error("PLAN_REVISED plan version or digest is invalid");
       }
+      const campaigns = p.campaigns === undefined ? state.campaigns : normalizeCampaigns(p.campaigns);
       const preserved = [...state.tasks.values()].filter((task) => task.status === "COMPLETED" || task.status === "RUNNING");
-      const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(preserved.map((task) => task.task.taskId)));
-      if (p.planDigest !== planDigest(state.objective, p.totalBudget, tasks, state.scope)) {
+      const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(preserved.map((task) => task.task.taskId)), campaigns);
+      if (p.planDigest !== planDigest(state.objective, p.totalBudget, tasks, state.scope, [...campaigns.values()])) {
         throw new Error("PLAN_REVISED plan digest does not match its contents");
       }
-      const proposedIds = new Set(tasks.map((task) => task.taskId));
-      if (preserved.some((task) => !proposedIds.has(task.task.taskId))) throw new Error("PLAN_REVISED drops an active task");
-      for (const task of preserved) {
-        const replacement = tasks.find((candidate) => candidate.taskId === task.task.taskId);
-        if (!replacement || !same(replacement, task.task)) throw new Error(`PLAN_REVISED rewrites active task ${task.task.taskId}`);
-      }
+      assertActiveTasksPreserved(state, preserved, tasks, "PLAN_REVISED");
+      assertCampaignEnvelopesPreserved(state, campaigns, "PLAN_REVISED");
       state.tasks = new Map(tasks.map((task) => {
         const old = state.tasks.get(task.taskId);
         if (old && (old.status === "COMPLETED" || old.status === "RUNNING")) return [task.taskId, old];
         return [task.taskId, queuedTask(task)];
       }));
+      state.campaigns = campaigns;
       state.planVersion = p.planVersion;
       state.planDigest = p.planDigest;
       state.budgetTotal = p.totalBudget;
@@ -1344,13 +1611,14 @@ export class MissionDirector {
     nonEmpty("mission objective", options.objective);
     const totalBudget = budgetTotal(options.budget);
     const scope = normalizeScope(options.scope);
+    const declaredCampaigns = normalizeCampaigns(options.campaigns);
     this.missionId = options.missionId;
     this.clock = options.clock ?? (() => Date.now());
     this.ledger = ledger;
     this.ideaTypePreference = options.ideaTypePreference === undefined ? undefined : Object.freeze([...options.ideaTypePreference].map(requireIdeaType));
     const trustedEvaluators = normalizeTrustedEvaluators(options.trustedEvaluators);
     if (ledger.events().length === 0) {
-      const tasks = validateTaskGraph(options.tasks ?? []);
+      const tasks = validateTaskGraph(options.tasks ?? [], new Set(), declaredCampaigns);
       if (tasks.length === 0) throw new RangeError("research mission requires at least one task");
       this.append("MISSION_CREATED", {
         missionId: options.missionId,
@@ -1358,8 +1626,9 @@ export class MissionDirector {
         totalBudget,
         tasks,
         ...(scope === undefined ? {} : { scope }),
+        ...(declaredCampaigns.size === 0 ? {} : { campaigns: [...declaredCampaigns.values()] }),
         planVersion: 1,
-        planDigest: planDigest(options.objective, totalBudget, tasks, scope),
+        planDigest: planDigest(options.objective, totalBudget, tasks, scope, [...declaredCampaigns.values()]),
         ...(trustedEvaluators.size === 0 ? {} : { trustedEvaluators: [...trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey })) }),
       }, "mission-created");
     } else {
@@ -1369,6 +1638,8 @@ export class MissionDirector {
       const initialBudget = ledger.events()[0]?.payload.totalBudget;
       if (typeof initialBudget !== "number" || totalBudget !== initialBudget) throw new Error("ledger belongs to another research budget");
       if (options.scope !== undefined && !same(scope, state.scope)) throw new Error("ledger belongs to another research scope");
+      const initialCampaigns = normalizeCampaigns(ledger.events()[0]?.payload.campaigns);
+      if (!same([...initialCampaigns.values()], [...declaredCampaigns.values()])) throw new Error("ledger belongs to another campaign declaration");
       const registered = [...state.trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey }));
       if (!same(options.trustedEvaluators ?? [], registered)) throw new Error("ledger belongs to another evaluator trust root");
     }
@@ -1425,7 +1696,7 @@ export class MissionDirector {
     if (state.phase === "STOPPED") return Object.freeze([]);
     refreshStatuses(state);
     return frozenArray([...state.tasks.values()]
-      .filter((task) => taskReady(state, task) && state.budgetConsumed + (task.task.estimatedCost ?? 1) <= state.budgetTotal)
+      .filter((task) => taskReady(state, task) && state.budgetConsumed + (task.task.estimatedCost ?? 1) <= state.budgetTotal && campaignAllows(state, task))
       .sort((left, right) => priorityScore(state, right) - priorityScore(state, left) || (left.task.estimatedCost ?? 1) - (right.task.estimatedCost ?? 1) || left.task.taskId.localeCompare(right.task.taskId))
       .map((task) => taskState(state, task)));
   }
@@ -1435,9 +1706,15 @@ export class MissionDirector {
     if (current.phase === "STOPPED") return undefined;
     const ready = this.readyTasks();
     const eligible = ready.filter((task) => task.status === "READY" && current.budget.consumed + (task.estimatedCost ?? 1) <= current.budget.total);
-    const selected = preferByIdeaType(eligible, this.ideaTypePreference, lastSelectedIdeaType(this.ledger.events(), current.tasks));
+    const selected = preferScaledCampaign(eligible, current.decisions)
+      ?? preferByIdeaType(eligible, this.ideaTypePreference, lastSelectedIdeaType(this.ledger.events(), current.tasks));
     if (!selected) return undefined;
-    this.append("TASK_SELECTED", { taskId: selected.taskId, selectedAt: this.clock() }, this.operation(`select-${selected.taskId}`));
+    this.append("TASK_SELECTED", {
+      taskId: selected.taskId,
+      selectedAt: this.clock(),
+      spend: selected.campaignId === undefined ? "micro" : "macro",
+      ...(selected.campaignId === undefined ? {} : { campaignId: selected.campaignId }),
+    }, this.operation(`select-${selected.taskId}`));
     return this.state().tasks[selected.taskId];
   }
 
@@ -1607,7 +1884,7 @@ export class MissionDirector {
     const state = project(this.ledger.events());
     const evidenceRefs = strings("generation evidenceRefs", input.evidenceRefs);
     if (evidenceRefs.length === 0) throw new Error("task generation requires evidence references");
-    const tasks = validateTaskGraph(input.tasks, new Set(state.tasks.keys()));
+    const tasks = validateTaskGraph(input.tasks, new Set(state.tasks.keys()), state.campaigns);
     const existing = this.operationEvent(input.operationId);
     if (existing) {
       if (existing.type !== "TASKS_GENERATED"
@@ -1632,7 +1909,7 @@ export class MissionDirector {
       evidenceRefs,
       tasks,
       planVersion: state.planVersion + 1,
-      planDigest: planDigest(state.objective, state.budgetTotal, allTasks, state.scope),
+      planDigest: planDigest(state.objective, state.budgetTotal, allTasks, state.scope, [...state.campaigns.values()]),
     }, operationId);
     const next = this.state();
     return frozenArray(tasks.map((task) => next.tasks[task.taskId]));
@@ -1704,6 +1981,8 @@ export class MissionDirector {
     const evidenceRefs = strings("decision evidenceRefs", input.evidenceRefs);
     if (evidenceRefs.length === 0) throw new Error("decision requires evidence references");
     requireRefs(state, evidenceRefs);
+    const campaignIds = strings("decision campaignIds", input.campaignIds);
+    if (campaignIds.some((id) => !state.campaigns.has(id))) throw new Error(`decision references an unknown campaign: ${campaignIds.join(", ")}`);
     nonEmpty("decision reason", input.reason);
     if (!["Continue", "Revise", "Scale", "Stop"].includes(input.action)) throw new RangeError("unknown decision action");
     const decisionId = input.decisionId ?? this.operation("decision-id");
@@ -1732,7 +2011,8 @@ export class MissionDirector {
     const evidenceRefs = strings("re-plan evidenceRefs", proposal.evidenceRefs);
     nonEmpty("re-plan reason", proposal.reason);
     const preserved = [...state.tasks.values()].filter((task) => task.status === "COMPLETED" || task.status === "RUNNING");
-    const tasks = validateTaskGraph(proposal.tasks, new Set(preserved.map((task) => task.task.taskId)));
+    const campaigns = proposal.campaigns === undefined ? state.campaigns : normalizeCampaigns(proposal.campaigns);
+    const tasks = validateTaskGraph(proposal.tasks, new Set(preserved.map((task) => task.task.taskId)), campaigns);
     const existing = this.operationEvent(proposal.operationId);
     if (existing) {
       if (existing.type !== "PLAN_REVISED"
@@ -1741,7 +2021,8 @@ export class MissionDirector {
         || existing.payload.totalBudget !== proposal.totalBudget
         || existing.payload.reason !== proposal.reason
         || !same(existing.payload.evidenceRefs, evidenceRefs)
-        || !same(existing.payload.tasks, tasks)) {
+        || !same(existing.payload.tasks, tasks)
+        || !same(existing.payload.campaigns, [...campaigns.values()])) {
         throw new Error(`operationId already contains a different research operation: ${proposal.operationId}`);
       }
       return this.state();
@@ -1752,17 +2033,16 @@ export class MissionDirector {
     if (proposal.totalBudget < state.budgetConsumed) throw new Error("re-plan budget cannot be below consumed budget");
     if (proposal.totalBudget > state.budgetTotal) throw new Error("coordinator cannot expand the mission budget");
     requireRefs(state, evidenceRefs);
-    for (const task of preserved) {
-      const replacement = tasks.find((candidate) => candidate.taskId === task.task.taskId);
-      if (!replacement || !same(replacement, task.task)) throw new Error(`re-plan cannot rewrite active task ${task.task.taskId}`);
-    }
+    assertActiveTasksPreserved(state, preserved, tasks, "re-plan cannot");
+    assertCampaignEnvelopesPreserved(state, campaigns, "re-plan cannot");
     const nextVersion = state.planVersion + 1;
-    const digest = planDigest(state.objective, proposal.totalBudget, tasks, state.scope);
+    const digest = planDigest(state.objective, proposal.totalBudget, tasks, state.scope, [...campaigns.values()]);
     const operationId = this.operation("replan", proposal.operationId);
     this.append("PLAN_REVISED", {
       parentPlanDigest: state.planDigest,
       objective: state.objective, totalBudget: proposal.totalBudget, tasks, evidenceRefs,
       reason: proposal.reason, planVersion: nextVersion, planDigest: digest,
+      campaigns: [...campaigns.values()],
     }, operationId);
     return this.state();
   }
