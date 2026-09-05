@@ -1,4 +1,18 @@
+import { defaultPrediction, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type PredictionArtifact, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
 import { deepFreeze, digestValue } from "./security-boundary";
+
+export type { ClaimCard, PredictionArtifact, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
+
+export interface TaskReconcileInput {
+  readonly reconcileId?: string;
+  readonly status?: ReconcileStatus;
+  readonly observationRefs?: readonly string[];
+  readonly artifactRefs?: readonly string[];
+  readonly evidenceRefs?: readonly string[];
+  readonly evaluatorId?: string;
+  readonly independentEvaluator?: boolean;
+  readonly evidenceGatePassed?: boolean;
+}
 
 export type ResearchDecisionAction = "Continue" | "Revise" | "Scale" | "Stop";
 export type ResearchTaskStatus = "QUEUED" | "READY" | "RUNNING" | "COMPLETED" | "FAILED" | "BLOCKED";
@@ -87,6 +101,7 @@ export interface ResearchTask {
   readonly uncertainty?: number;
   readonly estimatedCost?: number;
   readonly tags?: readonly string[];
+  readonly prediction?: PredictionArtifact;
 }
 
 export interface ResearchTaskState extends ResearchTask {
@@ -95,6 +110,8 @@ export interface ResearchTaskState extends ResearchTask {
   readonly candidateRefs: readonly ResearchCandidateRef[];
   readonly artifactRefs: readonly ResearchArtifactRef[];
   readonly priorityScore: number;
+  readonly prediction: PredictionArtifact;
+  readonly reconcile?: ReconcileRecord;
   readonly failureReason?: string;
 }
 
@@ -106,6 +123,7 @@ export interface TaskCompletion {
   readonly pitfalls?: readonly Pitfall[];
   readonly candidates?: readonly ResearchCandidateRef[];
   readonly artifacts?: readonly ResearchArtifactRef[];
+  readonly reconcile?: TaskReconcileInput;
 }
 
 export interface TaskFailure {
@@ -114,6 +132,7 @@ export interface TaskFailure {
   readonly category?: NegativeEvidence["category"];
   readonly evidence?: readonly EvidenceRecord[];
   readonly negativeEvidence?: readonly NegativeEvidence[];
+  readonly reconcile?: TaskReconcileInput;
 }
 
 export interface ResearchBudgetState {
@@ -135,6 +154,9 @@ export interface ResearchMissionState {
   readonly tasks: Readonly<Record<string, ResearchTaskState>>;
   readonly candidates: readonly ResearchCandidateRef[];
   readonly artifacts: readonly ResearchArtifactRef[];
+  readonly predictions: readonly PredictionArtifact[];
+  readonly reconciles: readonly ReconcileRecord[];
+  readonly worldModel: readonly ClaimCard[];
   readonly evidence: readonly EvidenceRecord[];
   readonly findings: readonly Finding[];
   readonly negativeEvidence: readonly NegativeEvidence[];
@@ -183,7 +205,10 @@ export interface MissionDirectorOptions {
 export type ResearchEventType =
   | "MISSION_CREATED"
   | "TASK_SELECTED"
+  | "PREDICTION_RECORDED"
   | "TASK_COMPLETED"
+  | "RECONCILED"
+  | "WORLD_MODEL_UPDATED"
   | "TASK_FAILED"
   | "TASKS_GENERATED"
   | "FINDING_RECORDED"
@@ -202,7 +227,7 @@ export interface ResearchEvent {
 }
 
 const RESEARCH_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "MISSION_CREATED", "TASK_SELECTED", "TASK_COMPLETED", "TASK_FAILED", "TASKS_GENERATED",
+  "MISSION_CREATED", "TASK_SELECTED", "PREDICTION_RECORDED", "TASK_COMPLETED", "RECONCILED", "WORLD_MODEL_UPDATED", "TASK_FAILED", "TASKS_GENERATED",
   "FINDING_RECORDED", "FINDING_REJECTED", "NEGATIVE_EVIDENCE_RECORDED", "PITFALL_RECORDED",
   "DECISION_RECORDED", "PLAN_REVISED", "MISSION_STOPPED",
 ]);
@@ -284,6 +309,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
   const dependencies = strings("task dependencies", task.dependencies);
   const requiredEvidence = strings("task requiredEvidence", task.requiredEvidence);
   const tags = strings("task tags", task.tags);
+  const prediction = normalizePrediction(task.prediction ?? defaultPrediction(task.taskId, task.objective), `${task.taskId}:prediction`);
   if (task.priority !== undefined) finiteNonNegative("task priority", task.priority);
   if (task.uncertainty !== undefined) finiteNonNegative("task uncertainty", task.uncertainty);
   const estimatedCost = task.estimatedCost ?? 1;
@@ -299,6 +325,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
     ...(task.uncertainty === undefined ? {} : { uncertainty: task.uncertainty }),
     estimatedCost,
     ...(tags.length === 0 ? {} : { tags: Object.freeze(tags) }),
+    prediction,
   });
 }
 
@@ -605,6 +632,8 @@ interface MutableTaskState {
   evidenceRefs: string[];
   candidateRefs: ResearchCandidateRef[];
   artifactRefs: ResearchArtifactRef[];
+  prediction?: PredictionArtifact;
+  reconcile?: ReconcileRecord;
   failureReason?: string;
 }
 
@@ -622,6 +651,9 @@ interface MutableResearchState {
   artifacts: Map<string, ResearchArtifactRef>;
   memory: EvidenceMemory;
   decisions: ResearchDecision[];
+  predictions: Map<string, PredictionArtifact>;
+  reconciles: Map<string, ReconcileRecord>;
+  worldModel: Map<string, ClaimCard>;
   suggestedAction?: ResearchDecisionAction;
   suggestedStopReason?: string;
   stopReason?: string;
@@ -638,6 +670,7 @@ function taskPlan(task: ResearchTask): ResearchTask {
     ...(task.uncertainty === undefined ? {} : { uncertainty: task.uncertainty }),
     ...(task.estimatedCost === undefined ? {} : { estimatedCost: task.estimatedCost }),
     ...(task.tags === undefined ? {} : { tags: [...task.tags] }),
+    ...(task.prediction === undefined ? {} : { prediction: clone(task.prediction) }),
   };
 }
 
@@ -699,14 +732,48 @@ function initialMutable(event: ResearchEvent): MutableResearchState {
     artifacts: new Map(),
     memory: new EvidenceMemory(),
     decisions: [],
+    predictions: new Map(tasks.map((task) => [task.taskId, task.prediction!] as const)),
+    reconciles: new Map(),
+    worldModel: new Map(),
     operations: new Map(typeof p.operationId === "string" ? [[p.operationId, { type: "MISSION_CREATED" as const, payload: p }]] : []),
   };
   refreshStatuses(state);
   return state;
 }
 
+function predictionFor(task: MutableTaskState): PredictionArtifact {
+  return task.prediction ?? task.task.prediction ?? defaultPrediction(task.task.taskId, task.task.objective);
+}
+
+function applyReconcile(state: MutableResearchState, task: MutableTaskState, raw: unknown, taskId: string): void {
+  const prediction = predictionFor(task);
+  const input = (raw ?? {}) as Record<string, unknown>;
+  const evidenceRefs = Array.isArray(input.evidenceRefs) ? input.evidenceRefs as string[] : [];
+  const observationRefs = Array.isArray(input.observationRefs) ? input.observationRefs as string[] : [];
+  const artifactRefs = Array.isArray(input.artifactRefs) ? input.artifactRefs as string[] : [];
+  requireRefs(state, evidenceRefs);
+  for (const ref of [...observationRefs, ...artifactRefs]) {
+    if (!state.memory.has(ref) && !state.artifacts.has(ref)) throw new Error(`unknown reconcile reference: ${ref}`);
+  }
+  const reconcile = normalizeReconcile({ ...input, reconcileId: input.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction.predictionId }, prediction);
+  const existing = state.reconciles.get(taskId);
+  if (existing && !same(existing, reconcile)) throw new Error(`reconcile id already contains different data: ${taskId}`);
+  task.prediction = prediction;
+  task.reconcile = existing ?? reconcile;
+  state.predictions.set(taskId, prediction);
+  state.reconciles.set(taskId, task.reconcile);
+  if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
+    const claim = normalizeClaimCard(reconcile.claim, prediction);
+    const previous = state.worldModel.get(claim.claimId);
+    if (previous && !same(previous, claim)) throw new Error(`claim id already contains different data: ${claim.claimId}`);
+    state.worldModel.set(claim.claimId, previous ?? claim);
+  }
+}
+
 function taskReady(state: MutableResearchState, task: MutableTaskState): boolean {
   if (task.status !== "QUEUED" && task.status !== "READY") return false;
+  const hypothesis = predictionFor(task).hypothesis.toLowerCase();
+  if ([...state.worldModel.values()].some((claim) => claim.reconcileStatus === "refuted" && claim.hypothesis.toLowerCase() === hypothesis)) return false;
   if ((task.task.dependencies ?? []).some((id) => state.tasks.get(id)?.status !== "COMPLETED")) return false;
   return (task.task.requiredEvidence ?? []).every((id) => state.memory.has(id));
 }
@@ -744,6 +811,8 @@ function taskState(state: MutableResearchState, task: MutableTaskState): Researc
     candidateRefs: clone(task.candidateRefs),
     artifactRefs: clone(task.artifactRefs),
     priorityScore: priorityScore(state, task),
+    ...(task.prediction === undefined ? {} : { prediction: clone(task.prediction) }),
+    ...(task.reconcile === undefined ? {} : { reconcile: clone(task.reconcile) }),
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
   }) as ResearchTaskState;
 }
@@ -761,6 +830,9 @@ function publicState(state: MutableResearchState): ResearchMissionState {
     tasks: Object.fromEntries([...state.tasks].map(([id, task]) => [id, taskState(state, task)])),
     candidates: frozenArray([...state.candidates.values()]),
     artifacts: frozenArray([...state.artifacts.values()]),
+    predictions: frozenArray([...state.predictions.values()]),
+    reconciles: frozenArray([...state.reconciles.values()]),
+    worldModel: frozenArray([...state.worldModel.values()]),
     evidence: state.memory.records(),
     findings: state.memory.findings(),
     negativeEvidence: state.memory.negativeEvidence(),
@@ -847,6 +919,9 @@ function applyCompletion(state: MutableResearchState, taskId: string, payload: R
     .concat(pitfalls.filter((pitfall) => pitfall.verified !== false).map((pitfall) => pitfall.id)))];
   task.candidateRefs = candidates;
   task.artifactRefs = artifacts;
+  task.prediction = predictionFor(task);
+  state.predictions.set(taskId, task.prediction);
+  if (payload.reconcile !== undefined) applyReconcile(state, task, payload.reconcile, taskId);
 }
 
 function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
@@ -856,6 +931,16 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
   if (state.phase === "STOPPED" && event.type !== "MISSION_STOPPED") return;
   if (event.type !== "MISSION_CREATED" && knownOperation(state, event)) return;
   switch (event.type) {
+    case "PREDICTION_RECORDED": {
+      const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
+      if (!task || task.status !== "QUEUED" && task.status !== "READY") return;
+      const prediction = normalizePrediction(p.prediction, `${task.task.taskId}:prediction`);
+      const existing = state.predictions.get(task.task.taskId);
+      if (existing && !same(existing, prediction)) return;
+      task.prediction = prediction;
+      state.predictions.set(task.task.taskId, prediction);
+      break;
+    }
     case "TASK_SELECTED": {
       const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
       if (!task || !taskReady(state, task)) return;
@@ -863,6 +948,23 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       if (state.budgetConsumed + cost > state.budgetTotal) return;
       task.status = "RUNNING";
       state.budgetConsumed += cost;
+      break;
+    }
+    case "RECONCILED": {
+      const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
+      if (!task || (task.status !== "COMPLETED" && task.status !== "FAILED")) return;
+      applyReconcile(state, task, p.reconcile, p.taskId as string);
+      break;
+    }
+    case "WORLD_MODEL_UPDATED": {
+      const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
+      const reconcile = task && state.reconciles.get(task.task.taskId);
+      if (!reconcile || !reconcile.evidenceGatePassed || reconcile.independentEvaluator !== true) return;
+      const claim = normalizeClaimCard(p.claim, predictionFor(task));
+      if (claim.reconcileStatus !== reconcile.status || !claim.evidenceGatePassed) return;
+      const existing = state.worldModel.get(claim.claimId);
+      if (existing && !same(existing, claim)) return;
+      state.worldModel.set(claim.claimId, existing ?? claim);
       break;
     }
     case "TASK_COMPLETED":
@@ -879,6 +981,9 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       for (const negative of negatives) state.memory.addNegativeEvidence(negative);
       task.evidenceRefs = [...new Set(evidence.filter((record) => record.verified !== false).map((record) => record.id)
         .concat(negatives.filter((negative) => negative.verified !== false).map((negative) => negative.id)))];
+      task.prediction = predictionFor(task);
+      state.predictions.set(task.task.taskId, task.prediction);
+      if (p.reconcile !== undefined) applyReconcile(state, task, p.reconcile, task.task.taskId);
       break;
     }
     case "TASKS_GENERATED": {
@@ -1110,6 +1215,51 @@ export class MissionDirector {
     return this.state().tasks[selected.taskId];
   }
 
+  recordPrediction(taskId: string, prediction: PredictionArtifact, operationId?: string): PredictionArtifact {
+    nonEmpty("taskId", taskId);
+    const state = project(this.ledger.events());
+    if (state.phase === "STOPPED") throw new Error("mission is stopped");
+    const task = state.tasks.get(taskId);
+    if (!task) throw new Error(`unknown research task: ${taskId}`);
+    if (task.status !== "QUEUED" && task.status !== "READY") throw new Error(`prediction must be recorded before task selection: ${taskId}`);
+    const normalized = normalizePrediction(prediction, `${taskId}:prediction`);
+    const operation = this.operation(`prediction-${taskId}`, operationId);
+    const existing = this.operationEvent(operation);
+    if (existing) {
+      this.assertOperation("PREDICTION_RECORDED", { taskId, prediction: normalized }, operation);
+      return state.predictions.get(taskId)!;
+    }
+    this.append("PREDICTION_RECORDED", { taskId, prediction: normalized }, operation);
+    return normalized;
+  }
+
+  reconcileTask(taskId: string, input: TaskReconcileInput): ReconcileRecord {
+    nonEmpty("taskId", taskId);
+    const state = project(this.ledger.events());
+    const task = state.tasks.get(taskId);
+    if (!task) throw new Error(`unknown research task: ${taskId}`);
+    if (task.status !== "COMPLETED" && task.status !== "FAILED") throw new Error(`task is not complete: ${taskId}`);
+    const prediction = predictionFor(task);
+    const reconcile = normalizeReconcile({ ...input, reconcileId: input.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction.predictionId }, prediction);
+    const existing = state.reconciles.get(taskId);
+    if (existing) {
+      if (!same(existing, reconcile)) throw new Error(`reconcile already contains different data: ${taskId}`);
+      return existing;
+    }
+    const operation = this.operation(`reconcile-${taskId}`, input.reconcileId);
+    this.append("RECONCILED", { taskId, reconcile }, operation);
+    if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
+      this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operation}-world-model`);
+    }
+    return this.state().reconciles.find((entry) => entry.taskId === taskId)!;
+  }
+
+  searchWorldModel(query?: string): readonly ClaimCard[] {
+    const needle = query?.trim().toLowerCase();
+    return frozenArray(this.state().worldModel.filter((claim) => needle === undefined || needle === ""
+      || [claim.hypothesis, claim.expectedObservation, claim.reconcileStatus].some((value) => value.toLowerCase().includes(needle))));
+  }
+
   completeTask(taskId: string, completion: TaskCompletion): ResearchTaskState {
     nonEmpty("taskId", taskId);
     const state = project(this.ledger.events());
@@ -1140,8 +1290,16 @@ export class MissionDirector {
     for (const pitfall of pitfalls) memory.addPitfall(pitfall);
     const refs = [...findings.flatMap((finding) => finding.evidenceRefs), ...negatives.flatMap((negative) => negative.evidenceRefs), ...pitfalls.flatMap((pitfall) => pitfall.evidenceRefs)];
     for (const ref of refs) if (!memory.has(ref)) throw new Error(`unknown evidence reference: ${ref}`);
-    const payload = { taskId, evidence, findings, negativeEvidence: negatives, pitfalls, candidates, artifacts };
+    const payload = { taskId, evidence, findings, negativeEvidence: negatives, pitfalls, candidates, artifacts, reconcile: completion.reconcile };
     this.append("TASK_COMPLETED", payload, operationId);
+    if (completion.reconcile) {
+      const prediction = state.tasks.get(taskId)?.prediction ?? (state.tasks.get(taskId) ? predictionFor(state.tasks.get(taskId)!) : undefined);
+      const reconcile = normalizeReconcile({ ...completion.reconcile, reconcileId: completion.reconcile.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction?.predictionId }, prediction);
+      this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
+      if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
+        this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operationId}-world-model`);
+      }
+    }
     return this.state().tasks[taskId];
   }
 
@@ -1154,7 +1312,7 @@ export class MissionDirector {
     const operationId = this.operation(`fail-${taskId}`, failure.operationId);
     const evidence = (failure.evidence ?? []).map((record) => normalizeEvidence(record, taskId));
     const negatives = (failure.negativeEvidence ?? [{ id: `${taskId}-negative-${operationId}`, statement: failure.reason, category: failure.category ?? "inconclusive", evidenceRefs: evidence.map((record) => record.id) }]).map(normalizeNegative);
-    const payload = { taskId, reason: failure.reason, evidence, negativeEvidence: negatives };
+    const payload = { taskId, reason: failure.reason, evidence, negativeEvidence: negatives, reconcile: failure.reconcile };
     const existing = this.operationEvent(failure.operationId);
     if (existing) {
       if (existing.type !== "TASK_FAILED" || !same(existing.payload, { ...payload, missionId: this.missionId, operationId })) {
@@ -1173,6 +1331,14 @@ export class MissionDirector {
     for (const record of evidence) memory.addEvidence(record);
     for (const negative of negatives) memory.addNegativeEvidence(negative);
     this.append("TASK_FAILED", payload, operationId);
+    if (failure.reconcile) {
+      const prediction = state.tasks.get(taskId)?.prediction ?? (state.tasks.get(taskId) ? predictionFor(state.tasks.get(taskId)!) : undefined);
+      const reconcile = normalizeReconcile({ ...failure.reconcile, reconcileId: failure.reconcile.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction?.predictionId }, prediction);
+      this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
+      if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
+        this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operationId}-world-model`);
+      }
+    }
     return this.state().tasks[taskId];
   }
 
