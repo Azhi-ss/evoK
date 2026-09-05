@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, sign as signDigest, verify as verifyDigest } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -465,6 +465,47 @@ function canonical(value: unknown, seen: Set<object>): string {
 
 export function digestValue(value: unknown): string {
   return createHash("sha256").update(canonical(value, new Set())).digest("hex");
+}
+
+/**
+ * Evaluator-owned signature identity: a trusted evaluator signs its evaluation proofs with a private key
+ * the research agent never holds. WORLD_MODEL admission verifies proofs against the public keys registered
+ * as the mission's trust root, so a raw self-report cannot forge independent-evaluator provenance even
+ * with a self-consistent digest chain.
+ */
+export interface EvaluationKeyPair {
+  readonly evaluatorId: string;
+  readonly publicKey: string;
+  readonly privateKey: string;
+}
+
+export function generateEvaluationKeyPair(evaluatorId: string): EvaluationKeyPair {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return deepFreeze({
+    evaluatorId,
+    publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
+    privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+  });
+}
+
+export function signEvaluationDigest(digest: string, privateKeyPem: string): string {
+  return signDigest(null, Buffer.from(digest, "utf8"), privateKeyPem).toString("base64");
+}
+
+export function verifyEvaluationDigest(digest: string, signature: string, publicKeyPem: string): boolean {
+  try {
+    return verifyDigest(null, Buffer.from(digest, "utf8"), publicKeyPem, Buffer.from(signature, "base64"));
+  } catch {
+    return false;
+  }
+}
+
+export function validEvaluationPublicKey(publicKeyPem: string): boolean {
+  try {
+    return createPublicKey(publicKeyPem).asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
 }
 
 export interface SnapshotManifest {

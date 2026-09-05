@@ -45,6 +45,13 @@ import {
   type EvaluationRunInput,
   type NormalizedEvaluationContract,
 } from "./evaluation-noise";
+import {
+  normalizePrediction,
+  normalizeReconcile,
+  reconcilePrediction,
+  type PredictionArtifact,
+  type ReconcileRecord,
+} from "./predict-reconcile";
 
 export {
   aggregateEvaluationFacts,
@@ -281,6 +288,7 @@ export type MissionEventType =
   | "EVALUATION_RUN_COMPLETED"
   | "EVALUATOR_SUCCEEDED"
   | "EVALUATOR_FAILED"
+  | "RECONCILED"
   | "FALSIFIER_COMPLETED"
   | "CRITIC_COMPLETED"
   | "CHALLENGER_COMPLETED"
@@ -351,6 +359,8 @@ export interface BranchState {
   candidateGenerated: boolean;
   agentCompleted: boolean;
   evaluatorSucceeded: boolean;
+  prediction?: PredictionArtifact;
+  reconcile?: ReconcileRecord;
   score?: number;
   facts?: ScoreFact[];
   snapshot?: Readonly<CandidateSnapshot>;
@@ -437,6 +447,8 @@ export interface ToyMissionOptions {
     quorum: number;
   };
   crashBeforeBranch?: string;
+  /** Explicit prediction artifact required before a Candidate/BranchRun enters expensive execution. */
+  prediction?: PredictionArtifact;
   /** Optional process/path policy used by the candidate boundary. */
   sandbox?: SandboxPolicy;
   /** Optional layer-internal verification roles; none of these can promote. */
@@ -483,6 +495,36 @@ function validVerificationRoles(value: unknown): value is VerificationRole[] {
   return Array.isArray(value) && value.length > 0 && new Set(value).size === value.length
     && value.includes("SelfVerifier") && value.includes("Falsifier")
     && value.every((role) => typeof role === "string" && VERIFICATION_ROLE_SET.has(role as VerificationRole));
+}
+
+/** Derives the trusted post-evaluation reconcile from a verified evaluation; shared by emission and replay. */
+function deriveEvaluationReconcile(missionId: string, branchId: string, snapshot: Readonly<CandidateSnapshot>, evaluation: EvaluationResult, prediction: PredictionArtifact): ReconcileRecord | undefined {
+  const facts = evaluation.facts ?? [{ name: "score", value: evaluation.score, source: "evaluator" }];
+  const observations: Record<string, string | number | boolean> = {};
+  const observationRefs: string[] = [];
+  const seen = new Set<string>();
+  // Refs are content-addressed: observations address the durable verified evaluation facts (by
+  // evaluation digest) and the artifact ref addresses the committed snapshot by its integrity digest.
+  for (const fact of facts) {
+    if (typeof fact.name !== "string" || fact.name.trim() === "" || seen.has(fact.name)) continue;
+    seen.add(fact.name);
+    observations[fact.name] = fact.value;
+    observationRefs.push(`${evaluationDigest(evaluation)}:observation:${fact.name}`);
+  }
+  const evaluatorId = typeof evaluation.evaluatorId === "string" && evaluation.evaluatorId.trim() !== "" ? evaluation.evaluatorId : undefined;
+  const gate = evaluatorId !== undefined;
+  return reconcilePrediction({
+    prediction,
+    observations,
+    observationRefs,
+    evidenceRefs: observationRefs,
+    artifactRefs: [`snapshot:${snapshot.digest}`],
+    evaluatorId,
+    independentEvaluator: gate,
+    evidenceGatePassed: gate,
+    reconcileId: `${missionId}:${snapshot.provenance.candidateId}:reconcile`,
+    taskId: branchId,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -573,6 +615,19 @@ function initialState(event: MissionEvent): MissionState {
     }
     evaluationControlSnapshotDigest = p.evaluationControlSnapshotDigest;
   }
+  const predictions: Record<string, PredictionArtifact> = {};
+  if (p.predictions !== undefined) {
+    if (!isPlainRecord(p.predictions)) throw new TrustViolation("mission predictions are malformed");
+    for (const branchId of branchIds) {
+      const value = p.predictions[branchId];
+      if (value === undefined) continue;
+      try {
+        predictions[branchId] = deepFreeze(clone(normalizePrediction(value, `${String(p.missionId)}:${branchId}:prediction`))) as PredictionArtifact;
+      } catch {
+        throw new TrustViolation(`branch prediction is malformed: ${branchId}`);
+      }
+    }
+  }
   if (p.evaluationContract !== undefined || p.evaluationContractDigest !== undefined) {
     try {
       evaluationContract = normalizeEvaluationContract(p.evaluationContract as EvaluationContract);
@@ -604,6 +659,7 @@ function initialState(event: MissionEvent): MissionState {
     branches: Object.fromEntries(branchIds.map((branchId) => [branchId, {
       branchId, status: "QUEUED", attempt: 0, candidateGenerated: false,
       agentCompleted: false, evaluatorSucceeded: false, verification: {},
+      ...(predictions[branchId] === undefined ? {} : { prediction: predictions[branchId] }),
     } satisfies BranchState])),
   };
 }
@@ -822,6 +878,7 @@ function project(events: readonly MissionEvent[]): MissionState {
           branch.candidateGenerated = false;
           branch.agentCompleted = false;
           branch.evaluatorSucceeded = false;
+          branch.reconcile = undefined;
           branch.score = undefined;
           branch.facts = undefined;
           branch.snapshot = undefined;
@@ -917,6 +974,30 @@ function project(events: readonly MissionEvent[]): MissionState {
         branch.evaluatorId = evaluation.evaluatorId;
         branch.evaluatorVersion = evaluation.evaluatorVersion;
         branch.status = "SCORED";
+        break;
+      }
+      case "RECONCILED": {
+        // Trusted reconciles are fully re-derived from the branch's verified evaluation: the projected
+        // reconcile must match a fresh derive from the trusted evaluation (status, refs, evaluator
+        // identity, and snapshot binding), so payload relabeling is rejected.
+        // Failure reconciles are only admitted as inconclusive, gate-free records whose observation ref
+        // is content-addressed to the reported evaluator-failure reason, and only while evaluation was
+        // actually in flight (VERIFYING/SCORED).
+        if (!branch || !branch.prediction || branch.reconcile !== undefined) break;
+        try {
+          const reconcile = normalizeReconcile({ ...(p.reconcile as Record<string, unknown> ?? {}), taskId: branch.branchId }, branch.prediction);
+          const trusted = !!branch.evaluation && branch.evaluatorSucceeded && !!branch.snapshot;
+          if (trusted) {
+            const expected = deriveEvaluationReconcile(state.missionId, branch.branchId, branch.snapshot!, branch.evaluation!, branch.prediction);
+            if (!expected || digestValue(expected) !== digestValue(reconcile)) break;
+          } else {
+            if (reconcile.status !== "inconclusive" || reconcile.evidenceGatePassed) break;
+            if (branch.status !== "VERIFYING" && branch.status !== "SCORED") break;
+            if (typeof p.failureReason !== "string" || !branch.snapshot || reconcile.observationRefs.length !== 1
+              || reconcile.observationRefs[0] !== `evaluator-failed:${digestValue({ candidateId: branch.snapshot.provenance.candidateId, reason: p.failureReason })}`) break;
+          }
+          branch.reconcile = deepFreeze(clone(reconcile));
+        } catch { break; }
         break;
       }
       case "EVALUATOR_FAILED":
@@ -1108,6 +1189,8 @@ export class ToyCompetitionHarness {
     if (maxAttempts !== undefined) effectiveBudget.maxAttempts = maxAttempts;
     this.effectiveBudget = effectiveBudget;
     validateOptions(options, branchIds, this.effectiveBudget);
+    const prediction = options.prediction === undefined ? undefined
+      : normalizePrediction(options.prediction, `${options.missionId}:prediction`);
     const maxBranches = this.effectiveBudget.maxCandidates ?? branchIds.length;
     const quorum = options.policy?.quorum ?? 1;
     if (quorum > Math.min(maxBranches, branchIds.length)) throw new RangeError("quorum cannot exceed available branches");
@@ -1127,6 +1210,9 @@ export class ToyCompetitionHarness {
           evaluationControlSnapshotDigest: this.evaluationControlSnapshot.digest,
         }),
         verificationRoles: configuredVerificationRoles(options),
+        ...(prediction === undefined ? {} : {
+          predictions: Object.fromEntries(branchIds.map((branchId) => [branchId, prediction])),
+        }),
       },
     }];
   }
@@ -1563,6 +1649,14 @@ export class ToyCompetitionHarness {
         this.crashed = true;
         throw new Error("simulated crash");
       }
+      // Prediction gate: no Candidate/BranchRun may enter expensive execution without an explicit,
+      // validated prediction artifact. Missing prediction fails the branch before any candidate work,
+      // snapshot commitment, or evaluation run.
+      const prediction = this.state().branches[branchId]?.prediction;
+      if (!prediction) {
+        this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "prediction required before expensive execution" });
+        return;
+      }
       if (!snapshot) {
         try {
           const workspace = this.sandbox.createWorkspace();
@@ -1669,6 +1763,14 @@ export class ToyCompetitionHarness {
           this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation });
         }
 
+        // Every completed evaluation must leave a durable reconcile derived from the verified evaluator
+        // facts, not from agent self-report: evaluator identity and snapshot digest come from the trusted
+        // evaluation above and are validated again on replay.
+        if (this.state().branches[branchId]?.reconcile === undefined) {
+          const reconcile = this.reconcileEvaluation(branchId, snapshot, evaluation, prediction);
+          if (reconcile) this.append("RECONCILED", { branchId, fencingToken, reconcile, snapshotDigest: snapshot.digest });
+        }
+
         const earlyRoles: VerificationRole[] = ["Falsifier", "Critic", "Challenger"];
         for (const role of earlyRoles) {
           const callbackExists = role === "Falsifier"
@@ -1767,6 +1869,8 @@ export class ToyCompetitionHarness {
           return;
         }
         const reason = this.redactor.error(error).message;
+        // Every failed evaluation leaves a durable inconclusive reconcile addressing the failure record.
+        this.appendFailureReconcile(branchId, fencingToken, snapshot, prediction, reason);
         if (!(error instanceof InfrastructureError) || attempt >= maxAttempts) {
           this.append("BRANCH_REJECTED", { branchId, fencingToken, reason });
           return;
@@ -1800,6 +1904,28 @@ export class ToyCompetitionHarness {
 
   async resume(): Promise<MissionState> { return this.run(); }
 
+  /** Derives the post-evaluation reconcile from the prediction and the verified evaluation facts. */
+  private reconcileEvaluation(branchId: string, snapshot: Readonly<CandidateSnapshot>, evaluation: EvaluationResult, prediction: PredictionArtifact): ReconcileRecord | undefined {
+    return deriveEvaluationReconcile(this.options.missionId, branchId, snapshot, evaluation, prediction);
+  }
+
+  /** Inconclusive reconcile for a failed evaluation; its observation ref is content-addressed to the failure reason. */
+  private appendFailureReconcile(branchId: string, fencingToken: number, snapshot: Readonly<CandidateSnapshot>, prediction: PredictionArtifact, reason: string): void {
+    const reconcile = reconcilePrediction({
+      prediction,
+      observations: {},
+      observationRefs: [`evaluator-failed:${digestValue({ candidateId: snapshot.provenance.candidateId, reason })}`],
+      artifactRefs: [],
+      evidenceRefs: [],
+      evaluatorId: undefined,
+      independentEvaluator: false,
+      evidenceGatePassed: false,
+      reconcileId: `${this.options.missionId}:${snapshot.provenance.candidateId}:reconcile`,
+      taskId: branchId,
+    });
+    this.append("RECONCILED", { branchId, fencingToken, reconcile, snapshotDigest: snapshot.digest, failureReason: reason });
+  }
+
   injectLateCompletion(branchId: string, fencingToken: number, score: number): boolean {
     const branch = this.state().branches[branchId];
     if (!branch || branch.fencingToken !== fencingToken) {
@@ -1821,6 +1947,7 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
 
 export * from "./team-execution";
 export * from "./pi-agent-runtime";
+export * from "./predict-reconcile";
 export * from "./branch-recovery";
 export * from "./dag-scheduler";
 export * from "./security-boundary";

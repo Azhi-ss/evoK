@@ -15,6 +15,14 @@ import {
   type ToyCompetitionAdapter,
 } from "./toy-harness";
 
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
+
 const noiseContract = {
   protocol_version: "noise-v1",
   noise_model: { kind: "stochastic", tolerance: 0.05 },
@@ -58,6 +66,7 @@ function mission(
   promotionPolicy?: PromotionPolicy,
 ) {
   return new ToyCompetitionHarness({
+      prediction,
     missionId: `noise-${Object.keys(scores).join("-")}`,
     taskContract: { objective: "maximize" },
     branchIds: Object.keys(scores),
@@ -211,6 +220,7 @@ describe("evaluation noise protocol", () => {
       noise: ({ stage, side, ordinal }) => stage === "single" && side === "candidate" ? 5 + ordinal : 0,
     });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "fixture-noise",
       taskContract: { objective: "maximize" },
       branchIds: ["baseline", "candidate"],
@@ -281,6 +291,7 @@ describe("evaluation noise protocol", () => {
     }) as CandidateSnapshot;
     const contexts: EvaluationRunContext[] = [];
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "control-mission",
       taskContract,
       branchIds: ["candidate"],
@@ -317,6 +328,7 @@ describe("evaluation noise protocol", () => {
     const tampered = { ...controlSnapshot, files: { score: "99" } } as CandidateSnapshot;
 
     expect(() => new ToyCompetitionHarness({
+      prediction,
       missionId: "tampered-mission",
       taskContract,
       branchIds: ["candidate"],

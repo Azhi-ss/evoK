@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createTrustedSnapshot } from "./security-boundary";
 import { ToyCompetitionHarness, type ToyCompetitionAdapter, type ToyAgentRuntime } from "./toy-harness";
+
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
 import {
   InMemorySubmissionLedger,
   SubmissionBroker,
@@ -400,6 +408,7 @@ describe("SubmissionBroker", () => {
       successAuditor: () => { adapter.submit(); bypassCalls.push("agent-role"); return { ok: true, objections: [] }; },
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "broker-harness",
       taskContract: { objective: "maximize" },
       branchIds: ["a"],

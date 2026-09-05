@@ -1,18 +1,9 @@
-import { defaultPrediction, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type PredictionArtifact, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
-import { deepFreeze, digestValue } from "./security-boundary";
+import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
+import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "./security-boundary";
 
-export type { ClaimCard, PredictionArtifact, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
+export type { ClaimCard, PredictionArtifact, ReconcileInput, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
 
-export interface TaskReconcileInput {
-  readonly reconcileId?: string;
-  readonly status?: ReconcileStatus;
-  readonly observationRefs?: readonly string[];
-  readonly artifactRefs?: readonly string[];
-  readonly evidenceRefs?: readonly string[];
-  readonly evaluatorId?: string;
-  readonly independentEvaluator?: boolean;
-  readonly evidenceGatePassed?: boolean;
-}
+export type TaskReconcileInput = ReconcileInput;
 
 export type ResearchDecisionAction = "Continue" | "Revise" | "Scale" | "Stop";
 export type ResearchTaskStatus = "QUEUED" | "READY" | "RUNNING" | "COMPLETED" | "FAILED" | "BLOCKED";
@@ -110,7 +101,7 @@ export interface ResearchTaskState extends ResearchTask {
   readonly candidateRefs: readonly ResearchCandidateRef[];
   readonly artifactRefs: readonly ResearchArtifactRef[];
   readonly priorityScore: number;
-  readonly prediction: PredictionArtifact;
+  readonly prediction?: PredictionArtifact;
   readonly reconcile?: ReconcileRecord;
   readonly failureReason?: string;
 }
@@ -162,6 +153,7 @@ export interface ResearchMissionState {
   readonly negativeEvidence: readonly NegativeEvidence[];
   readonly pitfalls: readonly Pitfall[];
   readonly decisions: readonly ResearchDecision[];
+  readonly trustedEvaluators: readonly TrustedEvaluator[];
   readonly suggestedAction?: ResearchDecisionAction;
   readonly suggestedStopReason?: string;
   readonly stopReason?: string;
@@ -200,6 +192,13 @@ export interface MissionDirectorOptions {
   readonly tasks?: readonly ResearchTask[];
   readonly scope?: EvidenceScope;
   readonly clock?: () => number;
+  /** Mission trust root: independent evaluators whose signed proofs may gate WORLD_MODEL admission. */
+  readonly trustedEvaluators?: readonly TrustedEvaluator[];
+}
+
+export interface TrustedEvaluator {
+  readonly evaluatorId: string;
+  readonly publicKey: string;
 }
 
 export type ResearchEventType =
@@ -309,7 +308,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
   const dependencies = strings("task dependencies", task.dependencies);
   const requiredEvidence = strings("task requiredEvidence", task.requiredEvidence);
   const tags = strings("task tags", task.tags);
-  const prediction = normalizePrediction(task.prediction ?? defaultPrediction(task.taskId, task.objective), `${task.taskId}:prediction`);
+  const prediction = task.prediction === undefined ? undefined : normalizePrediction(task.prediction, `${task.taskId}:prediction`);
   if (task.priority !== undefined) finiteNonNegative("task priority", task.priority);
   if (task.uncertainty !== undefined) finiteNonNegative("task uncertainty", task.uncertainty);
   const estimatedCost = task.estimatedCost ?? 1;
@@ -325,7 +324,7 @@ function normalizeTask(task: ResearchTask): ResearchTask {
     ...(task.uncertainty === undefined ? {} : { uncertainty: task.uncertainty }),
     estimatedCost,
     ...(tags.length === 0 ? {} : { tags: Object.freeze(tags) }),
-    prediction,
+    ...(prediction === undefined ? {} : { prediction }),
   });
 }
 
@@ -654,6 +653,7 @@ interface MutableResearchState {
   predictions: Map<string, PredictionArtifact>;
   reconciles: Map<string, ReconcileRecord>;
   worldModel: Map<string, ClaimCard>;
+  trustedEvaluators: Map<string, string>;
   suggestedAction?: ResearchDecisionAction;
   suggestedStopReason?: string;
   stopReason?: string;
@@ -727,53 +727,160 @@ function initialMutable(event: ResearchEvent): MutableResearchState {
     budgetConsumed: 0,
     planVersion: 1,
     planDigest: p.planDigest,
-    tasks: new Map(tasks.map((task) => [task.taskId, { task, status: "QUEUED", evidenceRefs: [], candidateRefs: [], artifactRefs: [] }])),
+    tasks: new Map(tasks.map((task) => [task.taskId, queuedTask(task)])),
     candidates: new Map(),
     artifacts: new Map(),
     memory: new EvidenceMemory(),
     decisions: [],
-    predictions: new Map(tasks.map((task) => [task.taskId, task.prediction!] as const)),
+    predictions: new Map(tasks.flatMap((task) => task.prediction === undefined ? [] : [[task.taskId, task.prediction] as const])),
     reconciles: new Map(),
     worldModel: new Map(),
+    trustedEvaluators: normalizeTrustedEvaluators(p.trustedEvaluators),
     operations: new Map(typeof p.operationId === "string" ? [[p.operationId, { type: "MISSION_CREATED" as const, payload: p }]] : []),
   };
   refreshStatuses(state);
   return state;
 }
 
-function predictionFor(task: MutableTaskState): PredictionArtifact {
-  return task.prediction ?? task.task.prediction ?? defaultPrediction(task.task.taskId, task.task.objective);
+function predictionFor(task: MutableTaskState): PredictionArtifact | undefined {
+  return task.prediction ?? task.task.prediction;
+}
+
+function normalizeTrustedEvaluators(value: unknown): Map<string, string> {
+  const result = new Map<string, string>();
+  if (value === undefined) return result;
+  if (!Array.isArray(value)) throw new TypeError("trusted evaluators must be an array");
+  for (const entry of value) {
+    if (!isPlainRecord(entry)) throw new TypeError("trusted evaluator must be an ordinary object");
+    nonEmpty("trusted evaluator id", entry.evaluatorId);
+    if (typeof entry.publicKey !== "string" || !validEvaluationPublicKey(entry.publicKey)) {
+      throw new Error(`trusted evaluator public key is invalid: ${String(entry.evaluatorId)}`);
+    }
+    if (result.has(entry.evaluatorId)) throw new RangeError(`duplicate trusted evaluator: ${String(entry.evaluatorId)}`);
+    result.set(entry.evaluatorId, entry.publicKey);
+  }
+  return result;
+}
+
+function queuedTask(task: ResearchTask): MutableTaskState {
+  return { task, status: "QUEUED", evidenceRefs: [], candidateRefs: [], artifactRefs: [], ...(task.prediction === undefined ? {} : { prediction: task.prediction }) };
+}
+
+function defaultFailureReconcile(taskId: string, evidenceRefs: readonly string[], artifactRefs: readonly string[]): TaskReconcileInput {
+  return {
+    reconcileId: `${taskId}:reconcile`, status: "inconclusive", observationRefs: evidenceRefs, artifactRefs,
+    evidenceRefs, evaluatorId: "research-loop-failure", independentEvaluator: false, evidenceGatePassed: false,
+  };
+}
+
+/**
+ * Content-addressed evaluator proof carried on evidence metadata. WORLD_MODEL admission never trusts a
+ * boolean assertion: the proof digest is recomputed and must carry a signature from an evaluator
+ * registered in the mission trust root; the evaluator identity is cross-checked with the reconcile and
+ * the evaluated snapshot digest must match a digest already registered in the mission artifact registry.
+ */
+interface EvaluationEvidenceProof {
+  readonly evaluatorId: string;
+  readonly snapshotDigest: string;
+  readonly facts: Readonly<Record<string, string | number | boolean>>;
+}
+
+function evaluationProof(value: unknown): EvaluationEvidenceProof | undefined {
+  if (!isPlainRecord(value)) return undefined;
+  if (typeof value.evaluatorId !== "string" || value.evaluatorId.trim() === "" || typeof value.snapshotDigest !== "string" || value.snapshotDigest.trim() === "") return undefined;
+  if (!isPlainRecord(value.facts) || Object.values(value.facts).some((fact) => typeof fact !== "string" && typeof fact !== "number" && typeof fact !== "boolean")) return undefined;
+  return value as unknown as EvaluationEvidenceProof;
+}
+
+/**
+ * Derives whether a reconcile is actually backed by independent evaluator evidence instead of trusting
+ * the caller's own gate flags. Every evidence ref must resolve to a verified record whose metadata
+ * carries a digest-verified evaluation proof that is (a) signed with the private key of an evaluator
+ * registered in the mission trust root, (b) bound to a snapshot digest already registered in the
+ * mission artifact registry, and (c) naming the same evaluator as the reconcile. A raw self-report
+ * cannot pass the gate even with a self-consistent digest chain because it never holds the evaluator's
+ * private key.
+ */
+function independentlyEvaluated(memory: EvidenceMemory, reconcile: ReconcileRecord, artifactDigests: ReadonlySet<string>, trustedEvaluators: ReadonlyMap<string, string>, prediction: PredictionArtifact): boolean {
+  if (!reconcile.evidenceGatePassed || reconcile.independentEvaluator !== true || !reconcile.evaluatorId || reconcile.evidenceRefs.length === 0) return false;
+  return reconcile.evidenceRefs.every((ref) => {
+    const evidence = memory.get(ref);
+    if (evidence?.verified === false) return false;
+    const metadata = evidence?.metadata;
+    if (!metadata || typeof metadata.evaluationDigest !== "string" || typeof metadata.signature !== "string") return false;
+    const proof = evaluationProof(metadata.evaluation);
+    if (!proof || proof.evaluatorId !== reconcile.evaluatorId || !artifactDigests.has(proof.snapshotDigest)) return false;
+    const publicKey = trustedEvaluators.get(proof.evaluatorId);
+    if (publicKey === undefined) return false;
+    try {
+      // The signed facts determine the verdict: the reconcile status must match what the proof derives,
+      // so a caller holding a valid proof cannot relabel a refutation as a confirmation.
+      return digestValue(proof) === metadata.evaluationDigest
+        && deriveReconcileStatus(prediction, proof.facts) === reconcile.status
+        && verifyEvaluationDigest(metadata.evaluationDigest, metadata.signature, publicKey);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function requireReconcileRefs(memory: EvidenceMemory, reconcile: ReconcileRecord, artifactIds: ReadonlySet<string>, artifactDigests: ReadonlySet<string>, trustedEvaluators: ReadonlyMap<string, string>, prediction: PredictionArtifact, taskId: string): void {
+  for (const ref of reconcile.evidenceRefs) if (!memory.has(ref)) throw new Error(`unknown reconcile evidence reference: ${ref}`);
+  for (const ref of [...reconcile.observationRefs, ...reconcile.artifactRefs]) {
+    if (!memory.has(ref) && !artifactIds.has(ref)) throw new Error(`unknown reconcile observation or artifact reference: ${ref}`);
+  }
+  if (reconcile.evidenceGatePassed && !independentlyEvaluated(memory, reconcile, artifactDigests, trustedEvaluators, prediction)) {
+    throw new Error(`reconcile claims a passed evidence gate without matching independent evaluator evidence: ${taskId}`);
+  }
 }
 
 function applyReconcile(state: MutableResearchState, task: MutableTaskState, raw: unknown, taskId: string): void {
-  const prediction = predictionFor(task);
+  const prediction = task.prediction ?? task.task.prediction;
+  if (!prediction) throw new Error(`reconcile requires a prediction: ${taskId}`);
   const input = (raw ?? {}) as Record<string, unknown>;
-  const evidenceRefs = Array.isArray(input.evidenceRefs) ? input.evidenceRefs as string[] : [];
-  const observationRefs = Array.isArray(input.observationRefs) ? input.observationRefs as string[] : [];
-  const artifactRefs = Array.isArray(input.artifactRefs) ? input.artifactRefs as string[] : [];
-  requireRefs(state, evidenceRefs);
-  for (const ref of [...observationRefs, ...artifactRefs]) {
-    if (!state.memory.has(ref) && !state.artifacts.has(ref)) throw new Error(`unknown reconcile reference: ${ref}`);
-  }
   const reconcile = normalizeReconcile({ ...input, reconcileId: input.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction.predictionId }, prediction);
+  requireReconcileRefs(
+    state.memory,
+    reconcile,
+    new Set(state.artifacts.keys()),
+    new Set([...state.artifacts.values()].map((artifact) => artifact.digest)),
+    state.trustedEvaluators,
+    prediction,
+    taskId,
+  );
   const existing = state.reconciles.get(taskId);
   if (existing && !same(existing, reconcile)) throw new Error(`reconcile id already contains different data: ${taskId}`);
   task.prediction = prediction;
   task.reconcile = existing ?? reconcile;
   state.predictions.set(taskId, prediction);
   state.reconciles.set(taskId, task.reconcile);
-  if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
-    const claim = normalizeClaimCard(reconcile.claim, prediction);
-    const previous = state.worldModel.get(claim.claimId);
-    if (previous && !same(previous, claim)) throw new Error(`claim id already contains different data: ${claim.claimId}`);
-    state.worldModel.set(claim.claimId, previous ?? claim);
+  // A refuted hypothesis is reusable #8 Negative Evidence, but only when the refutation passed the same
+  // independent-evaluator gate as WORLD_MODEL admission: raw self-report must not be able to steer future
+  // planning through the evidence memory either. Ungated refuted reconciles stay queryable in state.reconciles.
+  if (task.reconcile.status === "refuted" && independentlyEvaluated(state.memory, task.reconcile, new Set([...state.artifacts.values()].map((artifact) => artifact.digest)), state.trustedEvaluators, prediction)) {
+    const refs = [...new Set([...task.reconcile.evidenceRefs, ...task.reconcile.observationRefs])].filter((ref) => state.memory.has(ref));
+    if (refs.length > 0) {
+      state.memory.addNegativeEvidence({
+        id: `${task.reconcile.reconcileId}:negative`,
+        statement: prediction.hypothesis,
+        category: "hypothesis-refuted",
+        evidenceRefs: refs,
+        verified: true,
+      });
+    }
   }
 }
 
 function taskReady(state: MutableResearchState, task: MutableTaskState): boolean {
   if (task.status !== "QUEUED" && task.status !== "READY") return false;
-  const hypothesis = predictionFor(task).hypothesis.toLowerCase();
-  if ([...state.worldModel.values()].some((claim) => claim.reconcileStatus === "refuted" && claim.hypothesis.toLowerCase() === hypothesis)) return false;
+  const prediction = task.prediction ?? task.task.prediction;
+  if (prediction === undefined) return false;
+  const hypothesis = prediction.hypothesis.toLowerCase();
+  // Hypothesis equivalence is an exact normalized match; semantic paraphrase matching is out of scope
+  // here and belongs to the Claim-card objection layer (#38).
+  const refutedByWorldModel = [...state.worldModel.values()].some((claim) => claim.reconcileStatus === "refuted" && claim.hypothesis.toLowerCase() === hypothesis);
+  const refutedByNegativeEvidence = state.memory.negativeEvidence().some((negative) => negative.category === "hypothesis-refuted" && negative.statement.toLowerCase() === hypothesis);
+  if (refutedByWorldModel || refutedByNegativeEvidence) return false;
   if ((task.task.dependencies ?? []).some((id) => state.tasks.get(id)?.status !== "COMPLETED")) return false;
   return (task.task.requiredEvidence ?? []).every((id) => state.memory.has(id));
 }
@@ -838,6 +945,7 @@ function publicState(state: MutableResearchState): ResearchMissionState {
     negativeEvidence: state.memory.negativeEvidence(),
     pitfalls: state.memory.pitfalls(),
     decisions: frozenArray(state.decisions),
+    trustedEvaluators: frozenArray([...state.trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey }))),
     ...(state.suggestedAction === undefined ? {} : { suggestedAction: state.suggestedAction }),
     ...(state.suggestedStopReason === undefined ? {} : { suggestedStopReason: state.suggestedStopReason }),
     ...(state.stopReason === undefined ? {} : { stopReason: state.stopReason }),
@@ -898,7 +1006,7 @@ function mergeArtifactRefs(state: MutableResearchState, refs: readonly ResearchA
 
 function applyCompletion(state: MutableResearchState, taskId: string, payload: Record<string, unknown>, event: ResearchEvent): void {
   const task = state.tasks.get(taskId);
-  if (!task || task.status !== "RUNNING") return;
+  if (!task || task.status !== "RUNNING") throw new Error(`task is not running: ${taskId}`);
   const evidence = Array.isArray(payload.evidence) ? payload.evidence as EvidenceRecord[] : [];
   const findings = Array.isArray(payload.findings) ? payload.findings as Finding[] : [];
   const negatives = Array.isArray(payload.negativeEvidence) ? payload.negativeEvidence as NegativeEvidence[] : [];
@@ -919,8 +1027,7 @@ function applyCompletion(state: MutableResearchState, taskId: string, payload: R
     .concat(pitfalls.filter((pitfall) => pitfall.verified !== false).map((pitfall) => pitfall.id)))];
   task.candidateRefs = candidates;
   task.artifactRefs = artifacts;
-  task.prediction = predictionFor(task);
-  state.predictions.set(taskId, task.prediction);
+  if (payload.reconcile === undefined) throw new Error(`task completion requires reconciliation: ${taskId}`);
   if (payload.reconcile !== undefined) applyReconcile(state, task, payload.reconcile, taskId);
 }
 
@@ -933,37 +1040,48 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
   switch (event.type) {
     case "PREDICTION_RECORDED": {
       const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
-      if (!task || task.status !== "QUEUED" && task.status !== "READY") return;
+      if (!task || task.status !== "QUEUED" && task.status !== "READY") throw new Error("PREDICTION_RECORDED references a task that is not queued");
       const prediction = normalizePrediction(p.prediction, `${task.task.taskId}:prediction`);
       const existing = state.predictions.get(task.task.taskId);
-      if (existing && !same(existing, prediction)) return;
+      if (existing && !same(existing, prediction)) throw new Error(`PREDICTION_RECORDED conflicts with the recorded prediction: ${task.task.taskId}`);
       task.prediction = prediction;
       state.predictions.set(task.task.taskId, prediction);
       break;
     }
     case "TASK_SELECTED": {
       const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
-      if (!task || !taskReady(state, task)) return;
+      if (!task) throw new Error("TASK_SELECTED references an unknown task");
+      if (!taskReady(state, task)) throw new Error(`TASK_SELECTED references a task that is not ready: ${task.task.taskId}`);
       const cost = task.task.estimatedCost ?? 1;
-      if (state.budgetConsumed + cost > state.budgetTotal) return;
+      if (state.budgetConsumed + cost > state.budgetTotal) throw new Error(`TASK_SELECTED exceeds the mission budget: ${task.task.taskId}`);
       task.status = "RUNNING";
       state.budgetConsumed += cost;
       break;
     }
     case "RECONCILED": {
       const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
-      if (!task || (task.status !== "COMPLETED" && task.status !== "FAILED")) return;
+      if (!task || (task.status !== "COMPLETED" && task.status !== "FAILED")) throw new Error("RECONCILED references a task that is not complete");
       applyReconcile(state, task, p.reconcile, p.taskId as string);
       break;
     }
     case "WORLD_MODEL_UPDATED": {
       const task = typeof p.taskId === "string" ? state.tasks.get(p.taskId) : undefined;
       const reconcile = task && state.reconciles.get(task.task.taskId);
-      if (!reconcile || !reconcile.evidenceGatePassed || reconcile.independentEvaluator !== true) return;
-      const claim = normalizeClaimCard(p.claim, predictionFor(task));
-      if (claim.reconcileStatus !== reconcile.status || !claim.evidenceGatePassed) return;
+      const prediction = task && (task.prediction ?? task.task.prediction);
+      if (!reconcile || !prediction) throw new Error("WORLD_MODEL_UPDATED has no reconciled prediction");
+      if (!independentlyEvaluated(state.memory, reconcile, new Set([...state.artifacts.values()].map((artifact) => artifact.digest)), state.trustedEvaluators, prediction)) {
+        throw new Error("WORLD_MODEL_UPDATED lacks independent evaluator evidence");
+      }
+      requireRefs(state, reconcile.evidenceRefs);
+      for (const ref of [...reconcile.observationRefs, ...reconcile.artifactRefs]) {
+        if (!state.memory.has(ref) && !state.artifacts.has(ref)) throw new Error(`WORLD_MODEL_UPDATED references an unknown observation or artifact: ${ref}`);
+      }
+      const claim = normalizeClaimCard(p.claim, prediction);
+      if (claim.reconcileStatus !== reconcile.status || !claim.evidenceGatePassed || !same(claim, reconcile.claim)) {
+        throw new Error("WORLD_MODEL_UPDATED claim does not match its reconcile");
+      }
       const existing = state.worldModel.get(claim.claimId);
-      if (existing && !same(existing, claim)) return;
+      if (existing && !same(existing, claim)) throw new Error(`world model claim id already contains different data: ${claim.claimId}`);
       state.worldModel.set(claim.claimId, existing ?? claim);
       break;
     }
@@ -981,25 +1099,28 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       for (const negative of negatives) state.memory.addNegativeEvidence(negative);
       task.evidenceRefs = [...new Set(evidence.filter((record) => record.verified !== false).map((record) => record.id)
         .concat(negatives.filter((negative) => negative.verified !== false).map((negative) => negative.id)))];
-      task.prediction = predictionFor(task);
-      state.predictions.set(task.task.taskId, task.prediction);
+      if (p.reconcile === undefined) throw new Error(`task failure requires reconciliation: ${task.task.taskId}`);
       if (p.reconcile !== undefined) applyReconcile(state, task, p.reconcile, task.task.taskId);
       break;
     }
     case "TASKS_GENERATED": {
       const source = typeof p.sourceTaskId === "string" ? state.tasks.get(p.sourceTaskId) : undefined;
       const evidenceRefs = Array.isArray(p.evidenceRefs) ? p.evidenceRefs as string[] : [];
-      if (!source || source.status !== "COMPLETED") return;
-      if (evidenceRefs.length === 0) return;
+      if (!source || source.status !== "COMPLETED") throw new Error("TASKS_GENERATED requires a completed source task");
+      if (evidenceRefs.length === 0) throw new Error("TASKS_GENERATED requires evidence references");
       requireRefs(state, evidenceRefs);
       requireTaskEvidence(state, source, evidenceRefs);
       const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(state.tasks.keys()));
-      if (typeof p.planVersion !== "number" || p.planVersion !== state.planVersion + 1 || typeof p.planDigest !== "string") return;
+      if (typeof p.planVersion !== "number" || p.planVersion !== state.planVersion + 1 || typeof p.planDigest !== "string") {
+        throw new Error("TASKS_GENERATED plan version or digest is invalid");
+      }
       const allTasks = [...state.tasks.values()].map((value) => value.task).concat(tasks);
-      if (p.planDigest !== planDigest(state.objective, state.budgetTotal, allTasks, state.scope)) return;
+      if (p.planDigest !== planDigest(state.objective, state.budgetTotal, allTasks, state.scope)) {
+        throw new Error("TASKS_GENERATED plan digest does not match its contents");
+      }
       for (const task of tasks) {
         if (state.tasks.has(task.taskId)) throw new Error(`research task already exists: ${task.taskId}`);
-        state.tasks.set(task.taskId, { task, status: "QUEUED", evidenceRefs: [], candidateRefs: [], artifactRefs: [] });
+        state.tasks.set(task.taskId, queuedTask(task));
       }
       state.planVersion = p.planVersion;
       state.planDigest = p.planDigest;
@@ -1035,36 +1156,46 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
     case "PLAN_REVISED": {
       if (p.objective !== state.objective || typeof p.totalBudget !== "number" || !Number.isFinite(p.totalBudget)
         || p.totalBudget < state.budgetConsumed || p.totalBudget > state.budgetTotal
-        || typeof p.reason !== "string" || p.reason.trim() === "") return;
+        || typeof p.reason !== "string" || p.reason.trim() === "") {
+        throw new Error("PLAN_REVISED budget, objective, or reason is invalid");
+      }
       const evidenceRefs = Array.isArray(p.evidenceRefs) ? p.evidenceRefs as string[] : [];
       requireRefs(state, evidenceRefs);
       if (typeof p.parentPlanDigest !== "string" || p.parentPlanDigest !== state.planDigest
         || typeof p.planVersion !== "number" || p.planVersion !== state.planVersion + 1
-        || typeof p.planDigest !== "string") return;
+        || typeof p.planDigest !== "string") {
+        throw new Error("PLAN_REVISED plan version or digest is invalid");
+      }
       const preserved = [...state.tasks.values()].filter((task) => task.status === "COMPLETED" || task.status === "RUNNING");
       const tasks = validateTaskGraph(Array.isArray(p.tasks) ? p.tasks as ResearchTask[] : [], new Set(preserved.map((task) => task.task.taskId)));
-      if (p.planDigest !== planDigest(state.objective, p.totalBudget, tasks, state.scope)) return;
+      if (p.planDigest !== planDigest(state.objective, p.totalBudget, tasks, state.scope)) {
+        throw new Error("PLAN_REVISED plan digest does not match its contents");
+      }
       const proposedIds = new Set(tasks.map((task) => task.taskId));
-      if (preserved.some((task) => !proposedIds.has(task.task.taskId))) return;
+      if (preserved.some((task) => !proposedIds.has(task.task.taskId))) throw new Error("PLAN_REVISED drops an active task");
       for (const task of preserved) {
         const replacement = tasks.find((candidate) => candidate.taskId === task.task.taskId);
-        if (!replacement || !same(replacement, task.task)) return;
+        if (!replacement || !same(replacement, task.task)) throw new Error(`PLAN_REVISED rewrites active task ${task.task.taskId}`);
       }
       state.tasks = new Map(tasks.map((task) => {
         const old = state.tasks.get(task.taskId);
         if (old && (old.status === "COMPLETED" || old.status === "RUNNING")) return [task.taskId, old];
-        return [task.taskId, { task, status: "QUEUED", evidenceRefs: [], candidateRefs: [], artifactRefs: [] }];
+        return [task.taskId, queuedTask(task)];
       }));
-      state.planVersion = typeof p.planVersion === "number" ? p.planVersion : state.planVersion + 1;
-      state.planDigest = typeof p.planDigest === "string" ? p.planDigest : state.planDigest;
+      state.planVersion = p.planVersion;
+      state.planDigest = p.planDigest;
       state.budgetTotal = p.totalBudget;
       break;
     }
     case "MISSION_STOPPED":
-      if (typeof p.reason !== "string" || p.reason.trim() === "" || typeof p.decisionId !== "string") return;
+      if (typeof p.reason !== "string" || p.reason.trim() === "" || typeof p.decisionId !== "string") {
+        throw new Error("MISSION_STOPPED reason or decision id is invalid");
+      }
       const stopDecision = state.decisions.find((decision) => decision.decisionId === p.decisionId && decision.action === "Stop");
       if (!stopDecision || p.reason !== (stopDecision.stopReason ?? stopDecision.reason)
-        || !Array.isArray(p.evidenceRefs) || !same(p.evidenceRefs, stopDecision.evidenceRefs)) return;
+        || !Array.isArray(p.evidenceRefs) || !same(p.evidenceRefs, stopDecision.evidenceRefs)) {
+        throw new Error("MISSION_STOPPED does not match a recorded Stop decision");
+      }
       state.phase = "STOPPED";
       state.stopReason = p.reason;
       break;
@@ -1127,6 +1258,7 @@ export class MissionDirector {
     this.missionId = options.missionId;
     this.clock = options.clock ?? (() => Date.now());
     this.ledger = ledger;
+    const trustedEvaluators = normalizeTrustedEvaluators(options.trustedEvaluators);
     if (ledger.events().length === 0) {
       const tasks = validateTaskGraph(options.tasks ?? []);
       if (tasks.length === 0) throw new RangeError("research mission requires at least one task");
@@ -1138,6 +1270,7 @@ export class MissionDirector {
         ...(scope === undefined ? {} : { scope }),
         planVersion: 1,
         planDigest: planDigest(options.objective, totalBudget, tasks, scope),
+        ...(trustedEvaluators.size === 0 ? {} : { trustedEvaluators: [...trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey })) }),
       }, "mission-created");
     } else {
       const state = project(ledger.events());
@@ -1146,6 +1279,8 @@ export class MissionDirector {
       const initialBudget = ledger.events()[0]?.payload.totalBudget;
       if (typeof initialBudget !== "number" || totalBudget !== initialBudget) throw new Error("ledger belongs to another research budget");
       if (options.scope !== undefined && !same(scope, state.scope)) throw new Error("ledger belongs to another research scope");
+      const registered = [...state.trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey }));
+      if (!same(options.trustedEvaluators ?? [], registered)) throw new Error("ledger belongs to another evaluator trust root");
     }
   }
 
@@ -1240,18 +1375,31 @@ export class MissionDirector {
     if (!task) throw new Error(`unknown research task: ${taskId}`);
     if (task.status !== "COMPLETED" && task.status !== "FAILED") throw new Error(`task is not complete: ${taskId}`);
     const prediction = predictionFor(task);
+    if (!prediction) throw new Error(`reconcile requires a prediction: ${taskId}`);
     const reconcile = normalizeReconcile({ ...input, reconcileId: input.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction.predictionId }, prediction);
+    requireReconcileRefs(state.memory, reconcile, new Set(state.artifacts.keys()), new Set([...state.artifacts.values()].map((artifact) => artifact.digest)), state.trustedEvaluators, prediction, taskId);
     const existing = state.reconciles.get(taskId);
     if (existing) {
       if (!same(existing, reconcile)) throw new Error(`reconcile already contains different data: ${taskId}`);
+      // Crash recovery: the reconcile may have persisted without its WORLD_MODEL admission event.
+      this.ensureWorldModelAdmission(taskId, existing);
       return existing;
     }
     const operation = this.operation(`reconcile-${taskId}`, input.reconcileId);
     this.append("RECONCILED", { taskId, reconcile }, operation);
-    if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
-      this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operation}-world-model`);
-    }
+    this.ensureWorldModelAdmission(taskId, reconcile);
     return this.state().reconciles.find((entry) => entry.taskId === taskId)!;
+  }
+
+  /** Idempotently appends the WORLD_MODEL admission for a gate-backed reconcile that lacks it yet. */
+  private ensureWorldModelAdmission(taskId: string, reconcile: ReconcileRecord): void {
+    const current = project(this.ledger.events());
+    const prediction = current.predictions.get(taskId) ?? current.tasks.get(taskId)?.prediction;
+    if (!prediction) return;
+    if (!independentlyEvaluated(current.memory, reconcile, new Set([...current.artifacts.values()].map((artifact) => artifact.digest)), current.trustedEvaluators, prediction)) return;
+    const claim = reconcile.claim;
+    if (current.worldModel.has(claim.claimId)) return;
+    this.append("WORLD_MODEL_UPDATED", { taskId, claim }, `${claim.claimId}:world-model`);
   }
 
   searchWorldModel(query?: string): readonly ClaimCard[] {
@@ -1268,8 +1416,13 @@ export class MissionDirector {
     if (!task) throw new Error(`unknown research task: ${taskId}`);
     const operationId = this.operation(`complete-${taskId}`, completion.operationId);
     const existingOperation = this.ledger.events().some((event) => event.payload.operationId === operationId);
+    const conflictingOperation = this.operationEvent(operationId);
+    if (conflictingOperation && conflictingOperation.type !== "TASK_COMPLETED") {
+      throw new Error(`operationId already contains a different research operation: ${operationId}`);
+    }
     if (task.status === "COMPLETED" && !existingOperation) throw new Error(`task completion is already recorded: ${taskId}`);
     if (task.status !== "RUNNING" && task.status !== "COMPLETED") throw new Error(`task is not running: ${taskId}`);
+    if (!task.prediction) throw new Error(`task completion requires an explicit prediction: ${taskId}`);
     const evidence = (completion.evidence ?? []).map((record) => normalizeEvidence(record, taskId));
     const findings = (completion.findings ?? []).map(normalizeFinding);
     const negatives = (completion.negativeEvidence ?? []).map(normalizeNegative);
@@ -1290,16 +1443,24 @@ export class MissionDirector {
     for (const pitfall of pitfalls) memory.addPitfall(pitfall);
     const refs = [...findings.flatMap((finding) => finding.evidenceRefs), ...negatives.flatMap((negative) => negative.evidenceRefs), ...pitfalls.flatMap((pitfall) => pitfall.evidenceRefs)];
     for (const ref of refs) if (!memory.has(ref)) throw new Error(`unknown evidence reference: ${ref}`);
-    const payload = { taskId, evidence, findings, negativeEvidence: negatives, pitfalls, candidates, artifacts, reconcile: completion.reconcile };
+    const reconcileInput = completion.reconcile;
+    if (reconcileInput === undefined) throw new Error(`task completion requires reconciliation: ${taskId}`);
+    // Validate the whole completion (reconcile, refs, evidence gate) before the first ledger write so a
+    // rejected completion cannot leave a half-applied TASK_COMPLETED behind.
+    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: task.prediction.predictionId }, task.prediction);
+    requireReconcileRefs(
+      memory,
+      reconcile,
+      new Set([...state.artifacts.keys(), ...artifacts.map((artifact) => artifact.artifactId)]),
+      new Set([...state.artifacts.values(), ...artifacts].map((artifact) => artifact.digest)),
+      state.trustedEvaluators,
+      task.prediction,
+      taskId,
+    );
+    const payload = { taskId, evidence, findings, negativeEvidence: negatives, pitfalls, candidates, artifacts, reconcile };
     this.append("TASK_COMPLETED", payload, operationId);
-    if (completion.reconcile) {
-      const prediction = state.tasks.get(taskId)?.prediction ?? (state.tasks.get(taskId) ? predictionFor(state.tasks.get(taskId)!) : undefined);
-      const reconcile = normalizeReconcile({ ...completion.reconcile, reconcileId: completion.reconcile.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction?.predictionId }, prediction);
-      this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
-      if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
-        this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operationId}-world-model`);
-      }
-    }
+    this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
+    this.ensureWorldModelAdmission(taskId, reconcile);
     return this.state().tasks[taskId];
   }
 
@@ -1310,18 +1471,21 @@ export class MissionDirector {
     const task = state.tasks.get(taskId);
     if (!task) throw new Error(`unknown research task: ${taskId}`);
     const operationId = this.operation(`fail-${taskId}`, failure.operationId);
-    const evidence = (failure.evidence ?? []).map((record) => normalizeEvidence(record, taskId));
+    const failureObservation: EvidenceRecord = {
+      id: `${taskId}-failure-observation-${operationId}`,
+      kind: "observation",
+      summary: failure.reason,
+      verified: true,
+      taskId,
+    };
+    const evidence = [failureObservation, ...(failure.evidence ?? [])].map((record) => normalizeEvidence(record, taskId));
     const negatives = (failure.negativeEvidence ?? [{ id: `${taskId}-negative-${operationId}`, statement: failure.reason, category: failure.category ?? "inconclusive", evidenceRefs: evidence.map((record) => record.id) }]).map(normalizeNegative);
-    const payload = { taskId, reason: failure.reason, evidence, negativeEvidence: negatives, reconcile: failure.reconcile };
-    const existing = this.operationEvent(failure.operationId);
-    if (existing) {
-      if (existing.type !== "TASK_FAILED" || !same(existing.payload, { ...payload, missionId: this.missionId, operationId })) {
-        throw new Error(`operationId already contains a different research operation: ${failure.operationId}`);
-      }
-      return this.state().tasks[taskId];
-    }
-    if (state.phase === "STOPPED") throw new Error("mission is stopped");
-    if (task.status !== "RUNNING") throw new Error(`task is not running: ${taskId}`);
+    if (!predictionFor(task)) throw new Error(`reconcile requires a prediction: ${taskId}`);
+    // The default failure reconcile must carry the persisted failure observation as a real observation ref.
+    const defaultReconcile = defaultFailureReconcile(taskId, evidence.map((record) => record.id), []);
+    const reconcileInput = failure.reconcile ?? defaultReconcile;
+    // Validate the whole failure (reconcile and its refs) before the first ledger write.
+    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: predictionFor(task)!.predictionId }, predictionFor(task)!);
     const memory = new EvidenceMemory({
       evidence: state.memory.records(),
       findings: state.memory.findings(),
@@ -1330,15 +1494,20 @@ export class MissionDirector {
     });
     for (const record of evidence) memory.addEvidence(record);
     for (const negative of negatives) memory.addNegativeEvidence(negative);
-    this.append("TASK_FAILED", payload, operationId);
-    if (failure.reconcile) {
-      const prediction = state.tasks.get(taskId)?.prediction ?? (state.tasks.get(taskId) ? predictionFor(state.tasks.get(taskId)!) : undefined);
-      const reconcile = normalizeReconcile({ ...failure.reconcile, reconcileId: failure.reconcile.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: prediction?.predictionId }, prediction);
-      this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
-      if (reconcile.evidenceGatePassed && reconcile.independentEvaluator === true && reconcile.evaluatorId) {
-        this.append("WORLD_MODEL_UPDATED", { taskId, claim: reconcile.claim }, `${operationId}-world-model`);
+    requireReconcileRefs(memory, reconcile, new Set(state.artifacts.keys()), new Set([...state.artifacts.values()].map((artifact) => artifact.digest)), state.trustedEvaluators, predictionFor(task)!, taskId);
+    const payload = { taskId, reason: failure.reason, evidence, negativeEvidence: negatives, reconcile };
+    const existing = this.operationEvent(operationId);
+    if (existing) {
+      if (existing.type !== "TASK_FAILED" || !same(existing.payload, { ...payload, missionId: this.missionId, operationId })) {
+        throw new Error(`operationId already contains a different research operation: ${operationId}`);
       }
+      return this.state().tasks[taskId];
     }
+    if (state.phase === "STOPPED") throw new Error("mission is stopped");
+    if (task.status !== "RUNNING") throw new Error(`task is not running: ${taskId}`);
+    this.append("TASK_FAILED", payload, operationId);
+    this.append("RECONCILED", { taskId, reconcile }, `${operationId}-reconcile`);
+    this.ensureWorldModelAdmission(taskId, reconcile);
     return this.state().tasks[taskId];
   }
 

@@ -10,6 +10,10 @@ import {
   assertSnapshotIntegrity,
   createTrustedSnapshot,
   evaluateTrustedSnapshot,
+  generateEvaluationKeyPair,
+  signEvaluationDigest,
+  validEvaluationPublicKey,
+  verifyEvaluationDigest,
 } from "./security-boundary";
 
 describe("security boundary", () => {
@@ -89,5 +93,18 @@ describe("security boundary", () => {
     expect(decision).toMatchObject({ requestId: "submission-1", acceptedAt: 5, expiresAt: 10 });
     expect((decision as Record<string, unknown>).token).toBeUndefined();
     expect(Object.isFrozen(decision)).toBe(true);
+  });
+
+  test("evaluator signatures verify only against the registered key and reject tampering", () => {
+    const evaluator = generateEvaluationKeyPair("independent-evaluator");
+    const forger = generateEvaluationKeyPair("forger");
+    const digest = "sha256:digest";
+    const signature = signEvaluationDigest(digest, evaluator.privateKey);
+
+    expect(validEvaluationPublicKey(evaluator.publicKey)).toBe(true);
+    expect(validEvaluationPublicKey("not-a-key")).toBe(false);
+    expect(verifyEvaluationDigest(digest, signature, evaluator.publicKey)).toBe(true);
+    expect(verifyEvaluationDigest("sha256:other", signature, evaluator.publicKey)).toBe(false);
+    expect(verifyEvaluationDigest(digest, signature, forger.publicKey)).toBe(false);
   });
 });

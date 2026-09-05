@@ -6,6 +6,14 @@ import {
 } from "./toy-harness";
 import { createTrustedSnapshot } from "./security-boundary";
 
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
+
 const contract = { objective: "maximize" };
 const policy = { maxBranches: 1, maxParallelBranches: 1, maxAttempts: 3, quorum: 1 };
 
@@ -27,6 +35,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
     };
     let evaluated = false;
     const result = await new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-preflight",
       taskContract: contract,
       branchIds: ["a"],
@@ -53,6 +62,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
       successAuditor: () => { calls.push("success-auditor"); return { ok: true, objections: [] }; },
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-roles",
       taskContract: contract,
       branchIds: ["a"],
@@ -78,6 +88,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
     const runtime = baseRuntime();
     runtime.propose = () => { proposals++; return { files: { "../escape": "owned" } }; };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-path-attack",
       taskContract: contract,
       branchIds: ["a"],
@@ -97,6 +108,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
 
   test("quarantines evaluator tampering and forged results", async () => {
     const mutating = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-evaluator-mutation",
       taskContract: contract,
       branchIds: ["a"],
@@ -114,6 +126,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
     expect(mutationResult.champion).toBeUndefined();
 
     const forged = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-forged-evaluation",
       taskContract: contract,
       branchIds: ["a"],
@@ -128,6 +141,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
 
   test("rejects forged promotion snapshots and incomplete evaluator evidence during replay", async () => {
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-replay-integrity",
       taskContract: contract,
       branchIds: ["a"],
@@ -168,6 +182,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
 
   test("does not let a higher-fence replay reservation reopen a scored branch", async () => {
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-replay-fence",
       taskContract: contract,
       branchIds: ["a"],
@@ -189,6 +204,7 @@ describe("T06 sandbox, trust, and verification gates", () => {
 
   test("requires the current local champion digest for explicit human acceptance", async () => {
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "t06-human-gate",
       taskContract: contract,
       branchIds: ["a"],

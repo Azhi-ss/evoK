@@ -1,3 +1,11 @@
+import {
+  normalizePrediction,
+  normalizeReconcile,
+  type PredictionArtifact,
+  type ReconcileInput,
+  type ReconcileRecord,
+} from "./predict-reconcile";
+
 export type BranchRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "PROMOTED" | "FAILED" | "CANCELLED" | "QUARANTINED" | "EXPIRED";
 
 export interface BranchRunIdentity {
@@ -28,6 +36,8 @@ export interface BranchState {
   readonly run?: BranchRunIdentity;
   readonly artifact?: BranchArtifact;
   readonly promoted: boolean;
+  readonly prediction?: PredictionArtifact;
+  readonly reconcile?: ReconcileRecord;
 }
 
 export interface BudgetState {
@@ -191,6 +201,8 @@ interface MutableBranchState {
   run?: BranchRunIdentity;
   artifact?: BranchArtifact;
   promoted: boolean;
+  prediction?: PredictionArtifact;
+  reconcile?: ReconcileRecord;
   startedAt?: number;
   lastEventSequence: number;
 }
@@ -224,6 +236,8 @@ function validateJoinPolicy(policy: JoinPolicy, branchIds: readonly string[]): J
 export interface EventOptions {
   readonly eventId?: string;
   readonly sequence?: number;
+  /** Required reconciliation for a completed run; validated against the run's recorded prediction. */
+  readonly reconcile?: ReconcileInput;
 }
 
 /** A deterministic projection over an append-only ledger. The ledger is replaceable for durable storage. */
@@ -391,9 +405,9 @@ export class BranchRecoveryControlPlane {
     return `${identity.branchId}\u0000${identity.runId}\u0000${identity.workspaceId}\u0000${identity.attempt}\u0000${identity.fencingToken}`;
   }
 
-  private appendReservationAndStart(identity: BranchRunIdentity): boolean {
+  private appendReservationAndStart(identity: BranchRunIdentity, prediction: PredictionArtifact): boolean {
     const reservation = { type: "BUDGET_RESERVED" as const, payload: { identity, units: 1, missionId: this.missionId, scopeId: this.scopeId } };
-    const started = { type: "RUN_STARTED" as const, payload: { identity, startedAt: this.clock(), missionId: this.missionId, scopeId: this.scopeId } };
+    const started = { type: "RUN_STARTED" as const, payload: { identity, startedAt: this.clock(), prediction, missionId: this.missionId, scopeId: this.scopeId } };
     if (this.ledger.reserveAndStart) this.replay(this.ledger.reserveAndStart(reservation, started));
     else {
       this.append("BUDGET_RESERVED", reservation.payload);
@@ -403,10 +417,18 @@ export class BranchRecoveryControlPlane {
     return !!branch && branch.status === "RUNNING" && this.matchesCurrent(branch, identity);
   }
 
-  startRun(branchId: string): BranchRunIdentity | undefined {
+  startRun(branchId: string, prediction: PredictionArtifact): BranchRunIdentity | undefined {
     this.sync();
     const branch = this.branches.get(branchId);
     if (!branch) { this.reject("unknown branch", { branchId }); return undefined; }
+    // Prediction gate: a BranchRun may not enter expensive RUNNING without an explicit, valid prediction.
+    let normalized: PredictionArtifact;
+    try {
+      normalized = normalizePrediction(prediction, `${this.missionId}:${branchId}:prediction`);
+    } catch {
+      this.reject("run start requires a valid prediction", { branchId });
+      return undefined;
+    }
     if (this.joinState.closed) { this.reject("join is closed", { branchId }); return undefined; }
     if (branch.run && branch.status === "RUNNING") return frozenCopy(branch.run);
     if (branch.status === "COMPLETED") return undefined;
@@ -416,7 +438,7 @@ export class BranchRecoveryControlPlane {
     const pending = this.pendingReservations.get(branchId);
     if (pending) {
       if (pending.attempt > this.maxAttempts) { this.reject("max attempts exhausted", { branchId }); return undefined; }
-      this.append("RUN_STARTED", { identity: pending, startedAt: this.clock() });
+      this.append("RUN_STARTED", { identity: pending, startedAt: this.clock(), prediction: normalized });
       const current = this.branches.get(branchId);
       if (!current || current.status !== "RUNNING" || !this.matchesCurrent(current, pending)) {
         this.reject("run start rejected", { branchId });
@@ -436,7 +458,7 @@ export class BranchRecoveryControlPlane {
       runId: `${this.missionId}:${branchId}:run-${attempt}`,
       workspaceId: `${this.missionId}:${branchId}:workspace-${attempt}`,
     });
-    if (!this.appendReservationAndStart(identity)) {
+    if (!this.appendReservationAndStart(identity, normalized)) {
       this.reject("run start rejected", { branchId, fencingToken });
       return undefined;
     }
@@ -450,7 +472,7 @@ export class BranchRecoveryControlPlane {
     if (this.joinState.closed) { this.reject("join is closed", { branchId: identity.branchId }); return undefined; }
     if (!this.matchesCurrent(branch, identity) || branch.status !== "RUNNING") { this.reject("retry rejected for stale or non-running run", { branchId: identity.branchId }); return undefined; }
     if (reason !== "infrastructure") { this.reject("only infrastructure failure is retryable", { branchId: identity.branchId, reason }); return undefined; }
-    this.append("RUN_FAILED", { identity, reason });
+    this.append("RUN_FAILED", { identity, reason, ...(branch.prediction === undefined ? {} : { reconcile: this.failureReconcile(identity, branch.prediction, "RUN_FAILED") }) });
     const failedBranch = this.branches.get(identity.branchId);
     if (!failedBranch || failedBranch.status !== "FAILED" || !this.matchesCurrent(failedBranch, identity)) {
       this.reject("run failure rejected", { branchId: identity.branchId });
@@ -460,7 +482,11 @@ export class BranchRecoveryControlPlane {
       this.settleJoin();
       return undefined;
     }
-    return this.startRun(identity.branchId);
+    if (!branch.prediction) {
+      this.reject("run start requires a valid prediction", { branchId: identity.branchId });
+      return undefined;
+    }
+    return this.startRun(identity.branchId, branch.prediction);
   }
 
   complete(identity: BranchRunIdentity, artifact?: BranchArtifact, options: EventOptions = {}): boolean {
@@ -471,10 +497,11 @@ export class BranchRecoveryControlPlane {
     if (!this.acceptEvent(branch, identity, options)) return false;
     if (branch.status !== "RUNNING") return this.reject("run is not running", { branchId: identity.branchId });
     if (artifact !== undefined && !validArtifact(artifact)) return this.reject("missing or invalid artifact", { branchId: identity.branchId });
-    this.append("RUN_COMPLETED", { identity, ...this.eventMetadata(options), ...(artifact ? { artifact: copy(artifact) } : {}) });
+    this.append("RUN_COMPLETED", { identity, ...this.eventMetadata(options), ...(artifact ? { artifact: copy(artifact) } : {}), ...(options.reconcile !== undefined ? { reconcile: options.reconcile } : {}) });
     const completedBranch = this.branches.get(identity.branchId);
     if (!completedBranch || completedBranch.status !== "COMPLETED" || !this.matchesCurrent(completedBranch, identity)
-      || (artifact ? completedBranch.artifact?.artifactId !== artifact.artifactId : completedBranch.artifact !== undefined)) {
+      || (artifact ? completedBranch.artifact?.artifactId !== artifact.artifactId : completedBranch.artifact !== undefined)
+      || !completedBranch.reconcile) {
       return this.reject("completion rejected", { branchId: identity.branchId });
     }
     this.settleJoin();
@@ -522,11 +549,27 @@ export class BranchRecoveryControlPlane {
     const now = this.clock();
     for (const branch of this.branches.values()) {
       if (branch.status !== "RUNNING" || branch.startedAt === undefined || now - branch.startedAt < this.joinPolicy.timeoutMs) continue;
-      this.append("WATCHDOG_EXPIRED", { identity: branch.run!, reason: "watchdog expiry", expiredAt: now });
+      this.append("WATCHDOG_EXPIRED", { identity: branch.run!, reason: "watchdog expiry", expiredAt: now, ...(branch.prediction === undefined ? {} : { reconcile: this.failureReconcile(branch.run!, branch.prediction, "WATCHDOG_EXPIRED") }) });
       if (this.branches.get(branch.branchId)?.status === "EXPIRED") expired += 1;
     }
     this.settleJoin();
     return expired;
+  }
+
+  /** The plane itself records an inconclusive reconcile for a failed attempt; callers cannot skip it. */
+  private failureReconcile(identity: BranchRunIdentity, prediction: PredictionArtifact, eventType: "RUN_FAILED" | "WATCHDOG_EXPIRED"): ReconcileRecord {
+    return normalizeReconcile({
+      reconcileId: `${identity.runId}:reconcile`,
+      taskId: identity.branchId,
+      predictionId: prediction.predictionId,
+      status: "inconclusive",
+      // The observation ref addresses the durable failure event recorded in the ledger for this run.
+      observationRefs: [`${identity.runId}:${eventType}`],
+      artifactRefs: [],
+      evidenceRefs: [],
+      independentEvaluator: false,
+      evidenceGatePassed: false,
+    }, prediction);
   }
 
   join(): JoinDecision {
@@ -594,7 +637,7 @@ export class BranchRecoveryControlPlane {
   state(): ControlPlaneState {
     this.sync();
     this.settleJoin();
-    const branches = Object.fromEntries([...this.branches].map(([id, branch]) => [id, frozenCopy({ branchId: id, status: branch.status, attempt: branch.attempt, run: branch.run, artifact: branch.artifact, promoted: branch.promoted })]));
+    const branches = Object.fromEntries([...this.branches].map(([id, branch]) => [id, frozenCopy({ branchId: id, status: branch.status, attempt: branch.attempt, run: branch.run, artifact: branch.artifact, promoted: branch.promoted, prediction: branch.prediction, reconcile: branch.reconcile })]));
     return frozenCopy({ missionId: this.missionId, branches, budget: { maxAttempts: this.maxAttempts, maxUnits: this.maxUnits, remainingUnits: this.remainingUnits }, join: this.calculateJoin() });
   }
 
@@ -813,24 +856,43 @@ export class BranchRecoveryControlPlane {
             rejectEvent("run start timestamp is invalid");
             break;
           }
+          let prediction: PredictionArtifact;
+          try {
+            prediction = normalizePrediction(p.prediction, `${this.missionId}:${identity.branchId}:prediction`);
+          } catch {
+            rejectEvent("run start requires a valid prediction");
+            break;
+          }
           branch.attempt = identity.attempt;
           branch.run = frozenCopy(identity);
           branch.status = "RUNNING";
           branch.startedAt = p.startedAt;
+          branch.prediction = frozenCopy(prediction);
+          branch.reconcile = undefined;
           this.pendingReservations.delete(branch.branchId);
           this.startedIdentities.add(key);
           this.startedAtByIdentity.set(key, p.startedAt);
           recordMetadata();
           break;
         }
-        case "RUN_FAILED":
+        case "RUN_FAILED": {
           if (p.reason !== "infrastructure") { rejectEvent("only infrastructure failures are retryable"); break; }
           if (!metadataIsFresh()) { rejectEvent("stale or duplicate event metadata"); break; }
           if (!this.matchesCurrent(branch, identity)) { rejectEvent("stale fencing token or run identity"); break; }
           if (branch.status !== "RUNNING") { rejectEvent("run is not running"); break; }
+          let reconcile: ReconcileRecord;
+          try {
+            if (!branch.prediction) throw new Error("missing prediction");
+            reconcile = normalizeReconcile({ ...(p.reconcile as Record<string, unknown> ?? {}), taskId: identity.branchId, predictionId: branch.prediction.predictionId }, branch.prediction);
+          } catch {
+            rejectEvent("failure requires a valid reconciliation");
+            break;
+          }
           branch.status = "FAILED";
+          branch.reconcile = frozenCopy(reconcile);
           recordMetadata();
           break;
+        }
         case "RUN_COMPLETED": {
           if (!metadataIsFresh()) { rejectEvent("stale or duplicate event metadata"); break; }
           if (!this.matchesCurrent(branch, identity)) { rejectEvent("stale fencing token or run identity"); break; }
@@ -839,8 +901,22 @@ export class BranchRecoveryControlPlane {
             rejectEvent("missing or invalid artifact");
             break;
           }
+          let reconcile: ReconcileRecord;
+          try {
+            if (!branch.prediction) throw new Error("missing prediction");
+            reconcile = normalizeReconcile({ ...(p.reconcile as Record<string, unknown> ?? {}), taskId: identity.branchId, predictionId: branch.prediction.predictionId }, branch.prediction);
+          } catch {
+            rejectEvent("completion requires a valid reconciliation");
+            break;
+          }
+          const artifact = validArtifact(p.artifact) ? p.artifact : undefined;
+          if (artifact !== undefined && !reconcile.artifactRefs.includes(artifact.artifactId)) {
+            rejectEvent("reconcile artifact refs do not include the run artifact");
+            break;
+          }
           branch.status = "COMPLETED";
-          branch.artifact = validArtifact(p.artifact) ? frozenCopy(p.artifact) : undefined;
+          branch.artifact = artifact === undefined ? undefined : frozenCopy(artifact);
+          branch.reconcile = frozenCopy(reconcile);
           recordMetadata();
           break;
         }
@@ -881,7 +957,16 @@ export class BranchRecoveryControlPlane {
             rejectEvent("watchdog event is premature or malformed");
             break;
           }
+          let reconcile: ReconcileRecord;
+          try {
+            if (!branch.prediction) throw new Error("missing prediction");
+            reconcile = normalizeReconcile({ ...(p.reconcile as Record<string, unknown> ?? {}), taskId: identity.branchId, predictionId: branch.prediction.predictionId }, branch.prediction);
+          } catch {
+            rejectEvent("watchdog expiry requires a valid reconciliation");
+            break;
+          }
           branch.status = "EXPIRED";
+          branch.reconcile = frozenCopy(reconcile);
           this.timeoutObservations.set(key, Math.max(this.timeoutObservations.get(key) ?? Number.NEGATIVE_INFINITY, expiredAt));
           recordMetadata();
           break;

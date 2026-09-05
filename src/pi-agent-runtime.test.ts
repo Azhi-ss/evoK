@@ -10,6 +10,14 @@ import {
 } from "./pi-agent-runtime";
 import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "./toy-harness";
 
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
+
 const workspace = (path = "/tmp/evok-approved") => ({ path, isolated: true as const, approved: true as const });
 const request = (overrides: Partial<PiAgentRuntimeRequest> = {}): PiAgentRuntimeRequest => ({
   task: { objective: "inspect the repository" },
@@ -154,6 +162,7 @@ describe("PiAgentRuntime", () => {
       },
     });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "pi-facade",
       taskContract: { objective: "produce a score" },
       branchIds: ["pi"],
@@ -192,6 +201,7 @@ describe("PiAgentRuntime", () => {
       },
     });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "malformed-falsify",
       taskContract: { objective: "produce a score" },
       branchIds: ["candidate"],

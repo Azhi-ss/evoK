@@ -5,10 +5,22 @@ import {
   type ResearchTask,
   type TaskCompletion,
 } from "./research-loop";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+
+// Signed independent-evaluator proof bound to the registered "artifact-1" digest; missions register only
+// the evaluator's public key, so completions cannot forge the gate.
+const evaluatorKeys = generateEvaluationKeyPair("independent-evaluator");
+const trusted = [{ evaluatorId: evaluatorKeys.evaluatorId, publicKey: evaluatorKeys.publicKey }];
+const evaluationProof = { evaluatorId: "independent-evaluator", snapshotDigest: "artifact-digest", facts: { score: 1 } };
+const evaluationDigest = digestValue(evaluationProof);
 
 const tasks: readonly ResearchTask[] = [
-  { taskId: "baseline", objective: "measure the baseline", estimatedCost: 2, priority: 3 },
-  { taskId: "cheap-check", objective: "check a cheap alternative", estimatedCost: 1, priority: 2 },
+  { taskId: "baseline", objective: "measure the baseline", estimatedCost: 2, priority: 3, prediction: {
+    predictionId: "baseline-prediction", hypothesis: "the baseline is measurable", expectedObservation: "the evaluator returns a baseline", failureModes: ["evaluator unavailable"],
+  } },
+  { taskId: "cheap-check", objective: "check a cheap alternative", estimatedCost: 1, priority: 2, prediction: {
+    predictionId: "cheap-prediction", hypothesis: "the cheap alternative works", expectedObservation: "the evaluator returns a score", failureModes: ["evaluation fails"],
+  } },
 ];
 
 function completion(): TaskCompletion {
@@ -16,7 +28,7 @@ function completion(): TaskCompletion {
     operationId: "baseline-run-1",
     evidence: [
       { id: "hypothesis-1", kind: "hypothesis", summary: "the revised method should improve score" },
-      { id: "observation-1", kind: "observation", summary: "the revised method improved the baseline", refs: ["hypothesis-1"] },
+      { id: "observation-1", kind: "observation", summary: "the revised method improved the baseline", refs: ["hypothesis-1"], metadata: { evaluation: evaluationProof, evaluationDigest, signature: signEvaluationDigest(evaluationDigest, evaluatorKeys.privateKey) } },
     ],
     findings: [{
       id: "finding-1",
@@ -44,13 +56,17 @@ function completion(): TaskCompletion {
     }],
     candidates: [{ candidateId: "candidate-1", digest: "candidate-digest" }],
     artifacts: [{ artifactId: "artifact-1", digest: "artifact-digest" }],
+    reconcile: {
+      status: "inconclusive", observationRefs: ["observation-1"], artifactRefs: ["artifact-1"], evidenceRefs: ["observation-1"],
+      evaluatorId: "independent-evaluator", independentEvaluator: true, evidenceGatePassed: true,
+    },
   };
 }
 
 describe("long-running research loop", () => {
   test("uses a completed Task evidence chain to generate and select the next ready Task", () => {
     const director = new MissionDirector({
-      missionId: "loop-1",
+      missionId: "loop-1", trustedEvaluators: trusted,
       objective: "improve the competition result",
       budget: 10,
       scope: { competition: "demo", environment: "cpu" },
@@ -62,7 +78,9 @@ describe("long-running research loop", () => {
     const generation = {
       sourceTaskId: "baseline",
       evidenceRefs: ["finding-1", "negative-1"],
-      tasks: [{ taskId: "generated-task", objective: "test the revised method", dependencies: ["baseline"], requiredEvidence: ["pitfall-1"], estimatedCost: 2 }],
+      tasks: [{ taskId: "generated-task", objective: "test the revised method", dependencies: ["baseline"], requiredEvidence: ["pitfall-1"], estimatedCost: 2, prediction: {
+        predictionId: "generated-prediction", hypothesis: "the revised method works", expectedObservation: "the evaluator confirms the revised method", failureModes: ["evaluation fails"],
+      } }],
       operationId: "generation-1",
     } as const;
     director.generateTasks(generation);
@@ -76,7 +94,7 @@ describe("long-running research loop", () => {
   });
 
   test("keeps only verified Findings in memory and retrieves scoped Negative Evidence and Pitfalls", () => {
-    const director = new MissionDirector({ missionId: "loop-2", objective: "learn", budget: 5, tasks });
+    const director = new MissionDirector({ missionId: "loop-2", objective: "learn", budget: 5, tasks, trustedEvaluators: trusted });
     expect(director.recordFinding({ id: "draft", statement: "unverified", evidenceRefs: [], verified: false })).toBe(false);
     expect(director.evidenceMemory().getFinding("draft")).toBeUndefined();
 
@@ -91,7 +109,7 @@ describe("long-running research loop", () => {
   });
 
   test("records evidence-backed Continue, Revise, Scale, and Stop decisions", () => {
-    const director = new MissionDirector({ missionId: "loop-3", objective: "learn", budget: 5, tasks });
+    const director = new MissionDirector({ missionId: "loop-3", objective: "learn", budget: 5, tasks, trustedEvaluators: trusted });
     director.selectNextTask();
     director.completeTask("baseline", completion());
 
@@ -107,12 +125,12 @@ describe("long-running research loop", () => {
   });
 
   test("restarts from a checkpoint without losing verified evidence or duplicating a completion", () => {
-    const options = { missionId: "loop-4", objective: "learn", budget: 5, tasks } as const;
+    const options = { missionId: "loop-4", objective: "learn", budget: 5, tasks, trustedEvaluators: trusted } as const;
     const director = new MissionDirector(options);
     director.selectNextTask();
     director.completeTask("baseline", completion());
     const before = director.events();
-    const restarted = MissionDirector.fromEvents({ missionId: options.missionId, objective: options.objective, budget: options.budget }, before);
+    const restarted = MissionDirector.fromEvents({ missionId: options.missionId, objective: options.objective, budget: options.budget, trustedEvaluators: trusted }, before);
 
     expect(restarted.evidenceMemory().getFinding("finding-1")).toEqual(director.evidenceMemory().getFinding("finding-1"));
     expect(restarted.state().tasks.baseline.candidateRefs).toEqual([{ candidateId: "candidate-1", digest: "candidate-digest" }]);
@@ -159,7 +177,7 @@ describe("long-running research loop", () => {
   test("rejects operation-id reuse for a different mutation and refuses a corrupted ledger tail", () => {
     const director = new MissionDirector({ missionId: "loop-6", objective: "learn", budget: 5, tasks });
     director.selectNextTask();
-    expect(() => director.completeTask("baseline", { operationId: "select-baseline-1" })).toThrow("different research operation");
+    expect(() => director.completeTask("baseline", { operationId: "select-baseline-1", reconcile: completion().reconcile })).toThrow("different research operation");
 
     const malformed: ResearchEvent = {
       sequence: 4,
@@ -174,6 +192,9 @@ describe("long-running research loop", () => {
     const director = new MissionDirector({ missionId: "loop-7", objective: "learn", budget: 2, tasks: [tasks[0]!] });
     const result = await director.run(() => { throw new Error("evaluator unavailable"); });
     expect(result.tasks.baseline?.status).toBe("FAILED");
+    expect(result.reconciles).toHaveLength(1);
+    expect(result.reconciles[0]?.status).toBe("inconclusive");
+    expect(result.reconciles[0]?.observationRefs.length).toBeGreaterThan(0);
     expect(result.negativeEvidence).toHaveLength(1);
     expect(result.negativeEvidence[0]?.statement).toBe("evaluator unavailable");
   });
@@ -182,15 +203,15 @@ describe("long-running research loop", () => {
     const director = new MissionDirector({ missionId: "loop-8", objective: "learn", budget: 5, tasks });
     director.selectNextTask();
     director.completeTask("baseline", {
-      operationId: "baseline-candidate",
-      candidates: [{ candidateId: "candidate-1", digest: "candidate-digest" }],
+      operationId: "baseline-candidate", candidates: [{ candidateId: "candidate-1", digest: "candidate-digest" }],
       artifacts: [{ artifactId: "artifact-1", digest: "artifact-digest" }],
+      reconcile: { status: "inconclusive", observationRefs: [], artifactRefs: ["artifact-1"], evidenceRefs: [], independentEvaluator: false, evidenceGatePassed: false },
     });
     director.selectNextTask();
     director.completeTask("cheap-check", {
-      operationId: "cheap-candidate",
-      candidates: [{ candidateId: "candidate-1", digest: "candidate-digest" }],
+      operationId: "cheap-candidate", candidates: [{ candidateId: "candidate-1", digest: "candidate-digest" }],
       artifacts: [{ artifactId: "artifact-1", digest: "artifact-digest" }],
+      reconcile: { status: "inconclusive", observationRefs: [], artifactRefs: ["artifact-1"], evidenceRefs: [], independentEvaluator: false, evidenceGatePassed: false },
     });
     expect(director.state().candidates).toHaveLength(1);
     expect(director.state().artifacts).toHaveLength(1);

@@ -7,6 +7,14 @@ import {
   type ToyAgentRuntime,
 } from "./toy-harness";
 
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
+
 const contract = { objective: "maximize the score" };
 
 function runtimeFor(scores: Record<string, number>, falsified = new Set<string>()) {
@@ -44,6 +52,7 @@ describe("ToyCompetitionHarness", () => {
       falsify: () => ({ ok: true, objections: [] }),
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "preflight-failure",
       taskContract: contract,
       branchIds: ["a"],
@@ -67,6 +76,7 @@ describe("ToyCompetitionHarness", () => {
       new Set(["bad"]),
     );
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "mission-1",
       taskContract: contract,
       branchIds: ["a", "b", "bad"],
@@ -106,6 +116,7 @@ describe("ToyCompetitionHarness", () => {
       falsify: () => ({ ok: true, objections: [] }),
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "bounded",
       taskContract: contract,
       branchIds: ["a", "bb", "ccc", "dddd"],
@@ -122,6 +133,7 @@ describe("ToyCompetitionHarness", () => {
   test("resumes after a crash without rerunning a completed branch", async () => {
     const { runtime, counts } = runtimeFor({ a: 1, b: 2 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "resume",
       taskContract: contract,
       branchIds: ["a", "b"],
@@ -145,6 +157,7 @@ describe("ToyCompetitionHarness", () => {
   test("enforces task-contract-only candidate and attempt budgets", async () => {
     const { runtime, counts } = runtimeFor({ a: 1, b: 2 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "contract-budget",
       taskContract: { objective: "maximize", budget: { maxCandidates: 1, maxAttempts: 1 } },
       branchIds: ["a", "b"],
@@ -164,6 +177,7 @@ describe("ToyCompetitionHarness", () => {
   test("treats contract budgets as hard ceilings over top-level and policy limits", async () => {
     const { runtime, counts } = runtimeFor({ a: 1, b: 2, c: 3, d: 4 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "conflicting-budgets",
       taskContract: { objective: "maximize", budget: { maxCandidates: 2, maxAttempts: 1 } },
       budget: { maxCandidates: 3, maxAttempts: 2 },
@@ -184,6 +198,7 @@ describe("ToyCompetitionHarness", () => {
   test("resumes an incomplete reservation without exceeding one attempt", async () => {
     const { runtime, counts } = runtimeFor({ a: 1 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "resume-one-attempt",
       taskContract: contract,
       branchIds: ["a"],
@@ -205,6 +220,7 @@ describe("ToyCompetitionHarness", () => {
     const { runtime } = runtimeFor({ a: 5 });
     let evaluations = 0;
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "fencing",
       taskContract: contract,
       branchIds: ["a"],
@@ -236,6 +252,7 @@ describe("ToyCompetitionHarness", () => {
     const { runtime } = runtimeFor({ a: 5 });
     let evaluations = 0;
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "stale-replay",
       taskContract: contract,
       branchIds: ["a"],
@@ -276,6 +293,7 @@ describe("ToyCompetitionHarness", () => {
     for (const invalidFence of invalidFences) {
       const { runtime } = runtimeFor({ a: 5 });
       const harness = new ToyCompetitionHarness({
+      prediction,
         missionId: `invalid-fence-${invalidFence.name}`,
         taskContract: contract,
         branchIds: ["a"],
@@ -304,6 +322,7 @@ describe("ToyCompetitionHarness", () => {
   test("rejects branch replay events without an explicit fencing token", async () => {
     const { runtime } = runtimeFor({ a: 5 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "missing-fence-replay",
       taskContract: contract,
       branchIds: ["a"],
@@ -330,6 +349,7 @@ describe("ToyCompetitionHarness", () => {
   test("rejects snapshots with mismatched identity or embedded provenance", async () => {
     const { runtime } = runtimeFor({ a: 5 });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "snapshot-replay",
       taskContract: contract,
       branchIds: ["a"],
@@ -372,6 +392,7 @@ describe("ToyCompetitionHarness", () => {
     for (const stage of stages) {
       const first = runtimeFor({ a: 5 });
       const source = new ToyCompetitionHarness({
+      prediction,
         missionId: `durable-${stage.event}`,
         taskContract: contract,
         branchIds: ["a"],
@@ -385,6 +406,7 @@ describe("ToyCompetitionHarness", () => {
       const recovery = runtimeFor({ a: 5 });
       let evaluations = 0;
       const resumed = ToyCompetitionHarness.fromEvents({
+      prediction,
         missionId: `durable-${stage.event}`,
         taskContract: contract,
         branchIds: ["a"],
@@ -420,6 +442,7 @@ describe("ToyCompetitionHarness", () => {
       falsify: () => ({ ok: true, objections: [] }),
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "settle-siblings",
       taskContract: contract,
       branchIds: ["crash", "sibling"],
@@ -451,6 +474,7 @@ describe("ToyCompetitionHarness", () => {
       return !champion || candidate.score > champion.score;
     };
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "promotion-object",
       taskContract: contract,
       branchIds: ["a", "b"],
@@ -486,6 +510,7 @@ describe("ToyCompetitionHarness", () => {
     };
     let snapshotWasFrozen = false;
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "operator-created",
       taskContract: { objective: "maximize", constraints: { language: "ts" }, budget: { maxCandidates: 1 } },
       runtime,
@@ -517,6 +542,7 @@ describe("ToyCompetitionHarness", () => {
     const { runtime } = runtimeFor({ a: 3, b: 4 }, new Set(["b"]));
     let mutationBlocked = false;
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "quorum",
       taskContract: contract,
       branchIds: ["a", "b"],

@@ -7,6 +7,14 @@ import {
   type ToyAgentRuntime,
 } from "./toy-harness";
 
+const prediction = {
+  predictionId: "toy-prediction",
+  hypothesis: "the candidate improves the score",
+  expectedObservation: "the evaluator returns the candidate score",
+  expectedObservations: ["the evaluator returns the candidate score"],
+  failureModes: ["the score does not improve"],
+} as const;
+
 function binaryRuntime(predictions: Record<string, string>) {
   const counts = new Map<string, number>();
   const runtime: ToyAgentRuntime = {
@@ -65,6 +73,7 @@ describe("BinaryAccuracyToyCompetitionAdapter", () => {
   test("runs through the shared harness and keeps promotion in the harness", async () => {
     const { runtime } = binaryRuntime({ good: "[1, 0, 1]", weak: "[1, 1, 1]" });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "binary-success",
       taskContract: { objective: "maximize accuracy" },
       branchIds: ["good", "weak"],
@@ -93,6 +102,7 @@ describe("BinaryAccuracyToyCompetitionAdapter", () => {
   test("shares rule rejection and crash recovery behavior with the first adapter", async () => {
     const invalidRuntime = binaryRuntime({ bad: "[1, 2]" });
     const invalidHarness = new ToyCompetitionHarness({
+      prediction,
       missionId: "binary-invalid",
       taskContract: { objective: "maximize accuracy" },
       branchIds: ["bad"],
@@ -107,6 +117,7 @@ describe("BinaryAccuracyToyCompetitionAdapter", () => {
 
     const recovering = binaryRuntime({ first: "[1, 0]", second: "[0, 1]" });
     const harness = new ToyCompetitionHarness({
+      prediction,
       missionId: "binary-recovery",
       taskContract: { objective: "maximize accuracy" },
       branchIds: ["first", "second"],
