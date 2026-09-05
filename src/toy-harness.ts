@@ -5,6 +5,7 @@ import {
   SecretRedactor,
   TrustViolation,
   assertSnapshotIntegrity,
+  clone,
   createTrustedSnapshot,
   deepFreeze,
   digestValue,
@@ -24,6 +25,49 @@ import {
   type SubmissionBrokerOptions,
   type SubmissionChampion,
 } from "./submission-broker";
+import {
+  aggregateEvaluationFacts,
+  buildEvaluationLadder,
+  evaluationContractDigest,
+  evaluationRunDigest,
+  evaluationRunId,
+  evaluationRunOrdinal,
+  evaluationSeed,
+  evaluationStageSides,
+  normalizeEvaluationContract,
+  resolveEvaluationContract,
+  validateEvaluationLadder,
+  type EvaluationContract,
+  type EvaluationContractAccessor,
+  type EvaluationLadderResult,
+  type EvaluationRunContext,
+  type EvaluationRunFact,
+  type EvaluationRunInput,
+  type NormalizedEvaluationContract,
+} from "./evaluation-noise";
+
+export {
+  aggregateEvaluationFacts,
+  buildEvaluationLadder,
+  evaluationContractDigest,
+  evaluationRunDigest,
+  evaluationRunId,
+  evaluationRunOrdinal,
+  evaluationSeed,
+  evaluationStageSides,
+  normalizeEvaluationContract,
+  resolveEvaluationContract,
+  validateEvaluationLadder,
+};
+export type {
+  EvaluationContract,
+  EvaluationContractAccessor,
+  EvaluationLadderResult,
+  EvaluationRunContext,
+  EvaluationRunFact,
+  EvaluationRunInput,
+  NormalizedEvaluationContract,
+};
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -83,7 +127,22 @@ export interface EvaluationResult {
   evaluatorId?: string;
   evaluatorVersion?: string;
   snapshotDigest?: string;
+  /** The immutable TaskContract digest retained for compatibility. */
   contractDigest?: string;
+  /** The immutable adapter-owned evaluation protocol digest. */
+  evaluationContractDigest?: string;
+  evaluationContractVersion?: string;
+  officialScore?: number;
+  promotionScore?: number;
+  runs?: readonly EvaluationRunFact[];
+  ladder?: Readonly<EvaluationLadderResult>;
+  /** Alias used by callers that name the result after the ladder. */
+  evaluationLadder?: Readonly<EvaluationLadderResult>;
+  evaluationDigest?: string;
+  /** Optional evaluator output fields; the harness verifies them against its run identity. */
+  runId?: string;
+  seed?: number;
+  digest?: string;
 }
 
 export interface CompetitionAdapterDescription {
@@ -146,7 +205,18 @@ export interface ToyCompetitionAdapter {
   readonly describe?: () => CompetitionAdapterDescription;
   readonly validateRules?: (snapshot: Readonly<CandidateSnapshot>) => CompetitionRuleValidation;
   readonly collectArtifacts?: (snapshot: Readonly<CandidateSnapshot>) => readonly CompetitionArtifactReference[];
-  evaluate(snapshot: Readonly<CandidateSnapshot>): EvaluationResult | Promise<EvaluationResult>;
+  /** Adapter-owned immutable evaluation protocol; snake-case and camel-case forms are accepted. */
+  readonly evaluation_contract?: EvaluationContractAccessor;
+  readonly evaluationContract?: EvaluationContractAccessor;
+  evaluate(snapshot: Readonly<CandidateSnapshot>, context?: EvaluationRunContext): EvaluationResult | Promise<EvaluationResult>;
+  /** Optional richer ports for independent evaluators; legacy evaluate remains valid. */
+  readonly evaluateWithContract?: (
+    snapshot: Readonly<CandidateSnapshot>,
+    contract: Readonly<NormalizedEvaluationContract>,
+    context: EvaluationRunContext,
+    manifest?: Readonly<import("./security-boundary").SnapshotManifest>,
+  ) => EvaluationResult | Promise<EvaluationResult>;
+  readonly evaluateRun?: (input: EvaluationRunInput) => EvaluationResult | Promise<EvaluationResult>;
 }
 
 /** A deliberately small reference adapter: the candidate's `score` file is the score. */
@@ -208,6 +278,7 @@ export type MissionEventType =
   | "CANDIDATE_MATERIALIZED"
   | "SNAPSHOT_COMMITTED"
   | "EVALUATION_STARTED"
+  | "EVALUATION_RUN_COMPLETED"
   | "EVALUATOR_SUCCEEDED"
   | "EVALUATOR_FAILED"
   | "FALSIFIER_COMPLETED"
@@ -215,6 +286,7 @@ export type MissionEventType =
   | "CHALLENGER_COMPLETED"
   | "AUDITOR_COMPLETED"
   | "SUCCESS_AUDITOR_COMPLETED"
+  | "GAIN_BANKED"
   | "PROMOTED_LOCAL"
   | "BRANCH_REJECTED"
   | "BRANCH_QUARANTINED"
@@ -234,6 +306,43 @@ export interface MissionEvent {
   payload: Record<string, unknown>;
 }
 
+export interface PromotionComparison {
+  readonly officialScore: number;
+  readonly promotionScore: number;
+  readonly championScore?: number;
+  readonly officialMargin?: number;
+  readonly abScore?: number;
+  readonly abDelta?: number;
+  readonly tolerance: number;
+  readonly tightMargin: number;
+  readonly tight: boolean;
+  readonly officialAbDisagreement: boolean;
+  readonly agreement: boolean;
+  readonly digest: string;
+}
+
+export interface GainBankEntry {
+  readonly branchId: string;
+  readonly championBranchId: string;
+  readonly championDigest: string;
+  readonly amount: number;
+  readonly candidateScore: number;
+  readonly championScore: number;
+  readonly evaluationDigest: string;
+  readonly evaluationContractDigest: string;
+  readonly evaluationContractVersion?: string;
+}
+
+export interface PromotionCandidate {
+  branchId: string;
+  score: number;
+  facts: ScoreFact[];
+  snapshot: Readonly<CandidateSnapshot>;
+  evaluation?: Readonly<EvaluationResult>;
+  ladder?: Readonly<EvaluationLadderResult>;
+  promotion?: Readonly<PromotionComparison>;
+}
+
 export interface BranchState {
   branchId: string;
   status: BranchStatus;
@@ -245,12 +354,32 @@ export interface BranchState {
   score?: number;
   facts?: ScoreFact[];
   snapshot?: Readonly<CandidateSnapshot>;
+  evaluation?: Readonly<EvaluationResult>;
+  evaluationRuns?: readonly EvaluationRunFact[];
+  evaluationContractVersion?: string;
   objections?: string[];
   rejectionReason?: string;
+  promotionDecision?: string;
   verification: Partial<Record<VerificationRole, boolean>>;
   candidateFilesDigest?: string;
   snapshotDigest?: string;
   contractDigest?: string;
+  evaluationContractDigest?: string;
+  evaluatorId?: string;
+  evaluatorVersion?: string;
+}
+
+export interface MissionChampion {
+  branchId: string;
+  score: number;
+  facts: ScoreFact[];
+  snapshot: Readonly<CandidateSnapshot>;
+  evaluation?: Readonly<EvaluationResult>;
+  ladder?: Readonly<EvaluationLadderResult>;
+  evaluationContractDigest?: string;
+  evaluationContractVersion?: string;
+  evaluatorId?: string;
+  evaluatorVersion?: string;
 }
 
 export interface MissionState {
@@ -264,16 +393,29 @@ export interface MissionState {
   quorum: number;
   verificationRoles: readonly VerificationRole[];
   contractDigest: string;
+  evaluationContract?: Readonly<NormalizedEvaluationContract>;
+  evaluationContractDigest?: string;
+  evaluationControlSnapshotDigest?: string;
+  gainBank?: readonly GainBankEntry[];
   branches: Record<string, BranchState>;
-  champion?: { branchId: string; score: number; facts: ScoreFact[]; snapshot: Readonly<CandidateSnapshot> };
+  champion?: MissionChampion;
   humanAcceptance?: HumanAcceptanceDecision;
   stopReason?: string;
 }
 
-export type PromotionPolicy = (input: {
-  candidate: { branchId: string; score: number; facts: ScoreFact[]; snapshot: Readonly<CandidateSnapshot> };
+export interface PromotionPolicyInput {
+  candidate: PromotionCandidate;
   champion?: MissionState["champion"];
-}) => boolean;
+  evaluationContract?: Readonly<NormalizedEvaluationContract>;
+  gainBank?: readonly GainBankEntry[];
+}
+
+export interface PromotionPolicyDecision {
+  readonly approved: boolean;
+  readonly reason?: string;
+}
+
+export type PromotionPolicy = (input: PromotionPolicyInput) => boolean | PromotionPolicyDecision;
 
 export interface ToyMissionOptions {
   missionId: string;
@@ -299,12 +441,14 @@ export interface ToyMissionOptions {
   sandbox?: SandboxPolicy;
   /** Optional layer-internal verification roles; none of these can promote. */
   verification?: VerificationHooks;
+  /** Optional immutable control snapshot used by symmetric A/B evaluation. */
+  evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
+  /** Alias for callers that name the control snapshot a baseline. */
+  baselineSnapshot?: Readonly<CandidateSnapshot>;
+  /** Bound evaluation-run budget; a lower value leaves the ladder incomplete and non-promotable. */
+  evaluationMaxRuns?: number;
+  maxEvaluationRuns?: number;
   secrets?: readonly string[];
-}
-
-function clone<T>(value: T): T {
-  if (typeof structuredClone === "function") return structuredClone(value);
-  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function validateInteger(name: string, value: number, minimum: number): void {
@@ -361,6 +505,8 @@ function validateOptions(options: ToyMissionOptions, branchIds: string[], budget
     throw new RangeError("branchIds must contain unique, non-empty strings");
   }
   validateBudget(budget, "budget");
+  const evaluationMaxRuns = options.evaluationMaxRuns ?? options.maxEvaluationRuns;
+  if (evaluationMaxRuns !== undefined) validateInteger("evaluationMaxRuns", evaluationMaxRuns, 1);
   const policy = options.policy;
   if (!policy) return;
   validateInteger("policy.maxBranches", policy.maxBranches, 1);
@@ -369,14 +515,6 @@ function validateOptions(options: ToyMissionOptions, branchIds: string[], budget
   validateInteger("policy.quorum", policy.quorum, 1);
   if (policy.maxParallelBranches > policy.maxBranches) throw new RangeError("maxParallelBranches cannot exceed maxBranches");
   if (policy.quorum > Math.min(policy.maxBranches, branchIds.length)) throw new RangeError("quorum cannot exceed available branches");
-}
-
-function freeze<T>(value: T): Readonly<T> {
-  if (value && typeof value === "object") {
-    for (const child of Object.values(value as Record<string, unknown>)) freeze(child);
-    Object.freeze(value);
-  }
-  return value as Readonly<T>;
 }
 
 const DEFAULT_VERIFICATION_ROLES: readonly VerificationRole[] = Object.freeze(["SelfVerifier", "Falsifier"]);
@@ -391,6 +529,20 @@ function configuredVerificationRoles(options: ToyMissionOptions): VerificationRo
   if (typeof options.verification?.auditor === "function" || typeof options.runtime.auditor === "function") roles.push("Auditor");
   if (typeof options.verification?.successAuditor === "function" || typeof options.runtime.successAuditor === "function") roles.push("SuccessAuditor");
   return roles;
+}
+
+function trustedControlSnapshot(snapshot: Readonly<CandidateSnapshot>, contract: Readonly<TaskContract>): Readonly<CandidateSnapshot> {
+  try {
+    if (!isPlainRecord(snapshot) || !isPlainRecord(snapshot.files) || !isPlainRecord(snapshot.contract) || !isPlainRecord(snapshot.provenance)) {
+      throw new TrustViolation("evaluation control snapshot is malformed");
+    }
+    const manifest = assertSnapshotIntegrity(snapshot as unknown as Record<string, unknown>);
+    if (manifest.contractDigest !== digestValue(contract)) throw new TrustViolation("evaluation control snapshot uses another task contract");
+    return deepFreeze(clone(snapshot)) as Readonly<CandidateSnapshot>;
+  } catch (error) {
+    if (error instanceof TrustViolation) throw error;
+    throw new TrustViolation("evaluation control snapshot failed integrity validation");
+  }
 }
 
 function initialState(event: MissionEvent): MissionState {
@@ -412,6 +564,29 @@ function initialState(event: MissionEvent): MissionState {
     if (error instanceof TrustViolation) throw error;
     throw new TrustViolation("mission contract is not digestable");
   }
+  let evaluationContract: Readonly<NormalizedEvaluationContract> | undefined;
+  let evaluationDigest: string | undefined;
+  let evaluationControlSnapshotDigest: string | undefined;
+  if (p.evaluationControlSnapshotDigest !== undefined) {
+    if (typeof p.evaluationControlSnapshotDigest !== "string" || p.evaluationControlSnapshotDigest.trim() === "") {
+      throw new TrustViolation("evaluation control snapshot digest is malformed");
+    }
+    evaluationControlSnapshotDigest = p.evaluationControlSnapshotDigest;
+  }
+  if (p.evaluationContract !== undefined || p.evaluationContractDigest !== undefined) {
+    try {
+      evaluationContract = normalizeEvaluationContract(p.evaluationContract as EvaluationContract);
+      evaluationDigest = typeof p.evaluationContractDigest === "string"
+        ? p.evaluationContractDigest
+        : evaluationContractDigest(evaluationContract);
+      if (evaluationDigest !== evaluationContractDigest(evaluationContract)) {
+        throw new TrustViolation("evaluation contract digest does not match its contents");
+      }
+    } catch (error) {
+      if (error instanceof TrustViolation) throw error;
+      throw new TrustViolation("evaluation contract is malformed");
+    }
+  }
   return {
     missionId: String(p.missionId),
     phase: "CREATED",
@@ -423,6 +598,9 @@ function initialState(event: MissionEvent): MissionState {
     quorum,
     verificationRoles: Object.freeze(roles),
     contractDigest: p.contractDigest,
+    ...(evaluationContract === undefined ? {} : { evaluationContract, evaluationContractDigest: evaluationDigest }),
+    ...(evaluationControlSnapshotDigest === undefined ? {} : { evaluationControlSnapshotDigest }),
+    gainBank: [],
     branches: Object.fromEntries(branchIds.map((branchId) => [branchId, {
       branchId, status: "QUEUED", attempt: 0, candidateGenerated: false,
       agentCompleted: false, evaluatorSucceeded: false, verification: {},
@@ -482,6 +660,121 @@ function sameFacts(left: unknown, right: unknown): boolean {
   try { return digestValue(left) === digestValue(right); } catch { return false; }
 }
 
+function validEvaluationRunFact(
+  value: unknown,
+  state: MissionState,
+  branch: BranchState,
+  configuredControlSnapshotDigest?: string,
+): value is EvaluationRunFact {
+  const contract = state.evaluationContract;
+  const snapshot = branch.snapshot;
+  if (!contract || !snapshot || !isPlainRecord(value)) return false;
+  const run = value as unknown as EvaluationRunFact;
+  const step = contract.escalationLadder.find((entry) => entry.stage === run.stage);
+  const controlDigest = configuredControlSnapshotDigest
+    ?? state.evaluationControlSnapshotDigest
+    ?? state.champion?.snapshot.digest
+    ?? snapshot.digest;
+  if (!step || typeof run.runId !== "string" || typeof run.seed !== "number" || !Number.isSafeInteger(run.seed)
+    || (run.side !== "candidate" && run.side !== "control") || run.side === "control" && run.stage !== "symmetric-a-b"
+    || typeof run.repeat !== "number" || !Number.isSafeInteger(run.repeat) || run.repeat < 0 || run.repeat >= step.repeats
+    || typeof run.score !== "number" || !Number.isFinite(run.score)
+    || (run.facts !== undefined && !validFacts(run.facts))
+    || run.candidateSnapshotDigest !== snapshot.digest || run.snapshotDigest !== (run.side === "candidate" ? snapshot.digest : controlDigest)
+    || run.controlSnapshotDigest !== controlDigest || run.taskContractDigest !== state.contractDigest
+    || run.contractDigest !== state.contractDigest || run.evaluationContractDigest !== evaluationContractDigest(contract)
+    || run.protocolDigest !== evaluationContractDigest(contract)
+    || typeof run.evaluatorId !== "string" || run.evaluatorId.trim() === ""
+    || typeof run.evaluatorVersion !== "string" || run.evaluatorVersion.trim() === ""
+    || run.runId !== evaluationRunId(state.missionId, branch.branchId, branch.attempt, run.stage, run.side, run.repeat)
+    || run.seed !== evaluationSeed(state.missionId, branch.branchId, snapshot.digest, evaluationContractDigest(contract), contract.seed, run.stage, run.repeat)
+    || typeof run.digest !== "string" || run.digest.trim() === "") return false;
+  const { digest: _digest, ...withoutDigest } = run as unknown as Record<string, unknown>;
+  return evaluationRunDigest(withoutDigest as Omit<EvaluationRunFact, "digest">) === run.digest;
+}
+
+function evaluationDigest(value: EvaluationResult): string {
+  const { evaluationDigest: _evaluationDigest, ...content } = value;
+  return digestValue(content);
+}
+
+function sameRunFacts(left: readonly EvaluationRunFact[] | undefined, right: readonly EvaluationRunFact[], requirePresent = false): boolean {
+  if (left === undefined) return !requirePresent;
+  if (left.length !== right.length) return false;
+  return left.every((run, index) => run.digest === right[index]?.digest);
+}
+
+function withEvaluationLadderAlias(evaluation: EvaluationResult): EvaluationResult {
+  if (evaluation.ladder === undefined || Object.prototype.hasOwnProperty.call(evaluation, "evaluationLadder")) return evaluation;
+  Object.defineProperty(evaluation, "evaluationLadder", {
+    value: evaluation.ladder,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return evaluation;
+}
+
+function verifiedEvaluationFromPayload(state: MissionState, branch: BranchState, payload: Record<string, unknown>): EvaluationResult | undefined {
+  if (!branch.snapshot || !isFiniteNumber(payload.score) || !validFacts(payload.facts)
+    || typeof payload.evaluatorId !== "string" || payload.evaluatorId.trim() === ""
+    || typeof payload.evaluatorVersion !== "string" || payload.evaluatorVersion.trim() === ""
+    || typeof payload.snapshotDigest !== "string" || payload.snapshotDigest !== branch.snapshot.digest
+    || typeof payload.contractDigest !== "string" || payload.contractDigest !== branch.snapshot.contractDigest) return undefined;
+  const payloadScore = payload.score;
+  const payloadFacts = payload.facts;
+  const payloadEvaluatorId = payload.evaluatorId as string;
+  const payloadEvaluatorVersion = payload.evaluatorVersion as string;
+  const payloadSnapshotDigest = payload.snapshotDigest as string;
+  const payloadContractDigest = payload.contractDigest as string;
+  if (!state.evaluationContract) {
+    return {
+      score: payloadScore,
+      facts: clone(payloadFacts),
+      evaluatorId: payloadEvaluatorId,
+      evaluatorVersion: payloadEvaluatorVersion,
+      snapshotDigest: payloadSnapshotDigest,
+      contractDigest: payloadContractDigest,
+    };
+  }
+  const ladder = payload.ladder ?? payload.evaluationLadder;
+  if (!validateEvaluationLadder(ladder, {
+    contract: state.evaluationContract,
+    missionId: state.missionId,
+    branchId: branch.branchId,
+    attempt: branch.attempt,
+    taskContractDigest: state.contractDigest,
+    candidateSnapshotDigest: branch.snapshot.digest,
+    controlSnapshotDigest: state.evaluationControlSnapshotDigest
+      ?? state.champion?.snapshot.digest
+      ?? branch.snapshot.digest,
+    championScore: state.champion?.score,
+  })) return undefined;
+  if (ladder.evaluatorId !== payloadEvaluatorId || ladder.evaluatorVersion !== payloadEvaluatorVersion
+    || typeof payload.evaluationContractDigest !== "string" || payload.evaluationContractDigest !== state.evaluationContractDigest
+    || typeof payload.evaluationContractVersion !== "string" || payload.evaluationContractVersion !== state.evaluationContract.version
+    || payloadScore !== ladder.promotionScore
+    || payload.officialScore !== ladder.officialScore
+    || payload.promotionScore !== ladder.promotionScore
+    || typeof payload.evaluationDigest !== "string") return undefined;
+  const evaluation: EvaluationResult = {
+    score: payloadScore,
+    facts: clone(payloadFacts),
+    evaluatorId: payloadEvaluatorId,
+    evaluatorVersion: payloadEvaluatorVersion,
+    snapshotDigest: payloadSnapshotDigest,
+    contractDigest: payloadContractDigest,
+    evaluationContractDigest: payload.evaluationContractDigest as string,
+    evaluationContractVersion: payload.evaluationContractVersion as string,
+    officialScore: payload.officialScore as number,
+    promotionScore: payload.promotionScore as number,
+    runs: clone(ladder.runs),
+    ladder: deepFreeze(clone(ladder)),
+    evaluationDigest: payload.evaluationDigest as string,
+  };
+  return evaluationDigest(evaluation) === payload.evaluationDigest ? withEvaluationLadderAlias(evaluation) : undefined;
+}
+
 function verificationComplete(state: MissionState, branch: BranchState): boolean {
   return state.verificationRoles.every((role) => branch.verification[role] === true);
 }
@@ -535,6 +828,13 @@ function project(events: readonly MissionEvent[]): MissionState {
           branch.candidateFilesDigest = carriedFilesDigest;
           branch.snapshotDigest = undefined;
           branch.contractDigest = undefined;
+          branch.evaluation = undefined;
+          branch.evaluationRuns = undefined;
+          branch.evaluationContractDigest = undefined;
+          branch.evaluationContractVersion = undefined;
+          branch.evaluatorId = undefined;
+          branch.evaluatorVersion = undefined;
+          branch.promotionDecision = undefined;
           branch.objections = undefined;
           branch.rejectionReason = undefined;
           branch.verification = carriedVerification;
@@ -585,7 +885,7 @@ function project(events: readonly MissionEvent[]): MissionState {
         const recoverable = branch.status === "TASK_SELECTED" && p.recovered === true;
         if (duplicate && branch.status === "RUNNING") break;
         if (!(branch.status === "MATERIALIZED" || recoverable)) break;
-        branch.snapshot = freeze(clone(snapshot));
+        branch.snapshot = deepFreeze(clone(snapshot));
         branch.snapshotDigest = branch.snapshot.digest;
         branch.contractDigest = branch.snapshot.contractDigest;
         branch.status = "RUNNING";
@@ -594,17 +894,31 @@ function project(events: readonly MissionEvent[]): MissionState {
       case "EVALUATION_STARTED":
         if (branch && branch.snapshot && branch.status === "RUNNING") branch.status = "VERIFYING";
         break;
-      case "EVALUATOR_SUCCEEDED":
-        if (branch && branch.snapshot && branch.status === "VERIFYING" && isFiniteNumber(p.score) && validFacts(p.facts)
-          && typeof p.evaluatorId === "string" && p.evaluatorId.trim() !== ""
-          && typeof p.evaluatorVersion === "string" && p.evaluatorVersion.trim() !== ""
-          && p.snapshotDigest === branch.snapshot.digest && p.contractDigest === branch.snapshot.contractDigest) {
-          branch.evaluatorSucceeded = true;
-          branch.score = p.score;
-          branch.facts = clone(p.facts);
-          branch.status = "SCORED";
+      case "EVALUATION_RUN_COMPLETED": {
+        const run = p.run;
+        if (branch && branch.status === "VERIFYING" && validEvaluationRunFact(run, state, branch)
+          && !(branch.evaluationRuns ?? []).some((entry) => entry.runId === (run as EvaluationRunFact).runId)) {
+          branch.evaluationRuns = Object.freeze([...(branch.evaluationRuns ?? []), deepFreeze(clone(run as EvaluationRunFact))]);
         }
         break;
+      }
+      case "EVALUATOR_SUCCEEDED": {
+        if (!branch || !branch.snapshot || branch.status !== "VERIFYING") break;
+        const evaluation = verifiedEvaluationFromPayload(state, branch, p);
+        if (!evaluation) break;
+        if (state.evaluationContract && !sameRunFacts(branch.evaluationRuns, evaluation.ladder?.runs ?? [], true)) break;
+        branch.evaluatorSucceeded = true;
+        branch.score = evaluation.score;
+        branch.facts = clone(evaluation.facts ?? []);
+        branch.evaluation = deepFreeze(clone(evaluation));
+        branch.evaluationRuns = evaluation.runs === undefined ? branch.evaluationRuns : deepFreeze(clone(evaluation.runs));
+        branch.evaluationContractDigest = evaluation.evaluationContractDigest;
+        branch.evaluationContractVersion = evaluation.evaluationContractVersion;
+        branch.evaluatorId = evaluation.evaluatorId;
+        branch.evaluatorVersion = evaluation.evaluatorVersion;
+        branch.status = "SCORED";
+        break;
+      }
       case "EVALUATOR_FAILED":
         if (branch && (branch.status === "VERIFYING" || branch.status === "SCORED")
           && typeof p.reason === "string" && p.reason.trim() !== "") {
@@ -638,10 +952,44 @@ function project(events: readonly MissionEvent[]): MissionState {
         }
         break;
       }
+      case "GAIN_BANKED": {
+        const evaluation = branch?.evaluation;
+        const champion = state.champion;
+        const amount = p.amount;
+        if (state.evaluationContract && branch && branch.status === "SCORED" && evaluation?.evaluationDigest
+          && champion && typeof amount === "number" && Number.isFinite(amount) && amount > 0
+          && p.branchId === branch.branchId
+          && p.championBranchId === champion.branchId
+          && p.championDigest === champion.snapshot.digest
+          && p.evaluationDigest === evaluation.evaluationDigest
+          && p.evaluationContractDigest === state.evaluationContractDigest
+          && p.evaluationContractVersion === state.evaluationContract.version
+          && p.candidateScore === branch.score && p.championScore === champion.score
+          && amount <= (state.evaluationContract?.marginPolicy.microGain ?? 0)) {
+          const candidateScore = branch.score;
+          const evaluationDigestValue = evaluation.evaluationDigest;
+          if (typeof candidateScore !== "number" || typeof evaluationDigestValue !== "string" || typeof state.evaluationContractDigest !== "string") break;
+          const entry: GainBankEntry = {
+            branchId: branch.branchId,
+            championBranchId: champion.branchId,
+            championDigest: champion.snapshot.digest!,
+            amount,
+            candidateScore,
+            championScore: champion.score,
+            evaluationDigest: evaluationDigestValue,
+            evaluationContractDigest: state.evaluationContractDigest,
+            evaluationContractVersion: state.evaluationContract.version,
+          };
+          state.gainBank = [...(state.gainBank ?? []), deepFreeze(clone(entry))];
+          branch.promotionDecision = "gain-banked";
+        }
+        break;
+      }
       case "BRANCH_REJECTED":
         if (branch && branch.status !== "PROMOTED_LOCAL" && branch.status !== "QUARANTINED") {
           branch.status = "REJECTED";
           branch.rejectionReason = typeof p.reason === "string" && p.reason.trim() !== "" ? p.reason : "rejected";
+          branch.promotionDecision = branch.rejectionReason;
         }
         break;
       case "BRANCH_QUARANTINED":
@@ -653,17 +1001,34 @@ function project(events: readonly MissionEvent[]): MissionState {
         break;
       case "PROMOTED_LOCAL": {
         const promotedSnapshot = p.snapshot as CandidateSnapshot;
+        const evaluation = branch?.evaluation;
+        const ladder = evaluation?.ladder;
+        const protocolValid = !state.evaluationContract || !!(evaluation && ladder?.complete === true
+          && p.evaluationContractDigest === state.evaluationContractDigest
+          && p.evaluationContractVersion === state.evaluationContract.version
+          && p.evaluationDigest === evaluation.evaluationDigest
+          && p.ladderDigest === ladder.digest);
         if (!branch || branch.status !== "SCORED" || !branch.evaluatorSucceeded || !verificationComplete(state, branch)
-          || p.branchId !== branch.branchId || !branch.snapshot
+          || !protocolValid || p.branchId !== branch.branchId || !branch.snapshot
           || promotedSnapshot.digest !== branch.snapshot.digest
           || p.snapshotDigest !== branch.snapshot.digest || p.contractDigest !== branch.snapshot.contractDigest
           || !isFiniteNumber(p.score) || p.score !== branch.score || !validFacts(p.facts)
-          || !sameFacts(p.facts, branch.facts)) break;
+          || !sameFacts(p.facts, branch.facts)
+          || state.evaluationContract !== undefined && (
+            typeof p.evaluatorId !== "string" || p.evaluatorId !== branch.evaluatorId
+            || typeof p.evaluatorVersion !== "string" || p.evaluatorVersion !== branch.evaluatorVersion
+            || p.evaluationContractVersion !== branch.evaluationContractVersion
+          )) break;
         branch.status = "PROMOTED_LOCAL";
         if (state.champion?.snapshot.digest !== promotedSnapshot.digest) state.humanAcceptance = undefined;
         state.champion = {
           branchId: branch.branchId, score: p.score, facts: clone(p.facts),
-          snapshot: freeze(clone(promotedSnapshot)),
+          snapshot: deepFreeze(clone(promotedSnapshot)),
+          ...(evaluation === undefined ? {} : { evaluation: deepFreeze(clone(evaluation)), ladder: deepFreeze(clone(ladder)) }),
+          ...(state.evaluationContractDigest === undefined ? {} : { evaluationContractDigest: state.evaluationContractDigest }),
+          ...(typeof p.evaluationContractVersion === "string" ? { evaluationContractVersion: p.evaluationContractVersion } : {}),
+          ...(typeof p.evaluatorId === "string" ? { evaluatorId: p.evaluatorId } : {}),
+          ...(typeof p.evaluatorVersion === "string" ? { evaluatorVersion: p.evaluatorVersion } : {}),
         };
         break;
       }
@@ -672,7 +1037,7 @@ function project(events: readonly MissionEvent[]): MissionState {
           && typeof p.acceptedBy === "string" && p.acceptedBy.trim() !== ""
           && typeof p.decisionId === "string" && p.decisionId.trim() !== ""
           && isFiniteNumber(p.acceptedAt)) {
-          state.humanAcceptance = freeze({
+          state.humanAcceptance = deepFreeze({
             championDigest: p.championDigest,
             ...(typeof p.artifactDigest === "string" ? { artifactDigest: p.artifactDigest } : {}),
             acceptedBy: p.acceptedBy,
@@ -708,6 +1073,9 @@ export class ToyCompetitionHarness {
   private readonly effectiveBudget: MissionBudget;
   private readonly sandbox: SandboxBoundary;
   private readonly redactor: SecretRedactor;
+  private readonly evaluationContract?: Readonly<NormalizedEvaluationContract>;
+  private readonly evaluationContractDigest?: string;
+  private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
   private contractValue?: Readonly<TaskContract>;
   private readonly humanAcceptance = new HumanAcceptanceGate();
 
@@ -718,7 +1086,12 @@ export class ToyCompetitionHarness {
     this.sandbox = new SandboxBoundary({ ...options.sandbox, root: options.sandbox?.root ?? `/tmp/evok-${encodeURIComponent(options.missionId)}` });
     this.redactor = new SecretRedactor(options.secrets ?? []);
     this.adapter = options.adapter ?? options.competitionAdapter ?? { name: "toy", evaluate: options.evaluate ?? new ScoreFileToyCompetitionAdapter().evaluate.bind(new ScoreFileToyCompetitionAdapter()) };
+    const resolvedEvaluationContract = resolveEvaluationContract(this.adapter);
+    this.evaluationContract = resolvedEvaluationContract;
+    this.evaluationContractDigest = resolvedEvaluationContract === undefined ? undefined : evaluationContractDigest(resolvedEvaluationContract);
     const contract = this.contract;
+    const configuredControl = options.evaluationControlSnapshot ?? options.baselineSnapshot;
+    this.evaluationControlSnapshot = configuredControl === undefined ? undefined : trustedControlSnapshot(configuredControl, contract);
     const branchIds = this.branchIds;
     const contractBudget = contract.budget ?? {};
     const topLevelBudget = options.budget ?? {};
@@ -746,6 +1119,13 @@ export class ToyCompetitionHarness {
         budget: clone(this.effectiveBudget), branchIds, adapterName: this.adapter.name ?? "toy",
         competitionId: options.competitionId ?? this.adapter.name ?? "toy", quorum,
         contract: clone(contract), contractDigest: digestValue(contract),
+        ...(this.evaluationContract === undefined ? {} : {
+          evaluationContract: clone(this.evaluationContract),
+          evaluationContractDigest: this.evaluationContractDigest,
+        }),
+        ...(this.evaluationControlSnapshot === undefined ? {} : {
+          evaluationControlSnapshotDigest: this.evaluationControlSnapshot.digest,
+        }),
         verificationRoles: configuredVerificationRoles(options),
       },
     }];
@@ -776,12 +1156,12 @@ export class ToyCompetitionHarness {
   static replay(events: readonly MissionEvent[]): MissionState { return project(events); }
   replay(): MissionState { return project(this.ledger); }
   state(): MissionState { return this.replay(); }
-  events(): readonly MissionEvent[] { return freeze(clone(this.ledger)); }
+  events(): readonly MissionEvent[] { return deepFreeze(clone(this.ledger)); }
   ledgerEvents(): readonly MissionEvent[] { return this.events(); }
 
   private append(type: MissionEventType, payload: Record<string, unknown> = {}): void {
     const safe = this.redactor.redact(payload);
-    if (["CANDIDATE_GENERATED", "SNAPSHOT_COMMITTED", "EVALUATOR_SUCCEEDED", "PROMOTED_LOCAL"].includes(type)) {
+    if (["CANDIDATE_GENERATED", "SNAPSHOT_COMMITTED", "EVALUATION_RUN_COMPLETED", "EVALUATOR_SUCCEEDED", "PROMOTED_LOCAL"].includes(type)) {
       let unchanged = false;
       try { unchanged = JSON.stringify(safe) === JSON.stringify(payload); } catch { unchanged = false; }
       if (!unchanged) throw new SandboxViolation("credential", "integrity-bearing event contains a secret");
@@ -789,9 +1169,181 @@ export class ToyCompetitionHarness {
     this.ledger.push({ sequence: this.ledger.length + 1, type, payload: clone(safe) });
   }
 
-  private promotionApproved(candidate: NonNullable<MissionState["champion"]>, state: MissionState): boolean {
+  private promotionDecision(candidate: PromotionCandidate, state: MissionState): PromotionPolicyDecision {
     const policy = this.options.promotionPolicy;
-    return policy ? policy({ candidate, champion: state.champion }) : !state.champion || candidate.score > state.champion.score;
+    if (!policy) return { approved: !state.champion || candidate.score > state.champion.score };
+    const decision = policy({
+      candidate,
+      champion: state.champion,
+      evaluationContract: this.evaluationContract,
+      gainBank: state.gainBank,
+    });
+    return typeof decision === "boolean" ? { approved: decision } : decision ?? { approved: false };
+  }
+
+  private controlSnapshot(snapshot: Readonly<CandidateSnapshot>, state: MissionState): Readonly<CandidateSnapshot> {
+    return this.evaluationControlSnapshot ?? state.champion?.snapshot ?? snapshot;
+  }
+
+  private async invokeEvaluation(
+    snapshot: Readonly<CandidateSnapshot>,
+    contract: Readonly<NormalizedEvaluationContract>,
+    context: EvaluationRunContext,
+    manifest: Readonly<import("./security-boundary").SnapshotManifest>,
+  ): Promise<EvaluationResult> {
+    const adapter = this.adapter;
+    if (adapter.evaluateRun) {
+      return adapter.evaluateRun({ snapshot, contract, context, run: context, manifest });
+    }
+    if (adapter.evaluateWithContract) return adapter.evaluateWithContract(snapshot, contract, context, manifest);
+    return adapter.evaluate(snapshot, context);
+  }
+
+  private async evaluateRunFact(
+    snapshot: Readonly<CandidateSnapshot>,
+    context: EvaluationRunContext,
+  ): Promise<EvaluationRunFact> {
+    const protocol = this.evaluationContract!;
+    const protocolDigest = this.evaluationContractDigest!;
+    const trusted = await evaluateTrustedSnapshot(
+      snapshot as unknown as Record<string, unknown>,
+      this.contract,
+      async (candidate, _taskContract, manifest) => this.invokeEvaluation(
+        candidate as unknown as CandidateSnapshot,
+        protocol,
+        context,
+        manifest,
+      ),
+    );
+    const raw = trusted.result;
+    if (!isRecord(raw) || !isFiniteNumber(raw.score)
+      || raw.facts !== undefined && !validFacts(raw.facts)
+      || raw.evaluatorId !== undefined && (typeof raw.evaluatorId !== "string" || raw.evaluatorId.trim() === "")
+      || raw.evaluatorVersion !== undefined && (typeof raw.evaluatorVersion !== "string" || raw.evaluatorVersion.trim() === "")
+      || raw.snapshotDigest !== undefined && raw.snapshotDigest !== trusted.manifest.snapshotDigest
+      || raw.contractDigest !== undefined && raw.contractDigest !== trusted.manifest.contractDigest
+      || raw.evaluationContractDigest !== undefined && raw.evaluationContractDigest !== protocolDigest
+      || raw.runId !== undefined && raw.runId !== context.runId
+      || raw.seed !== undefined && raw.seed !== context.seed) {
+      throw new TrustViolation("evaluator returned a malformed or unbound run result");
+    }
+    const evaluatorId = typeof raw.evaluatorId === "string" ? raw.evaluatorId : this.adapter.name ?? "toy-evaluator";
+    const evaluatorVersion = typeof raw.evaluatorVersion === "string"
+      ? raw.evaluatorVersion
+      : protocol.evaluatorVersion ?? "1";
+    const base: Omit<EvaluationRunFact, "digest"> = {
+      runId: context.runId,
+      seed: context.seed,
+      stage: context.stage,
+      side: context.side,
+      repeat: context.repeat,
+      score: raw.score,
+      facts: clone((raw.facts as ScoreFact[] | undefined) ?? [{ name: "score", value: raw.score, source: evaluatorId }]),
+      candidateSnapshotDigest: context.candidateSnapshotDigest,
+      snapshotDigest: trusted.manifest.snapshotDigest,
+      controlSnapshotDigest: context.controlSnapshotDigest ?? context.candidateSnapshotDigest,
+      taskContractDigest: trusted.manifest.contractDigest,
+      contractDigest: trusted.manifest.contractDigest,
+      evaluationContractDigest: protocolDigest,
+      protocolDigest,
+      evaluatorId,
+      evaluatorVersion,
+    };
+    const fact = { ...base, digest: evaluationRunDigest(base) } as EvaluationRunFact;
+    if (raw.digest !== undefined && raw.digest !== fact.digest) throw new TrustViolation("evaluator returned a forged run digest");
+    return deepFreeze(fact) as EvaluationRunFact;
+  }
+
+  private async evaluateWithNoiseProtocol(
+    snapshot: Readonly<CandidateSnapshot>,
+    branchId: string,
+    fencingToken: number,
+    attempt: number,
+    existingRuns: readonly EvaluationRunFact[] = [],
+  ): Promise<EvaluationResult> {
+    const protocol = this.evaluationContract!;
+    const protocolDigest = this.evaluationContractDigest!;
+    const before = this.state();
+    const control = this.controlSnapshot(snapshot, before);
+    const controlDigest = control.digest ?? snapshot.digest;
+    const runs = [...existingRuns];
+    for (const run of runs) {
+      if (!validEvaluationRunFact(run, before, before.branches[branchId]!, controlDigest)) {
+        throw new TrustViolation("evaluation run fact is not bound to the trusted protocol");
+      }
+    }
+    let evaluatorId = runs[0]?.evaluatorId ?? this.adapter.name ?? "toy-evaluator";
+    let evaluatorVersion = runs[0]?.evaluatorVersion ?? protocol.evaluatorVersion ?? "1";
+    const runLimit = this.options.evaluationMaxRuns ?? this.options.maxEvaluationRuns;
+    outer: for (const step of protocol.escalationLadder) {
+      for (let repeat = 0; repeat < step.repeats; repeat += 1) {
+        for (const side of evaluationStageSides(step.stage)) {
+          const runId = evaluationRunId(this.options.missionId, branchId, attempt, step.stage, side, repeat);
+          if (runs.some((run) => run.runId === runId)) continue;
+          if (runLimit !== undefined && runs.length >= runLimit) break outer;
+          const seed = evaluationSeed(this.options.missionId, branchId, snapshot.digest!, protocolDigest, protocol.seed, step.stage, repeat);
+          const target = side === "candidate" ? snapshot : control;
+          const context = deepFreeze({
+            stage: step.stage,
+            runId,
+            seed,
+            repeat,
+            side,
+            missionId: this.options.missionId,
+            branchId,
+            candidateSnapshotDigest: snapshot.digest!,
+            snapshotDigest: target.digest!,
+            controlSnapshotDigest: controlDigest,
+            ...(this.evaluationControlSnapshot !== undefined || before.champion === undefined ? {} : { controlBranchId: before.champion.branchId }),
+            candidateSnapshot: snapshot,
+            controlSnapshot: control,
+            candidate: snapshot,
+            control,
+            taskContractDigest: snapshot.contractDigest!,
+            evaluationContractDigest: protocolDigest,
+            evaluationContractVersion: protocol.version,
+            evaluationContract: protocol,
+            contract: protocol,
+            ordinal: evaluationRunOrdinal(protocol, step.stage, side, repeat),
+          }) as Readonly<EvaluationRunContext>;
+          const fact = await this.evaluateRunFact(target, context);
+          if (fact.evaluatorId !== evaluatorId && runs.length > 0) throw new TrustViolation("evaluator identity changed during ladder");
+          if (runs.length === 0) evaluatorId = fact.evaluatorId;
+          if (fact.evaluatorVersion !== evaluatorVersion && runs.length > 0) throw new TrustViolation("evaluator version changed during ladder");
+          if (runs.length === 0) evaluatorVersion = fact.evaluatorVersion;
+          runs.push(fact);
+          this.append("EVALUATION_RUN_COMPLETED", { branchId, fencingToken, run: fact });
+        }
+      }
+    }
+    const state = this.state();
+    const ladder = buildEvaluationLadder({
+      contract: protocol,
+      runs,
+      taskContractDigest: snapshot.contractDigest!,
+      candidateSnapshotDigest: snapshot.digest!,
+      controlSnapshotDigest: controlDigest,
+      championScore: state.champion?.score,
+      evaluatorId,
+      evaluatorVersion,
+    });
+    const facts = aggregateEvaluationFacts(runs, ladder);
+    const base: EvaluationResult = {
+      score: ladder.promotionScore,
+      facts,
+      evaluatorId,
+      evaluatorVersion,
+      snapshotDigest: snapshot.digest,
+      contractDigest: snapshot.contractDigest,
+      evaluationContractDigest: protocolDigest,
+      evaluationContractVersion: protocol.version,
+      officialScore: ladder.officialScore,
+      promotionScore: ladder.promotionScore,
+      runs: ladder.runs,
+      ladder,
+    };
+    const result = { ...base, evaluationDigest: evaluationDigest(base) } as EvaluationResult;
+    return deepFreeze(withEvaluationLadderAlias(result)) as EvaluationResult;
   }
 
   private verificationContext(role: VerificationRole, branchId: string, snapshot?: Readonly<CandidateSnapshot>, evaluation?: Readonly<EvaluationResult>): VerificationContext {
@@ -1070,12 +1622,24 @@ export class ToyCompetitionHarness {
 
         let evaluation: EvaluationResult;
         if (evaluationAlreadySucceeded) {
-          evaluation = {
+          const recoveredEvaluation = branch.evaluation;
+          evaluation = recoveredEvaluation ?? {
             score: branch.score!,
             facts: branch.facts ?? [],
             snapshotDigest: snapshot.digest,
             contractDigest: snapshot.contractDigest,
+            evaluatorId: branch.evaluatorId,
+            evaluatorVersion: branch.evaluatorVersion,
           };
+        } else if (this.evaluationContract) {
+          evaluation = await this.evaluateWithNoiseProtocol(
+            snapshot,
+            branchId,
+            fencingToken,
+            attempt,
+            branch.evaluationRuns ?? [],
+          );
+          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation });
         } else {
           const trusted = await evaluateTrustedSnapshot(
             snapshot as unknown as Record<string, unknown>,
@@ -1134,11 +1698,67 @@ export class ToyCompetitionHarness {
           }
         }
 
-        const candidate = { branchId, score: evaluation.score, facts: evaluation.facts ?? [], snapshot };
-        if (this.promotionApproved(candidate, this.state())) {
-          this.append("PROMOTED_LOCAL", { ...candidate, fencingToken, snapshotDigest: evaluation.snapshotDigest, contractDigest: evaluation.contractDigest });
+        const ladder = evaluation.ladder;
+        const candidate = deepFreeze({
+          branchId,
+          score: evaluation.score,
+          facts: evaluation.facts ?? [],
+          snapshot,
+          ...(evaluation.ladder === undefined ? {} : { evaluation, ladder: evaluation.ladder, promotion: evaluation.ladder.comparison }),
+        }) as PromotionCandidate;
+        const promotionState = this.state();
+        if (this.evaluationContract) {
+          if (!ladder || ladder.complete !== true) {
+            this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "evaluation-ladder-incomplete" });
+            return;
+          }
+          if (this.evaluationContract.marginPolicy.requireAgreement
+            && ladder.comparison.tight && ladder.comparison.officialAbDisagreement) {
+            this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "official-a-b-disagreement" });
+            return;
+          }
+          const champion = promotionState.champion;
+          if (champion && this.evaluationContract.marginPolicy.bankMicroGains) {
+            const amount = ladder.comparison.abDelta ?? evaluation.score - champion.score;
+            if (amount > 0 && amount <= this.evaluationContract.marginPolicy.microGain) {
+              this.append("GAIN_BANKED", {
+                branchId,
+                fencingToken,
+                championBranchId: champion.branchId,
+                championDigest: champion.snapshot.digest,
+                amount,
+                candidateScore: evaluation.score,
+                championScore: champion.score,
+                evaluationDigest: evaluation.evaluationDigest,
+                evaluationContractDigest: this.evaluationContractDigest,
+                evaluationContractVersion: this.evaluationContract.version,
+              });
+              return;
+            }
+          }
+        }
+        const decision = this.promotionDecision(candidate, promotionState);
+        if (decision.approved) {
+          this.append("PROMOTED_LOCAL", {
+            branchId,
+            fencingToken,
+            score: evaluation.score,
+            facts: evaluation.facts ?? [],
+            snapshot,
+            snapshotDigest: evaluation.snapshotDigest,
+            contractDigest: evaluation.contractDigest,
+            ...(evaluation.evaluationContractDigest === undefined ? {} : {
+              evaluationContractDigest: evaluation.evaluationContractDigest,
+              evaluationContractVersion: evaluation.evaluationContractVersion,
+              evaluatorId: evaluation.evaluatorId,
+              evaluatorVersion: evaluation.evaluatorVersion,
+              evaluationDigest: evaluation.evaluationDigest,
+              ladderDigest: ladder?.digest,
+            }),
+          });
         } else {
-          this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "promotion policy rejected" });
+          const reason = typeof decision.reason === "string" && decision.reason.trim() !== "" ? decision.reason : "promotion policy rejected";
+          this.append("BRANCH_REJECTED", { branchId, fencingToken, reason });
         }
         return;
       } catch (error) {

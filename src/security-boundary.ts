@@ -51,7 +51,7 @@ const PROTECTED_COMMAND_PATH = /(?:^|[\s"'=])(?:~(?:\/|\\)|\/)(?:[^\s"']*\/)?(?:
 const HOST_SOCKET_COMMAND = /\b(?:docker|podman|kubectl)\b|\/var\/run\/|docker\.sock/i;
 const URL_TOKEN = /https?:\/\/[^\s"'`;&|)]+/gi;
 
-function clone<T>(value: T): T {
+export function clone<T>(value: T): T {
   if (typeof structuredClone === "function") return structuredClone(value);
   if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((entry) => clone(entry)) as T;

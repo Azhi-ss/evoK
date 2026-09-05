@@ -6,7 +6,11 @@ import type {
   CompetitionRuleValidation,
   EvaluationResult,
   ToyCompetitionAdapter,
+  EvaluationContract,
+  EvaluationRunContext,
+  NormalizedEvaluationContract,
 } from "./toy-harness";
+import { normalizeEvaluationContract } from "./evaluation-noise";
 
 export type BinaryLabel = 0 | 1;
 
@@ -97,4 +101,91 @@ export class BinaryAccuracyToyCompetitionAdapter implements ToyCompetitionAdapte
   }
 }
 
-export const BinaryClassificationToyCompetitionAdapter = BinaryAccuracyToyCompetitionAdapter;
+export interface NoisyScoreToyCompetitionAdapterOptions {
+  readonly scoreFile?: string;
+  readonly controlScore?: number;
+  readonly noise?: readonly number[] | ((context: EvaluationRunContext, snapshot: Readonly<CandidateSnapshot>) => number);
+  readonly evaluationContract?: EvaluationContract;
+  readonly contract?: EvaluationContract;
+  readonly evaluatorVersion?: string;
+}
+
+/** A deterministic fixture for proving that one noisy score cannot crown a champion. */
+export class NoisyScoreToyCompetitionAdapter implements ToyCompetitionAdapter {
+  readonly name = "noisy-score";
+  readonly scoreFile: string;
+  readonly controlScore?: number;
+  readonly noise?: readonly number[] | ((context: EvaluationRunContext, snapshot: Readonly<CandidateSnapshot>) => number);
+  readonly evaluatorVersion: string;
+  private readonly protocol: NormalizedEvaluationContract;
+
+  constructor(options: NoisyScoreToyCompetitionAdapterOptions | readonly number[] = {}) {
+    const source: NoisyScoreToyCompetitionAdapterOptions = Array.isArray(options)
+      ? { noise: [...options] }
+      : options as NoisyScoreToyCompetitionAdapterOptions;
+    this.scoreFile = source.scoreFile ?? "score";
+    nonEmpty("scoreFile", this.scoreFile);
+    if (source.controlScore !== undefined && (!Number.isFinite(source.controlScore))) throw new RangeError("controlScore must be finite");
+    this.controlScore = source.controlScore;
+    if (Array.isArray(source.noise) && source.noise.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+      throw new RangeError("noise values must be finite numbers");
+    }
+    this.noise = Array.isArray(source.noise) ? Object.freeze([...source.noise]) : source.noise;
+    this.protocol = normalizeEvaluationContract(source.evaluationContract ?? source.contract ?? {
+      version: "toy-noise-v1",
+      noiseModel: { kind: "stochastic", tolerance: 0.05 },
+      requiredRepeats: 3,
+      escalationLadder: [
+        { stage: "single", repeats: 1 },
+        { stage: "best-of-n", repeats: 3 },
+        { stage: "symmetric-a-b", repeats: 3 },
+      ],
+      marginPolicy: { microGain: 0.01, tightMargin: 0.05 },
+    });
+    this.evaluatorVersion = source.evaluatorVersion ?? "toy-noise-evaluator-v1";
+  }
+
+  evaluation_contract(): NormalizedEvaluationContract {
+    return this.protocol;
+  }
+
+  evaluationContract(): NormalizedEvaluationContract {
+    return this.protocol;
+  }
+
+  describe(): CompetitionAdapterDescription {
+    return deepFreeze({
+      name: this.name,
+      input: { scoreFile: this.scoreFile, evaluationContract: this.protocol },
+      rules: [`${this.scoreFile} must contain a finite numeric score`],
+      artifacts: [this.scoreFile],
+      metric: "noisy score (higher is better)",
+    });
+  }
+
+  evaluate(snapshot: Readonly<CandidateSnapshot>, context?: EvaluationRunContext): EvaluationResult {
+    const raw = snapshot.files[this.scoreFile];
+    const score = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(score) && !(context?.side === "control" && this.controlScore !== undefined)) {
+      throw new Error(`${this.scoreFile} is missing or not finite`);
+    }
+    const base = context?.side === "control" && this.controlScore !== undefined ? this.controlScore : score;
+    const noise = typeof this.noise === "function"
+      ? (context === undefined ? 0 : this.noise(context, snapshot))
+      : this.noise?.[context?.ordinal ?? 0] ?? 0;
+    if (typeof noise !== "number" || !Number.isFinite(noise)) throw new RangeError("noise must be finite");
+    return {
+      score: base + noise,
+      evaluatorId: this.name,
+      evaluatorVersion: this.evaluatorVersion,
+      facts: [
+        { name: "base-score", value: base, source: this.name },
+        { name: "noise", value: noise, source: this.name },
+        ...(context === undefined ? [] : [
+          { name: "evaluation-stage", value: context.stage, source: this.name },
+          { name: "evaluation-side", value: context.side, source: this.name },
+        ]),
+      ],
+    };
+  }
+}
