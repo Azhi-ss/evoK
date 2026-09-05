@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   InfrastructureError,
   ToyCompetitionHarness,
+  ledgerEventKind,
   type MissionEvent,
   type PromotionPolicy,
   type ToyAgentRuntime,
@@ -564,6 +565,166 @@ describe("ToyCompetitionHarness", () => {
     expect(result.phase).toBe("STOPPED");
     expect(result.stopReason).toBe("join quorum not met");
     expect(mutationBlocked).toBe(true);
+  });
+
+  test("join release emits a queryable EdgeTraversal record with plan_version (T46)", async () => {
+    const { runtime } = runtimeFor({ a: 5, b: 3 });
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "t46-join",
+      taskContract: contract,
+      branchIds: ["a", "b"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      promotionPolicy: () => true,
+      policy: { maxBranches: 2, maxParallelBranches: 1, quorum: 2 },
+      planVersion: 3,
+    });
+
+    const result = await harness.run();
+
+    expect(result.phase).toBe("COMPLETED");
+    const traversals = harness.edgeTraversals();
+    expect(traversals.length).toBeGreaterThanOrEqual(1);
+    const payload = traversals[0].payload;
+    expect(typeof payload.edge_id).toBe("string");
+    expect((payload.edge_id as string).length).toBeGreaterThan(0);
+    expect(typeof payload.condition_ref).toBe("string");
+    expect(payload.condition_version).toBe(3);
+    expect(payload.plan_version).toBe(3);
+    expect(typeof payload.run_id).toBe("string");
+    expect(typeof payload.source_attempt).toBe("number");
+    expect(payload.target).toBe("MISSION_COMPLETED");
+    expect(Array.isArray(payload.evidence_ids)).toBe(true);
+    expect((payload.evidence_ids as string[]).length).toBeGreaterThanOrEqual(2);
+    expect(typeof payload.captured_at).toBe("number");
+  });
+
+  test("an unmet join quorum still records the fan-in edge taken (T46)", async () => {
+    const { runtime } = runtimeFor({ a: 5, b: 3 });
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "t46-join-stopped",
+      taskContract: contract,
+      branchIds: ["a", "b"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      policy: { maxBranches: 2, maxParallelBranches: 1, quorum: 2 },
+    });
+
+    const result = await harness.run();
+
+    expect(result.phase).toBe("STOPPED");
+    const traversals = harness.edgeTraversals();
+    expect(traversals.length).toBeGreaterThanOrEqual(1);
+    expect(traversals[0].payload.target).toBe("MISSION_STOPPED");
+    expect(traversals[0].payload.plan_version).toBe(1);
+  });
+
+  test("local promotion references an Evaluation that references Evidence ids; Approval alone cannot champion (T46)", async () => {
+    const runtime: ToyAgentRuntime = {
+      selfVerify: () => ({ ok: true }),
+      propose: () => ({ files: { score: "5" } }),
+      falsify: () => ({ ok: true, objections: [] }),
+      critic: () => ({ ok: true, objections: [] }),
+      challenger: () => ({ ok: true, objections: [] }),
+      auditor: () => ({ ok: true, objections: [] }),
+      successAuditor: () => ({ ok: true, objections: [] }),
+    };
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "t46-evaluation",
+      taskContract: contract,
+      branchIds: ["a"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+    });
+
+    await harness.run();
+    const events = harness.events();
+    const promoted = events.find((event) => event.type === "PROMOTED_LOCAL");
+    expect(promoted).toBeDefined();
+    expect(ledgerEventKind("PROMOTED_LOCAL")).toBe("Evaluation");
+    const evaluationRef = promoted!.payload.evaluationRef;
+    expect(typeof evaluationRef).toBe("string");
+    expect((evaluationRef as string).length).toBeGreaterThan(0);
+    const evidenceIds = promoted!.payload.evidenceIds;
+    expect(Array.isArray(evidenceIds)).toBe(true);
+    expect((evidenceIds as string[]).length).toBeGreaterThan(0);
+    const evaluatorRecord = events.find((event) => event.type === "EVALUATOR_SUCCEEDED" && event.payload.evaluationDigest === evaluationRef);
+    expect(evaluatorRecord).toBeDefined();
+    expect(ledgerEventKind("EVALUATOR_SUCCEEDED")).toBe("Evidence");
+    expect((evaluatorRecord!.payload.evidenceIds as string[]).length).toBeGreaterThan(0);
+
+    // Approval alone cannot champion: replaying the same ledger without the
+    // promotion verdict leaves no champion, and the projector rejects forged
+    // promotions whose evaluation ref or evidence ids do not bind to the
+    // verified Evaluation record.
+    expect(ToyCompetitionHarness.replay(events).champion?.branchId).toBe("a");
+    const withoutPromotion = events.filter((event) => event.type !== "PROMOTED_LOCAL");
+    expect(ToyCompetitionHarness.replay(withoutPromotion).champion).toBeUndefined();
+    const reforge = (payload: Record<string, unknown>) => [
+      ...withoutPromotion,
+      { ...promoted!, payload },
+    ].map((event, index) => ({ ...event, sequence: index + 1 }));
+    expect(ToyCompetitionHarness.replay(reforge({ ...promoted!.payload, evaluationRef: undefined })).champion).toBeUndefined();
+    expect(ToyCompetitionHarness.replay(reforge({ ...promoted!.payload, evidenceIds: ["forged:1"] })).champion).toBeUndefined();
+  });
+
+  test("SubmissionBroker and human gates are recorded as Approval, never Evaluation (T46)", async () => {
+    expect(ledgerEventKind("HUMAN_ACCEPTED")).toBe("Approval");
+    expect(ledgerEventKind("SUBMISSION_APPROVED")).toBe("Approval");
+    expect(ledgerEventKind("SUBMISSION_REJECTED")).toBe("Approval");
+
+    const runtime: ToyAgentRuntime = {
+      selfVerify: () => ({ ok: true }),
+      propose: () => ({ files: { score: "5" } }),
+      falsify: () => ({ ok: true, objections: [] }),
+      critic: () => ({ ok: true, objections: [] }),
+      challenger: () => ({ ok: true, objections: [] }),
+      auditor: () => ({ ok: true, objections: [] }),
+      successAuditor: () => ({ ok: true, objections: [] }),
+    };
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "t46-approval",
+      taskContract: contract,
+      branchIds: ["a"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+    });
+    await harness.run();
+    expect(harness.state().champion).toBeDefined();
+    harness.acceptChampion({ acceptedBy: "operator", reason: "looks good" });
+    const calls: unknown[] = [];
+    const broker = harness.createSubmissionBroker({
+      allowedCompetitions: [harness.state().competitionId],
+      allowedTargets: ["fake://score-file"],
+      allowedCredentialScopes: ["submit:score-file"],
+      destination: {
+        submit(input) {
+          calls.push(input);
+          return { submissionId: "external-1", accepted: true };
+        },
+      },
+      clock: () => 1,
+    });
+    const request = broker.createRequest({
+      missionId: "t46-approval",
+      competition: harness.state().competitionId,
+      target: "fake://score-file",
+      credential: { id: "cred-1", scopes: ["submit:score-file"], expiresAt: 100 },
+      dryRun: false,
+    });
+    broker.approve(request, { acceptedBy: "operator" });
+
+    const gateEvents = harness.events().filter((event) => ["HUMAN_ACCEPTED", "SUBMISSION_REQUESTED", "SUBMISSION_APPROVED", "SUBMISSION_REJECTED", "SUBMISSION_RESULT"].includes(event.type));
+    expect(gateEvents.length).toBeGreaterThanOrEqual(2);
+    for (const event of gateEvents) expect(ledgerEventKind(event.type)).not.toBe("Evaluation");
+    expect(harness.events().filter((event) => event.type === "HUMAN_ACCEPTED" || event.type === "SUBMISSION_APPROVED")
+      .every((event) => ledgerEventKind(event.type) === "Approval")).toBe(true);
   });
 
   test("task contract idea type must be registered and is carried onto the candidate snapshot", async () => {

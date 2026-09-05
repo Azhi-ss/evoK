@@ -356,6 +356,7 @@ export type MissionEventType =
   | "CROSS_MODEL_CHECK_COMPLETED"
   | "MISSION_COMPLETED"
   | "MISSION_STOPPED"
+  | "EDGE_TRAVERSED"
   | "LATE_EVENT_REJECTED";
 
 export interface MissionEvent {
@@ -546,6 +547,12 @@ export interface ToyMissionOptions {
    */
   promotionCrossModel?: "both";
   secrets?: readonly string[];
+  /**
+   * Immutable plan/policy version this mission run executes under (spec #1
+   * Graph Engineering 对照): re-plans must bump it, and every EdgeTraversal
+   * record carries it. Defaults to 1.
+   */
+  planVersion?: number;
 }
 
 function validateInteger(name: string, value: number, minimum: number): void {
@@ -580,6 +587,33 @@ function validVerificationRoles(value: unknown): value is VerificationRole[] {
   return Array.isArray(value) && value.length > 0 && new Set(value).size === value.length
     && value.includes("SelfVerifier") && value.includes("Falsifier")
     && value.every((role) => typeof role === "string" && VERIFICATION_ROLE_SET.has(role as VerificationRole));
+}
+
+/**
+ * Content-addressed Evidence ids a verdict or evaluator record cites: the
+ * committed snapshot, the evaluation digest, each evaluation-run digest, and
+ * one observation ref per evaluator fact (same address space as reconciles).
+ */
+function evaluationEvidenceIds(evaluation: EvaluationResult, snapshot: CandidateSnapshot): string[] {
+  const ids = new Set<string>();
+  if (snapshot.digest) ids.add(`snapshot:${snapshot.digest}`);
+  if (typeof evaluation.evaluationDigest === "string" && evaluation.evaluationDigest !== "") ids.add(`evaluation:${evaluation.evaluationDigest}`);
+  for (const run of evaluation.runs ?? []) {
+    if (typeof run.digest === "string" && run.digest !== "") ids.add(`evaluation-run:${run.digest}`);
+  }
+  for (const fact of evaluation.facts ?? []) {
+    if (typeof fact.name === "string" && fact.name.trim() !== "") ids.add(`${evaluationDigest(evaluation)}:observation:${fact.name}`);
+  }
+  return [...ids];
+}
+
+function validEvidenceIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry.trim() !== "");
+}
+
+/** Exact ordered match: the ids a verdict cites must equal the recomputed ids of the verified evaluation. */
+function sameEvidenceIds(actual: unknown, expected: readonly string[]): boolean {
+  return validEvidenceIds(actual) && actual.length === expected.length && actual.every((id, index) => id === expected[index]);
 }
 
 /** Derives the trusted post-evaluation reconcile from a verified evaluation; shared by emission and replay. */
@@ -870,7 +904,7 @@ function verifiedEvaluationFromPayload(state: MissionState, branch: BranchState,
   const payloadSnapshotDigest = payload.snapshotDigest as string;
   const payloadContractDigest = payload.contractDigest as string;
   if (!state.evaluationContract) {
-    return {
+    const evaluation: EvaluationResult = {
       score: payloadScore,
       facts: clone(payloadFacts),
       evaluatorId: payloadEvaluatorId,
@@ -878,6 +912,7 @@ function verifiedEvaluationFromPayload(state: MissionState, branch: BranchState,
       snapshotDigest: payloadSnapshotDigest,
       contractDigest: payloadContractDigest,
     };
+    return { ...evaluation, evaluationDigest: evaluationDigest(evaluation) };
   }
   const ladder = payload.ladder ?? payload.evaluationLadder;
   if (!validateEvaluationLadder(ladder, {
@@ -1177,6 +1212,11 @@ function project(events: readonly MissionEvent[]): MissionState {
           && p.ladderDigest === ladder.digest);
         if (!branch || branch.status !== "SCORED" || !branch.evaluatorSucceeded || !verificationComplete(state, branch)
           || !protocolValid || p.branchId !== branch.branchId || !branch.snapshot
+          // A promotion without a verifiable evaluation ref or evidence ids is
+          // a forged verdict and never produces a champion (T46).
+          || evaluation === undefined || typeof p.evaluationRef !== "string" || p.evaluationRef.trim() === ""
+          || p.evaluationRef !== evaluationDigest(evaluation)
+          || !sameEvidenceIds(p.evidenceIds, evaluationEvidenceIds(evaluation, promotedSnapshot))
           || promotedSnapshot.digest !== branch.snapshot.digest
           || p.snapshotDigest !== branch.snapshot.digest || p.contractDigest !== branch.snapshot.contractDigest
           || !isFiniteNumber(p.score) || p.score !== branch.score || !validFacts(p.facts)
@@ -1244,6 +1284,7 @@ export class ToyCompetitionHarness {
   private readonly evaluationContract?: Readonly<NormalizedEvaluationContract>;
   private readonly evaluationContractDigest?: string;
   private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
+  private readonly planVersion: number;
   private contractValue?: Readonly<TaskContract>;
   private readonly humanAcceptance = new HumanAcceptanceGate();
 
@@ -1304,6 +1345,8 @@ export class ToyCompetitionHarness {
     if (maxAttempts !== undefined) effectiveBudget.maxAttempts = maxAttempts;
     this.effectiveBudget = effectiveBudget;
     validateOptions(options, branchIds, this.effectiveBudget);
+    if (options.planVersion !== undefined) validateInteger("planVersion", options.planVersion, 1);
+    this.planVersion = options.planVersion ?? 1;
     const prediction = options.prediction === undefined ? undefined
       : normalizePrediction(options.prediction, `${options.missionId}:prediction`);
     const maxBranches = this.effectiveBudget.maxCandidates ?? branchIds.length;
@@ -1325,6 +1368,7 @@ export class ToyCompetitionHarness {
           evaluationControlSnapshotDigest: this.evaluationControlSnapshot.digest,
         }),
         verificationRoles: configuredVerificationRoles(options),
+        planVersion: this.planVersion,
         ...(prediction === undefined ? {} : {
           predictions: Object.fromEntries(branchIds.map((branchId) => [branchId, prediction])),
         }),
@@ -1360,6 +1404,11 @@ export class ToyCompetitionHarness {
   state(): MissionState { return this.replay(); }
   events(): readonly MissionEvent[] { return deepFreeze(clone(this.ledger)); }
   ledgerEvents(): readonly MissionEvent[] { return this.events(); }
+
+  /** Queryable EdgeTraversal records: which join/route edges this run actually took (T46). */
+  edgeTraversals(): readonly MissionEvent[] {
+    return this.events().filter((event) => event.type === "EDGE_TRAVERSED");
+  }
 
   private append(type: MissionEventType, payload: Record<string, unknown> = {}): void {
     const safe = this.redactor.redact(payload);
@@ -1942,7 +1991,7 @@ export class ToyCompetitionHarness {
             attempt,
             branch.evaluationRuns ?? [],
           );
-          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation });
+          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
         } else {
           const trusted = await evaluateTrustedSnapshot(
             snapshot as unknown as Record<string, unknown>,
@@ -1969,7 +2018,9 @@ export class ToyCompetitionHarness {
             snapshotDigest: trusted.manifest.snapshotDigest,
             contractDigest: trusted.manifest.contractDigest,
           };
-          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation });
+          // Every evaluator record is content-addressed so verdicts can cite it (T46).
+          evaluation = { ...evaluation, evaluationDigest: evaluationDigest(evaluation) };
+          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
         }
 
         // Every completed evaluation must leave a durable reconcile derived from the verified evaluator
@@ -2071,6 +2122,11 @@ export class ToyCompetitionHarness {
             snapshot,
             snapshotDigest: evaluation.snapshotDigest,
             contractDigest: evaluation.contractDigest,
+            // The promotion verdict must cite the Evaluation record it rests on
+            // and the Evidence ids that record cites (spec #1, T46): the
+            // projector refuses a promotion without a verifiable evaluation ref.
+            evaluationRef: evaluation.evaluationDigest,
+            evidenceIds: evaluationEvidenceIds(evaluation, snapshot),
             ...(evaluation.evaluationContractDigest === undefined ? {} : {
               evaluationContractDigest: evaluation.evaluationContractDigest,
               evaluationContractVersion: evaluation.evaluationContractVersion,
@@ -2118,8 +2174,25 @@ export class ToyCompetitionHarness {
     if (failure) throw failure.reason;
     const final = this.state();
     const quorum = this.options.policy?.quorum ?? 1;
-    const promoted = Object.values(final.branches).filter((branch) => branch.status === "PROMOTED_LOCAL").length;
-    if (promoted >= quorum) this.append("MISSION_COMPLETED", { champion: final.champion });
+    const promotedBranches = Object.values(final.branches).filter((branch) => branch.status === "PROMOTED_LOCAL");
+    const released = promotedBranches.length >= quorum;
+    // EdgeTraversal (spec #1 Graph Engineering 对照): the fan-in edge the run
+    // actually took — defined edge vs traversed edge stay separate records.
+    this.append("EDGE_TRAVERSED", {
+      edge_id: `join:mission-quorum:${this.options.missionId}`,
+      condition_ref: "policy:quorum",
+      condition_version: this.planVersion,
+      source_attempt: ids.length,
+      run_id: this.options.missionId,
+      target: released ? "MISSION_COMPLETED" : "MISSION_STOPPED",
+      evidence_ids: promotedBranches.flatMap((branch) => [
+        ...(branch.snapshot?.digest ? [`snapshot:${branch.snapshot.digest}`] : []),
+        ...(typeof branch.evaluation?.evaluationDigest === "string" ? [`evaluation:${branch.evaluation.evaluationDigest}`] : []),
+      ]),
+      plan_version: this.planVersion,
+      captured_at: Date.now(),
+    });
+    if (released) this.append("MISSION_COMPLETED", { champion: final.champion });
     else this.append("MISSION_STOPPED", { reason: "join quorum not met" });
     return this.state();
   }
@@ -2168,6 +2241,7 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
 }
 
 export * from "./idea-types";
+export * from "./ledger-kinds";
 export * from "./team-execution";
 export * from "./pi-agent-runtime";
 export * from "./predict-reconcile";

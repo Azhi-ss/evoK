@@ -103,7 +103,8 @@ describe("T06 sandbox, trust, and verification gates", () => {
     expect(proposals).toBe(1);
     expect(evaluations).toBe(0);
     expect(harness.events().filter((event) => event.type === "RETRY_SCHEDULED")).toHaveLength(0);
-    expect(harness.events().at(-2)?.type).toBe("BRANCH_QUARANTINED");
+    expect(harness.events().at(-1)?.type).toBe("MISSION_STOPPED");
+    expect(harness.events().at(-3)?.type).toBe("BRANCH_QUARANTINED");
   });
 
   test("quarantines evaluator tampering and forged results", async () => {
