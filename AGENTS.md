@@ -23,8 +23,8 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/do
 
 ## Ticket workflow
 
-- One fresh Pi context handles exactly one GitHub ticket. Start with a compact `/goal --tokens 60000 ...` naming the issue, acceptance criteria, validation, and stop conditions.
+- One fresh Pi context handles exactly one GitHub ticket. Start with a compact `/goal --tokens 100k ...` naming the issue, acceptance criteria, validation, and stop conditions; small tickets may omit `--tokens`. Note the budget counts cumulative Goal usage (injected context + tool output), not just the objective text.
 - Before editing, read the issue and comments, verify `ready-for-agent` and blockers, claim it with `gh issue edit <number> --add-assignee @me` as the first write, then read `CONTEXT.md` and relevant ADRs.
 - Use TDD for behavior changes. Preserve unrelated changes. Before completion, run `bun test --rerun-all-tests`, `bun run typecheck`, `git diff --check`, and `/code-review`; then commit, comment the result on the issue, and close it.
 - Only after the ticket is committed, closed, and the tracked worktree is clean, use the session-resolved Orca CLI to open a new fresh Pi in the active worktree and send it the next eligible ticket. Never implement the next ticket in the current session.
-- Stop on blockers, failed gates, ambiguity, unexplained dirty state, or when no eligible ticket remains.
+- Stop on blockers, failed gates, ambiguity, unexplained dirty state, or when no eligible ticket remains. A budget-limited goal cannot finish: use `/goal edit --tokens <larger>` or `/goal resume` in the same ticket session, never switch tickets.
