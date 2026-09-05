@@ -53,6 +53,18 @@ import {
   type PredictionArtifact,
   type ReconcileRecord,
 } from "./predict-reconcile";
+import {
+  DEFAULT_MODEL_MIX,
+  ModelOrchestra,
+  type ModelCatalog,
+  type ModelConfig,
+  type ModelMix,
+  type OrchestraConfig,
+  type OrchestraResolutionReason,
+  type PatternModelPolicy,
+  type RoleClass,
+  type TierId,
+} from "./model-orchestra";
 
 export {
   aggregateEvaluationFacts,
@@ -181,6 +193,8 @@ export interface CandidateVerificationInput {
   missionId: string;
   branchId: string;
   snapshot: Readonly<CandidateSnapshot>;
+  /** Resolved by the mission seam when a model catalog/orchestra is wired; runtime ports ignore it when absent. */
+  model?: ModelConfig;
 }
 
 export interface EvidenceVerificationInput extends CandidateVerificationInput {
@@ -194,17 +208,23 @@ export interface ToyAgentRuntime {
     taskContract: TaskContract;
     context: Record<string, unknown>;
     workspace: Record<string, string>;
+    /** Resolved by the mission seam when a model catalog/orchestra is wired. */
+    model?: ModelConfig;
   }): { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   propose(input: {
     missionId: string;
     branchId: string;
     taskContract: TaskContract;
     workspace: Record<string, string>;
+    /** Resolved by the mission seam when a model catalog/orchestra is wired. */
+    model?: ModelConfig;
   }): { files: Record<string, string> } | Promise<{ files: Record<string, string> }>;
   falsify(input: {
     missionId: string;
     branchId: string;
     snapshot: Readonly<CandidateSnapshot>;
+    /** Resolved by the mission seam when a model catalog/orchestra is wired. */
+    model?: ModelConfig;
   }): { ok: boolean; objections: string[] } | Promise<{ ok: boolean; objections: string[] }>;
   critic?: (input: CandidateVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   challenger?: (input: CandidateVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
@@ -309,6 +329,7 @@ export type MissionEventType =
   | "SUBMISSION_REJECTED"
   | "SUBMISSION_RESULT"
   | "RETRY_SCHEDULED"
+  | "MODEL_RESOLVED"
   | "MISSION_COMPLETED"
   | "MISSION_STOPPED"
   | "LATE_EVENT_REJECTED";
@@ -317,6 +338,24 @@ export interface MissionEvent {
   sequence: number;
   type: MissionEventType;
   payload: Record<string, unknown>;
+}
+
+/**
+ * One RoleSession's model resolution as recorded in the mission ledger: the
+ * resolved tier plus the decision context (mix, gate, reason, forced) and the
+ * exact ModelConfig handed to the runtime, so model economics are replayable
+ * (spec #27 decision 9).
+ */
+export interface RoleSessionResolution {
+  readonly role: string;
+  readonly tier: TierId | "default";
+  readonly mix: ModelMix;
+  /** The harness gate the session resolved under, or null for non-gate sessions. */
+  readonly gate: string | null;
+  readonly reason: OrchestraResolutionReason;
+  /** True only when an accepted forced_tier override produced this resolution. */
+  readonly forced: boolean;
+  readonly model: ModelConfig;
 }
 
 export interface PromotionComparison {
@@ -465,6 +504,14 @@ export interface ToyMissionOptions {
   /** Bound evaluation-run budget; a lower value leaves the ladder incomplete and non-promotable. */
   evaluationMaxRuns?: number;
   maxEvaluationRuns?: number;
+  /** Optional replayable model economics via ModelOrchestra; unset/null = unconfigured (one default model). */
+  orchestra?: OrchestraConfig | null;
+  /** Read-only model catalog the orchestra validates tiers against; wiring it activates the mission seam. */
+  modelCatalog?: ModelCatalog;
+  /** Pattern-level model_mix/deep_gates policy resolved per role session. */
+  pattern?: PatternModelPolicy;
+  /** Operator tier override for every role session; honored only when Policy Guard + budget allow. */
+  forcedTier?: TierId;
   secrets?: readonly string[];
 }
 
@@ -1157,6 +1204,7 @@ export class ToyCompetitionHarness {
   private crashed = false;
   private readonly options: ToyMissionOptions;
   private readonly adapter: ToyCompetitionAdapter;
+  private readonly orchestra?: ModelOrchestra;
   private readonly effectiveBudget: MissionBudget;
   private readonly sandbox: SandboxBoundary;
   private readonly redactor: SecretRedactor;
@@ -1170,6 +1218,16 @@ export class ToyCompetitionHarness {
     if (typeof options.missionId !== "string" || options.missionId.trim() === "") throw new TypeError("missionId is required");
     if (options.competitionId !== undefined && (typeof options.competitionId !== "string" || options.competitionId.trim() === "")) throw new TypeError("competitionId must be a non-empty string");
     this.options = options;
+    if (options.modelCatalog !== undefined) {
+      this.orchestra = new ModelOrchestra(options.modelCatalog, options.orchestra ?? null);
+      // Fail closed before the mission starts: an invalid pattern (unknown deep
+      // gates, bad mix), unbound or rejected forced tier, or missing default
+      // model is a configuration error, not a per-branch runtime surprise
+      // (spec #27 decision 20).
+      this.orchestra.resolve({ pattern: options.pattern, forcedTier: options.forcedTier });
+    } else if (options.orchestra !== undefined && options.orchestra !== null) {
+      throw new TypeError("modelCatalog is required when orchestra tiers are configured");
+    }
     this.sandbox = new SandboxBoundary({ ...options.sandbox, root: options.sandbox?.root ?? `/tmp/evok-${encodeURIComponent(options.missionId)}` });
     this.redactor = new SecretRedactor(options.secrets ?? []);
     this.adapter = options.adapter ?? options.competitionAdapter ?? { name: "toy", evaluate: options.evaluate ?? new ScoreFileToyCompetitionAdapter().evaluate.bind(new ScoreFileToyCompetitionAdapter()) };
@@ -1451,34 +1509,71 @@ export class ToyCompetitionHarness {
     });
   }
 
+  /**
+   * Mission main seam: resolves the ModelConfig for one role session and
+   * records the decision in the ledger. Inactive (undefined) when no model
+   * catalog is wired, so legacy missions run exactly as before. Throws on
+   * invalid pattern/gate configuration so misconfig fails closed.
+   */
+  private resolveSession(role: string, roleClass: RoleClass, gate?: string): RoleSessionResolution | undefined {
+    if (!this.orchestra) return undefined;
+    const resolution = this.orchestra.resolve({
+      pattern: this.options.pattern,
+      roleClass,
+      gate,
+      forcedTier: this.options.forcedTier,
+    });
+    return {
+      role,
+      tier: resolution.tier,
+      mix: this.options.pattern?.modelMix ?? DEFAULT_MODEL_MIX,
+      gate: gate ?? null,
+      reason: resolution.reason,
+      forced: resolution.reason === "forced",
+      model: { ...resolution.model },
+    };
+  }
+
+  private appendModelResolved(branchId: string, fencingToken: number, session: RoleSessionResolution): void {
+    this.append("MODEL_RESOLVED", { branchId, fencingToken, ...session });
+  }
+
   private async runVerificationRole(
     role: VerificationRole,
     branchId: string,
+    fencingToken: number,
     snapshot: Readonly<CandidateSnapshot>,
     evaluation?: Readonly<EvaluationResult>,
   ): Promise<{ ok: boolean; objections: string[] }> {
     const hooks = this.options.verification;
     const runtime = this.options.runtime;
     const context = this.verificationContext(role, branchId, snapshot, evaluation);
+    // Model resolution only applies when the runtime executes the role;
+    // verification hooks are harness-side callbacks and consume no model.
+    const viaRuntime = (invoke: (model?: ModelConfig) => unknown): unknown => {
+      const session = this.resolveSession(role, "adversarial", role === "SuccessAuditor" ? "success_audit" : undefined);
+      if (session) this.appendModelResolved(branchId, fencingToken, session);
+      return invoke(session?.model);
+    };
     let result: unknown;
     if (role === "Falsifier") {
       if (hooks?.falsifier) result = await hooks.falsifier(context);
-      else result = await runtime.falsify({ missionId: this.options.missionId, branchId, snapshot });
+      else result = await viaRuntime((model) => runtime.falsify({ missionId: this.options.missionId, branchId, snapshot, model }));
     } else if (role === "Critic") {
       if (hooks?.critic) result = await hooks.critic(context);
-      else if (runtime.critic) result = await runtime.critic({ missionId: this.options.missionId, branchId, snapshot });
+      else if (runtime.critic) result = await viaRuntime((model) => runtime.critic!({ missionId: this.options.missionId, branchId, snapshot, model }));
       else return { ok: true, objections: [] };
     } else if (role === "Challenger") {
       if (hooks?.challenger) result = await hooks.challenger(context);
-      else if (runtime.challenger) result = await runtime.challenger({ missionId: this.options.missionId, branchId, snapshot });
+      else if (runtime.challenger) result = await viaRuntime((model) => runtime.challenger!({ missionId: this.options.missionId, branchId, snapshot, model }));
       else return { ok: true, objections: [] };
     } else if (role === "Auditor") {
       if (hooks?.auditor) result = await hooks.auditor(context);
-      else if (runtime.auditor) result = await runtime.auditor({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation! });
+      else if (runtime.auditor) result = await viaRuntime((model) => runtime.auditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, model }));
       else return { ok: true, objections: [] };
     } else if (role === "SuccessAuditor") {
       if (hooks?.successAuditor) result = await hooks.successAuditor(context);
-      else if (runtime.successAuditor) result = await runtime.successAuditor({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation! });
+      else if (runtime.successAuditor) result = await viaRuntime((model) => runtime.successAuditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, model }));
       else return { ok: true, objections: [] };
     } else {
       const callback = hooks?.selfVerifier;
@@ -1669,16 +1764,23 @@ export class ToyCompetitionHarness {
           const workspace = this.sandbox.createWorkspace();
           const context: Record<string, unknown> = {};
           const taskContract = deepFreeze(clone(this.contract)) as TaskContract;
-          const rawCheck = typeof this.options.verification?.selfVerifier === "function"
-            ? await this.options.verification.selfVerifier(this.verificationContext("SelfVerifier", branchId))
-            : await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract, context, workspace });
+          let rawCheck: unknown;
+          if (typeof this.options.verification?.selfVerifier === "function") {
+            rawCheck = await this.options.verification.selfVerifier(this.verificationContext("SelfVerifier", branchId));
+          } else {
+            const selfVerifySession = this.resolveSession("SelfVerifier", "execution");
+            if (selfVerifySession) this.appendModelResolved(branchId, fencingToken, selfVerifySession);
+            rawCheck = await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract, context, workspace, model: selfVerifySession?.model });
+          }
           const check = normalizeVerificationResult(rawCheck, "SelfVerifier");
           if (!check.ok) {
             this.append("PREFLIGHT_SELF_CHECK_FAILED", { branchId, fencingToken, objections: check.objections, reason: "self-check failed" });
             return;
           }
           this.append("PREFLIGHT_SELF_CHECK_PASSED", { branchId, fencingToken, ok: true, objections: check.objections });
-          const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract, workspace });
+          const proposeSession = this.resolveSession("Worker", "execution");
+          if (proposeSession) this.appendModelResolved(branchId, fencingToken, proposeSession);
+          const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract, workspace, model: proposeSession?.model });
           const files = this.sandbox.validateCandidateFiles(proposal?.files);
           if (JSON.stringify(this.redactor.redact(files)) !== JSON.stringify(files)) {
             throw new SandboxViolation("credential", "candidate output contains a configured secret");
@@ -1785,7 +1887,7 @@ export class ToyCompetitionHarness {
             || role === "Critic" && (typeof this.options.verification?.critic === "function" || typeof this.options.runtime.critic === "function")
             || role === "Challenger" && (typeof this.options.verification?.challenger === "function" || typeof this.options.runtime.challenger === "function");
           if (!callbackExists || verifiedRoles.has(role)) continue;
-          const result = await this.runVerificationRole(role, branchId, snapshot);
+          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot);
           this.appendVerification(role, branchId, fencingToken, snapshot, result);
           verifiedRoles.add(role);
           if (!result.ok) {
@@ -1799,7 +1901,7 @@ export class ToyCompetitionHarness {
             ? typeof this.options.verification?.auditor === "function" || typeof this.options.runtime.auditor === "function"
             : typeof this.options.verification?.successAuditor === "function" || typeof this.options.runtime.successAuditor === "function";
           if (!callbackExists || verifiedRoles.has(role)) continue;
-          const result = await this.runVerificationRole(role, branchId, snapshot, evaluation);
+          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot, evaluation);
           this.appendVerification(role, branchId, fencingToken, snapshot, result);
           verifiedRoles.add(role);
           if (!result.ok) {
