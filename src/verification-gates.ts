@@ -77,6 +77,8 @@ export interface VerificationContext {
   readonly taskContract: Readonly<Record<string, unknown>>;
   readonly snapshot?: Readonly<Record<string, unknown>>;
   readonly evaluation?: Readonly<Record<string, unknown>>;
+  /** Optional agent-readable feedback view; never trusted scoring evidence. */
+  readonly feedbackView?: Readonly<Record<string, unknown>>;
 }
 
 export type VerificationHook = (input: VerificationContext) => VerificationResult | Promise<VerificationResult>;

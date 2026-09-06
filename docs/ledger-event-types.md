@@ -59,7 +59,8 @@ Required fields: observation content (facts / digest / record) plus provenance r
 Event types: `MISSION_CREATED`, `MISSION_STARTED`, `BRANCH_RESERVED`, `TASK_SELECTED`,
 `PREFLIGHT_SELF_CHECK_PASSED`, `PREFLIGHT_SELF_CHECK_FAILED`, `AGENT_COMPLETED`,
 `CANDIDATE_GENERATED`, `CANDIDATE_MATERIALIZED`, `SNAPSHOT_COMMITTED`,
-`EVALUATION_STARTED`, `EVALUATION_RUN_COMPLETED`, `EVALUATOR_SUCCEEDED`,
+`EVALUATION_STARTED`, `EVALUATION_RUN_COMPLETED`, `FEEDBACK_VIEW_CREATED`,
+`EVALUATOR_SUCCEEDED`,
 `EVALUATOR_FAILED`, `RECONCILED`, `FALSIFIER_COMPLETED`, `CRITIC_COMPLETED`,
 `CHALLENGER_COMPLETED`, `AUDITOR_COMPLETED`, `SUCCESS_AUDITOR_COMPLETED`,
 `SUBMISSION_REQUESTED`, `SUBMISSION_RESULT`, `RETRY_SCHEDULED`, `MODEL_RESOLVED`,
@@ -67,7 +68,9 @@ Event types: `MISSION_CREATED`, `MISSION_STARTED`, `BRANCH_RESERVED`, `TASK_SELE
 
 `EVALUATOR_SUCCEEDED` carries `evidenceIds` (content-addressed: snapshot digest,
 evaluation digest, per-run digests, per-fact observation refs) and is itself
-content-addressed by `evaluationDigest`.
+content-addressed by `evaluationDigest`. `FEEDBACK_VIEW_CREATED` records the
+derived, agent-readable `feedback_view`; its payload names the source evaluation
+digest and never feeds grading or promotion.
 
 ### Claim cards ride `RECONCILED` (no new event type)
 

@@ -148,6 +148,31 @@ export interface ScoreFact {
   source?: string;
 }
 
+/** The evaluator-owned score record; only this channel can feed grading or promotion. */
+export interface TrustedScore {
+  readonly kind: "trusted_score";
+  readonly score: number;
+  readonly evaluationDigest: string;
+  readonly snapshotDigest: string;
+  readonly contractDigest: string;
+}
+
+/** A derived agent-readable view over trusted Evidence; never a scorer, promotion input, independent Evaluator, or #11 noise protocol. */
+export interface EvaluationFeedbackView {
+  readonly kind: "feedback_view";
+  readonly stage: "evaluation";
+  readonly score: number;
+  readonly facts: readonly ScoreFact[];
+  readonly contractDigest: string;
+  readonly sourceEvaluationDigest: string;
+  readonly chain: readonly string[];
+}
+
+export interface EvaluationFeedbackOptions {
+  /** Disabled by default; enabling this changes only the agent-readable channel. */
+  readonly enabled?: boolean;
+}
+
 export interface EvaluationResult {
   score: number;
   facts?: ScoreFact[];
@@ -166,6 +191,10 @@ export interface EvaluationResult {
   /** Alias used by callers that name the result after the ladder. */
   evaluationLadder?: Readonly<EvaluationLadderResult>;
   evaluationDigest?: string;
+  /** Trusted score identity; this is excluded from the digest payload as a derived label. */
+  trustedScore?: Readonly<TrustedScore>;
+  /** Agent-readable feedback identity; this is excluded from trusted evaluation digests. */
+  feedbackView?: Readonly<EvaluationFeedbackView>;
   /** Optional evaluator output fields; the harness verifies them against its run identity. */
   runId?: string;
   seed?: number;
@@ -196,6 +225,8 @@ export interface CandidateVerificationInput {
   missionId: string;
   branchId: string;
   snapshot: Readonly<CandidateSnapshot>;
+  /** Optional agent-readable feedback; trusted scoring stays outside this channel. */
+  feedbackView?: Readonly<EvaluationFeedbackView>;
   /** Resolved by the mission seam when a model catalog/orchestra is wired; runtime ports ignore it when absent. */
   model?: ModelConfig;
 }
@@ -228,6 +259,8 @@ export interface ToyAgentRuntime {
     missionId: string;
     branchId: string;
     snapshot: Readonly<CandidateSnapshot>;
+    /** Agent-readable feedback; absent when the layer is disabled. */
+    feedbackView?: Readonly<EvaluationFeedbackView>;
     /** Resolved by the mission seam when a model catalog/orchestra is wired. */
     model?: ModelConfig;
     tier?: string;
@@ -340,6 +373,7 @@ export type MissionEventType =
   | "SNAPSHOT_COMMITTED"
   | "EVALUATION_STARTED"
   | "EVALUATION_RUN_COMPLETED"
+  | "FEEDBACK_VIEW_CREATED"
   | "EVALUATOR_SUCCEEDED"
   | "EVALUATOR_FAILED"
   | "RECONCILED"
@@ -434,6 +468,8 @@ export interface BranchState {
   candidateGenerated: boolean;
   agentCompleted: boolean;
   evaluatorSucceeded: boolean;
+  trustedScore?: Readonly<TrustedScore>;
+  feedbackView?: Readonly<EvaluationFeedbackView>;
   prediction?: PredictionArtifact;
   claimCard?: ClaimCard;
   reconcile?: ReconcileRecord;
@@ -479,6 +515,7 @@ export interface MissionState {
   quorum: number;
   verificationRoles: readonly VerificationRole[];
   contractDigest: string;
+  evaluationFeedbackEnabled: boolean;
   evaluationContract?: Readonly<NormalizedEvaluationContract>;
   evaluationContractDigest?: string;
   evaluationControlSnapshotDigest?: string;
@@ -533,6 +570,8 @@ export interface ToyMissionOptions {
   evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
   /** Alias for callers that name the control snapshot a baseline. */
   baselineSnapshot?: Readonly<CandidateSnapshot>;
+  /** Optional EnvHarness-style agent-readable evaluation information flow. Off by default. */
+  evaluationFeedback?: EvaluationFeedbackOptions;
   /** Bound evaluation-run budget; a lower value leaves the ladder incomplete and non-promotable. */
   evaluationMaxRuns?: number;
   maxEvaluationRuns?: number;
@@ -780,6 +819,7 @@ function initialState(event: MissionEvent): MissionState {
     quorum,
     verificationRoles: Object.freeze(roles),
     contractDigest: p.contractDigest,
+    evaluationFeedbackEnabled: p.evaluationFeedbackEnabled === true,
     ...(evaluationContract === undefined ? {} : { evaluationContract, evaluationContractDigest: evaluationDigest }),
     ...(evaluationControlSnapshotDigest === undefined ? {} : { evaluationControlSnapshotDigest }),
     gainBank: [],
@@ -878,8 +918,34 @@ function validEvaluationRunFact(
 }
 
 function evaluationDigest(value: EvaluationResult): string {
-  const { evaluationDigest: _evaluationDigest, ...content } = value;
+  const { evaluationDigest: _evaluationDigest, trustedScore: _trustedScore, feedbackView: _feedbackView, ...content } = value;
   return digestValue(content);
+}
+
+function trustedScoreFromEvaluation(evaluation: EvaluationResult, snapshot: Readonly<CandidateSnapshot>): TrustedScore {
+  if (typeof evaluation.evaluationDigest !== "string" || typeof snapshot.digest !== "string" || typeof snapshot.contractDigest !== "string") {
+    throw new TrustViolation("trusted evaluation is missing immutable identity");
+  }
+  return deepFreeze({
+    kind: "trusted_score",
+    score: evaluation.score,
+    evaluationDigest: evaluation.evaluationDigest,
+    snapshotDigest: snapshot.digest,
+    contractDigest: snapshot.contractDigest,
+  });
+}
+
+function feedbackViewFromEvaluation(evaluation: EvaluationResult, snapshot: Readonly<CandidateSnapshot>): EvaluationFeedbackView {
+  const trusted = trustedScoreFromEvaluation(evaluation, snapshot);
+  return deepFreeze({
+    kind: "feedback_view",
+    stage: "evaluation",
+    score: trusted.score,
+    facts: clone(evaluation.facts ?? []),
+    contractDigest: trusted.contractDigest,
+    sourceEvaluationDigest: trusted.evaluationDigest,
+    chain: Object.freeze([`trusted_score:${trusted.evaluationDigest}`]),
+  });
 }
 
 function sameRunFacts(left: readonly EvaluationRunFact[] | undefined, right: readonly EvaluationRunFact[], requirePresent = false): boolean {
@@ -1019,6 +1085,8 @@ function project(events: readonly MissionEvent[]): MissionState {
           branch.candidateGenerated = false;
           branch.agentCompleted = false;
           branch.evaluatorSucceeded = false;
+          branch.trustedScore = undefined;
+          branch.feedbackView = undefined;
           branch.reconcile = undefined;
           branch.score = undefined;
           branch.facts = undefined;
@@ -1103,12 +1171,22 @@ function project(events: readonly MissionEvent[]): MissionState {
         }
         break;
       }
+      case "FEEDBACK_VIEW_CREATED": {
+        if (!branch || branch.status !== "SCORED" || !state.evaluationFeedbackEnabled
+          || branch.feedbackView !== undefined || !branch.evaluation || !branch.snapshot || p.snapshotDigest !== branch.snapshot.digest) break;
+        const feedbackView = p.feedback_view;
+        const expected = feedbackViewFromEvaluation(branch.evaluation, branch.snapshot);
+        if (!isPlainRecord(feedbackView) || !sameFacts(feedbackView, expected)) break;
+        branch.feedbackView = expected;
+        break;
+      }
       case "EVALUATOR_SUCCEEDED": {
         if (!branch || !branch.snapshot || branch.status !== "VERIFYING") break;
         const evaluation = verifiedEvaluationFromPayload(state, branch, p);
         if (!evaluation) break;
         if (state.evaluationContract && !sameRunFacts(branch.evaluationRuns, evaluation.ladder?.runs ?? [], true)) break;
         branch.evaluatorSucceeded = true;
+        branch.trustedScore = trustedScoreFromEvaluation(evaluation, branch.snapshot);
         branch.score = evaluation.score;
         branch.facts = clone(evaluation.facts ?? []);
         branch.evaluation = deepFreeze(clone(evaluation));
@@ -1413,6 +1491,7 @@ export class ToyCompetitionHarness {
         }),
         verificationRoles: configuredVerificationRoles(options),
         planVersion: this.planVersion,
+        evaluationFeedbackEnabled: this.options.evaluationFeedback?.enabled === true,
         ...(prediction === undefined ? {} : {
           predictions: Object.fromEntries(branchIds.map((branchId) => [branchId, prediction])),
         }),
@@ -1456,7 +1535,7 @@ export class ToyCompetitionHarness {
 
   private append(type: MissionEventType, payload: Record<string, unknown> = {}): void {
     const safe = this.redactor.redact(payload);
-    if (["CANDIDATE_GENERATED", "SNAPSHOT_COMMITTED", "EVALUATION_RUN_COMPLETED", "EVALUATOR_SUCCEEDED", "PROMOTED_LOCAL"].includes(type)) {
+    if (["CANDIDATE_GENERATED", "SNAPSHOT_COMMITTED", "EVALUATION_RUN_COMPLETED", "FEEDBACK_VIEW_CREATED", "EVALUATOR_SUCCEEDED", "PROMOTED_LOCAL"].includes(type)) {
       let unchanged = false;
       try { unchanged = JSON.stringify(safe) === JSON.stringify(payload); } catch { unchanged = false; }
       if (!unchanged) throw new SandboxViolation("credential", "integrity-bearing event contains a secret");
@@ -1688,10 +1767,12 @@ export class ToyCompetitionHarness {
     fencingToken: number,
     snapshot: Readonly<CandidateSnapshot>,
     evaluation?: Readonly<EvaluationResult>,
+    feedbackView?: Readonly<EvaluationFeedbackView>,
   ): Promise<{ ok: boolean; objections: string[] }> {
     const hooks = this.options.verification;
     const runtime = this.options.runtime;
     const context = this.verificationContext(role, branchId, snapshot, evaluation);
+    const roleInput = { ...context, ...(feedbackView === undefined ? {} : { feedbackView }) };
     // Model resolution only applies when the runtime executes the role;
     // verification hooks are harness-side callbacks and consume no model.
     const viaRuntime = (invoke: (model?: ModelConfig) => unknown): unknown => {
@@ -1701,23 +1782,23 @@ export class ToyCompetitionHarness {
     };
     let result: unknown;
     if (role === "Falsifier") {
-      if (hooks?.falsifier) result = await hooks.falsifier(context);
-      else result = await viaRuntime((model) => runtime.falsify({ missionId: this.options.missionId, branchId, snapshot, model }));
+      if (hooks?.falsifier) result = await hooks.falsifier(roleInput);
+      else result = await viaRuntime((model) => runtime.falsify({ missionId: this.options.missionId, branchId, snapshot, feedbackView, model }));
     } else if (role === "Critic") {
-      if (hooks?.critic) result = await hooks.critic(context);
-      else if (runtime.critic) result = await viaRuntime((model) => runtime.critic!({ missionId: this.options.missionId, branchId, snapshot, model }));
+      if (hooks?.critic) result = await hooks.critic(roleInput);
+      else if (runtime.critic) result = await viaRuntime((model) => runtime.critic!({ missionId: this.options.missionId, branchId, snapshot, feedbackView, model }));
       else return { ok: true, objections: [] };
     } else if (role === "Challenger") {
-      if (hooks?.challenger) result = await hooks.challenger(context);
-      else if (runtime.challenger) result = await viaRuntime((model) => runtime.challenger!({ missionId: this.options.missionId, branchId, snapshot, model }));
+      if (hooks?.challenger) result = await hooks.challenger(roleInput);
+      else if (runtime.challenger) result = await viaRuntime((model) => runtime.challenger!({ missionId: this.options.missionId, branchId, snapshot, feedbackView, model }));
       else return { ok: true, objections: [] };
     } else if (role === "Auditor") {
-      if (hooks?.auditor) result = await hooks.auditor(context);
-      else if (runtime.auditor) result = await viaRuntime((model) => runtime.auditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, model }));
+      if (hooks?.auditor) result = await hooks.auditor(roleInput);
+      else if (runtime.auditor) result = await viaRuntime((model) => runtime.auditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, feedbackView, model }));
       else return { ok: true, objections: [] };
     } else if (role === "SuccessAuditor") {
-      if (hooks?.successAuditor) result = await hooks.successAuditor(context);
-      else if (runtime.successAuditor) result = await viaRuntime((model) => runtime.successAuditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, model }));
+      if (hooks?.successAuditor) result = await hooks.successAuditor(roleInput);
+      else if (runtime.successAuditor) result = await viaRuntime((model) => runtime.successAuditor!({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation!, feedbackView, model }));
       else return { ok: true, objections: [] };
     } else {
       const callback = hooks?.selfVerifier;
@@ -2035,7 +2116,7 @@ export class ToyCompetitionHarness {
             attempt,
             branch.evaluationRuns ?? [],
           );
-          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
+          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, trusted_score: trustedScoreFromEvaluation(evaluation, snapshot), evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
         } else {
           const trusted = await evaluateTrustedSnapshot(
             snapshot as unknown as Record<string, unknown>,
@@ -2064,8 +2145,18 @@ export class ToyCompetitionHarness {
           };
           // Every evaluator record is content-addressed so verdicts can cite it (T46).
           evaluation = { ...evaluation, evaluationDigest: evaluationDigest(evaluation) };
-          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
+          this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, trusted_score: trustedScoreFromEvaluation(evaluation, snapshot), evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
         }
+
+        const feedbackView = this.options.evaluationFeedback?.enabled === true
+          ? feedbackViewFromEvaluation(evaluation, snapshot)
+          : undefined;
+        if (feedbackView) this.append("FEEDBACK_VIEW_CREATED", {
+          branchId,
+          fencingToken,
+          snapshotDigest: snapshot.digest,
+          feedback_view: feedbackView,
+        });
 
         // Every completed evaluation must leave a durable reconcile derived from the verified evaluator
         // facts, not from agent self-report: evaluator identity and snapshot digest come from the trusted
@@ -2081,7 +2172,7 @@ export class ToyCompetitionHarness {
             || role === "Critic" && (typeof this.options.verification?.critic === "function" || typeof this.options.runtime.critic === "function")
             || role === "Challenger" && (typeof this.options.verification?.challenger === "function" || typeof this.options.runtime.challenger === "function");
           if (!callbackExists || verifiedRoles.has(role)) continue;
-          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot);
+          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot, undefined, feedbackView);
           this.appendVerification(role, branchId, fencingToken, snapshot, result);
           verifiedRoles.add(role);
           if (!result.ok) {
@@ -2095,7 +2186,7 @@ export class ToyCompetitionHarness {
             ? typeof this.options.verification?.auditor === "function" || typeof this.options.runtime.auditor === "function"
             : typeof this.options.verification?.successAuditor === "function" || typeof this.options.runtime.successAuditor === "function";
           if (!callbackExists || verifiedRoles.has(role)) continue;
-          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot, evaluation);
+          const result = await this.runVerificationRole(role, branchId, fencingToken, snapshot, evaluation, feedbackView);
           this.appendVerification(role, branchId, fencingToken, snapshot, result);
           verifiedRoles.add(role);
           if (!result.ok) {

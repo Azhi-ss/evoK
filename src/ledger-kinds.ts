@@ -28,6 +28,7 @@ export const LEDGER_EVENT_KINDS: Record<MissionEventType, LedgerEventKind> = {
   SNAPSHOT_COMMITTED: "Evidence",
   EVALUATION_STARTED: "Evidence",
   EVALUATION_RUN_COMPLETED: "Evidence",
+  FEEDBACK_VIEW_CREATED: "Evidence",
   EVALUATOR_SUCCEEDED: "Evidence",
   EVALUATOR_FAILED: "Evidence",
   RECONCILED: "Evidence",
