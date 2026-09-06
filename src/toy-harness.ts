@@ -47,6 +47,15 @@ import {
   type NormalizedEvaluationContract,
 } from "./evaluation-noise";
 import {
+  LeakageViolation,
+  auditCandidateFiles,
+  resolveDataHonestyContract,
+  type DataHonestyContract,
+  type LeakageAuditContract,
+  type LeakageFinding,
+  type TestSignalPolicy,
+} from "./data-honesty";
+import {
   normalizePrediction,
   normalizeReconcile,
   reconcilePrediction,
@@ -91,6 +100,8 @@ export type {
   EvaluationRunInput,
   NormalizedEvaluationContract,
 };
+export { LeakageViolation, auditCandidateFiles, resolveDataHonestyContract };
+export type { DataHonestyContract, LeakageAuditContract, LeakageFinding, TestSignalPolicy };
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -294,11 +305,16 @@ export interface CrossModelCheckResult {
   readonly reason?: string;
 }
 
-export interface ToyCompetitionAdapter {
+export type ToyCompetitionAdapter = {
   readonly name?: string;
   readonly describe?: () => CompetitionAdapterDescription;
   readonly validateRules?: (snapshot: Readonly<CandidateSnapshot>) => CompetitionRuleValidation;
   readonly collectArtifacts?: (snapshot: Readonly<CandidateSnapshot>) => readonly CompetitionArtifactReference[];
+  /** Data honesty (T40): what held-out data exists and how test feedback may be used. */
+  readonly leakage_audit?: (() => DataHonestyContract["leakage_audit"]) | DataHonestyContract["leakage_audit"];
+  readonly leakageAudit?: (() => DataHonestyContract["leakage_audit"]) | DataHonestyContract["leakage_audit"];
+  readonly test_signal_policy?: (() => DataHonestyContract["test_signal_policy"]) | DataHonestyContract["test_signal_policy"];
+  readonly testSignalPolicy?: (() => DataHonestyContract["test_signal_policy"]) | DataHonestyContract["test_signal_policy"];
   /** Adapter-owned immutable evaluation protocol; snake-case and camel-case forms are accepted. */
   readonly evaluation_contract?: EvaluationContractAccessor;
   readonly evaluationContract?: EvaluationContractAccessor;
@@ -382,6 +398,7 @@ export type MissionEventType =
   | "CHALLENGER_COMPLETED"
   | "AUDITOR_COMPLETED"
   | "SUCCESS_AUDITOR_COMPLETED"
+  | "LEAKAGE_DISCLOSURE"
   | "GAIN_BANKED"
   | "PROMOTED_LOCAL"
   | "BRANCH_REJECTED"
@@ -1229,6 +1246,11 @@ function project(events: readonly MissionEvent[]): MissionState {
           branch.objections = [p.reason];
         }
         break;
+      case "LEAKAGE_DISCLOSURE":
+        // disclose_only (T40): an auditable Evidence event. It never changes branch status,
+        // objections, evaluation, or promotion — the event ledger itself is the audit record;
+        // replay projects branch state from verdicts, not from observations (docs/ledger-event-types.md).
+        break;
       case "RETRY_SCHEDULED":
         if (branch && (branch.status === "VERIFYING" || branch.status === "SCORED")
           && isValidFence(eventFence) && eventFence === branch.fencingToken
@@ -1405,6 +1427,8 @@ export class ToyCompetitionHarness {
   private readonly redactor: SecretRedactor;
   private readonly evaluationContract?: Readonly<NormalizedEvaluationContract>;
   private readonly evaluationContractDigest?: string;
+  /** T40 data honesty contract; undefined = gate inactive for this adapter. */
+  private readonly dataHonesty?: Readonly<DataHonestyContract>;
   private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
   private readonly planVersion: number;
   private contractValue?: Readonly<TaskContract>;
@@ -1445,6 +1469,8 @@ export class ToyCompetitionHarness {
     this.sandbox = new SandboxBoundary({ ...options.sandbox, root: options.sandbox?.root ?? `/tmp/evok-${encodeURIComponent(options.missionId)}` });
     this.redactor = new SecretRedactor(options.secrets ?? []);
     this.adapter = options.adapter ?? options.competitionAdapter ?? { name: "toy", evaluate: options.evaluate ?? new ScoreFileToyCompetitionAdapter().evaluate.bind(new ScoreFileToyCompetitionAdapter()) };
+    // Data honesty gate (T40): inactive when the adapter declares no contract; fail-closed on malformed declarations.
+    this.dataHonesty = resolveDataHonestyContract(this.adapter);
     const resolvedEvaluationContract = resolveEvaluationContract(this.adapter);
     this.evaluationContract = resolvedEvaluationContract;
     this.evaluationContractDigest = resolvedEvaluationContract === undefined ? undefined : evaluationContractDigest(resolvedEvaluationContract);
@@ -1828,7 +1854,14 @@ export class ToyCompetitionHarness {
 
   private quarantine(branchId: string, fencingToken: number, error: unknown): void {
     const safe = this.redactor.error(error);
-    this.append("BRANCH_QUARANTINED", { branchId, fencingToken, reason: safe.message, objections: [safe.message] });
+    const leakage = error instanceof LeakageViolation
+      ? {
+        leakageFindings: error.findings.map((finding) => ({ kind: finding.kind, token: finding.token, detail: finding.detail })),
+        // Stable violation fingerprint: the same confirmed violation path is never auto-retried.
+        violationFingerprint: error.fingerprint(),
+      }
+      : {};
+    this.append("BRANCH_QUARANTINED", { branchId, fencingToken, reason: safe.message, objections: [safe.message], ...leakage });
   }
 
   /**
@@ -2057,6 +2090,26 @@ export class ToyCompetitionHarness {
           const files = this.sandbox.validateCandidateFiles(proposal?.files);
           if (JSON.stringify(this.redactor.redact(files)) !== JSON.stringify(files)) {
             throw new SandboxViolation("credential", "candidate output contains a configured secret");
+          }
+          // Data honesty gate (T40): audit proposed files for held-out label/test leakage and
+          // test-signal peeking before any snapshot, evaluation, or evidence exists. forbid →
+          // terminal quarantine (LeakageViolation is a TrustViolation); disclose_only → durable
+          // auditable disclosure; test feedback never feeds grading or promotion.
+          if (this.dataHonesty) {
+            const findings = auditCandidateFiles(this.dataHonesty, files);
+            if (findings.length > 0) {
+              if (this.dataHonesty.test_signal_policy.mode === "forbid") {
+                throw new LeakageViolation(findings);
+              }
+              this.append("LEAKAGE_DISCLOSURE", {
+                branchId,
+                fencingToken,
+                mode: "disclose_only",
+                findingKinds: [...new Set(findings.map((finding) => finding.kind))],
+                findings: findings.map((finding) => ({ kind: finding.kind, token: finding.token, detail: finding.detail })),
+                filesDigest: digestValue(files),
+              });
+            }
           }
           this.append("AGENT_COMPLETED", { branchId, fencingToken, ok: true });
           this.append("CANDIDATE_GENERATED", { branchId, fencingToken, files, filesDigest: digestValue(files) });
