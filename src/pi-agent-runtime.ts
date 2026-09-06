@@ -925,7 +925,14 @@ export class PiAgentRuntime {
       }
       return result;
     } catch (error) {
-      if (!(error instanceof RuntimeCrashError) && !(error instanceof UncertainExecutionError)) {
+      if (error instanceof RuntimeCrashError) {
+        // Crash with work in flight: side effects are uncertain. Persist the
+        // in-flight tool intents but leave the intent DISPATCHED so the startup
+        // audit / restart detects the uncertain state — never silent success.
+        await this.intentStore.updateIntent(intentId, {
+          toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
+        }).catch(() => {});
+      } else if (!(error instanceof UncertainExecutionError)) {
         await this.intentStore.updateIntent(intentId, {
           status: "FAILED",
           error: error instanceof Error ? error.message : String(error),
@@ -986,7 +993,7 @@ export class PiAgentRuntime {
   }
 
   async selfVerify(input: Parameters<ToyAgentRuntime["selfVerify"]>[0]): Promise<{ ok: boolean; objections?: string[] }> {
-    const tier = (input as { model?: { tier?: string } }).model?.tier;
+    const tier = input.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.taskContract, stage: "self-verify",
       instructions: "Check the approved Task and Role plan. Return JSON {\"ok\":true,\"objections\":[]} unless the plan is incomplete.",
@@ -997,7 +1004,7 @@ export class PiAgentRuntime {
   }
 
   async propose(input: Parameters<ToyAgentRuntime["propose"]>[0]): Promise<{ files: Record<string, string> }> {
-    const tier = (input as { model?: { tier?: string } }).model?.tier;
+    const tier = input.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.taskContract, stage: "propose",
       instructions: "Produce the candidate. Return JSON {\"files\":{\"score\":\"number\"}} with the candidate files and no prose.",
@@ -1011,7 +1018,7 @@ export class PiAgentRuntime {
   }
 
   async falsify(input: Parameters<ToyAgentRuntime["falsify"]>[0]): Promise<{ ok: boolean; objections: string[] }> {
-    const tier = (input as { model?: { tier?: string } }).model?.tier;
+    const tier = input.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.snapshot.contract, stage: "falsify",
       instructions: `Actively find a counterexample in this candidate snapshot: ${JSON.stringify(input.snapshot)}. Return JSON {\"ok\":true,\"objections\":[]}.`,
