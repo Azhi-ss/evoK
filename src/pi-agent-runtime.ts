@@ -1,8 +1,10 @@
-import { mkdir, mkdtemp, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { TaskContract, ToyAgentRuntime } from "./toy-harness";
 import {
+  deepFreeze,
+  digestValue,
   restrictSandboxPolicy,
   SandboxBoundary,
   SandboxViolation,
@@ -10,6 +12,7 @@ import {
   type SandboxPolicy,
 } from "./security-boundary";
 import { verificationRoleContract, type VerificationRole } from "./verification-gates";
+import type { BranchRunIdentity } from "./branch-recovery";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -51,6 +54,246 @@ export interface PiAgentRuntimeRequest {
   readonly role: RolePlan;
   readonly workspace?: ApprovedWorkspace;
   readonly secrets?: readonly string[];
+  readonly tier?: string;
+  readonly intentId?: string;
+  readonly identity?: BranchRunIdentity;
+  readonly repair?: boolean;
+}
+
+export type IntentStatus =
+  | "DECLARED"
+  | "DISPATCHED"
+  | "COMPLETED"
+  | "FAILED"
+  | "PAUSED"
+  | "QUARANTINED";
+
+export interface DurableToolIntent {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly inputDigest: string;
+  readonly status: "DISPATCHED" | "COMPLETED" | "FAILED";
+  readonly args?: unknown;
+  readonly result?: unknown;
+  readonly isError?: boolean;
+}
+
+export interface IntentReconcileRecord {
+  readonly action: "repair" | "adopt_result" | "quarantine";
+  readonly reconciledAt: number;
+  readonly note?: string;
+  readonly adoptedResult?: AgentRuntimeResult;
+}
+
+export interface IntentReconcileDecision {
+  readonly action: "repair" | "adopt_result" | "quarantine";
+  readonly note?: string;
+  readonly reason?: string;
+  readonly result?: AgentRuntimeResult;
+}
+
+export interface DurableIntentRecord {
+  readonly intentId: string;
+  readonly role: string;
+  readonly tier: string;
+  readonly inputDigest: string;
+  readonly status: IntentStatus;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly identity?: BranchRunIdentity;
+  readonly repair?: boolean;
+  readonly toolIntents?: readonly DurableToolIntent[];
+  readonly result?: AgentRuntimeResult;
+  readonly error?: string;
+  readonly uncertainReason?: string;
+  readonly reconcile?: IntentReconcileRecord;
+}
+
+export interface DurableIntentStore {
+  recordIntent(record: Omit<DurableIntentRecord, "createdAt" | "updatedAt">): Promise<DurableIntentRecord>;
+  updateIntent(intentId: string, patch: Partial<DurableIntentRecord>): Promise<DurableIntentRecord>;
+  getIntent(intentId: string): Promise<DurableIntentRecord | undefined>;
+  findIntent(criteria: { role?: string; tier?: string; inputDigest?: string; runId?: string; intentId?: string }): Promise<DurableIntentRecord | undefined>;
+  listIntents(): Promise<readonly DurableIntentRecord[]>;
+  auditPendingIntents?(): Promise<readonly DurableIntentRecord[]>;
+}
+
+export class InMemoryDurableIntentStore implements DurableIntentStore {
+  private readonly records = new Map<string, DurableIntentRecord>();
+
+  setDirect(record: DurableIntentRecord): void {
+    this.records.set(record.intentId, deepFreeze(JSON.parse(JSON.stringify(record))) as DurableIntentRecord);
+  }
+
+  async recordIntent(record: Omit<DurableIntentRecord, "createdAt" | "updatedAt">): Promise<DurableIntentRecord> {
+    const existing = this.records.get(record.intentId);
+    if (existing && !record.repair && existing.status === "COMPLETED") {
+      return existing;
+    }
+    const now = Date.now();
+    const created: DurableIntentRecord = {
+      ...record,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.records.set(record.intentId, deepFreeze(JSON.parse(JSON.stringify(created))) as DurableIntentRecord);
+    return this.records.get(record.intentId)!;
+  }
+
+  async updateIntent(intentId: string, patch: Partial<DurableIntentRecord>): Promise<DurableIntentRecord> {
+    const existing = this.records.get(intentId);
+    if (!existing) throw new Error(`intent not found: ${intentId}`);
+    const updated: DurableIntentRecord = {
+      ...existing,
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    this.records.set(intentId, deepFreeze(JSON.parse(JSON.stringify(updated))) as DurableIntentRecord);
+    return this.records.get(intentId)!;
+  }
+
+  async getIntent(intentId: string): Promise<DurableIntentRecord | undefined> {
+    return this.records.get(intentId);
+  }
+
+  async findIntent(criteria: { role?: string; tier?: string; inputDigest?: string; runId?: string; intentId?: string }): Promise<DurableIntentRecord | undefined> {
+    for (const record of this.records.values()) {
+      if (criteria.intentId && record.intentId !== criteria.intentId) continue;
+      if (criteria.runId && record.identity?.runId !== criteria.runId) continue;
+      if (criteria.role && record.role !== criteria.role) continue;
+      if (criteria.tier && record.tier !== criteria.tier) continue;
+      if (criteria.inputDigest && record.inputDigest !== criteria.inputDigest) continue;
+      return record;
+    }
+    return undefined;
+  }
+
+  async listIntents(): Promise<readonly DurableIntentRecord[]> {
+    return Array.from(this.records.values());
+  }
+
+  async auditPendingIntents(): Promise<readonly DurableIntentRecord[]> {
+    const paused: DurableIntentRecord[] = [];
+    for (const record of this.records.values()) {
+      if (record.status === "DISPATCHED") {
+        const updated: DurableIntentRecord = {
+          ...record,
+          status: "PAUSED",
+          uncertainReason: "crash occurred after intent was sent but before result was confirmed",
+          updatedAt: Date.now(),
+        };
+        this.records.set(record.intentId, deepFreeze(JSON.parse(JSON.stringify(updated))) as DurableIntentRecord);
+        paused.push(this.records.get(record.intentId)!);
+      }
+    }
+    return paused;
+  }
+}
+
+export class FileDurableIntentStore implements DurableIntentStore {
+  private readonly filePath: string;
+  private readonly inMemory = new InMemoryDurableIntentStore();
+  private loadPromise?: Promise<void>;
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+  }
+
+  private async load(): Promise<void> {
+    this.loadPromise ??= (async () => {
+      try {
+        const data = await readFile(this.filePath, "utf8");
+        const records = JSON.parse(data);
+        if (Array.isArray(records)) {
+          for (const record of records) {
+            this.inMemory.setDirect(record);
+          }
+        }
+      } catch {
+        // file does not exist yet
+      }
+    })();
+    await this.loadPromise;
+  }
+
+  private async persist(): Promise<void> {
+    const list = await this.inMemory.listIntents();
+    await mkdir(dirname(this.filePath), { recursive: true });
+    await writeFile(this.filePath, JSON.stringify(list, null, 2), "utf8");
+  }
+
+  async recordIntent(record: Omit<DurableIntentRecord, "createdAt" | "updatedAt">): Promise<DurableIntentRecord> {
+    await this.load();
+    const result = await this.inMemory.recordIntent(record);
+    await this.persist();
+    return result;
+  }
+
+  async updateIntent(intentId: string, patch: Partial<DurableIntentRecord>): Promise<DurableIntentRecord> {
+    await this.load();
+    const result = await this.inMemory.updateIntent(intentId, patch);
+    await this.persist();
+    return result;
+  }
+
+  async getIntent(intentId: string): Promise<DurableIntentRecord | undefined> {
+    await this.load();
+    return this.inMemory.getIntent(intentId);
+  }
+
+  async findIntent(criteria: { role?: string; tier?: string; inputDigest?: string; runId?: string; intentId?: string }): Promise<DurableIntentRecord | undefined> {
+    await this.load();
+    return this.inMemory.findIntent(criteria);
+  }
+
+  async listIntents(): Promise<readonly DurableIntentRecord[]> {
+    await this.load();
+    return this.inMemory.listIntents();
+  }
+
+  async auditPendingIntents(): Promise<readonly DurableIntentRecord[]> {
+    await this.load();
+    const result = await this.inMemory.auditPendingIntents();
+    if (result.length > 0) await this.persist();
+    return result;
+  }
+}
+
+export function computeInputDigest(input: PiAgentRuntimeRequest): string {
+  return digestValue({
+    task: {
+      objective: input.task.objective,
+      constraints: input.task.constraints,
+      expectedOutputs: input.task.expectedOutputs,
+    },
+    role: {
+      name: input.role.name,
+      instructions: input.role.instructions,
+      tools: input.role.tools,
+      verificationRole: input.role.verificationRole,
+      allowTestExecution: input.role.allowTestExecution,
+      allowCodingTools: input.role.allowCodingTools,
+    },
+    tier: input.tier ?? "default",
+  });
+}
+
+export class UncertainExecutionError extends Error {
+  readonly kind = "uncertain-execution" as const;
+  readonly intent: DurableIntentRecord;
+  constructor(intent: DurableIntentRecord, message?: string) {
+    super(message ?? `intent "${intent.intentId}" is in an auditable uncertain state (${intent.status}): ${intent.uncertainReason ?? "requires human or controlled reconcile"}`);
+    this.name = "UncertainExecutionError";
+    this.intent = intent;
+  }
+}
+
+export class RuntimeCrashError extends Error {
+  readonly kind = "runtime-crash" as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeCrashError";
+  }
 }
 
 export interface RuntimeUsage {
@@ -111,6 +354,13 @@ export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd
   readonly redactor?: SecretRedactor;
 }) => Promise<AgentRuntimeSession>;
 
+export interface RuntimeFaultInjection {
+  readonly crashBeforeDispatch?: boolean;
+  readonly crashAfterDispatch?: boolean;
+  readonly crashDuringTool?: { readonly toolName?: string; readonly afterExecution?: boolean };
+  readonly crashBeforeResultConfirmation?: boolean;
+}
+
 export interface PiAgentRuntimeOptions {
   readonly workspaceRoot?: string;
   readonly sessionFactory?: AgentSessionFactory;
@@ -119,6 +369,8 @@ export interface PiAgentRuntimeOptions {
   readonly secrets?: readonly string[];
   readonly redactor?: SecretRedactor;
   readonly onDispose?: () => void;
+  readonly intentStore?: DurableIntentStore;
+  readonly faultInjection?: RuntimeFaultInjection;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -347,6 +599,8 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
 };
 
 export class PiAgentRuntime {
+  readonly intentStore: DurableIntentStore;
+  private readonly faultInjection?: RuntimeFaultInjection;
   private readonly root: string;
   private readonly factory: AgentSessionFactory;
   private readonly sessionOptions: PiAgentRuntimeOptions["sessionOptions"];
@@ -357,15 +611,63 @@ export class PiAgentRuntime {
   private readonly secrets: readonly string[];
   private readonly onDispose?: () => void;
   private harnessRun = 0;
+  private auditPromise?: Promise<readonly DurableIntentRecord[]>;
 
   constructor(options: PiAgentRuntimeOptions = {}) {
     this.root = resolve(options.workspaceRoot ?? tmpdir());
+    this.intentStore = options.intentStore ?? new InMemoryDurableIntentStore();
+    this.faultInjection = options.faultInjection;
     this.factory = options.sessionFactory ?? defaultSessionFactory;
     this.sessionOptions = options.sessionOptions;
     this.sandboxPolicy = restrictSandboxPolicy(options.sandbox ?? {});
     this.secrets = Object.freeze([...(options.secrets ?? [])]);
     this.redactor = options.redactor ?? new SecretRedactor(this.secrets);
     this.onDispose = options.onDispose;
+  }
+
+  private async ensureAudited(): Promise<void> {
+    this.auditPromise ??= this.intentStore.auditPendingIntents?.() ?? Promise.resolve([]);
+    await this.auditPromise;
+  }
+
+  async auditPendingIntents(): Promise<readonly DurableIntentRecord[]> {
+    await this.ensureAudited();
+    return this.intentStore.auditPendingIntents?.() ?? [];
+  }
+
+  private shouldInjectToolCrash(toolName: string, after: boolean): boolean {
+    if (!this.faultInjection?.crashDuringTool) return false;
+    const { toolName: target, afterExecution } = this.faultInjection.crashDuringTool;
+    if (target !== undefined && target !== toolName) return false;
+    return Boolean(afterExecution) === after;
+  }
+
+  async reconcileIntent(intentId: string, decision: IntentReconcileDecision): Promise<DurableIntentRecord> {
+    const intent = await this.intentStore.getIntent(intentId);
+    if (!intent) throw new Error(`intent not found: ${intentId}`);
+    const now = Date.now();
+    switch (decision.action) {
+      case "repair":
+        return await this.intentStore.updateIntent(intentId, {
+          status: "PAUSED",
+          uncertainReason: undefined,
+          reconcile: { action: "repair", reconciledAt: now, note: decision.note },
+        });
+      case "adopt_result":
+        if (!decision.result) throw new TypeError("adopt_result requires an adopted result");
+        return await this.intentStore.updateIntent(intentId, {
+          status: "COMPLETED",
+          result: decision.result,
+          uncertainReason: undefined,
+          reconcile: { action: "adopt_result", reconciledAt: now, note: decision.note, adoptedResult: decision.result },
+        });
+      case "quarantine":
+        return await this.intentStore.updateIntent(intentId, {
+          status: "QUARANTINED",
+          uncertainReason: decision.reason ?? intent.uncertainReason ?? "quarantined by controlled reconcile",
+          reconcile: { action: "quarantine", reconciledAt: now, note: decision.note },
+        });
+    }
   }
 
   private redactorFor(input: PiAgentRuntimeRequest): SecretRedactor {
@@ -395,104 +697,200 @@ export class PiAgentRuntime {
     const approvedWorkspaceRoot = await realpath(this.root);
     if (!within(approvedWorkspaceRoot, approvedRoot)) throw new SandboxViolation("symlink", "workspace path escapes the approved workspace root");
     if (this.usedWorkspaces.has(approvedRoot)) throw new Error("workspace/session reuse is not allowed");
-    this.usedWorkspaces.add(approvedRoot);
-    const workspace = await realpath(await mkdtemp(join(approvedRoot, "run-")));
-    const boundary = new SandboxBoundary({
-      ...requestedPolicy,
-      root: workspace,
-      allowedTools: tools,
-      allowBash: requestedPolicy.allowBash === true,
-    });
-    const events: RuntimeEvent[] = [];
-    const seen = new Set<string>();
-    const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
-    const session = await this.factory({
-      ...sessionOptions,
-      customTools: [],
-      settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
-      cwd: workspace,
-      tools,
-      sandbox: boundary.policy,
-      redactor,
-    });
-    const sessionId = session.sessionId;
-    if (typeof sessionId !== "string" || sessionId.trim() === "" || this.usedSessions.has(sessionId)) {
-      try { session.dispose(); } finally { this.onDispose?.(); }
-      throw new Error("workspace/session reuse is not allowed");
+
+    await this.ensureAudited();
+    const tier = input.tier ?? "default";
+    const inputDigest = computeInputDigest(input);
+    const baseIntentId = input.intentId ?? (input.identity ? `${input.identity.runId}:${input.identity.attempt}:intent` : `intent-${inputDigest}`);
+
+    let existing = input.intentId
+      ? await this.intentStore.getIntent(input.intentId)
+      : await this.intentStore.findIntent({ role: input.role.name, tier, inputDigest, runId: input.identity?.runId });
+
+    if (existing) {
+      if (existing.status === "DISPATCHED") {
+        existing = await this.intentStore.updateIntent(existing.intentId, {
+          status: "PAUSED",
+          uncertainReason: "crash occurred after intent was sent but before result was confirmed",
+        });
+      }
+      if (existing.status === "PAUSED") {
+        if (!input.repair || existing.reconcile?.action !== "repair") {
+          throw new UncertainExecutionError(
+            existing,
+            `intent "${existing.intentId}" is in an auditable uncertain state (PAUSED): ${existing.uncertainReason ?? "requires human or controlled reconcile before repair"}`
+          );
+        }
+      } else if (existing.status === "QUARANTINED") {
+        throw new Error(`intent "${existing.intentId}" is quarantined and cannot be retried`);
+      } else if (existing.status === "COMPLETED" && existing.result) {
+        if (!input.repair) {
+          // Idempotency / crash-recovery guard of #23: already confirmed result does not re-execute session
+          return existing.result;
+        }
+      }
     }
-    this.usedSessions.add(sessionId);
-    const add = (event: RuntimeEvent, key?: string) => {
-      const safeEvent = redactor.redact(event) as RuntimeEvent;
-      const eventKey = key ?? JSON.stringify([safeEvent.type, safeEvent.toolCallId, safeEvent.toolName, safeEvent.reason, safeEvent.isError, safeEvent.raw]);
-      if (seen.has(eventKey)) return;
-      seen.add(eventKey);
-      events.push(safeEvent);
-    };
-    add({ type: "session_start", sessionId });
-    let completionUsage: RuntimeUsage | undefined;
-    const accountedMessages = new Set<string>();
-    let stopReason: string | undefined;
-    let completionText: string | undefined;
-    let eventError: Error | undefined;
-    const setEventError = (error: Error) => {
-      if (eventError instanceof SessionPolicyViolation) return;
-      eventError ??= error;
-    };
-    let abortPromise: Promise<void> | undefined;
-    const unsubscribe = session.subscribe((raw) => {
-      if (!isRecord(raw) || typeof raw.type !== "string") return;
-      const type = raw.type;
-      if (type === "tool_execution_start") {
-        try {
-          boundary.assertToolCall(String(raw.toolName ?? ""), isRecord(raw.args) ? raw.args : {});
-        } catch (error) {
-          setEventError(error instanceof SandboxViolation ? error : redactor.error(error));
-          abortPromise ??= session.abort();
-        }
-      }
-      if (type === "agent_end") {
-        const messages = Array.isArray(raw.messages) ? raw.messages : [];
-        for (const message of messages) {
-          if (!isRecord(message) || message.role !== "assistant") continue;
-          const key = JSON.stringify(message);
-          const usage = usageFromSdk(message);
-          if (usage && !accountedMessages.has(key)) {
-            accountedMessages.add(key);
-            completionUsage = addUsage(completionUsage, usage);
-          }
-        }
-        const assistant = messages.findLast((message) => isRecord(message) && message.role === "assistant");
-        if (isRecord(assistant)) {
-          completionText = redactor.redactText(textFromMessage(assistant)) || completionText;
-          if (typeof assistant.stopReason === "string") stopReason = redactor.redactText(assistant.stopReason);
-          if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
-            setEventError(redactor.error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`)));
-          }
-        }
-      }
-      if (type === "tool_execution_end" && raw.isError === true) setEventError(redactor.error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`));
-      if (type === "error" || type === "session_error") setEventError(redactor.error(String(raw.message ?? raw.errorMessage ?? "agent session failed")));
-      const normalizedType = type === "session_error" ? "error" : type;
-      if (!NORMALIZED_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) return;
-      if (POLICY_VIOLATION_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) {
-        // Fail closed: the redacted event is recorded below; keep the first violation
-        // and its live event ledger so later evidence is never silently dropped.
-        eventError = eventError instanceof SessionPolicyViolation
-          ? eventError
-          : new SessionPolicyViolation(normalizedType, redactor.redact(raw), events);
-        abortPromise ??= session.abort();
-      }
-      add({
-        type: normalizedType as RuntimeEvent["type"], sessionId, raw: redactor.redact(raw),
-        toolCallId: typeof raw.toolCallId === "string" ? redactor.redactText(raw.toolCallId) : undefined,
-        toolName: typeof raw.toolName === "string" ? redactor.redactText(raw.toolName) : undefined,
-        isError: typeof raw.isError === "boolean" ? raw.isError : undefined,
-        reason: typeof raw.reason === "string" ? redactor.redactText(raw.reason) : undefined,
-      });
+
+    this.usedWorkspaces.add(approvedRoot);
+    const intentId = input.repair && existing ? `${baseIntentId}:repair:${Date.now()}` : baseIntentId;
+
+    await this.intentStore.recordIntent({
+      intentId,
+      role: input.role.name,
+      tier,
+      inputDigest,
+      status: "DECLARED",
+      identity: input.identity,
+      repair: input.repair === true,
     });
-    const onAbort = () => { abortPromise ??= session.abort(); };
-    signal?.addEventListener("abort", onAbort, { once: true });
+
+    if (this.faultInjection?.crashBeforeDispatch) {
+      throw new RuntimeCrashError("fault injection: crash before intent dispatch");
+    }
+
+    let dispatched = false;
+    await this.intentStore.updateIntent(intentId, { status: "DISPATCHED" });
+    dispatched = true;
+
+    if (this.faultInjection?.crashAfterDispatch) {
+      throw new RuntimeCrashError("fault injection: crash after intent sent before result confirmed");
+    }
+
+    let session: AgentRuntimeSession | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let onAbort: (() => void) | undefined;
+    let abortPromise: Promise<void> | undefined;
+    const recordedToolIntents: DurableToolIntent[] = [];
+
     try {
+      const workspace = await realpath(await mkdtemp(join(approvedRoot, "run-")));
+      const boundary = new SandboxBoundary({
+        ...requestedPolicy,
+        root: workspace,
+        allowedTools: tools,
+        allowBash: requestedPolicy.allowBash === true,
+      });
+      const events: RuntimeEvent[] = [];
+      const seen = new Set<string>();
+      const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
+      session = await this.factory({
+        ...sessionOptions,
+        customTools: [],
+        settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
+        cwd: workspace,
+        tools,
+        sandbox: boundary.policy,
+        redactor,
+      });
+      const sessionId = session.sessionId;
+      if (typeof sessionId !== "string" || sessionId.trim() === "" || this.usedSessions.has(sessionId)) {
+        throw new Error("workspace/session reuse is not allowed");
+      }
+      this.usedSessions.add(sessionId);
+      const add = (event: RuntimeEvent, key?: string) => {
+        const safeEvent = redactor.redact(event) as RuntimeEvent;
+        const eventKey = key ?? JSON.stringify([safeEvent.type, safeEvent.toolCallId, safeEvent.toolName, safeEvent.reason, safeEvent.isError, safeEvent.raw]);
+        if (seen.has(eventKey)) return;
+        seen.add(eventKey);
+        events.push(safeEvent);
+      };
+      add({ type: "session_start", sessionId });
+      let completionUsage: RuntimeUsage | undefined;
+      const accountedMessages = new Set<string>();
+      let stopReason: string | undefined;
+      let completionText: string | undefined;
+      let eventError: Error | undefined;
+      const setEventError = (error: Error) => {
+        if (eventError instanceof SessionPolicyViolation) return;
+        eventError ??= error;
+      };
+      unsubscribe = session.subscribe((raw) => {
+        if (!isRecord(raw) || typeof raw.type !== "string") return;
+        const type = raw.type;
+        if (type === "tool_execution_start") {
+          const toolName = String(raw.toolName ?? "");
+          const toolCallId = String(raw.toolCallId ?? `tool-${Date.now()}`);
+          const toolDigest = digestValue(raw.args ?? {});
+          recordedToolIntents.push({
+            toolCallId,
+            toolName,
+            inputDigest: toolDigest,
+            status: "DISPATCHED",
+            args: redactor.redact(raw.args),
+          });
+
+          if (this.shouldInjectToolCrash(toolName, false)) {
+            setEventError(new RuntimeCrashError(`fault injection: crash during tool execution of ${toolName}`));
+            abortPromise ??= session?.abort();
+            return;
+          }
+          try {
+            boundary.assertToolCall(toolName, isRecord(raw.args) ? raw.args : {});
+          } catch (error) {
+            setEventError(error instanceof SandboxViolation ? error : redactor.error(error));
+            abortPromise ??= session?.abort();
+          }
+        }
+        if (type === "agent_end") {
+          const messages = Array.isArray(raw.messages) ? raw.messages : [];
+          for (const message of messages) {
+            if (!isRecord(message) || message.role !== "assistant") continue;
+            const key = JSON.stringify(message);
+            const usage = usageFromSdk(message);
+            if (usage && !accountedMessages.has(key)) {
+              accountedMessages.add(key);
+              completionUsage = addUsage(completionUsage, usage);
+            }
+          }
+          const assistant = messages.findLast((message) => isRecord(message) && message.role === "assistant");
+          if (isRecord(assistant)) {
+            completionText = redactor.redactText(textFromMessage(assistant)) || completionText;
+            if (typeof assistant.stopReason === "string") stopReason = redactor.redactText(assistant.stopReason);
+            if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+              setEventError(redactor.error(String(assistant.errorMessage ?? `agent ${assistant.stopReason}`)));
+            }
+          }
+        }
+        if (type === "tool_execution_end") {
+          const toolName = String(raw.toolName ?? "");
+          const toolCallId = String(raw.toolCallId ?? "");
+          const index = recordedToolIntents.findLastIndex((ti) => ti.toolCallId === toolCallId || (ti.toolName === toolName && ti.status === "DISPATCHED"));
+          if (index >= 0) {
+            recordedToolIntents[index] = {
+              ...recordedToolIntents[index],
+              status: raw.isError ? "FAILED" : "COMPLETED",
+              result: redactor.redact(raw.result),
+              isError: Boolean(raw.isError),
+            };
+          }
+          if (this.shouldInjectToolCrash(toolName, true)) {
+            setEventError(new RuntimeCrashError(`fault injection: crash after tool execution of ${toolName}`));
+            abortPromise ??= session?.abort();
+            return;
+          }
+          if (raw.isError === true) setEventError(redactor.error(`tool execution failed: ${String(raw.toolName ?? "unknown tool")}`));
+        }
+        if (type === "error" || type === "session_error") setEventError(redactor.error(String(raw.message ?? raw.errorMessage ?? "agent session failed")));
+        const normalizedType = type === "session_error" ? "error" : type;
+        if (!NORMALIZED_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) return;
+        if (POLICY_VIOLATION_EVENT_TYPES.has(normalizedType as RuntimeEvent["type"])) {
+          // Fail closed: the redacted event is recorded below; keep the first violation
+          // and its live event ledger so later evidence is never silently dropped.
+          eventError = eventError instanceof SessionPolicyViolation
+            ? eventError
+            : new SessionPolicyViolation(normalizedType, redactor.redact(raw), events);
+          abortPromise ??= session?.abort();
+        }
+        add({
+          type: normalizedType as RuntimeEvent["type"], sessionId, raw: redactor.redact(raw),
+          toolCallId: typeof raw.toolCallId === "string" ? redactor.redactText(raw.toolCallId) : undefined,
+          toolName: typeof raw.toolName === "string" ? redactor.redactText(raw.toolName) : undefined,
+          isError: typeof raw.isError === "boolean" ? raw.isError : undefined,
+          reason: typeof raw.reason === "string" ? redactor.redactText(raw.reason) : undefined,
+        });
+      });
+      onAbort = () => { abortPromise ??= session?.abort(); };
+      signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) {
         onAbort();
         await abortPromise;
@@ -510,18 +908,42 @@ export class PiAgentRuntime {
       completionUsage = usageFromStats(stats) ?? completionUsage;
       if (!completionUsage) throw new Error("agent completion is missing usage/cost data");
       if (!stopReason) throw new Error("agent completion is missing stop reason");
+      if (this.faultInjection?.crashBeforeResultConfirmation) {
+        throw new RuntimeCrashError("fault injection: crash before result confirmation");
+      }
       add({ type: "session_end", sessionId, reason: stopReason });
-      return { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText };
+      const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText };
+      await this.intentStore.updateIntent(intentId, {
+        status: "COMPLETED",
+        result,
+        toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
+      });
+      if (input.repair && existing) {
+        await this.intentStore.updateIntent(existing.intentId, {
+          reconcile: existing.reconcile ? { ...existing.reconcile, note: `repaired by ${intentId}` } : undefined,
+        }).catch(() => {});
+      }
+      return result;
     } catch (error) {
+      if (!(error instanceof RuntimeCrashError) && !(error instanceof UncertainExecutionError)) {
+        await this.intentStore.updateIntent(intentId, {
+          status: "FAILED",
+          error: error instanceof Error ? error.message : String(error),
+          toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
+        }).catch(() => {});
+      }
       if (abortPromise) await abortPromise.catch(() => undefined);
       if (signal?.aborted) throw abortError();
+      if (error instanceof RuntimeCrashError || error instanceof UncertainExecutionError) throw error;
       if (error instanceof SandboxViolation) throw new SandboxViolation(error.kind, redactor.redactText(error.message));
       if (error instanceof SessionPolicyViolation) throw error; // evidence already redacted
       throw redactor.error(error);
     } finally {
-      signal?.removeEventListener("abort", onAbort);
-      unsubscribe();
-      try { session.dispose(); } finally { this.onDispose?.(); }
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      unsubscribe?.();
+      if (session) {
+        try { session.dispose(); } finally { this.onDispose?.(); }
+      }
     }
   }
 
@@ -536,8 +958,11 @@ export class PiAgentRuntime {
     stage: string;
     instructions: string;
     expectedOutputs?: readonly string[];
+    tier?: string;
   }): Promise<AgentRuntimeResult> {
-    const workspace = join(this.root, ".evok-harness", encodeURIComponent(input.missionId), encodeURIComponent(input.branchId), `${this.harnessRun++}-${input.stage}`);
+    const attempt = this.harnessRun++;
+    const workspace = join(this.root, ".evok-harness", encodeURIComponent(input.missionId), encodeURIComponent(input.branchId), `${attempt}-${input.stage}`);
+    const runId = `${input.missionId}:${input.branchId}:${input.stage}:${attempt}`;
     return this.execute({
       task: { objective: input.taskContract.objective, constraints: input.taskContract.constraints, expectedOutputs: input.expectedOutputs },
       role: {
@@ -548,23 +973,36 @@ export class PiAgentRuntime {
           : input.stage === "falsify" ? { verificationRole: "Falsifier" as const } : {}),
       },
       workspace: { path: workspace, isolated: true, approved: true },
+      tier: input.tier ?? "default",
+      intentId: `${input.missionId}:${input.branchId}:${input.stage}:${attempt}`,
+      identity: {
+        branchId: input.branchId,
+        runId,
+        attempt,
+        workspaceId: workspace,
+        fencingToken: 1,
+      },
     });
   }
 
   async selfVerify(input: Parameters<ToyAgentRuntime["selfVerify"]>[0]): Promise<{ ok: boolean; objections?: string[] }> {
+    const tier = (input as { model?: { tier?: string } }).model?.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.taskContract, stage: "self-verify",
       instructions: "Check the approved Task and Role plan. Return JSON {\"ok\":true,\"objections\":[]} unless the plan is incomplete.",
       expectedOutputs: ["JSON self-verification result"],
+      tier,
     });
     return verificationFromText(result.text, "self-verification");
   }
 
   async propose(input: Parameters<ToyAgentRuntime["propose"]>[0]): Promise<{ files: Record<string, string> }> {
+    const tier = (input as { model?: { tier?: string } }).model?.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.taskContract, stage: "propose",
       instructions: "Produce the candidate. Return JSON {\"files\":{\"score\":\"number\"}} with the candidate files and no prose.",
       expectedOutputs: ["JSON candidate files"],
+      tier,
     });
     const parsed = objectFromText(result.text);
     const files = parsed?.files;
@@ -573,10 +1011,12 @@ export class PiAgentRuntime {
   }
 
   async falsify(input: Parameters<ToyAgentRuntime["falsify"]>[0]): Promise<{ ok: boolean; objections: string[] }> {
+    const tier = (input as { model?: { tier?: string } }).model?.tier;
     const result = await this.executeHarnessPlan({
       missionId: input.missionId, branchId: input.branchId, taskContract: input.snapshot.contract, stage: "falsify",
       instructions: `Actively find a counterexample in this candidate snapshot: ${JSON.stringify(input.snapshot)}. Return JSON {\"ok\":true,\"objections\":[]}.`,
       expectedOutputs: ["JSON falsification result"],
+      tier,
     });
     return verificationFromText(result.text, "falsification");
   }

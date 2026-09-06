@@ -213,6 +213,7 @@ export interface ToyAgentRuntime {
     workspace: Record<string, string>;
     /** Resolved by the mission seam when a model catalog/orchestra is wired. */
     model?: ModelConfig;
+    tier?: string;
   }): { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   propose(input: {
     missionId: string;
@@ -221,6 +222,7 @@ export interface ToyAgentRuntime {
     workspace: Record<string, string>;
     /** Resolved by the mission seam when a model catalog/orchestra is wired. */
     model?: ModelConfig;
+    tier?: string;
   }): { files: Record<string, string> } | Promise<{ files: Record<string, string> }>;
   falsify(input: {
     missionId: string;
@@ -228,6 +230,7 @@ export interface ToyAgentRuntime {
     snapshot: Readonly<CandidateSnapshot>;
     /** Resolved by the mission seam when a model catalog/orchestra is wired. */
     model?: ModelConfig;
+    tier?: string;
   }): { ok: boolean; objections: string[] } | Promise<{ ok: boolean; objections: string[] }>;
   critic?: (input: CandidateVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
   challenger?: (input: CandidateVerificationInput) => { ok: boolean; objections?: string[] } | Promise<{ ok: boolean; objections?: string[] }>;
@@ -1959,7 +1962,7 @@ export class ToyCompetitionHarness {
           } else {
             const selfVerifySession = this.resolveSession("SelfVerifier", "execution");
             if (selfVerifySession) this.appendModelResolved(branchId, fencingToken, selfVerifySession);
-            rawCheck = await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract, context, workspace, model: selfVerifySession?.model });
+            rawCheck = await this.options.runtime.selfVerify({ missionId: this.options.missionId, branchId, taskContract, context, workspace, model: selfVerifySession?.model, tier: selfVerifySession?.tier });
           }
           const check = normalizeVerificationResult(rawCheck, "SelfVerifier");
           if (!check.ok) {
@@ -1969,7 +1972,7 @@ export class ToyCompetitionHarness {
           this.append("PREFLIGHT_SELF_CHECK_PASSED", { branchId, fencingToken, ok: true, objections: check.objections });
           const proposeSession = this.resolveSession("Worker", "execution");
           if (proposeSession) this.appendModelResolved(branchId, fencingToken, proposeSession);
-          const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract, workspace, model: proposeSession?.model });
+          const proposal = await this.options.runtime.propose({ missionId: this.options.missionId, branchId, taskContract, workspace, model: proposeSession?.model, tier: proposeSession?.tier });
           const files = this.sandbox.validateCandidateFiles(proposal?.files);
           if (JSON.stringify(this.redactor.redact(files)) !== JSON.stringify(files)) {
             throw new SandboxViolation("credential", "candidate output contains a configured secret");
