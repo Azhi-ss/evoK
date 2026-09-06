@@ -37,6 +37,16 @@ Steals the **orchestration clarity** of Google Co-Scientist — Generation → R
 
 Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/toy-harness.ts` (branch `claimCard` + promotion gate), `src/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
 
+## File Blueprint mission state (Ravi-style)
+
+Long-running Missions keep GOAL, RULES, an experiments log, and SCOREBOARD as content-addressed File Blueprint artifacts plus ledger refs — not as chat memory. Cross-review (author → reviewer) writes the same kind of refs so a later Task can read them.
+
+- Stop is refused while GOAL or SCOREBOARD is missing. A Finding that “feels done” cannot silently stop the Mission.
+- SCOREBOARD rows must cite evaluator Evidence. A `championRef` on the file is narrative only and cannot bypass the independent evaluator or promotion gate.
+- Checkpoint / restart rebuilds the blueprint from the ledger; file digests must stay aligned with their Evidence refs.
+
+Schema: `docs/file-blueprint.md`. Implementation: `src/file-blueprint.ts`, `MissionDirector.commitBlueprintFile` / `recordCrossReview`.
+
 ### Non-goals
 
 - Full literature Co-Scientist / web research engine

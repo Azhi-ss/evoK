@@ -1,8 +1,27 @@
 import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type ClaimObjection, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
 import { requireIdeaType } from "./idea-types";
+import {
+  assertBlueprintAllowsStop,
+  assertBlueprintRefsConsistent,
+  blueprintArtifactId,
+  blueprintFileDigest,
+  collectBlueprintEvidenceRefs,
+  emptyBlueprint,
+  isBlueprintArtifactId,
+  isEvaluatorObservation,
+  normalizeBlueprintFile,
+  normalizeBlueprintFileRef,
+  normalizeCrossReview,
+  toBlueprintArtifact,
+  type BlueprintFile,
+  type BlueprintFileRef,
+  type CrossReviewRecord,
+  type MissionBlueprint,
+} from "./file-blueprint";
 import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "./security-boundary";
 
 export type { ClaimCard, PredictionArtifact, ReconcileInput, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
+export type { BlueprintFile, BlueprintFileKind, BlueprintFileRef, CrossReviewRecord, MissionBlueprint } from "./file-blueprint";
 
 export type TaskReconcileInput = ReconcileInput;
 
@@ -240,6 +259,7 @@ export interface ResearchMissionState {
   readonly suggestedAction?: ResearchDecisionAction;
   readonly suggestedStopReason?: string;
   readonly stopReason?: string;
+  readonly blueprint: MissionBlueprint;
 }
 
 export interface ResearchDecision {
@@ -271,6 +291,20 @@ export interface GenerateTasksInput {
   readonly sourceTaskId: string;
   readonly evidenceRefs: readonly string[];
   readonly tasks: readonly ResearchTask[];
+  readonly operationId?: string;
+}
+
+export interface CommitBlueprintInput {
+  readonly evidenceRefs?: readonly string[];
+  readonly operationId?: string;
+}
+
+export interface RecordCrossReviewInput {
+  readonly reviewId: string;
+  readonly phase: "author" | "reviewer";
+  readonly subjectRefs: readonly string[];
+  readonly findings: readonly string[];
+  readonly evidenceRefs?: readonly string[];
   readonly operationId?: string;
 }
 
@@ -313,6 +347,8 @@ export type ResearchEventType =
   | "PITFALL_RECORDED"
   | "DECISION_RECORDED"
   | "PLAN_REVISED"
+  | "BLUEPRINT_COMMITTED"
+  | "CROSS_REVIEW_RECORDED"
   | "MISSION_STOPPED";
 
 export interface ResearchEvent {
@@ -325,7 +361,7 @@ export interface ResearchEvent {
 const RESEARCH_EVENT_TYPES: ReadonlySet<string> = new Set([
   "MISSION_CREATED", "TASK_SELECTED", "PREDICTION_RECORDED", "TASK_COMPLETED", "RECONCILED", "WORLD_MODEL_UPDATED", "TASK_FAILED", "TASKS_GENERATED",
   "FINDING_RECORDED", "FINDING_REJECTED", "NEGATIVE_EVIDENCE_RECORDED", "PITFALL_RECORDED",
-  "DECISION_RECORDED", "PLAN_REVISED", "MISSION_STOPPED",
+  "DECISION_RECORDED", "PLAN_REVISED", "BLUEPRINT_COMMITTED", "CROSS_REVIEW_RECORDED", "MISSION_STOPPED",
 ]);
 
 export interface ResearchLedger {
@@ -770,6 +806,7 @@ interface MutableResearchState {
   suggestedAction?: ResearchDecisionAction;
   suggestedStopReason?: string;
   stopReason?: string;
+  blueprint: MissionBlueprint;
   operations: Map<string, { type: ResearchEventType; payload: Readonly<Record<string, unknown>> }>;
 }
 
@@ -933,6 +970,7 @@ function initialMutable(event: ResearchEvent): MutableResearchState {
     reconciles: new Map(),
     worldModel: new Map(),
     trustedEvaluators: normalizeTrustedEvaluators(p.trustedEvaluators),
+    blueprint: emptyBlueprint(),
     operations: new Map(typeof p.operationId === "string" ? [[p.operationId, { type: "MISSION_CREATED" as const, payload: p }]] : []),
   };
   refreshStatuses(state);
@@ -1306,6 +1344,7 @@ function publicState(state: MutableResearchState): ResearchMissionState {
     ...(state.suggestedAction === undefined ? {} : { suggestedAction: state.suggestedAction }),
     ...(state.suggestedStopReason === undefined ? {} : { suggestedStopReason: state.suggestedStopReason }),
     ...(state.stopReason === undefined ? {} : { stopReason: state.stopReason }),
+    blueprint: state.blueprint,
   }) as ResearchMissionState;
 }
 
@@ -1336,14 +1375,107 @@ function requireRefs(state: MutableResearchState, refs: readonly string[]): void
   for (const ref of refs) if (!state.memory.has(ref)) throw new Error(`unknown evidence reference: ${ref}`);
 }
 
+function isBlueprintReadableEvidence(state: MutableResearchState, ref: string): boolean {
+  if (!state.memory.has(ref)) return false;
+  if (isBlueprintArtifactId(ref)) return true;
+  return state.blueprint.crossReviews.some((review) => review.reviewId === ref || `cross-review:${review.reviewId}` === ref);
+}
+
+function replaceBlueprintArtifact(state: MutableResearchState, ref: { readonly artifactId: string; readonly digest: string; readonly address?: string }): void {
+  const artifact = toBlueprintArtifact(ref);
+  const existing = state.artifacts.get(artifact.artifactId);
+  if (existing && existing.digest !== artifact.digest) state.artifacts.delete(artifact.artifactId);
+  mergeArtifactRefs(state, normalizeArtifacts([artifact]));
+}
+
+function requireScoreboardEvaluatorCitations(state: MutableResearchState, file: BlueprintFile): void {
+  if (file.kind !== "SCOREBOARD") return;
+  for (const row of file.rows) {
+    const evidence = state.memory.get(row.evaluationRef);
+    if (!evidence || !isEvaluatorObservation(evidence.metadata)) {
+      throw new Error(`SCOREBOARD evaluationRef must cite an independent evaluator observation: ${row.evaluationRef}`);
+    }
+  }
+}
+
+function requireCrossReviewPhase(state: MutableResearchState, review: CrossReviewRecord): void {
+  if (review.phase === "author") {
+    const committed = new Set(Object.values(state.blueprint.files).flatMap((file) => file === undefined ? [] : [file.artifactId]));
+    if (!review.subjectRefs.every((ref) => committed.has(ref))) {
+      throw new Error("author Cross-review must cite committed File Blueprint artifacts");
+    }
+    return;
+  }
+  const authors = state.blueprint.crossReviews.filter((entry) => entry.phase === "author");
+  if (!review.subjectRefs.some((ref) => authors.some((author) => author.artifactId === ref))) {
+    throw new Error("reviewer Cross-review requires an author Cross-review subject");
+  }
+}
+
 function requireTaskEvidence(state: MutableResearchState, task: MutableTaskState, refs: readonly string[]): void {
   const available = new Set<string>();
   for (const direct of task.evidenceRefs) {
     if (!state.memory.has(direct)) continue;
     for (const record of state.memory.chain(direct)) available.add(record.id);
   }
-  for (const ref of refs) if (!available.has(ref)) throw new Error(`evidence is not part of task ${task.task.taskId}: ${ref}`);
+  for (const ref of refs) {
+    if (available.has(ref) || isBlueprintReadableEvidence(state, ref)) continue;
+    throw new Error(`evidence is not part of task ${task.task.taskId}: ${ref}`);
+  }
 }
+
+function applyBlueprintCommit(state: MutableResearchState, payload: Record<string, unknown>): void {
+  const file = normalizeBlueprintFile(payload.file);
+  const ref = normalizeBlueprintFileRef(payload.ref);
+  if (ref.kind !== file.kind) throw new Error("BLUEPRINT_COMMITTED kind does not match its file");
+  if (ref.digest !== blueprintFileDigest(file)) throw new Error(`blueprint ${file.kind} digest does not match its contents`);
+  if (file.kind === "GOAL" && file.objective !== state.objective) {
+    throw new Error("GOAL objective must match the mission research objective");
+  }
+  requireRefs(state, ref.evidenceRefs);
+  requireScoreboardEvaluatorCitations(state, file);
+  replaceBlueprintArtifact(state, ref);
+  const evidence = payload.evidence === undefined ? undefined : normalizeEvidence(payload.evidence as EvidenceRecord);
+  if (evidence) state.memory.addEvidence(evidence);
+  state.blueprint = deepFreeze({
+    files: { ...state.blueprint.files, [file.kind]: ref },
+    crossReviews: state.blueprint.crossReviews,
+  }) as MissionBlueprint;
+  assertBlueprintRefsConsistent(state.blueprint, {
+    hasEvidence: (id) => state.memory.has(id),
+    artifactDigest: (artifactId) => state.artifacts.get(artifactId)?.digest,
+  });
+}
+
+function applyCrossReview(state: MutableResearchState, payload: Record<string, unknown>): void {
+  const review = normalizeCrossReview(payload.review);
+  const bodyDigest = digestValue({
+    reviewId: review.reviewId,
+    phase: review.phase,
+    subjectRefs: review.subjectRefs,
+    findings: review.findings,
+    evidenceRefs: review.evidenceRefs,
+  });
+  if (review.digest !== bodyDigest) throw new Error(`cross-review ${review.reviewId} digest does not match its contents`);
+  requireRefs(state, review.evidenceRefs);
+  requireCrossReviewPhase(state, review);
+  const existing = state.blueprint.crossReviews.find((entry) => entry.reviewId === review.reviewId);
+  if (existing && !same(existing, review)) throw new Error(`cross-review id already contains different data: ${review.reviewId}`);
+  replaceBlueprintArtifact(state, review);
+  const evidence = payload.evidence === undefined ? undefined : normalizeEvidence(payload.evidence as EvidenceRecord);
+  if (evidence) state.memory.addEvidence(evidence);
+  if (!existing) {
+    state.blueprint = deepFreeze({
+      files: state.blueprint.files,
+      crossReviews: [...state.blueprint.crossReviews, review],
+    }) as MissionBlueprint;
+  }
+  assertBlueprintRefsConsistent(state.blueprint, {
+    hasEvidence: (id) => state.memory.has(id),
+    artifactDigest: (artifactId) => state.artifacts.get(artifactId)?.digest,
+  });
+}
+
 
 function mergeCandidateRefs(state: MutableResearchState, refs: readonly ResearchCandidateRef[]): void {
   for (const ref of refs) {
@@ -1516,6 +1648,12 @@ function applyEvent(state: MutableResearchState, event: ResearchEvent): void {
       if (decision.action === "Stop") state.suggestedStopReason = decision.stopReason ?? decision.reason;
       break;
     }
+    case "BLUEPRINT_COMMITTED":
+      applyBlueprintCommit(state, p);
+      break;
+    case "CROSS_REVIEW_RECORDED":
+      applyCrossReview(state, p);
+      break;
     case "PLAN_REVISED": {
       if (p.objective !== state.objective || typeof p.totalBudget !== "number" || !Number.isFinite(p.totalBudget)
         || p.totalBudget < state.budgetConsumed || p.totalBudget > state.budgetTotal
@@ -1982,6 +2120,81 @@ export class MissionDirector {
     return true;
   }
 
+  commitBlueprintFile(file: BlueprintFile, input: CommitBlueprintInput = {}): BlueprintFileRef {
+    const state = project(this.ledger.events());
+    if (state.phase === "STOPPED") throw new Error("mission is stopped");
+    const normalized = normalizeBlueprintFile(file);
+    if (normalized.kind === "GOAL" && normalized.objective !== state.objective) {
+      throw new Error("GOAL objective must match the mission research objective");
+    }
+    const collected = collectBlueprintEvidenceRefs(normalized);
+    const extra = strings("blueprint evidenceRefs", input.evidenceRefs);
+    const evidenceRefs = [...new Set([...collected, ...extra])];
+    requireRefs(state, evidenceRefs);
+    requireScoreboardEvaluatorCitations(state, normalized);
+    const digest = blueprintFileDigest(normalized);
+    const ref = normalizeBlueprintFileRef({
+      kind: normalized.kind,
+      artifactId: blueprintArtifactId(normalized.kind),
+      digest,
+      evidenceRefs,
+    });
+    const operationId = this.operation(`blueprint-${normalized.kind}`, input.operationId);
+    const payload = { file: normalized, ref };
+    const existing = this.operationEvent(operationId);
+    if (existing) {
+      this.assertOperation("BLUEPRINT_COMMITTED", payload, operationId);
+      return normalizeBlueprintFileRef(existing.payload.ref);
+    }
+    this.append("BLUEPRINT_COMMITTED", payload, operationId);
+    return ref;
+  }
+
+  pendingCrossReviewSubjects(): readonly string[] {
+    const state = project(this.ledger.events());
+    const reviewed = new Set(state.blueprint.crossReviews.filter((review) => review.phase === "author").flatMap((review) => review.subjectRefs));
+    return frozenArray(Object.values(state.blueprint.files).flatMap((file) => file === undefined || reviewed.has(file.artifactId) ? [] : [file.artifactId]));
+  }
+
+  recordCrossReview(input: RecordCrossReviewInput): CrossReviewRecord {
+    const state = project(this.ledger.events());
+    if (state.phase === "STOPPED") throw new Error("mission is stopped");
+    nonEmpty("cross-review reviewId", input.reviewId);
+    const evidenceRefs = strings("cross-review evidenceRefs", input.evidenceRefs);
+    requireRefs(state, evidenceRefs);
+    const body = {
+      reviewId: input.reviewId,
+      phase: input.phase,
+      subjectRefs: strings("cross-review subjectRefs", input.subjectRefs),
+      findings: strings("cross-review findings", input.findings),
+      evidenceRefs,
+    };
+    const digest = digestValue(body);
+    const review = normalizeCrossReview({
+      ...body,
+      artifactId: `cross-review:${input.reviewId}`,
+      digest,
+      authoritative: false,
+    });
+    requireCrossReviewPhase(state, review);
+    const evidence: EvidenceRecord = {
+      id: `cross-review:${input.reviewId}`,
+      kind: "observation",
+      summary: review.findings[0]!,
+      refs: evidenceRefs,
+      metadata: { digest, phase: review.phase, authoritative: false },
+    };
+    const operationId = this.operation(`cross-review-${input.reviewId}`, input.operationId);
+    const payload = { review, evidence };
+    const existing = this.operationEvent(operationId);
+    if (existing) {
+      this.assertOperation("CROSS_REVIEW_RECORDED", payload, operationId);
+      return normalizeCrossReview(existing.payload.review);
+    }
+    this.append("CROSS_REVIEW_RECORDED", payload, operationId);
+    return review;
+  }
+
   decide(input: Omit<ResearchDecision, "decisionId"> & { readonly decisionId?: string }): ResearchDecision {
     const state = project(this.ledger.events());
     const evidenceRefs = strings("decision evidenceRefs", input.evidenceRefs);
@@ -1999,6 +2212,7 @@ export class MissionDirector {
       return existing;
     }
     if (state.phase === "STOPPED") throw new Error("mission is stopped");
+    if (decision.action === "Stop") assertBlueprintAllowsStop(state.blueprint);
     const operationId = this.operation(`decision-${decision.decisionId}`);
     this.append("DECISION_RECORDED", { decision }, operationId);
     if (decision.action === "Stop") {

@@ -138,6 +138,21 @@ describe("long-running research loop", () => {
       director.decide({ action, evidenceRefs: ["finding-1"], reason: `${action} from evidence` });
     }
     expect(() => director.decide({ action: "Stop", evidenceRefs: [], reason: "missing evidence" })).toThrow();
+    director.commitBlueprintFile({
+      kind: "GOAL",
+      objective: "learn",
+      successCriteria: ["keep a verified evidence trail"],
+    });
+    director.commitBlueprintFile({
+      kind: "SCOREBOARD",
+      rows: [{
+        candidateId: "candidate-1",
+        metric: "score",
+        value: 1,
+        evaluationRef: "observation-1",
+        evidenceRefs: ["finding-1"],
+      }],
+    });
     director.decide({ action: "Stop", evidenceRefs: ["negative-1"], reason: "rule risk is unresolved" });
 
     expect(director.state().phase).toBe("STOPPED");

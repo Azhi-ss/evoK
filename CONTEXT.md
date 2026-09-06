@@ -90,6 +90,14 @@ _Avoid_: Mode, hard-coded router
 The repeated cycle of selecting a Task, proposing and executing work, evaluating evidence, updating beliefs, and deciding what to do next.
 _Avoid_: Chat loop
 
+**File Blueprint**:
+The durable, content-addressed workspace files that make a Mission's GOAL, RULES, experiment log, and SCOREBOARD auditable outside the chat transcript. The files are Evidence; they do not score, promote, or authorize Stop by themselves.
+_Avoid_: Shared notes, prompt memory, scoreboard-as-verdict
+
+**Cross-review**:
+A two-phase (author then reviewer) critique whose output is a content-addressed Artifact and ledger Evidence ref that later Tasks can read. Cross-review is advisory and never authoritative for evaluation or promotion.
+_Avoid_: Cross-model check (that is model-tier agreement at the promotion gate), judge, promotion review
+
 ## Verification and Evidence
 
 **Self-Verification**:
