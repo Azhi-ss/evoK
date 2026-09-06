@@ -50,6 +50,9 @@ import {
   normalizePrediction,
   normalizeReconcile,
   reconcilePrediction,
+  createClaimCard,
+  type ClaimCard,
+  type ClaimObjection,
   type PredictionArtifact,
   type ReconcileRecord,
 } from "./predict-reconcile";
@@ -429,6 +432,7 @@ export interface BranchState {
   agentCompleted: boolean;
   evaluatorSucceeded: boolean;
   prediction?: PredictionArtifact;
+  claimCard?: ClaimCard;
   reconcile?: ReconcileRecord;
   score?: number;
   facts?: ScoreFact[];
@@ -641,6 +645,7 @@ function deriveEvaluationReconcile(missionId: string, branchId: string, snapshot
     evaluatorId,
     independentEvaluator: gate,
     evidenceGatePassed: gate,
+    score: evaluation.score,
     reconcileId: `${missionId}:${snapshot.provenance.candidateId}:reconcile`,
     taskId: branchId,
   });
@@ -956,6 +961,18 @@ function verificationComplete(state: MissionState, branch: BranchState): boolean
   return state.verificationRoles.every((role) => branch.verification[role] === true);
 }
 
+/**
+ * T45 claim-card promotion gate, shared by emission and replay: a promotion verdict
+ * needs the finalized claim card plus evaluator evidence ids, no violated prediction,
+ * and no uncleared objections — score alone never promotes. An unknown status (no
+ * declared metrics) stays eligible for the existing policy; a violated one never does.
+ */
+function claimCardJustifiesPromotion(branch: BranchState): boolean {
+  const card = branch.claimCard;
+  return card !== undefined && card.status !== "violated" && card.evidenceGatePassed
+    && card.evidenceRefs.length > 0 && card.objections.length === 0;
+}
+
 function project(events: readonly MissionEvent[]): MissionState {
   const created = events[0];
   if (!created || created.type !== "MISSION_CREATED" || created.sequence !== 1 || !isPlainRecord(created.payload)) {
@@ -1054,7 +1071,10 @@ function project(events: readonly MissionEvent[]): MissionState {
         break;
       }
       case "CANDIDATE_MATERIALIZED":
-        if (branch && branch.status === "CANDIDATE_PROPOSED" && branch.candidateGenerated) branch.status = "MATERIALIZED";
+        if (branch && branch.status === "CANDIDATE_PROPOSED" && branch.candidateGenerated) {
+          branch.status = "MATERIALIZED";
+          if (branch.prediction) branch.claimCard = createClaimCard(branch.prediction, `${branch.branchId}:${branch.attempt}:claim`);
+        }
         break;
       case "SNAPSHOT_COMMITTED": {
         if (!branch) break;
@@ -1118,6 +1138,7 @@ function project(events: readonly MissionEvent[]): MissionState {
               || reconcile.observationRefs[0] !== `evaluator-failed:${digestValue({ candidateId: branch.snapshot.provenance.candidateId, reason: p.failureReason })}`) break;
           }
           branch.reconcile = deepFreeze(clone(reconcile));
+          branch.claimCard = deepFreeze(clone(reconcile.claim));
         } catch { break; }
         break;
       }
@@ -1148,6 +1169,23 @@ function project(events: readonly MissionEvent[]): MissionState {
         if (early ? !["VERIFYING", "SCORED"].includes(branch.status) : branch.status !== "SCORED") break;
         branch.verification[role] = p.ok;
         branch.objections = clone(p.objections);
+        // Claim-card objection write-back (T45): role objections become durable, structured
+        // ClaimObjection entries on the candidate's card so the next expansion sees them even
+        // when the branch is rejected or discarded.
+        if (branch.claimCard && validObjections(p.objections)) {
+          branch.claimCard = deepFreeze(clone({
+            ...branch.claimCard,
+            objections: [
+              ...branch.claimCard.objections,
+              ...(p.objections as string[]).map((statement, index) => ({
+                objectionId: `${branch.branchId}:${role.toLowerCase()}:${index + 1}`,
+                source: role,
+                statement,
+                evidenceRefs: [],
+              })),
+            ],
+          })) as ClaimCard;
+        }
         if (!p.ok) {
           branch.status = "REJECTED";
           branch.rejectionReason = `${role} objection`;
@@ -1217,6 +1255,9 @@ function project(events: readonly MissionEvent[]): MissionState {
           || evaluation === undefined || typeof p.evaluationRef !== "string" || p.evaluationRef.trim() === ""
           || p.evaluationRef !== evaluationDigest(evaluation)
           || !sameEvidenceIds(p.evidenceIds, evaluationEvidenceIds(evaluation, promotedSnapshot))
+          // T45: even a payload-perfect verdict cannot champion when the projected
+          // claim card is missing, violated, ungated, or carries uncleared objections.
+          || !claimCardJustifiesPromotion(branch)
           || promotedSnapshot.digest !== branch.snapshot.digest
           || p.snapshotDigest !== branch.snapshot.digest || p.contractDigest !== branch.snapshot.contractDigest
           || !isFiniteNumber(p.score) || p.score !== branch.score || !validFacts(p.facts)
@@ -2108,6 +2149,21 @@ export class ToyCompetitionHarness {
             this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: `cross-model disagreement: ${agreement.reason}` });
             return;
           }
+        }
+        // Claim-card promotion gate (T45, Co-Scientist-light ranking): shared with the replay
+        // projector via claimCardJustifiesPromotion.
+        const claimCard = this.state().branches[branchId]?.claimCard;
+        const branchState = this.state().branches[branchId]!;
+        if (!claimCardJustifiesPromotion(branchState)) {
+          this.append("BRANCH_REJECTED", {
+            branchId,
+            fencingToken,
+            reason: claimCard === undefined
+              ? "claim card required for promotion"
+              : claimCard.objections.length > 0 ? `uncleared claim objections: ${claimCard.objections.map((entry) => entry.source).join(", ")}`
+              : "claim card does not justify promotion",
+          });
+          return;
         }
         // Re-read the state: the cross-model check awaited, so a sibling
         // branch may have promoted in the meantime and promotionState above

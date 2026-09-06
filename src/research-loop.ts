@@ -1,4 +1,4 @@
-import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
+import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type ClaimObjection, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
 import { requireIdeaType } from "./idea-types";
 import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "./security-boundary";
 
@@ -116,6 +116,8 @@ export interface ResearchTaskState extends ResearchTask {
   readonly priorityScore: number;
   readonly prediction?: PredictionArtifact;
   readonly reconcile?: ReconcileRecord;
+  readonly claimCard?: ClaimCard;
+  readonly objections?: readonly ClaimObjection[];
   readonly failureReason?: string;
 }
 
@@ -128,6 +130,7 @@ export interface TaskCompletion {
   readonly candidates?: readonly ResearchCandidateRef[];
   readonly artifacts?: readonly ResearchArtifactRef[];
   readonly reconcile?: TaskReconcileInput;
+  readonly objections?: readonly ClaimObjection[];
 }
 
 export interface TaskFailure {
@@ -137,6 +140,7 @@ export interface TaskFailure {
   readonly evidence?: readonly EvidenceRecord[];
   readonly negativeEvidence?: readonly NegativeEvidence[];
   readonly reconcile?: TaskReconcileInput;
+  readonly objections?: readonly ClaimObjection[];
 }
 
 export interface ResearchBudgetState {
@@ -1267,6 +1271,8 @@ function taskState(state: MutableResearchState, task: MutableTaskState): Researc
     priorityScore: priorityScore(state, task),
     ...(task.prediction === undefined ? {} : { prediction: clone(task.prediction) }),
     ...(task.reconcile === undefined ? {} : { reconcile: clone(task.reconcile) }),
+    ...(task.reconcile?.claim === undefined ? {} : { claimCard: clone(task.reconcile.claim) }),
+    ...(task.reconcile?.objections === undefined ? {} : { objections: clone(task.reconcile.objections) }),
     ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
   }) as ResearchTaskState;
 }
@@ -1815,7 +1821,7 @@ export class MissionDirector {
     if (reconcileInput === undefined) throw new Error(`task completion requires reconciliation: ${taskId}`);
     // Validate the whole completion (reconcile, refs, evidence gate) before the first ledger write so a
     // rejected completion cannot leave a half-applied TASK_COMPLETED behind.
-    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: task.prediction.predictionId }, task.prediction);
+    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: task.prediction.predictionId, ...(completion.objections === undefined ? {} : { objections: completion.objections }) }, task.prediction);
     requireReconcileRefs(
       memory,
       reconcile,
@@ -1853,7 +1859,7 @@ export class MissionDirector {
     const defaultReconcile = defaultFailureReconcile(taskId, evidence.map((record) => record.id), []);
     const reconcileInput = failure.reconcile ?? defaultReconcile;
     // Validate the whole failure (reconcile and its refs) before the first ledger write.
-    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: predictionFor(task)!.predictionId }, predictionFor(task)!);
+    const reconcile = normalizeReconcile({ ...reconcileInput, reconcileId: reconcileInput.reconcileId ?? `${taskId}:reconcile`, taskId, predictionId: predictionFor(task)!.predictionId, ...(failure.objections === undefined ? {} : { objections: failure.objections }) }, predictionFor(task)!);
     const memory = new EvidenceMemory({
       evidence: state.memory.records(),
       findings: state.memory.findings(),

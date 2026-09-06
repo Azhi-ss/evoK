@@ -4,7 +4,8 @@ import {
   type ResearchEvent,
   type ResearchTask,
   type TaskCompletion,
-} from "./research-loop";import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+} from "./research-loop";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
 
 // Signed independent-evaluator proof bound to the registered "artifact-1" digest; missions register only
 // the evaluator's public key, so completions cannot forge the gate.
@@ -299,5 +300,91 @@ describe("long-running research loop", () => {
       ],
     });
     expect(director.selectNextTask()?.taskId).toBe("search-1");
+  });
+});
+
+describe("claim-card write-back (#38)", () => {
+  const objections = [
+    { objectionId: "falsifier-1", source: "Falsifier", statement: "counterexample at x=0", evidenceRefs: [] },
+  ] as const;
+
+  test("persists claim objections onto the finalized card as repair", () => {
+    const director = new MissionDirector({ missionId: "claim-obj", objective: "learn", budget: 5, tasks, trustedEvaluators: trusted });
+    director.selectNextTask();
+    director.completeTask("baseline", { ...completion(), objections });
+
+    const card = director.state().tasks["baseline"]?.claimCard;
+    expect(card?.objections).toEqual(objections);
+    expect(card?.next).toBe("repair");
+    expect(director.state().tasks["baseline"]?.objections).toEqual(objections);
+  });
+
+  test("a refuted gate-backed reconcile marks the card violated and discard", () => {
+    const refutedPrediction = {
+      predictionId: "refuted-prediction",
+      hypothesis: "the better split improves score",
+      expectedObservation: "score improves",
+      expectedMetrics: [{ name: "score", min: 0.8 }],
+      failureModes: ["score regresses"],
+    } as const;
+    const director = new MissionDirector({
+      missionId: "claim-refuted", objective: "learn", budget: 1,
+      tasks: [{ taskId: "refuted", objective: "test the split", estimatedCost: 1, prediction: refutedPrediction }],
+      trustedEvaluators: trusted,
+    });
+    director.selectNextTask();
+    const proof = { evaluatorId: "independent-evaluator", snapshotDigest: "artifact-digest", facts: { score: 0.4 } };
+    const evalDigest = digestValue(proof);
+    director.completeTask("refuted", {
+      operationId: "refuted-completion",
+      evidence: [{
+        id: "observation", kind: "observation", summary: "score was 0.4", verified: true,
+        metadata: { evaluation: proof, evaluationDigest: evalDigest, signature: signEvaluationDigest(evalDigest, evaluatorKeys.privateKey) },
+      }],
+      artifacts: [{ artifactId: "artifact-1", digest: "artifact-digest" }],
+      reconcile: {
+        status: "refuted", observationRefs: ["observation"], artifactRefs: ["artifact-1"], evidenceRefs: ["observation"],
+        evaluatorId: "independent-evaluator", independentEvaluator: true, evidenceGatePassed: true,
+      },
+      objections,
+    });
+
+    const card = director.state().tasks["refuted"]?.claimCard;
+    expect(card?.status).toBe("violated");
+    expect(card?.next).toBe("discard");
+    expect(card?.objections).toEqual(objections);
+  });
+
+  test("restart preserves the claim card and objections exactly once", () => {
+    const options = { missionId: "claim-restart", objective: "learn", budget: 5, tasks, trustedEvaluators: trusted } as const;
+    const director = new MissionDirector(options);
+    director.selectNextTask();
+    director.completeTask("baseline", { ...completion(), objections });
+    const original = director.state().tasks["baseline"]?.claimCard;
+    const events = director.events();
+
+    const restarted = MissionDirector.fromEvents(options, events);
+    expect(restarted.state().tasks["baseline"]?.claimCard).toEqual(original);
+    expect(restarted.state().tasks["baseline"]?.objections).toEqual(objections);
+    restarted.completeTask("baseline", { ...completion(), objections });
+    expect(restarted.events()).toHaveLength(events.length);
+  });
+
+  test("generated-task planning can read the source claim card objections", () => {
+    const director = new MissionDirector({ missionId: "claim-gen", objective: "improve the result", budget: 10, tasks, trustedEvaluators: trusted });
+    director.selectNextTask();
+    director.completeTask("baseline", { ...completion(), objections });
+
+    const generated = director.generateTasks({
+      sourceTaskId: "baseline",
+      evidenceRefs: ["finding-1", "negative-1"],
+      tasks: [{ taskId: "generated-task", objective: "test the revised method", dependencies: ["baseline"], estimatedCost: 2, prediction: {
+        predictionId: "generated-prediction", hypothesis: "the revised method works", expectedObservation: "the evaluator confirms", failureModes: ["evaluation fails"],
+      } }],
+      operationId: "gen-1",
+    });
+
+    expect(generated.map((task) => task.taskId)).toEqual(["generated-task"]);
+    expect(director.state().tasks["baseline"]?.claimCard?.objections).toEqual(objections);
   });
 });

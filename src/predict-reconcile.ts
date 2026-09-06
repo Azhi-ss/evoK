@@ -19,8 +19,34 @@ export interface PredictionArtifact {
   readonly failureModes: readonly string[];
 }
 
+export type ClaimStatus = "confirmed" | "violated" | "unknown";
+export type ClaimNext = "refine" | "repair" | "discard" | "promote-eligible";
+
+/** Structured, durable critique attached to a Claim card and written back to the next search step. */
+export interface ClaimObjection {
+  readonly objectionId: string;
+  readonly source: string;
+  readonly statement: string;
+  readonly evidenceRefs: readonly string[];
+}
+
+/**
+ * The durable card every candidate/hypothesis is finalized on (Co-Scientist-light, #38):
+ * an explicit claim, its prediction, the reconciled verdict, the evaluated score with
+ * evidence refs, and any objections written back by the Falsifier/Critic/Challenger/
+ * Auditor roles. `next` is the derived disposition: refine / repair / discard /
+ * promote-eligible — ranking and promotion consume it instead of score alone.
+ */
 export interface ClaimCard {
   readonly claimId: string;
+  /** The one testable sentence under evaluation. */
+  readonly claim: string;
+  readonly prediction: PredictionArtifact;
+  readonly status: ClaimStatus;
+  readonly score?: number;
+  readonly objections: readonly ClaimObjection[];
+  readonly next: ClaimNext;
+  /** Compatibility aliases retained for the predict→reconcile contract (#12). */
   readonly hypothesis: string;
   readonly expectedObservation: string;
   readonly expectedObservations: readonly string[];
@@ -44,6 +70,9 @@ export interface ReconcileInput {
   readonly evaluatorId?: string;
   readonly independentEvaluator?: boolean;
   readonly evidenceGatePassed?: boolean;
+  readonly score?: number;
+  readonly objections?: readonly ClaimObjection[];
+  readonly claim?: ClaimCard;
 }
 
 export interface ReconcileRecord {
@@ -57,6 +86,8 @@ export interface ReconcileRecord {
   readonly evaluatorId?: string;
   readonly independentEvaluator: boolean;
   readonly evidenceGatePassed: boolean;
+  readonly score?: number;
+  readonly objections?: readonly ClaimObjection[];
   readonly claim: ClaimCard;
 }
 
@@ -133,38 +164,107 @@ function normalizeRefs(name: string, value: unknown): readonly string[] {
   return Object.freeze(strings(name, value));
 }
 
+function claimStatus(status: ReconcileStatus): ClaimStatus {
+  return status === "refuted" ? "violated" : status === "inconclusive" ? "unknown" : "confirmed";
+}
+
+function reconcileStatusOf(value: unknown): ReconcileStatus | undefined {
+  return value === "confirmed" ? "confirmed" : value === "violated" ? "refuted" : value === "unknown" ? "inconclusive" : undefined;
+}
+
+function normalizeObjections(value: unknown): ClaimObjection[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new TypeError("claim objections must be an array");
+  const ids = new Set<string>();
+  return value.map((entry, index) => {
+    if (!record(entry)) throw new TypeError(`claim objection ${index} must be an ordinary object`);
+    nonEmpty(`claim objection ${index} id`, entry.objectionId);
+    nonEmpty(`claim objection ${index} source`, entry.source);
+    nonEmpty(`claim objection ${index} statement`, entry.statement);
+    const evidenceRefs = strings(`claim objection ${index} evidenceRefs`, entry.evidenceRefs);
+    if (ids.has(entry.objectionId)) throw new Error(`claim objection ids must be unique: ${entry.objectionId}`);
+    ids.add(entry.objectionId);
+    return Object.freeze({ objectionId: entry.objectionId, source: entry.source, statement: entry.statement, evidenceRefs: Object.freeze(evidenceRefs) });
+  });
+}
+
+function claimNext(status: ReconcileStatus, objections: readonly ClaimObjection[], evidenceGatePassed: boolean): ClaimNext {
+  if (objections.length > 0) return status === "refuted" ? "discard" : "repair";
+  if (status === "refuted") return "discard";
+  return status === "confirmed" && evidenceGatePassed ? "promote-eligible" : "refine";
+}
+
+/** A card starts with an explicit hypothesis/prediction, never a synthetic prediction. */
+export function createClaimCard(prediction: PredictionArtifact, claimId: string): ClaimCard {
+  const normalized = normalizePrediction(prediction);
+  return normalizeClaimCard({
+    claimId,
+    claim: normalized.hypothesis,
+    predictionId: normalized.predictionId,
+    hypothesis: normalized.hypothesis,
+    expectedObservation: normalized.expectedObservation,
+    reconcileStatus: "inconclusive",
+    evidenceRefs: [],
+    observationRefs: [],
+    artifactRefs: [],
+    evidenceGatePassed: false,
+  }, normalized);
+}
+
 export function normalizeClaimCard(value: unknown, prediction: PredictionArtifact): ClaimCard {
   if (!record(value)) throw new TypeError("claim card must be an ordinary object");
-  if (value.predictionId !== prediction.predictionId || value.hypothesis !== prediction.hypothesis
-    || value.expectedObservation !== prediction.expectedObservation || value.reconcileStatus !== "confirmed" && value.reconcileStatus !== "refuted" && value.reconcileStatus !== "inconclusive"
-    || !Array.isArray(value.evidenceRefs) || !Array.isArray(value.observationRefs) || !Array.isArray(value.artifactRefs)
-    || typeof value.evidenceGatePassed !== "boolean") throw new Error("claim card does not match prediction");
+  const normalizedPrediction = normalizePrediction(prediction);
+  const claim = value.claim ?? normalizedPrediction.hypothesis;
+  const hypothesis = value.hypothesis ?? claim;
+  const expectedObservation = value.expectedObservation ?? normalizedPrediction.expectedObservation;
+  const reconcileStatus = value.reconcileStatus ?? reconcileStatusOf(value.status);
+  if (value.reconcileStatus !== undefined && value.status !== undefined
+    && reconcileStatusOf(value.status) !== undefined && reconcileStatusOf(value.status) !== value.reconcileStatus) {
+    throw new Error("claim card status conflicts with its reconcile status");
+  }
+  if (claim !== normalizedPrediction.hypothesis || hypothesis !== normalizedPrediction.hypothesis
+    || expectedObservation !== normalizedPrediction.expectedObservation
+    || value.predictionId !== undefined && value.predictionId !== normalizedPrediction.predictionId
+    || (reconcileStatus !== "confirmed" && reconcileStatus !== "refuted" && reconcileStatus !== "inconclusive")) {
+    throw new Error("claim card does not match prediction");
+  }
   nonEmpty("claimId", value.claimId);
   const evidenceRefs = normalizeRefs("claim evidenceRefs", value.evidenceRefs);
   const observationRefs = normalizeRefs("claim observationRefs", value.observationRefs);
   const artifactRefs = normalizeRefs("claim artifactRefs", value.artifactRefs);
-  if (value.evidenceGatePassed && (typeof value.evaluatorId !== "string" || value.evaluatorId.trim() === "" || evidenceRefs.length === 0 || observationRefs.length + artifactRefs.length === 0)) {
+  const objections = Object.freeze(normalizeObjections(value.objections));
+  const evidenceGatePassed = value.evidenceGatePassed ?? false;
+  if (typeof evidenceGatePassed !== "boolean") throw new TypeError("claim evidence gate must be boolean");
+  if (evidenceGatePassed && (typeof value.evaluatorId !== "string" || value.evaluatorId.trim() === "" || evidenceRefs.length === 0 || observationRefs.length + artifactRefs.length === 0)) {
     throw new Error("claim evidence gate requires independent evaluator evidence");
   }
+  if (value.score !== undefined && (typeof value.score !== "number" || !Number.isFinite(value.score))) throw new RangeError("claim score must be finite");
   return deepFreeze({
     claimId: value.claimId,
-    hypothesis: prediction.hypothesis,
-    expectedObservation: prediction.expectedObservation,
-    expectedObservations: expectedObservations(prediction),
-    expectedMetrics: prediction.expectedMetrics ?? [],
-    reconcileStatus: value.reconcileStatus,
+    claim: normalizedPrediction.hypothesis,
+    prediction: normalizedPrediction,
+    status: claimStatus(reconcileStatus),
+    ...(value.score === undefined ? {} : { score: value.score as number }),
+    objections,
+    next: claimNext(reconcileStatus, objections, evidenceGatePassed),
+    hypothesis: normalizedPrediction.hypothesis,
+    expectedObservation: normalizedPrediction.expectedObservation,
+    expectedObservations: expectedObservations(normalizedPrediction),
+    expectedMetrics: normalizedPrediction.expectedMetrics ?? [],
+    reconcileStatus,
     evidenceRefs,
     observationRefs,
     artifactRefs,
-    predictionId: prediction.predictionId,
+    predictionId: normalizedPrediction.predictionId,
     ...(value.evaluatorId === undefined ? {} : { evaluatorId: value.evaluatorId as string }),
-    evidenceGatePassed: value.evidenceGatePassed,
+    evidenceGatePassed,
   });
 }
 
 export function normalizeReconcile(value: unknown, prediction: PredictionArtifact): ReconcileRecord {
   if (!record(value)) throw new TypeError("reconcile record must be an ordinary object");
   nonEmpty("reconcileId", value.reconcileId);
+  if (value.taskId !== undefined) nonEmpty("reconcile taskId", value.taskId);
   if (value.predictionId !== prediction.predictionId) throw new Error("reconcile prediction mismatch");
   if (value.status !== "confirmed" && value.status !== "refuted" && value.status !== "inconclusive") throw new RangeError("unknown reconcile status");
   const observationRefs = normalizeRefs("observationRefs", value.observationRefs);
@@ -184,8 +284,17 @@ export function normalizeReconcile(value: unknown, prediction: PredictionArtifac
     || observationRefs.length + artifactRefs.length === 0)) {
     throw new Error("reconcile gate requires independent evaluator evidence");
   }
+  const score = value.score;
+  if (score !== undefined && (typeof score !== "number" || !Number.isFinite(score))) throw new RangeError("reconcile score must be finite");
+  const objections = normalizeObjections(value.objections);
   const claim: ClaimCard = {
     claimId: `${value.reconcileId}:claim`,
+    claim: prediction.hypothesis,
+    prediction,
+    status: claimStatus(value.status),
+    ...(score === undefined ? {} : { score }),
+    objections,
+    next: claimNext(value.status, objections, value.evidenceGatePassed),
     hypothesis: prediction.hypothesis,
     expectedObservation: prediction.expectedObservation,
     expectedObservations: expectedObservations(prediction),
@@ -198,7 +307,10 @@ export function normalizeReconcile(value: unknown, prediction: PredictionArtifac
     ...(value.evaluatorId === undefined ? {} : { evaluatorId: value.evaluatorId }),
     evidenceGatePassed: value.evidenceGatePassed,
   };
-  if (value.claim !== undefined && digestValue(value.claim) !== digestValue(claim)) throw new Error("claim card does not match reconcile");
+  if (value.claim !== undefined) {
+    const supplied = normalizeClaimCard(value.claim, prediction);
+    if (digestValue(supplied) !== digestValue(claim)) throw new Error("claim card does not match reconcile");
+  }
   return deepFreeze({
     reconcileId: value.reconcileId,
     ...(value.taskId === undefined ? {} : { taskId: value.taskId as string }),
@@ -210,6 +322,8 @@ export function normalizeReconcile(value: unknown, prediction: PredictionArtifac
     ...(value.evaluatorId === undefined ? {} : { evaluatorId: value.evaluatorId }),
     independentEvaluator,
     evidenceGatePassed: value.evidenceGatePassed,
+    ...(score === undefined ? {} : { score }),
+    ...(objections.length === 0 ? {} : { objections: Object.freeze(objections) }),
     claim,
   });
 }
@@ -243,6 +357,9 @@ export function reconcilePrediction(input: {
   readonly evaluatorId?: string;
   readonly independentEvaluator?: boolean;
   readonly evidenceGatePassed?: boolean;
+  readonly score?: number;
+  readonly objections?: readonly ClaimObjection[];
+  readonly claim?: ClaimCard;
   readonly reconcileId?: string;
   readonly taskId?: string;
 }): ReconcileRecord {
@@ -260,6 +377,9 @@ export function reconcilePrediction(input: {
     taskId: input.taskId,
     predictionId: prediction.predictionId,
     status: deriveReconcileStatus(prediction, observations, input.observationsComplete),
+    score: input.score,
+    objections: input.objections,
+    claim: input.claim,
     observationRefs,
     artifactRefs,
     evidenceRefs: input.evidenceRefs ?? [],

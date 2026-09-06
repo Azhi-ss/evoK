@@ -21,6 +21,87 @@ function runtimeFor(score: string): ToyAgentRuntime {
 }
 
 describe("prediction gate and trusted reconcile seam", () => {
+  test("finalizes a candidate with a Claim card and three-way reconciliation status", async () => {
+    const cases = [
+      { score: "0.9", expectedMetrics: [{ name: "score", min: 0.8 }], status: "confirmed" },
+      { score: "0.4", expectedMetrics: [{ name: "score", min: 0.8 }], status: "violated" },
+      { score: "0.9", expectedMetrics: undefined, status: "unknown" },
+    ] as const;
+    for (const entry of cases) {
+      const harness = new ToyCompetitionHarness({
+        missionId: `claim-${entry.status}`,
+        taskContract: contract,
+        branchIds: ["a"],
+        runtime: runtimeFor(entry.score),
+        prediction: { ...prediction, expectedMetrics: entry.expectedMetrics },
+        evaluate: () => ({ score: Number(entry.score) }),
+        policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+      });
+      const result = await harness.run();
+      expect(result.branches.a.claimCard).toMatchObject({
+        claim: prediction.hypothesis,
+        prediction: { predictionId: prediction.predictionId },
+        status: entry.status,
+        score: Number(entry.score),
+        objections: [],
+      });
+      expect(result.branches.a.claimCard?.evidenceRefs.length).toBeGreaterThan(0);
+      expect(ToyCompetitionHarness.replay(harness.events()).branches.a.claimCard).toEqual(result.branches.a.claimCard);
+    }
+  });
+
+  test("uncleared claim objections block promotion and a forged verdict cannot champion them away", async () => {
+    const runtime: ToyAgentRuntime = {
+      selfVerify: () => ({ ok: true }),
+      propose: () => ({ files: { score: "0.9" } }),
+      falsify: () => ({ ok: true, objections: ["fails on the cold-start edge case"] }),
+    };
+    const harness = new ToyCompetitionHarness({
+      missionId: "objection-gate",
+      taskContract: contract,
+      branchIds: ["a"],
+      runtime,
+      prediction,
+      evaluate: () => ({ score: 0.9 }),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+    });
+    const result = await harness.run();
+    // Emission seam: a role that passes but raises objections leaves them uncleared on the card,
+    // so the claim-card gate rejects the promotion regardless of score.
+    expect(result.champion).toBeUndefined();
+    expect(result.branches.a.status).toBe("REJECTED");
+    expect(result.branches.a.rejectionReason).toContain("uncleared claim objections");
+    expect(result.branches.a.claimCard?.objections[0]).toMatchObject({
+      source: "Falsifier",
+      statement: "fails on the cold-start edge case",
+    });
+    // Replay seam: splice a payload-perfect PROMOTED_LOCAL after the Falsifier has verified the
+    // snapshot (so every other projector check passes); only the claim-card gate, which sees the
+    // uncleared Falsifier objection on the card, may refuse the champion.
+    const source = harness.events().filter((event) =>
+      !["PROMOTED_LOCAL", "BRANCH_REJECTED", "MISSION_STOPPED", "MISSION_COMPLETED", "EDGE_TRAVERSED"].includes(event.type));
+    const evaluatorEvent = source.find((event) => event.type === "EVALUATOR_SUCCEEDED")!;
+    const branch = harness.state().branches.a;
+    const forged = {
+      type: "PROMOTED_LOCAL" as const,
+      payload: {
+        branchId: "a",
+        fencingToken: branch.fencingToken,
+        snapshot: branch.snapshot,
+        snapshotDigest: branch.snapshot!.digest,
+        contractDigest: branch.snapshot!.contractDigest,
+        score: branch.score,
+        facts: branch.facts,
+        evaluationRef: evaluatorEvent.payload.evaluationDigest,
+        evidenceIds: evaluatorEvent.payload.evidenceIds,
+      },
+    };
+    const verificationIndex = source.findIndex((event) => event.type === "FALSIFIER_COMPLETED");
+    const spliced = [...source.slice(0, verificationIndex + 1), forged, ...source.slice(verificationIndex + 1)]
+      .map((event, index) => ({ ...event, sequence: index + 1 }));
+    expect(ToyCompetitionHarness.replay(spliced as MissionEvent[]).champion).toBeUndefined();
+  });
+
   test("blocks expensive execution without an explicit prediction", async () => {
     let evaluations = 0;
     const harness = new ToyCompetitionHarness({

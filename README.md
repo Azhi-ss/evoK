@@ -26,3 +26,20 @@ The Orchestra config (RunPolicy) only **binds tiers to model ids already registe
 - Orchestra only picks model tiers — it never schedules tasks, spends budget, or changes the mission objective.
 - `promotion_cross_model: "both"` schedules two tiered evaluation attempts (one fast, one deep ModelConfig) at the promotion gate. Disagreement denies promotion with the runtime's explicit reason; agreement only keeps the candidate eligible for the existing promotion policy — it never auto-promotes and never auto-submits. The Orchestra supplies the two ModelConfigs; the promotion policy and SubmissionBroker keep their authority.
 - Cross-model agreement is **model-level independence only**: it is not a sandbox/trust verdict (#7) and does not replace the evaluation noise protocol (#11). Those gates stay separate — a candidate can agree across models and still fail trust verification or noise policy.
+
+## Claim-card research loop (Co-Scientist-light)
+
+Steals the **orchestration clarity** of Google Co-Scientist — Generation → Reflection → Ranking/Tournament → Evolution — not its literature/AI-scientist product thickness. The loop turns every candidate/hypothesis into a durable **Claim card** and forces **objection write-back** into the next search step.
+
+- Every candidate/hypothesis carries a **Claim card**: `claim` (one testable sentence) / `prediction` / `status` (`confirmed` / `violated` / `unknown`) / `score` + evidence refs / `objections` / `next` (`refine` / `repair` / `discard` / `promote-eligible`).
+- Reflection/Falsifier/Critic/Challenger/Auditor outputs are persisted as structured **objections** and written back onto the card, so the next expansion or Director step reads them — never discarded with the failed candidate.
+- **Ranking/promotion consumes gates + uncleared objections + evidence refs, never score alone**: a promotion verdict is refused when the card is missing, `violated`, ungated, or carries uncleared objections.
+
+Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/toy-harness.ts` (branch `claimCard` + promotion gate), `src/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
+
+### Non-goals
+
+- Full literature Co-Scientist / web research engine
+- Normative logic / formal claim calculus
+- Lean / theorem proving
+- EviGraph / paper Chain-of-Evidence product suite

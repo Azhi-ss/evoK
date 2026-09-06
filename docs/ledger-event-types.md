@@ -69,6 +69,16 @@ Event types: `MISSION_CREATED`, `MISSION_STARTED`, `BRANCH_RESERVED`, `TASK_SELE
 evaluation digest, per-run digests, per-fact observation refs) and is itself
 content-addressed by `evaluationDigest`.
 
+### Claim cards ride `RECONCILED` (no new event type)
+
+The Co-Scientist-light Claim card (#38) is a projection, not a new ledger event type.
+`RECONCILED` (Evidence) carries the predict→reconcile verdict; the branch/task projector
+attaches the derived `ClaimCard` to the candidate, and Falsifier/Critic/Challenger/Auditor
+objections are written back onto that card from their `*_COMPLETED` Evidence events.
+Evaluation-kind promotion verdicts must still cite Evidence ids, and are refused when the
+claim card is missing, `violated`, ungated, or carries uncleared objections — score alone
+never promotes.
+
 ### Evaluation — verdicts over Evidence ids
 
 Verdicts (promotion / reject / quarantine / stop / fan-in decisions). They must cite
