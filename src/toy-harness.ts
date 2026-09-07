@@ -23,8 +23,10 @@ import { requireIdeaType } from "./idea-types";
 import type { HumanAcceptanceDecision } from "./security-boundary";
 import {
   SubmissionBroker,
+  externalSubmissionsFromEvents,
   type SubmissionBrokerOptions,
   type SubmissionChampion,
+  type SubmissionEventLike,
 } from "./submission-broker";
 import {
   aggregateEvaluationFacts,
@@ -154,6 +156,8 @@ export interface TaskContract {
 export interface MissionBudget {
   maxCandidates?: number;
   maxAttempts?: number;
+  /** T42: total real (external) submissions allowed for the mission; dry-runs are free. */
+  submissionQuota?: number;
   [key: string]: number | undefined;
 }
 
@@ -572,6 +576,10 @@ export interface MissionState {
   validationLadder?: Readonly<ValidationLadderContract>;
   /** Number of Public LB probes already consumed (projected from the ledger). */
   publicProbesUsed?: number;
+  /** T42: number of external submissions already spent against submissionQuota (projected from the ledger). */
+  submissionQuotaUsed?: number;
+  /** T42: remaining external submissions allowed; undefined when the mission budgets no quota. */
+  submissionQuotaRemaining?: number;
   evaluationControlSnapshotDigest?: string;
   gainBank?: readonly GainBankEntry[];
   branches: Record<string, BranchState>;
@@ -1459,6 +1467,11 @@ function project(events: readonly MissionEvent[]): MissionState {
   }
   // T41: spent Public LB probes are projected from evaluator-succeeded events.
   state.publicProbesUsed = publicProbesUsedFromEvents(events as readonly ValidationEventLike[]);
+  // T42: spent submission quota and remaining balance are projected from external SUBMISSION_RESULT events.
+  state.submissionQuotaUsed = externalSubmissionsFromEvents(events as readonly SubmissionEventLike[]);
+  const quotaLimit = state.budget.submissionQuota;
+  state.submissionQuotaRemaining = typeof quotaLimit === "number"
+    ? Math.max(0, quotaLimit - state.submissionQuotaUsed) : undefined;
   return state;
 }
 
@@ -2067,6 +2080,10 @@ export class ToyCompetitionHarness {
     };
     return new SubmissionBroker({
       ...options,
+      // T42: default the quota to the mission budget dimension when the caller
+      // did not set one explicitly; the gain threshold stays caller-configured.
+      ...(options.submissionQuota === undefined && this.effectiveBudget.submissionQuota !== undefined
+        ? { submissionQuota: this.effectiveBudget.submissionQuota } : {}),
       secrets: [...(this.options.secrets ?? []), ...(options.secrets ?? [])],
       ledger,
       championProvider: (requestedMissionId): SubmissionChampion | undefined => {
@@ -2105,6 +2122,7 @@ export class ToyCompetitionHarness {
           artifactDigest: artifact.digest,
           artifact,
           snapshot: champion.snapshot,
+          score: champion.score,
           evaluatorSucceeded: branch.evaluatorSucceeded,
           successAuditorPassed: branch.verification.SuccessAuditor === true,
           promotionApproved: branch.status === "PROMOTED_LOCAL",

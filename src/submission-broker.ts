@@ -27,6 +27,8 @@ export type SubmissionRejectionCode =
   | "human-acceptance-expired"
   | "approval-mismatch"
   | "rate-limit-exceeded"
+  | "submission-quota-exhausted"
+  | "gain-below-threshold"
   | "destination-unavailable"
   | "request-not-found"
   | "request-id-conflict"
@@ -57,6 +59,8 @@ export interface SubmissionChampion {
   readonly missionId: string;
   readonly competition?: string;
   readonly branchId: string;
+  /** Evaluator-owned score of the champion; required for gain-threshold checks. */
+  readonly score?: number;
   readonly championDigest?: string;
   /** Alias accepted for adapters that call the champion identity simply `digest`. */
   readonly digest?: string;
@@ -217,6 +221,43 @@ export interface SubmissionRateLimit {
   readonly windowMs: number;
 }
 
+/**
+ * First-class external-submission budget (T42). Total real submissions ever
+ * spent from the mission quota; dry-runs never consume it. A balance is
+ * projected from the ledger so a restarted broker keeps the same quota.
+ */
+export interface SubmissionQuotaBalance {
+  readonly limit: number | undefined;
+  readonly used: number;
+  /** Undefined when no quota limit is configured. */
+  readonly remaining?: number;
+}
+
+/** Minimal ledger event shape used to count spent quota (structural projection). */
+export interface SubmissionEventLike {
+  readonly type: string;
+  readonly payload?: Readonly<Record<string, unknown>>;
+}
+
+/** External SUBMISSION_RESULT events (SUCCEEDED or FAILED) consume real quota; dry-runs do not. */
+export function externalSubmissionsFromEvents(events: readonly SubmissionEventLike[]): number {
+  return events.reduce((count, event) => {
+    if (event.type !== "SUBMISSION_RESULT") return count;
+    return event.payload?.mode === "external" ? count + 1 : count;
+  }, 0);
+}
+
+/** Score of the last SUCCESSFULLY submitted champion; the gain baseline for the next real submission. */
+export function submissionGainBaselineFromEvents(events: readonly SubmissionEventLike[]): number | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "SUBMISSION_RESULT" || event.payload?.mode !== "external" || event.payload?.status !== "SUCCEEDED") continue;
+    const score = event.payload?.championScore;
+    if (typeof score === "number" && Number.isFinite(score)) return score;
+  }
+  return undefined;
+}
+
 export interface SubmissionBrokerOptions {
   readonly allowedCompetitions?: readonly string[];
   readonly competitionAllowlist?: readonly string[];
@@ -229,6 +270,19 @@ export interface SubmissionBrokerOptions {
   readonly artifactDigestAllowlist?: SubmissionAllowlist;
   readonly defaultCredentialScopes?: readonly string[];
   readonly rateLimit?: SubmissionRateLimit;
+  /**
+   * Total external submissions the mission quota allows (submission_quota
+   * budget dimension). undefined = unlimited. Every external result
+   * (SUCCEEDED/FAILED) consumes one; dry-runs never do.
+   */
+  readonly submissionQuota?: number;
+  /**
+   * Minimum evaluator-score gain over the last SUCCESSFULLY submitted champion
+   * required to spend another real submission. undefined/0 = gain not gated.
+   * Every submitted champion must carry an evaluator score; the first
+   * successful submission establishes the baseline.
+   */
+  readonly gainThreshold?: number;
   readonly destination?: SubmissionDestination | SubmissionDestinationHandler;
   readonly ledger?: SubmissionEventSink;
   /** Required authoritative harness source; request champion data is only a digest assertion. */
@@ -531,6 +585,10 @@ export class SubmissionBroker {
   private readonly defaultCredentialScopes: readonly string[];
   private readonly maxSubmissions: number;
   private readonly rateWindowMs: number;
+  /** External submission budget; undefined = unlimited. */
+  private readonly submissionQuota?: number;
+  /** Minimum score gain over the last submitted champion; undefined = gain not gated. */
+  private readonly gainThreshold?: number;
   private readonly destination?: SubmissionDestination | SubmissionDestinationHandler;
   private readonly championProvider?: (missionId: string) => SubmissionChampion | undefined;
   private readonly clock: () => number;
@@ -544,6 +602,12 @@ export class SubmissionBroker {
   private readonly results = new Map<string, SubmissionResult>();
   private readonly submissionTimes: number[] = [];
   private readonly inFlight = new Set<string>();
+  /**
+   * T42: external submissions whose quota was synchronously reserved before the
+   * (async) destination call — prevents concurrent submits from overspending.
+   * Released once the result is recorded (the ledger then counts them).
+   */
+  private readonly quotaReserved = new Set<string>();
   private nextRequest = 1;
 
   constructor(options: SubmissionBrokerOptions) {
@@ -567,6 +631,15 @@ export class SubmissionBroker {
     finiteNumber("rateLimit.windowMs", rate.windowMs, 1);
     this.maxSubmissions = max;
     this.rateWindowMs = rate.windowMs;
+    if (options.submissionQuota !== undefined) {
+      finiteNumber("submissionQuota", options.submissionQuota, 0);
+      if (!Number.isSafeInteger(options.submissionQuota)) throw new RangeError("submissionQuota must be a safe integer");
+      this.submissionQuota = options.submissionQuota;
+    }
+    if (options.gainThreshold !== undefined) {
+      finiteNumber("gainThreshold", options.gainThreshold, 0);
+      this.gainThreshold = options.gainThreshold;
+    }
     this.destination = options.destination;
     const configuredChampion = options.champion ?? options.localChampion;
     if (configuredChampion !== undefined) {
@@ -1184,6 +1257,44 @@ export class SubmissionBroker {
     while (this.submissionTimes.length > 0 && this.submissionTimes[0]! <= first) this.submissionTimes.shift();
   }
 
+  /** Observable submission-quota balance, projected from the ledger plus synchronous reservations (T42). */
+  quotaBalance(): SubmissionQuotaBalance {
+    const used = externalSubmissionsFromEvents(this.ledger.events?.() ?? []) + this.quotaReserved.size;
+    return {
+      limit: this.submissionQuota,
+      used,
+      ...(this.submissionQuota === undefined ? {} : { remaining: Math.max(0, this.submissionQuota - used) }),
+    };
+  }
+
+  /**
+   * T42 budget gates for a real (non-dry-run) submission, enforced in addition
+   * to the human-acceptance gate. Refusal writes a reason code to the ledger and
+   * performs no external side effect and no quota consumption.
+   */
+  private validateSubmissionBudget(champion: SubmissionChampion, requestId: string): void {
+    if (this.submissionQuota !== undefined) {
+      const { used, remaining } = this.quotaBalance();
+      if ((remaining ?? Infinity) <= 0) {
+        this.reject("submission-quota-exhausted", `submission quota exhausted: ${this.submissionQuota} allowed, ${used} already spent or reserved`, requestId);
+      }
+    }
+    if (this.gainThreshold !== undefined && this.gainThreshold > 0) {
+      const score = champion.score;
+      if (typeof score !== "number" || !Number.isFinite(score)) {
+        this.reject("gain-below-threshold", "champion has no evaluator score; gain threshold cannot be evaluated", requestId);
+      }
+      const baseline = submissionGainBaselineFromEvents(this.ledger.events?.() ?? []);
+      if (baseline !== undefined && score - baseline < this.gainThreshold) {
+        this.reject("gain-below-threshold", `champion gain ${score - baseline} is below the required gain threshold ${this.gainThreshold}`, requestId, {
+          championScore: score,
+          baselineScore: baseline,
+          gainThreshold: this.gainThreshold,
+        });
+      }
+    }
+  }
+
   private reserveRate(now: number, requestId: string): void {
     this.pruneRate(now);
     if (this.submissionTimes.length >= this.maxSubmissions) {
@@ -1347,6 +1458,12 @@ export class SubmissionBroker {
     request.status = result.status === "DRY_RUN" ? "DRY_RUN" : result.status;
     this.append("SUBMISSION_RESULT", {
       requestId: result.requestId, mode: result.mode, status: result.status, submittedAt: result.submittedAt,
+      // T42: the successfully submitted champion's evaluator score is the gain
+      // baseline for the next real submission (FAILED attempts consumed quota
+      // but never established a baseline — that champion was not submitted).
+      ...(result.mode === "external" && result.status === "SUCCEEDED"
+        && typeof request.champion?.score === "number" && Number.isFinite(request.champion.score)
+        ? { championScore: request.champion.score } : {}),
       ...(result.submissionId === undefined ? {} : { submissionId: result.submissionId }),
       ...(result.response === undefined ? {} : { response: result.response }),
     }, credential);
@@ -1397,6 +1514,7 @@ export class SubmissionBroker {
         return this.recordResult({ requestId, mode: "dry-run", status: "DRY_RUN", submittedAt: now }, request);
       }
       this.validateApproval(request, now);
+      this.validateSubmissionBudget(champion, requestId);
       const credential = this.currentCredential(request, options.credential, now);
       if (!this.destination) this.reject("destination-unavailable", "no external submission destination is configured", requestId);
       const destinationSubmit = typeof this.destination === "function"
@@ -1406,6 +1524,10 @@ export class SubmissionBroker {
       if (this.inFlight.has(requestId)) this.reject("request-already-completed", "submission request is already in flight", requestId);
       this.reserveRate(now, requestId);
       this.inFlight.add(requestId);
+      // Synchronous quota reservation, before the first await: concurrent
+      // submits see it in quotaBalance(); quota is spent when the external side
+      // effect is attempted, not when its result lands (mirrors reserveRate).
+      this.quotaReserved.add(requestId);
       try {
         const requestView = publicRequest(request);
         const destinationInput = deepFreeze({
@@ -1441,6 +1563,7 @@ export class SubmissionBroker {
         }, request, credential);
       } finally {
         this.inFlight.delete(requestId);
+        this.quotaReserved.delete(requestId);
       }
     } catch (error) {
       if (error instanceof SubmissionRejected) throw error;

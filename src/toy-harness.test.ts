@@ -727,6 +727,66 @@ describe("ToyCompetitionHarness", () => {
       .every((event) => ledgerEventKind(event.type) === "Approval")).toBe(true);
   });
 
+  test("T42: submission_quota budget dimension is observable in mission state and enforced by the broker", async () => {
+    const runtime: ToyAgentRuntime = {
+      selfVerify: () => ({ ok: true }),
+      propose: () => ({ files: { score: "5" } }),
+      falsify: () => ({ ok: true, objections: [] }),
+      critic: () => ({ ok: true, objections: [] }),
+      challenger: () => ({ ok: true, objections: [] }),
+      auditor: () => ({ ok: true, objections: [] }),
+      successAuditor: () => ({ ok: true, objections: [] }),
+    };
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "t42-quota",
+      taskContract: { objective: "maximize", budget: { submissionQuota: 1 } },
+      branchIds: ["a"],
+      runtime,
+      evaluate: () => ({ score: 1 }),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+    });
+    await harness.run();
+    expect(harness.state().budget.submissionQuota).toBe(1);
+    expect(harness.state().submissionQuotaUsed).toBe(0);
+    expect(harness.state().submissionQuotaRemaining).toBe(1);
+
+    const calls: unknown[] = [];
+    const broker = harness.createSubmissionBroker({
+      allowedCompetitions: [harness.state().competitionId],
+      allowedTargets: ["fake://score-file"],
+      allowedCredentialScopes: ["submit:score-file"],
+      destination: { submit: () => { calls.push(true); return { submissionId: "external-1" }; } },
+      clock: () => 1,
+    });
+    const request = broker.createRequest({
+      missionId: "t42-quota",
+      competition: harness.state().competitionId,
+      target: "fake://score-file",
+      credential: { id: "cred-1", scopes: ["submit:score-file"], expiresAt: 100 },
+      dryRun: false,
+    });
+    broker.approve(request, { acceptedBy: "operator" });
+    await broker.submit(request, { dryRun: false });
+    expect(calls).toHaveLength(1);
+
+    // The spent quota is projected into mission state from the ledger.
+    expect(harness.state().submissionQuotaUsed).toBe(1);
+    expect(harness.state().submissionQuotaRemaining).toBe(0);
+
+    // A second external submission is refused on the exhausted mission quota.
+    const again = broker.createRequest({
+      missionId: "t42-quota",
+      competition: harness.state().competitionId,
+      target: "fake://score-file",
+      credential: { id: "cred-1", scopes: ["submit:score-file"], expiresAt: 100 },
+      dryRun: false,
+    });
+    broker.approve(again, { acceptedBy: "operator" });
+    await expect(broker.submit(again, { dryRun: false })).rejects.toMatchObject({ code: "submission-quota-exhausted" });
+    expect(calls).toHaveLength(1);
+  });
+
   test("task contract idea type must be registered and is carried onto the candidate snapshot", async () => {
     expect(() => new ToyCompetitionHarness({
       prediction,

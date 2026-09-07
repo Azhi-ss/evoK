@@ -659,4 +659,223 @@ describe("SubmissionBroker", () => {
     expect(calls).toHaveLength(1);
     expect(JSON.stringify(ledger.events())).not.toContain(token);
   });
+
+  describe("T42 submission quota + gain threshold", () => {
+    /** Champion with an evaluator score; the broker compares gains against it. */
+    function scoredChampion(score: number, digest = snapshot.digest): SubmissionChampion {
+      const { snapshot: _snapshot, ...eligible } = champion;
+      return { ...eligible, championDigest: digest, artifactDigest: digest, score };
+    }
+
+    function quotaBroker(
+      options: {
+        quota?: number;
+        gainThreshold?: number;
+        champion?: SubmissionChampion;
+        ledger?: InMemorySubmissionLedger;
+        now?: { value: number };
+        calls?: unknown[];
+      } = {},
+    ) {
+      const calls = options.calls ?? [];
+      let current = options.champion ?? scoredChampion(10);
+      const broker = new SubmissionBroker({
+        allowedCompetitions: ["score-file"],
+        allowedTargets: ["fake://score-file"],
+        allowedCredentialScopes: ["submit:score-file"],
+        rateLimit: { maxSubmissions: 100, windowMs: 10 },
+        submissionQuota: options.quota,
+        gainThreshold: options.gainThreshold,
+        destination: destination(calls),
+        clock: () => (options.now ?? { value: 1 }).value,
+        ledger: options.ledger,
+        championProvider: () => current,
+      });
+      return { broker, calls, setChampion: (next: SubmissionChampion) => { current = next; }, input: (overrides: Record<string, unknown> = {}) => requestInput({ champion: undefined, artifactDigest: undefined, ...overrides }) };
+    }
+
+    test("dry-run never consumes submission quota; external results do", async () => {
+      const { broker, calls } = quotaBroker({ quota: 1 });
+      expect(broker.quotaBalance()).toMatchObject({ limit: 1, used: 0, remaining: 1 });
+
+      const dry = broker.createDryRun({ missionId: champion.missionId, competition: "score-file", target: "fake://score-file", credentialScopes: credential.scopes });
+      await broker.submit(dry);
+      expect(broker.quotaBalance()).toMatchObject({ limit: 1, used: 0, remaining: 1 });
+      expect(calls).toHaveLength(0);
+
+      const request = broker.createRequest(requestInput());
+      broker.approve(request, { acceptedBy: "operator" });
+      const result = await broker.submit(request, { dryRun: false });
+      expect(result.status).toBe("SUCCEEDED");
+      expect(calls).toHaveLength(1);
+      expect(broker.quotaBalance()).toMatchObject({ limit: 1, used: 1, remaining: 0 });
+
+      const third = broker.createRequest(requestInput({ requestId: "third" }));
+      broker.approve(third, { acceptedBy: "operator" });
+      await expect(broker.submit(third, { dryRun: false })).rejects.toMatchObject({ code: "submission-quota-exhausted" });
+      expect(calls).toHaveLength(1);
+      expect(broker.events().at(-1)).toMatchObject({ type: "SUBMISSION_REJECTED", payload: { code: "submission-quota-exhausted" } });
+    });
+
+    test("zero configured quota refuses every external submission", async () => {
+      const { broker, calls, input } = quotaBroker({ quota: 0 });
+      const request = broker.createRequest(input());
+      broker.approve(request, { acceptedBy: "operator" });
+      await expect(broker.submit(request, { dryRun: false })).rejects.toMatchObject({ code: "submission-quota-exhausted" });
+      expect(calls).toHaveLength(0);
+    });
+
+    test("passes when the champion gain meets the threshold and refuses below-threshold gains", async () => {
+      const ledger = new InMemorySubmissionLedger();
+      const { broker, calls, setChampion, input } = quotaBroker({ quota: 10, gainThreshold: 1, champion: scoredChampion(5), ledger });
+
+      // First external submission has no baseline → treated as unlimited gain.
+      const first = broker.createRequest(input());
+      broker.approve(first, { acceptedBy: "operator" });
+      await broker.submit(first, { dryRun: false });
+      expect(calls).toHaveLength(1);
+
+      // Same champion, score unchanged → gain 0 < threshold.
+      const same = broker.createRequest(input({ requestId: "same" }));
+      broker.approve(same, { acceptedBy: "operator" });
+      await expect(broker.submit(same, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+      expect(calls).toHaveLength(1);
+      expect(broker.events().at(-1)?.payload).toMatchObject({ code: "gain-below-threshold" });
+
+      // +0.4 gain still below threshold 1.
+      setChampion(scoredChampion(5.4, "digest-54"));
+      const small = broker.createRequest(input({ requestId: "small" }));
+      broker.approve(small, { acceptedBy: "operator" });
+      await expect(broker.submit(small, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+      expect(calls).toHaveLength(1);
+
+      // +1 gain meets the threshold.
+      setChampion(scoredChampion(6, "digest-60"));
+      const better = broker.createRequest(input({ requestId: "better" }));
+      broker.approve(better, { acceptedBy: "operator" });
+      const result = await broker.submit(better, { dryRun: false });
+      expect(result.status).toBe("SUCCEEDED");
+      expect(calls).toHaveLength(2);
+    });
+
+    test("a below-threshold refusal does not consume quota", async () => {
+      const { broker, calls, setChampion, input } = quotaBroker({ quota: 2, gainThreshold: 2, champion: scoredChampion(5) });
+      const first = broker.createRequest(input());
+      broker.approve(first, { acceptedBy: "operator" });
+      await broker.submit(first, { dryRun: false });
+
+      setChampion(scoredChampion(5.1, "digest-51"));
+      const tiny = broker.createRequest(input({ requestId: "tiny" }));
+      broker.approve(tiny, { acceptedBy: "operator" });
+      await expect(broker.submit(tiny, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+      expect(broker.quotaBalance()).toMatchObject({ limit: 2, used: 1, remaining: 1 });
+      expect(calls).toHaveLength(1);
+    });
+
+    test("rehydrates quota balance and gain baseline from the ledger", async () => {
+      const ledger = new InMemorySubmissionLedger();
+      const first = quotaBroker({ quota: 3, gainThreshold: 1, champion: scoredChampion(5), ledger, calls: [] });
+      const request = first.broker.createRequest(first.input());
+      first.broker.approve(request, { acceptedBy: "operator" });
+      await first.broker.submit(request, { dryRun: false });
+
+      const calls: unknown[] = [];
+      const restarted = quotaBroker({ quota: 3, gainThreshold: 1, champion: scoredChampion(5.5, "digest-55"), ledger, calls });
+      expect(restarted.broker.quotaBalance()).toMatchObject({ limit: 3, used: 1, remaining: 2 });
+
+      // Baseline 5 → 5.5 is +0.5 < 1: rehydrated baseline must gate the restarted broker.
+      const below = restarted.broker.createRequest(restarted.input({ requestId: "restarted-below" }));
+      restarted.broker.approve(below, { acceptedBy: "operator" });
+      await expect(restarted.broker.submit(below, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+      expect(calls).toHaveLength(0);
+    });
+    test("never overspends quota under concurrent external submits", async () => {
+      const entered: string[] = [];
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const broker = new SubmissionBroker({
+        allowedCompetitions: ["score-file"],
+        allowedTargets: ["fake://score-file"],
+        allowedCredentialScopes: ["submit:score-file"],
+        rateLimit: { maxSubmissions: 100, windowMs: 10 },
+        submissionQuota: 1,
+        gainThreshold: 1,
+        championProvider: () => scoredChampion(5),
+        clock: () => 1,
+        destination: { submit: async (input) => { entered.push(input.request.requestId); await gate; return { submissionId: `ext-${entered.length}` }; } },
+      });
+      const a = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined, requestId: "conc-a" }));
+      const b = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined, requestId: "conc-b" }));
+      broker.approve(a, { acceptedBy: "operator" });
+      broker.approve(b, { acceptedBy: "operator" });
+
+      const first = broker.submit(a, { dryRun: false });
+      // Wait until the first destination call has actually entered (quota reserved + side effect in flight).
+      for (let i = 0; entered.length === 0 && i < 100; i += 1) await Promise.resolve();
+      expect(entered).toEqual(["conc-a"]);
+      // The second call is refused synchronously against the live reservation; attach the assertion immediately.
+      const second = expect(broker.submit(b, { dryRun: false })).rejects.toMatchObject({ code: "submission-quota-exhausted" });
+      release!();
+      await expect(first).resolves.toMatchObject({ status: "SUCCEEDED" });
+      await second;
+      expect(entered).toEqual(["conc-a"]);
+      expect(broker.quotaBalance()).toMatchObject({ limit: 1, used: 1, remaining: 0 });
+    });
+
+    test("refuses to consume real quota when the gain threshold is set but the champion carries no score", async () => {
+      const calls: unknown[] = [];
+      const { score: _score, ...scoreless } = scoredChampion(6, "digest-60");
+      // A scoreless current champion cannot have its gain evaluated.
+      const broker = new SubmissionBroker({
+        allowedCompetitions: ["score-file"],
+        allowedTargets: ["fake://score-file"],
+        allowedCredentialScopes: ["submit:score-file"],
+        rateLimit: { maxSubmissions: 100, windowMs: 10 },
+        submissionQuota: 5,
+        gainThreshold: 1,
+        championProvider: () => scoreless,
+        clock: () => 1,
+        destination: destination(calls),
+      });
+      const request = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined }));
+      broker.approve(request, { acceptedBy: "operator" });
+      await expect(broker.submit(request, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+      expect(calls).toHaveLength(0);
+      expect(broker.quotaBalance()).toMatchObject({ limit: 5, used: 0, remaining: 5 });
+    });
+
+    test("a FAILED external submission consumes quota but never sets the gain baseline", async () => {
+      const calls: unknown[] = [];
+      let fail = true;
+      const broker = new SubmissionBroker({
+        allowedCompetitions: ["score-file"],
+        allowedTargets: ["fake://score-file"],
+        allowedCredentialScopes: ["submit:score-file"],
+        rateLimit: { maxSubmissions: 100, windowMs: 10 },
+        submissionQuota: 3,
+        gainThreshold: 1,
+        championProvider: () => scoredChampion(5),
+        clock: () => 1,
+        destination: { submit: () => { calls.push(true); if (fail) throw new Error("remote down"); return { submissionId: "ok" }; } },
+      });
+      const first = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined, requestId: "will-fail" }));
+      broker.approve(first, { acceptedBy: "operator" });
+      const failed = await broker.submit(first, { dryRun: false });
+      expect(failed.status).toBe("FAILED");
+      expect(broker.quotaBalance()).toMatchObject({ limit: 3, used: 1, remaining: 2 });
+
+      // Same champion score (5) has no successful baseline yet → the gain gate passes.
+      fail = false;
+      const retry = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined, requestId: "will-succeed" }));
+      broker.approve(retry, { acceptedBy: "operator" });
+      const result = await broker.submit(retry, { dryRun: false });
+      expect(result.status).toBe("SUCCEEDED");
+      expect(calls).toHaveLength(2);
+
+      // Now baseline 5 is set: the same champion again is below threshold.
+      const again = broker.createRequest(requestInput({ champion: undefined, artifactDigest: undefined, requestId: "no-gain" }));
+      broker.approve(again, { acceptedBy: "operator" });
+      await expect(broker.submit(again, { dryRun: false })).rejects.toMatchObject({ code: "gain-below-threshold" });
+    });
+  });
 });
