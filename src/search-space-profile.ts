@@ -534,12 +534,12 @@ function isSearchSpaceAttachResult(value: unknown): value is {
   return isPlainRecord(value) && isPlainRecord(value.artifact) && typeof value.artifact.artifactId === "string";
 }
 
-function isMappedSearchSpaceSource(value: unknown): value is { readonly artifactId: string } {
+function hasArtifactId(value: unknown): value is { readonly artifactId: string } {
   return isPlainRecord(value) && typeof value.artifactId === "string" && value.artifactId.trim() !== "";
 }
 
 function isRawSearchSpaceDiagnosis(value: unknown): boolean {
-  if (!isPlainRecord(value) || isMappedSearchSpaceSource(value) || isSearchSpaceAttachResult(value)) return false;
+  if (!isPlainRecord(value) || hasArtifactId(value) || isSearchSpaceAttachResult(value)) return false;
   if (typeof value.id === "string") return false;
   const statusLike = value.status === "hits" || value.status === "clear" || value.status === "inconclusive" || value.status === "skipped";
   const verdictLike = value.verdict === "ok" || value.verdict === "collapse_suspected" || value.verdict === "inconclusive";
@@ -551,10 +551,7 @@ function normalizeSearchSpaceSource(value: unknown): unknown {
     throw new Error("unmapped DiversityDiag / near-dup diagnosis cannot enter evidence_refs");
   }
   if (isSearchSpaceAttachResult(value)) return value.artifact.artifactId;
-  if (isPlainRecord(value) && isPlainRecord(value.dump) && typeof value.dump.artifactId === "string") {
-    return value.dump.artifactId;
-  }
-  if (isMappedSearchSpaceSource(value)) return value.artifactId;
+  if (hasArtifactId(value)) return value.artifactId;
   return value;
 }
 
