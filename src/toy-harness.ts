@@ -969,6 +969,21 @@ export class ToyCompetitionHarness {
         return;
       }
 
+      if (!evaluationAlreadyStarted && typeof this.adapter.validateRules === "function") {
+        try {
+          const rules = this.adapter.validateRules(snapshot);
+          if (!rules.ok) throw new Error(`rule validation failed: ${rules.violations.join("; ")}`);
+        } catch (error) {
+          if (error instanceof SandboxViolation) {
+            this.quarantine(branchId, fencingToken, error);
+            return;
+          }
+          const reason = this.redactor.error(error).message;
+          this.append("BRANCH_REJECTED", { branchId, fencingToken, reason });
+          return;
+        }
+      }
+
       try {
         if (!evaluationAlreadyStarted) this.append("EVALUATION_STARTED", { branchId, fencingToken });
 
@@ -1112,3 +1127,4 @@ export * from "./verification-gates";
 export * from "./research-loop";
 export * from "./second-toy-adapter";
 export * from "./methodology";
+export * from "./methodology-acceptance";

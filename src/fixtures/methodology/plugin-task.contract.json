@@ -1,0 +1,21 @@
+{
+  "splitContract": {
+    "scheme": "kfold",
+    "nSplits": 5,
+    "seed": 42,
+    "shuffle": true,
+    "splitRef": {
+      "id": "cv-v1",
+      "digest": "sha256:toy-split-ref-v1"
+    }
+  },
+  "oofEnsemble": {
+    "required": true,
+    "strategy": "stacking"
+  },
+  "featurePipeline": {
+    "fitScope": "train_fold",
+    "steps": ["impute", "scale"],
+    "forbidTargetLeak": true
+  }
+}

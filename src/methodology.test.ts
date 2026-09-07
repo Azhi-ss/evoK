@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  auditMethodology,
   compileMethodologyBlock,
+  oofEnsembleGate,
   readMethodologyManifest,
   resolveMethodologyContracts,
   type MethodologyContracts,
@@ -128,6 +130,32 @@ describe("methodology manifest read", () => {
     expect(echoedContractOnly.oofPresent).toBe(false);
   });
 
+  test("maps algorithm-evolve protocol fixtures into the same evidence surface", () => {
+    const contracts = toyContracts();
+    const protocol = readMethodologyManifest({
+      feature_pipeline: { steps: [{ name: "impute" }] },
+      oof_ensemble: { members: ["baseline", "tree"], oof: { protocol: "kfold" } },
+      split_ref: { digest_summary: DIGEST },
+    }, contracts);
+    expectFeedable(protocol, {
+      splitRefDigest: DIGEST,
+      splitDigestAgreement: "agree",
+      oofPresent: true,
+    });
+
+    const declared = readMethodologyManifest({
+      split_ref: { digestSummary: DIGEST },
+      oof_ensemble: { declared_equivalent: true },
+    }, contracts);
+    expect(declared.oofPresent).toBe(true);
+
+    const missingOof = readMethodologyManifest({
+      split_ref: { digest_summary: DIGEST },
+      oof_ensemble: { members: ["baseline", "tree"] },
+    }, contracts);
+    expect(missingOof.oofPresent).toBe(false);
+  });
+
   test("round-trips compile shape into evidence without inventing gate passage", () => {
     const contracts = toyContracts();
     const block = compileMethodologyBlock(contracts);
@@ -147,6 +175,32 @@ describe("methodology manifest read", () => {
     expect(block).not.toHaveProperty("pass");
     expect(matching).not.toHaveProperty("ok");
     expect(matching).not.toHaveProperty("promoted");
+  });
+});
+
+describe("methodology T44 gates", () => {
+  test("auditMethodology fails closed on split disagreement and sleeps without a split contract", () => {
+    const contracts = toyContracts();
+    expect(auditMethodology({
+      splitRefDigest: OTHER_DIGEST,
+      splitDigestAgreement: "disagree",
+      oofPresent: true,
+    }, contracts).ok).toBe(false);
+    expect(auditMethodology({
+      splitRefDigest: DIGEST,
+      splitDigestAgreement: "agree",
+      oofPresent: true,
+    }, contracts).ok).toBe(true);
+    expect(auditMethodology({ splitDigestAgreement: "unknown", oofPresent: false }).ok).toBe(true);
+  });
+
+  test("oofEnsembleGate rejects missing OOF with a leak/OOF reason and sleeps when not required", () => {
+    const required = toyContracts();
+    const rejected = oofEnsembleGate({ splitDigestAgreement: "agree", oofPresent: false }, required);
+    expect(rejected.ok).toBe(false);
+    expect(rejected.objections.join(" ")).toMatch(/leak|OOF/i);
+    expect(oofEnsembleGate({ splitDigestAgreement: "agree", oofPresent: true }, required).ok).toBe(true);
+    expect(oofEnsembleGate({ splitDigestAgreement: "unknown", oofPresent: false }).ok).toBe(true);
   });
 });
 
