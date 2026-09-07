@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   asKillTestPass,
+  HypothesisLedger,
   killTestOutcomeIsPass,
   T48MappedCatalog,
   type KillTestOutcome,
@@ -240,5 +241,224 @@ describe("before-promotion KillTester stacks after SuccessAuditor", () => {
       expect(blocked.state.humanAcceptance).toBeUndefined();
       expect(() => blocked.harness.acceptChampion({ acceptedBy: "operator" })).toThrow(/champion/i);
     }
+  });
+});
+
+function ledgerWithOpenPlan(catalog = catalogWithMappedIds()) {
+  const ledger = new HypothesisLedger({ catalog });
+  ledger.createHypothesis({
+    hypothesisId: "h-k2",
+    statement: "shared preprocessing leaks the hold-out",
+    evidenceRefs: ["ev-holdout"],
+  });
+  const plan = ledger.planKillTest({
+    planId: "kt-k2",
+    hypothesisId: "h-k2",
+    predicate: "retrain without the shared step; hold-out must not move",
+    evidenceRefs: ["ev-holdout"],
+  });
+  return { catalog, ledger, plan };
+}
+
+describe("K2 kill-test hang reads and writes the H2 ledger", () => {
+  test("reads KillTestPlan and writes KillTestResult through HypothesisLedger with H1/H2 field names", () => {
+    const { catalog, ledger, plan } = ledgerWithOpenPlan();
+    expect(ledger.state().plans[plan.planId]?.planId).toBe("kt-k2");
+    expect(ledger.state().plans[plan.planId]?.hypothesisId).toBe("h-k2");
+    expect(ledger.state().plans[plan.planId]?.predicate).toBe("retrain without the shared step; hold-out must not move");
+    expect(ledger.state().plans[plan.planId]?.evidenceRefs).toEqual([{ kind: "evidence", id: "ev-holdout" }]);
+    expect(ledger.resultFor("kt-k2")).toBeUndefined();
+
+    const hang = runKillTestHang({
+      outcome: "fail",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: plan.planId,
+      resultId: "ktr-k2",
+    });
+
+    expect(hang.ok).toBe(false);
+    expect(hang.blocksBroker).toBe(true);
+    const result = ledger.resultFor("kt-k2");
+    expect(result).toEqual({
+      resultId: "ktr-k2",
+      planId: "kt-k2",
+      hypothesisId: "h-k2",
+      outcome: "fail",
+      evidenceRefs: [{ kind: "evidence", id: "ev-kill" }],
+    });
+    expect(Object.keys(result ?? {})).toEqual(["resultId", "planId", "hypothesisId", "outcome", "evidenceRefs"]);
+    expect(ledger.state().results["ktr-k2"]).toEqual(result);
+    expect(ledger.state().hypotheses["h-k2"]?.killTestPlanIds).toEqual(["kt-k2"]);
+    expect(ledger.state().hypotheses["h-k2"]?.status).toBe("killed");
+    expect(ledger.events().map((event) => event.type)).toEqual([
+      "hypothesis.created",
+      "kill_test.planned",
+      "kill_test.finished",
+      "hypothesis.status_changed",
+    ]);
+  });
+
+  test("fail and inconclusive write through the ledger and cannot reach the Broker analog; pass may promote", async () => {
+    const { inner, evidence } = passingMethodology();
+    expect(auditMethodology(evidence, contracts).ok).toBe(true);
+    expect(oofEnsembleGate(evidence, contracts).ok).toBe(true);
+    const policy = { maxBranches: 1, maxParallelBranches: 1, quorum: 1 };
+
+    async function runWith(outcome: KillTestOutcome) {
+      const { catalog, ledger, plan } = ledgerWithOpenPlan();
+      const harness = new ToyCompetitionHarness({
+        missionId: `k2-${outcome}`,
+        taskContract: { objective: "maximize the score under methodology contracts" },
+        branchIds: ["candidate"],
+        runtime: runtimeFromFiles(inner.files as Record<string, string>),
+        adapter: new MethodologyToyCompetitionAdapter(contracts),
+        policy,
+        verification: {
+          successAuditor: () => ({ ok: true, objections: [] }),
+          killTestHang: createKillTestHangHook({
+            outcome,
+            evidenceRefs: ["ev-kill"],
+            catalog,
+            ledger,
+            planId: plan.planId,
+            resultId: `ktr-${outcome}`,
+            contracts,
+            methodologyEvidence: evidence,
+          }),
+        },
+      });
+      const state = await harness.run();
+      return { harness, state, ledger, plan };
+    }
+
+    const passed = await runWith("pass");
+    expect(passed.ledger.resultFor(passed.plan.planId)).toEqual({
+      resultId: "ktr-pass",
+      planId: "kt-k2",
+      hypothesisId: "h-k2",
+      outcome: "pass",
+      evidenceRefs: [{ kind: "evidence", id: "ev-kill" }],
+    });
+    expect(passed.ledger.state().hypotheses["h-k2"]?.status).toBe("open");
+    expect(passed.ledger.state().hypotheses["h-k2"]?.status).not.toBe("killed");
+    expect(killTestOutcomeIsPass(passed.ledger.resultFor(passed.plan.planId)!.outcome)).toBe(true);
+    const passedTypes = passed.harness.events().map((event) => event.type);
+    expect(passedTypes.indexOf("KILL_TESTER_COMPLETED")).toBeGreaterThan(passedTypes.indexOf("SUCCESS_AUDITOR_COMPLETED"));
+    expect(passedTypes.indexOf("PROMOTED_LOCAL")).toBeGreaterThan(passedTypes.indexOf("KILL_TESTER_COMPLETED"));
+    expect(passed.state.branches.candidate.status).toBe("PROMOTED_LOCAL");
+    expect(passed.harness.acceptChampion({
+      acceptedBy: "operator",
+      championDigest: passed.state.champion!.snapshot.digest,
+    }).acceptedBy).toBe("operator");
+    expect(passed.harness.events().at(-1)?.type).toBe("HUMAN_ACCEPTED");
+
+    for (const outcome of ["fail", "inconclusive"] as const) {
+      const blocked = await runWith(outcome);
+      const recorded = blocked.ledger.resultFor(blocked.plan.planId);
+      expect(recorded?.outcome).toBe(outcome);
+      expect(recorded?.planId).toBe("kt-k2");
+      expect(recorded?.hypothesisId).toBe("h-k2");
+      expect(recorded?.evidenceRefs).toEqual([{ kind: "evidence", id: "ev-kill" }]);
+      expect(killTestOutcomeIsPass(recorded!.outcome)).toBe(false);
+      expect(killTestOutcomeBlocksBroker(recorded!.outcome)).toBe(true);
+      if (outcome === "fail") {
+        expect(blocked.ledger.state().hypotheses["h-k2"]?.status).toBe("killed");
+      } else {
+        expect(blocked.ledger.state().hypotheses["h-k2"]?.status).toBe("open");
+        expect(blocked.ledger.state().hypotheses["h-k2"]?.status).not.toBe("killed");
+        expect(() => asKillTestPass(recorded!.outcome)).toThrow(/inconclusive|not pass/i);
+      }
+      expect(blocked.harness.events().some((event) => event.type === "PROMOTED_LOCAL")).toBe(false);
+      expect(blocked.harness.events().some((event) => event.type === "HUMAN_ACCEPTED")).toBe(false);
+      expect(blocked.state.champion).toBeUndefined();
+      expect(blocked.state.branches.candidate.status).toBe("REJECTED");
+      expect(blocked.state.humanAcceptance).toBeUndefined();
+      expect(() => blocked.harness.acceptChampion({ acceptedBy: "operator" })).toThrow(/champion/i);
+    }
+  });
+
+  test("keeps unmapped-artifact and sole side-slot/MMD filters and does not write a ledger result", () => {
+    const { catalog, ledger, plan } = ledgerWithOpenPlan();
+    const unmapped = runKillTestHang({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: plan.planId,
+      artifacts: [{ artifactId: "unmapped-art" }],
+    });
+    expect(unmapped.ok).toBe(false);
+    expect(unmapped.blocksBroker).toBe(true);
+    expect(unmapped.objections.join(" ")).toMatch(/T48|artifact/i);
+    expect(ledger.resultFor(plan.planId)).toBeUndefined();
+    expect(ledger.state().results).toEqual({});
+
+    const scalars: unknown[] = [0.91, { mmd: 0.12 }, { sideSlot: 0.8 }, { side_slot: 0.4 }];
+    for (const key of scalars) {
+      const { catalog: nextCatalog, ledger: nextLedger, plan: nextPlan } = ledgerWithOpenPlan();
+      const rejected = runKillTestHang({
+        outcome: "pass",
+        evidenceRefs: [key],
+        catalog: nextCatalog,
+        ledger: nextLedger,
+        planId: nextPlan.planId,
+      });
+      expect(rejected.ok).toBe(false);
+      expect(rejected.objections.join(" ")).toMatch(/side-slot|MMD|near-dup|diversity|scalar/i);
+      expect(nextLedger.resultFor(nextPlan.planId)).toBeUndefined();
+    }
+
+    const mixed = runKillTestHang({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill", { mmd: 0.12 }],
+      catalog,
+      ledger,
+      planId: plan.planId,
+      resultId: "ktr-mixed",
+    });
+    expect(mixed.ok).toBe(true);
+    expect(ledger.resultFor(plan.planId)?.evidenceRefs).toEqual([{ kind: "evidence", id: "ev-kill" }]);
+    expect(ledger.resultFor(plan.planId)?.evidenceRefs.some((ref) => "mmd" in ref)).toBe(false);
+  });
+
+  test("fails closed on a missing plan and does not silently skip the hang", () => {
+    const { catalog, ledger } = ledgerWithOpenPlan();
+    const missingPlan = runKillTestHang({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: "kt-missing",
+    });
+    expect(missingPlan.ok).toBe(false);
+    expect(missingPlan.blocksPromotion).toBe(true);
+    expect(missingPlan.blocksBroker).toBe(true);
+    expect(missingPlan.objections.join(" ")).toMatch(/unknown kill-test plan/i);
+    expect(ledger.resultFor("kt-missing")).toBeUndefined();
+    expect(Object.keys(ledger.state().results)).toEqual([]);
+
+    const ledgerWithoutPlan = runKillTestHang({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+    });
+    expect(ledgerWithoutPlan.ok).toBe(false);
+    expect(ledgerWithoutPlan.objections.join(" ")).toMatch(/ledger KillTestPlan/i);
+
+    const t48Blocked = runKillTestHang({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: "kt-k2",
+      contracts,
+      methodologyEvidence: { splitDigestAgreement: "disagree", oofPresent: false },
+    });
+    expect(t48Blocked.ok).toBe(false);
+    expect(t48Blocked.objections.join(" ")).toMatch(/split|OOF|leak/i);
+    expect(ledger.resultFor("kt-k2")).toBeUndefined();
   });
 });

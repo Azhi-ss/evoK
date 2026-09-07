@@ -1,18 +1,21 @@
 /**
- * K1 before-promotion kill-test hang.
+ * K1 before-promotion kill-test hang, K2-wired to the H2 HypothesisLedger.
  *
  * Stacks on the SuccessAuditor family (same `before-promotion` trigger) and
  * does not replace it. Runs after T48 `auditMethodology` / `oofEnsembleGate`
  * (those gates sleep when no contract is injected) and before the Broker
  * analog: local promote (`PROMOTED_LOCAL`) and `HumanAcceptanceGate`.
  *
- * Reuses H1 `Hypothesis` / `KillTest*` types. No durable H2 ledger.
+ * When a ledger + planId are supplied, the hang reads `KillTestPlan` and
+ * writes `KillTestResult` through H2. It does not invent a second store,
+ * skip the hang, or relax T48 / Broker.
  */
 import { deepFreeze } from "./security-boundary";
 import {
   T48MappedCatalog,
   asKillTestPass,
   killTestOutcomeIsPass,
+  type HypothesisLedger,
   type KillTestOutcome,
   type KillTestResult,
   type T48MappedRef,
@@ -45,6 +48,9 @@ export interface KillTestHangInput {
   readonly outcome: KillTestOutcome;
   readonly evidenceRefs: readonly unknown[];
   readonly catalog: T48MappedCatalog;
+  readonly ledger?: Pick<HypothesisLedger, "state" | "finishKillTest" | "resultFor">;
+  readonly planId?: string;
+  readonly resultId?: string;
   readonly artifacts?: readonly unknown[];
   readonly contracts?: MethodologyContracts;
   readonly methodologyEvidence?: MethodologyEvidence;
@@ -142,9 +148,38 @@ function rejectSoleScalarVerdict(values: readonly unknown[], label: string): str
   return undefined;
 }
 
+function writeLedgerResult(
+  input: KillTestHangInput,
+  outcome: KillTestOutcome,
+  mapped: readonly T48MappedRef[],
+): KillTestResult | string | undefined {
+  if (input.ledger === undefined && input.planId === undefined) return undefined;
+  if (input.ledger === undefined || typeof input.planId !== "string" || input.planId.trim() === "") {
+    return "kill-test hang requires a ledger KillTestPlan";
+  }
+  const plan = input.ledger.state().plans[input.planId];
+  if (!plan) return `unknown kill-test plan: ${input.planId}`;
+  const existing = input.ledger.resultFor(plan.planId);
+  if (existing) {
+    if (existing.outcome !== outcome) return `kill-test plan already has a result: ${plan.planId}`;
+    return existing;
+  }
+  try {
+    return input.ledger.finishKillTest({
+      resultId: input.resultId,
+      planId: plan.planId,
+      outcome,
+      evidenceRefs: mapped,
+    });
+  } catch (error) {
+    return error instanceof Error ? error.message : "kill-test hang failed to write KillTestResult";
+  }
+}
+
 /**
  * Before-promotion hang: T48 methodology/OOF first, then T48-mapped kill-test
  * evidence, then tri-state outcome. Only `pass` may reach the Broker analog.
+ * Ledger-bound hangs read KillTestPlan and write KillTestResult through H2.
  */
 export function runKillTestHang(input: KillTestHangInput): KillTestHangDecision {
   const outcome = normalizeOutcome(input.result?.outcome ?? input.outcome);
@@ -177,6 +212,11 @@ export function runKillTestHang(input: KillTestHangInput): KillTestHangDecision 
     return decision(outcome, [mapped.includes("T48") || mapped.includes("unknown") || mapped.includes("side-slot")
       ? mapped
       : `unknown T48-mapped evidence or artifact id: ${mapped}`]);
+  }
+
+  const recorded = writeLedgerResult(input, outcome, mapped);
+  if (typeof recorded === "string") {
+    return decision(outcome, [recorded], mapped);
   }
 
   if (killTestOutcomeBlocksBroker(outcome) || !killTestOutcomeIsPass(outcome)) {
