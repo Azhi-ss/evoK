@@ -210,6 +210,7 @@ export type MissionEventType =
   | "CHALLENGER_COMPLETED"
   | "AUDITOR_COMPLETED"
   | "SUCCESS_AUDITOR_COMPLETED"
+  | "KILL_TESTER_COMPLETED"
   | "PROMOTED_LOCAL"
   | "BRANCH_REJECTED"
   | "BRANCH_QUARANTINED"
@@ -370,7 +371,7 @@ function freeze<T>(value: T): Readonly<T> {
 
 const DEFAULT_VERIFICATION_ROLES: readonly VerificationRole[] = Object.freeze(["SelfVerifier", "Falsifier"]);
 const VERIFICATION_ROLE_SET = new Set<VerificationRole>([
-  "SelfVerifier", "Falsifier", "Critic", "Challenger", "Auditor", "SuccessAuditor",
+  "SelfVerifier", "Falsifier", "Critic", "Challenger", "Auditor", "SuccessAuditor", "KillTester",
 ]);
 
 function configuredVerificationRoles(options: ToyMissionOptions): VerificationRole[] {
@@ -379,6 +380,7 @@ function configuredVerificationRoles(options: ToyMissionOptions): VerificationRo
   if (typeof options.verification?.challenger === "function" || typeof options.runtime.challenger === "function") roles.push("Challenger");
   if (typeof options.verification?.auditor === "function" || typeof options.runtime.auditor === "function") roles.push("Auditor");
   if (typeof options.verification?.successAuditor === "function" || typeof options.runtime.successAuditor === "function") roles.push("SuccessAuditor");
+  if (typeof options.verification?.killTestHang === "function") roles.push("KillTester");
   return roles;
 }
 
@@ -457,6 +459,7 @@ const verificationEventRoles: Readonly<Record<string, VerificationRole>> = Objec
   CHALLENGER_COMPLETED: "Challenger",
   AUDITOR_COMPLETED: "Auditor",
   SUCCESS_AUDITOR_COMPLETED: "SuccessAuditor",
+  KILL_TESTER_COMPLETED: "KillTester",
 });
 
 function validFacts(value: unknown): value is ScoreFact[] {
@@ -607,7 +610,8 @@ function project(events: readonly MissionEvent[]): MissionState {
       case "CRITIC_COMPLETED":
       case "CHALLENGER_COMPLETED":
       case "AUDITOR_COMPLETED":
-      case "SUCCESS_AUDITOR_COMPLETED": {
+      case "SUCCESS_AUDITOR_COMPLETED":
+      case "KILL_TESTER_COMPLETED": {
         const role = verificationEventRoles[event.type];
         if (!branch || !role || !state.verificationRoles.includes(role) || p.role !== role
           || typeof p.ok !== "boolean" || !validObjections(p.objections) || !branch.snapshot
@@ -816,6 +820,9 @@ export class ToyCompetitionHarness {
       if (hooks?.successAuditor) result = await hooks.successAuditor(context);
       else if (runtime.successAuditor) result = await runtime.successAuditor({ missionId: this.options.missionId, branchId, snapshot, evaluation: evaluation! });
       else return { ok: true, objections: [] };
+    } else if (role === "KillTester") {
+      if (hooks?.killTestHang) result = await hooks.killTestHang(context);
+      else return { ok: true, objections: [] };
     } else {
       const callback = hooks?.selfVerifier;
       if (!callback) return { ok: true, objections: [] };
@@ -835,7 +842,9 @@ export class ToyCompetitionHarness {
     const type: MissionEventType = role === "Falsifier" ? "FALSIFIER_COMPLETED"
       : role === "Critic" ? "CRITIC_COMPLETED"
         : role === "Challenger" ? "CHALLENGER_COMPLETED"
-          : role === "Auditor" ? "AUDITOR_COMPLETED" : "SUCCESS_AUDITOR_COMPLETED";
+          : role === "Auditor" ? "AUDITOR_COMPLETED"
+            : role === "SuccessAuditor" ? "SUCCESS_AUDITOR_COMPLETED"
+              : "KILL_TESTER_COMPLETED";
     this.append(type, {
       branchId, fencingToken, role, ok: result.ok, objections: result.objections,
       snapshotDigest: snapshot.digest, contractDigest: snapshot.contractDigest,
@@ -1049,6 +1058,16 @@ export class ToyCompetitionHarness {
           verifiedRoles.add(role);
           if (!result.ok) {
             this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: `${role} objection` });
+            return;
+          }
+        }
+
+        if (typeof this.options.verification?.killTestHang === "function" && !verifiedRoles.has("KillTester")) {
+          const result = await this.runVerificationRole("KillTester", branchId, snapshot, evaluation);
+          this.appendVerification("KillTester", branchId, fencingToken, snapshot, result);
+          verifiedRoles.add("KillTester");
+          if (!result.ok) {
+            this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "KillTester objection" });
             return;
           }
         }

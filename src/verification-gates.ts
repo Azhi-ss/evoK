@@ -4,7 +4,8 @@ export type VerificationRole =
   | "Critic"
   | "Challenger"
   | "Auditor"
-  | "SuccessAuditor";
+  | "SuccessAuditor"
+  | "KillTester";
 
 export type VerificationTrigger =
   | "before-expensive-execution"
@@ -39,6 +40,7 @@ export const VERIFICATION_ROLE_CONTRACTS: Readonly<Record<VerificationRole, Veri
   Challenger: contract("Challenger", "after-snapshot", "candidate-snapshot", "probe boundaries, worst cases, and adversarial inputs", ["read-snapshot", "run-tests"]),
   Auditor: contract("Auditor", "after-evaluation", "evidence", "check evidence, rules, provenance, and claimed commands", ["read-snapshot", "read-evidence"]),
   SuccessAuditor: contract("SuccessAuditor", "before-promotion", "success-claim", "check every part of the success claim against evidence", ["read-snapshot", "read-evidence"]),
+  KillTester: contract("KillTester", "before-promotion", "success-claim", "overlay the kill-test hang on the success claim; fail and inconclusive must not pass", ["read-snapshot", "read-evidence"]),
 });
 
 export const ROLE_CONTRACTS = VERIFICATION_ROLE_CONTRACTS;
@@ -88,4 +90,6 @@ export interface VerificationHooks {
   readonly challenger?: VerificationHook;
   readonly auditor?: VerificationHook;
   readonly successAuditor?: VerificationHook;
+  /** Stacked after SuccessAuditor on the same before-promotion trigger. Does not replace it. */
+  readonly killTestHang?: VerificationHook;
 }

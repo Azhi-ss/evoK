@@ -13,7 +13,8 @@ describe("verification role contracts", () => {
     expect(verificationRoleContract("Challenger")).toMatchObject({ trigger: "after-snapshot", input: "candidate-snapshot" });
     expect(verificationRoleContract("Auditor")).toMatchObject({ trigger: "after-evaluation", input: "evidence" });
     expect(verificationRoleContract("SuccessAuditor")).toMatchObject({ trigger: "before-promotion", input: "success-claim" });
-    expect(new Set(Object.values(VERIFICATION_ROLE_CONTRACTS).map((contract) => contract.purpose)).size).toBe(6);
+    expect(verificationRoleContract("KillTester")).toMatchObject({ trigger: "before-promotion", input: "success-claim" });
+    expect(new Set(Object.values(VERIFICATION_ROLE_CONTRACTS).map((contract) => contract.purpose)).size).toBe(7);
     expect(Object.values(VERIFICATION_ROLE_CONTRACTS).every((contract) => contract.authoritative === false)).toBe(true);
   });
 
