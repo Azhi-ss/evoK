@@ -347,7 +347,7 @@ function emptyState(): MutableHypothesisState {
   return { hypotheses: new Map(), plans: new Map(), results: new Map(), queued: [], operations: new Map() };
 }
 
-function publicState(state: MutableHypothesisState, events: readonly HypothesisEvent[] = []): HypothesisLedgerState {
+function publicState(state: MutableHypothesisState, events: readonly HypothesisEvent[]): HypothesisLedgerState {
   return deepFreeze({
     hypotheses: Object.fromEntries(state.hypotheses),
     plans: Object.fromEntries(state.plans),
