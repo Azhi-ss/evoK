@@ -17,6 +17,7 @@ import {
   killTestOutcomeIsPass,
   type HypothesisLedger,
   type KillTestOutcome,
+  type KillTestPlan,
   type KillTestResult,
   type T48MappedRef,
 } from "./hypothesis-ledger";
@@ -65,6 +66,7 @@ export interface KillTestHangDecision {
   readonly mappedEvidence: readonly T48MappedRef[];
   readonly blocksPromotion: boolean;
   readonly blocksBroker: boolean;
+  readonly plan?: KillTestPlan;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -92,6 +94,7 @@ function decision(
   outcome: KillTestOutcome,
   objections: readonly string[],
   mappedEvidence: readonly T48MappedRef[] = [],
+  plan?: KillTestPlan,
 ): KillTestHangDecision {
   const blocked = objections.length > 0 || !killTestOutcomeIsPass(outcome);
   return deepFreeze({
@@ -101,6 +104,7 @@ function decision(
     mappedEvidence: Object.freeze([...mappedEvidence]),
     blocksPromotion: blocked,
     blocksBroker: blocked,
+    ...(plan === undefined ? {} : { plan }),
   }) as KillTestHangDecision;
 }
 
@@ -148,24 +152,28 @@ function rejectSoleScalarVerdict(values: readonly unknown[], label: string): str
   return undefined;
 }
 
-function writeLedgerResult(
-  input: KillTestHangInput,
-  outcome: KillTestOutcome,
-  mapped: readonly T48MappedRef[],
-): KillTestResult | string | undefined {
+function readKillTestPlan(input: KillTestHangInput): KillTestPlan | string | undefined {
   if (input.ledger === undefined && input.planId === undefined) return undefined;
   if (input.ledger === undefined || typeof input.planId !== "string" || input.planId.trim() === "") {
     return "kill-test hang requires a ledger KillTestPlan";
   }
   const plan = input.ledger.state().plans[input.planId];
   if (!plan) return `unknown kill-test plan: ${input.planId}`;
-  const existing = input.ledger.resultFor(plan.planId);
-  if (existing) {
-    if (existing.outcome !== outcome) return `kill-test plan already has a result: ${plan.planId}`;
-    return existing;
+  return plan;
+}
+
+function writeLedgerResult(
+  ledger: NonNullable<KillTestHangInput["ledger"]>,
+  input: KillTestHangInput,
+  plan: KillTestPlan,
+  outcome: KillTestOutcome,
+  mapped: readonly T48MappedRef[],
+): KillTestResult | string {
+  if (ledger.resultFor(plan.planId)) {
+    return `kill-test plan already has a result: ${plan.planId}`;
   }
   try {
-    return input.ledger.finishKillTest({
+    return ledger.finishKillTest({
       resultId: input.resultId,
       planId: plan.planId,
       outcome,
@@ -214,19 +222,25 @@ export function runKillTestHang(input: KillTestHangInput): KillTestHangDecision 
       : `unknown T48-mapped evidence or artifact id: ${mapped}`]);
   }
 
-  const recorded = writeLedgerResult(input, outcome, mapped);
-  if (typeof recorded === "string") {
-    return decision(outcome, [recorded], mapped);
+  const plan = readKillTestPlan(input);
+  if (typeof plan === "string") {
+    return decision(outcome, [plan], mapped);
+  }
+  if (plan !== undefined && input.ledger !== undefined) {
+    const recorded = writeLedgerResult(input.ledger, input, plan, outcome, mapped);
+    if (typeof recorded === "string") {
+      return decision(outcome, [recorded], mapped, plan);
+    }
   }
 
   if (killTestOutcomeBlocksBroker(outcome) || !killTestOutcomeIsPass(outcome)) {
     const reason = outcome === "inconclusive"
       ? "inconclusive kill-test outcome is not pass"
       : "kill-test fail blocks promotion and the submission broker";
-    return decision(outcome, [reason], mapped);
+    return decision(outcome, [reason], mapped, plan);
   }
   asKillTestPass(outcome);
-  return decision(outcome, [], mapped);
+  return decision(outcome, [], mapped, plan);
 }
 
 export function createKillTestHangHook(
