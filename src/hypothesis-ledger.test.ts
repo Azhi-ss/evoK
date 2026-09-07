@@ -160,10 +160,12 @@ describe("T48-mapped evidence_refs", () => {
       { sideSlot: 0.8 },
       { side_slot: 0.4 },
       { score: 1.3 },
+      { near_dup: 0.2 },
+      { diversity: 0.9 },
     ];
     for (const key of rejected) {
-      expect(() => catalog.map(key)).toThrow(/T48|promotion key|side-slot|MMD/i);
-      expect(() => ledger.createHypothesis({ statement: "bad key", evidenceRefs: [key] })).toThrow(/T48|promotion key|side-slot|MMD/i);
+      expect(() => catalog.map(key)).toThrow(/T48|promotion key|side-slot|MMD|near-dup|diversity/i);
+      expect(() => ledger.createHypothesis({ statement: "bad key", evidenceRefs: [key] })).toThrow(/T48|promotion key|side-slot|MMD|near-dup|diversity/i);
     }
     expect(() => catalog.map("unknown-id")).toThrow(/unknown|T48/i);
   });

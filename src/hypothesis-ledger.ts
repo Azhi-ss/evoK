@@ -48,7 +48,10 @@ const HYPOTHESIS_EVENT_TYPES: ReadonlySet<HypothesisEventType> = new Set([
 
 const HYPOTHESIS_STATUSES: ReadonlySet<HypothesisStatus> = new Set(["open", "supported", "killed", "superseded"]);
 const KILL_TEST_OUTCOMES: ReadonlySet<KillTestOutcome> = new Set(["pass", "fail", "inconclusive"]);
-const SCORE_KEY_FIELDS = ["mmd", "sideSlot", "side_slot", "sideSlotScore", "mmdScore", "score"] as const;
+const SCORE_KEY_FIELDS = [
+  "mmd", "sideSlot", "side_slot", "sideSlotScore", "mmdScore", "score",
+  "nearDup", "near_dup", "nearDupScore", "nearDuplicate", "diversity", "diversityScore",
+] as const;
 
 export type T48RefKind = "evidence" | "artifact";
 
@@ -235,7 +238,7 @@ export class InMemoryHypothesisLedger implements HypothesisLedgerStore {
 
 /**
  * Promotion keys are Evidence / Artifact ids already present in the T48
- * (research / methodology) catalog. Side-slot and MMD scalars never qualify.
+ * (research / methodology) catalog. Side-slot, MMD, and near-dup scalars never qualify.
  */
 export class T48MappedCatalog {
   private readonly evidence = new Set<string>();
@@ -264,7 +267,7 @@ export class T48MappedCatalog {
 
   map(value: unknown): T48MappedRef {
     if (looksLikeScoreKey(value)) {
-      throw new TypeError("side-slot/MMD scalar scores cannot be T48 promotion keys");
+      throw new TypeError("side-slot/MMD/near-dup scalar scores cannot be T48 promotion keys");
     }
     if (typeof value === "string") {
       nonEmpty("evidence_refs id", value);
@@ -299,6 +302,18 @@ export class T48MappedCatalog {
       seen.add(key);
     }
     return frozenArray(mapped);
+  }
+
+  /** Register additional T48 artifacts (S1 diagnostic artifacts) without replacing the catalog. */
+  withArtifacts(artifacts: readonly { readonly artifactId: string }[]): T48MappedCatalog {
+    const next = new T48MappedCatalog();
+    for (const id of this.evidence) next.evidence.add(id);
+    for (const id of this.artifacts) next.artifacts.add(id);
+    for (const artifact of artifacts) {
+      nonEmpty("artifactId", artifact.artifactId);
+      next.artifacts.add(artifact.artifactId);
+    }
+    return next;
   }
 }
 
