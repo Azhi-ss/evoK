@@ -1,11 +1,13 @@
 /**
- * Optional task-level SearchSpaceProfile + near-dup detection (S1 / #54).
+ * Optional task-level SearchSpaceProfile + near-dup (S1 / #54) and MMD
+ * DiversityDiag (S2 / #58).
  *
- * Binding is `diagnostic_only`: feature extraction and near-dup hits never
- * change select_node / default inner A (tree+fixed_uct) or #40 SelectionPolicy.
- * No profile is a no-op. Missing dims are inconclusive — never silent
- * "diversity ok". Diagnostic artifacts enter Hypothesis `evidence_refs` only
- * after T48 mapping. MMD (S2 / #58) and side-slot adapters (#59) are out of scope.
+ * Binding is `diagnostic_only`: feature extraction, near-dup hits, and MMD
+ * windows never change select_node / default inner A (tree+fixed_uct) or #40
+ * SelectionPolicy. Missing dims or unavailable MMD are inconclusive — never
+ * silent "diversity ok". Diagnostic artifacts enter Hypothesis `evidence_refs`
+ * only after T48 mapping. Side-slot adapters and auto Hypothesis.killed (#59)
+ * are out of scope.
  */
 import { deepFreeze, digestValue } from "./security-boundary";
 import {
@@ -24,9 +26,23 @@ export interface NearDupRule {
   readonly maxDistance: number;
 }
 
+export interface MmdKernel {
+  readonly name: "rbf";
+  readonly bandwidth: number;
+  /** Fixed seed persisted on the dump so a run is reproducible; not an optimality claim. */
+  readonly seed: number;
+}
+
+export interface MmdRule {
+  readonly kernel: MmdKernel;
+  readonly collapseThreshold: number;
+  readonly windowSize?: number;
+}
+
 export interface SearchSpaceProfile {
   readonly featureDims: readonly FeatureDim[];
   readonly nearDup: NearDupRule;
+  readonly mmd?: MmdRule;
 }
 
 export interface SearchSpaceCandidate {
@@ -66,7 +82,28 @@ export interface NearDupDiagnosis {
 export interface SearchSpaceArtifact {
   readonly artifactId: string;
   readonly digest: string;
-  readonly kind: "near_dup_diagnosis";
+  readonly kind: "near_dup_diagnosis" | "diversity_diag";
+}
+
+export type DiversityVerdict = "ok" | "collapse_suspected" | "inconclusive";
+
+export interface DiversityDiag {
+  readonly binding: SearchSpaceBindingMode;
+  readonly taskId: string;
+  readonly verdict: DiversityVerdict;
+  readonly windowSize: number;
+  readonly missingDims: readonly string[];
+  readonly unavailable: readonly string[];
+  readonly kernel?: MmdKernel;
+  readonly mmd?: number;
+  readonly collapseThreshold?: number;
+  readonly diversityOk?: false;
+}
+
+export interface DiversityDiagDump extends DiversityDiag {
+  readonly artifactId: string;
+  readonly digest: string;
+  readonly kind: "diversity_diag";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,6 +126,45 @@ function finiteNonNegative(name: string, value: unknown): asserts value is numbe
   }
 }
 
+function finitePositive(name: string, value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${name} must be finite and > 0`);
+  }
+}
+
+function integerSeed(name: string, value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new RangeError(`${name} must be an integer seed`);
+  }
+}
+
+function normalizeMmd(value: unknown): MmdRule {
+  if (!isPlainRecord(value) || !isPlainRecord(value.kernel)) {
+    throw new TypeError("mmd must declare kernel and collapseThreshold");
+  }
+  if (value.kernel.name !== "rbf") {
+    throw new RangeError("mmd.kernel.name must be rbf");
+  }
+  finitePositive("mmd.kernel.bandwidth", value.kernel.bandwidth);
+  integerSeed("mmd.kernel.seed", value.kernel.seed);
+  finiteNonNegative("mmd.collapseThreshold", value.collapseThreshold);
+  const windowSize = value.windowSize;
+  if (windowSize !== undefined) {
+    if (typeof windowSize !== "number" || !Number.isInteger(windowSize) || windowSize < 2) {
+      throw new RangeError("mmd.windowSize must be an integer >= 2");
+    }
+  }
+  return deepFreeze({
+    kernel: {
+      name: "rbf" as const,
+      bandwidth: value.kernel.bandwidth,
+      seed: value.kernel.seed,
+    },
+    collapseThreshold: value.collapseThreshold,
+    ...(windowSize === undefined ? {} : { windowSize }),
+  }) as MmdRule;
+}
+
 function normalizeProfile(value: SearchSpaceProfile): SearchSpaceProfile {
   if (!isPlainRecord(value) || !Array.isArray(value.featureDims) || !isPlainRecord(value.nearDup)) {
     throw new TypeError("SearchSpaceProfile must declare featureDims and nearDup");
@@ -103,9 +179,11 @@ function normalizeProfile(value: SearchSpaceProfile): SearchSpaceProfile {
     return Object.freeze({ name: dim.name });
   });
   if (featureDims.length === 0) throw new RangeError("SearchSpaceProfile requires at least one feature dim");
+  const mmd = value.mmd === undefined ? undefined : normalizeMmd(value.mmd);
   return deepFreeze({
     featureDims,
     nearDup: { maxDistance: value.nearDup.maxDistance },
+    ...(mmd === undefined ? {} : { mmd }),
   }) as SearchSpaceProfile;
 }
 
@@ -227,6 +305,218 @@ export function diagnoseNearDup(
     hits,
     missingDims: [],
   }) as NearDupDiagnosis;
+}
+
+function vectorOf(values: Readonly<Record<string, number>>, dims: readonly string[]): number[] {
+  return dims.map((dim) => values[dim]!);
+}
+
+function centroidOf(points: readonly number[][]): number[] {
+  const dims = points[0]!.length;
+  const out = Array<number>(dims).fill(0);
+  for (const point of points) {
+    for (let i = 0; i < dims; i += 1) out[i]! += point[i]!;
+  }
+  for (let i = 0; i < dims; i += 1) out[i]! /= points.length;
+  return out;
+}
+
+function rbfKernel(left: readonly number[], right: readonly number[], bandwidth: number): number {
+  let sum = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    const delta = left[i]! - right[i]!;
+    sum += delta * delta;
+  }
+  return Math.exp(-sum / (2 * bandwidth * bandwidth));
+}
+
+/** Unbiased Gretton MMD². Kernel/bandwidth are caller-configured; not claimed optimal. */
+function mmd2Unbiased(left: readonly number[][], right: readonly number[][], bandwidth: number): number {
+  const n = left.length;
+  const m = right.length;
+  let xx = 0;
+  let yy = 0;
+  let xy = 0;
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      if (i === j) continue;
+      xx += rbfKernel(left[i]!, left[j]!, bandwidth);
+    }
+  }
+  for (let i = 0; i < m; i += 1) {
+    for (let j = 0; j < m; j += 1) {
+      if (i === j) continue;
+      yy += rbfKernel(right[i]!, right[j]!, bandwidth);
+    }
+  }
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < m; j += 1) {
+      xy += rbfKernel(left[i]!, right[j]!, bandwidth);
+    }
+  }
+  return xx / (n * (n - 1)) + yy / (m * (m - 1)) - 2 * xy / (n * m);
+}
+
+function inconclusiveDiversity(input: {
+  readonly taskId: string;
+  readonly windowSize: number;
+  readonly missingDims?: readonly string[];
+  readonly unavailable: readonly string[];
+  readonly kernel?: MmdKernel;
+  readonly collapseThreshold?: number;
+}): DiversityDiag {
+  return deepFreeze({
+    binding: SEARCH_SPACE_BINDING,
+    taskId: input.taskId,
+    verdict: "inconclusive",
+    windowSize: input.windowSize,
+    missingDims: input.missingDims ?? [],
+    unavailable: input.unavailable,
+    diversityOk: false,
+    ...(input.kernel === undefined ? {} : { kernel: input.kernel }),
+    ...(input.collapseThreshold === undefined ? {} : { collapseThreshold: input.collapseThreshold }),
+  }) as DiversityDiag;
+}
+
+export function diagnoseDiversity(
+  binding: SearchSpaceBinding,
+  window: readonly SearchSpaceCandidate[],
+): DiversityDiag {
+  if (!isPlainRecord(binding) || binding.mode !== SEARCH_SPACE_BINDING) {
+    throw new RangeError("SearchSpaceProfile binding must be diagnostic_only");
+  }
+  nonEmpty("taskId", binding.taskId);
+  if (!Array.isArray(window)) throw new TypeError("MMD window must be an array");
+  if (binding.profile === undefined) {
+    return inconclusiveDiversity({
+      taskId: binding.taskId,
+      windowSize: window.length,
+      unavailable: ["profile"],
+    });
+  }
+  const profile = normalizeProfile(binding.profile);
+  if (profile.mmd === undefined) {
+    return inconclusiveDiversity({
+      taskId: binding.taskId,
+      windowSize: window.length,
+      unavailable: ["mmd"],
+    });
+  }
+  const mmdRule = profile.mmd;
+  const requiredSize = mmdRule.windowSize;
+  const sliced = requiredSize === undefined ? window : window.slice(-requiredSize);
+  if (sliced.length < 2 || (requiredSize !== undefined && sliced.length < requiredSize)) {
+    return inconclusiveDiversity({
+      taskId: binding.taskId,
+      windowSize: sliced.length,
+      unavailable: ["window"],
+      kernel: mmdRule.kernel,
+      collapseThreshold: mmdRule.collapseThreshold,
+    });
+  }
+  const extracted = sliced.map((candidate) => {
+    const features = extractSearchFeatures(profile, candidate);
+    return { candidateId: candidate.candidateId, features };
+  });
+  const ids = new Set<string>();
+  for (const entry of extracted) {
+    if (ids.has(entry.candidateId)) throw new RangeError(`duplicate candidate: ${entry.candidateId}`);
+    ids.add(entry.candidateId);
+  }
+  const missingDims = [...new Set(extracted.flatMap((entry) => [...entry.features.missing]))];
+  if (missingDims.length > 0) {
+    return inconclusiveDiversity({
+      taskId: binding.taskId,
+      windowSize: sliced.length,
+      missingDims,
+      unavailable: ["features"],
+      kernel: mmdRule.kernel,
+      collapseThreshold: mmdRule.collapseThreshold,
+    });
+  }
+  const dims = profile.featureDims.map((dim) => dim.name);
+  const points = extracted.map((entry) => vectorOf(entry.features.values, dims));
+  const center = centroidOf(points);
+  const reference = points.map(() => center);
+  const raw = mmd2Unbiased(points, reference, mmdRule.kernel.bandwidth);
+  if (!Number.isFinite(raw)) {
+    return inconclusiveDiversity({
+      taskId: binding.taskId,
+      windowSize: sliced.length,
+      unavailable: ["mmd"],
+      kernel: mmdRule.kernel,
+      collapseThreshold: mmdRule.collapseThreshold,
+    });
+  }
+  const mmd = Math.max(0, raw);
+  const verdict: DiversityVerdict = mmd <= mmdRule.collapseThreshold ? "collapse_suspected" : "ok";
+  return deepFreeze({
+    binding: SEARCH_SPACE_BINDING,
+    taskId: binding.taskId,
+    verdict,
+    windowSize: sliced.length,
+    missingDims: [],
+    unavailable: [],
+    kernel: mmdRule.kernel,
+    mmd,
+    collapseThreshold: mmdRule.collapseThreshold,
+  }) as DiversityDiag;
+}
+
+function diversityPayload(diag: DiversityDiag): Record<string, unknown> {
+  return {
+    binding: diag.binding,
+    taskId: diag.taskId,
+    verdict: diag.verdict,
+    windowSize: diag.windowSize,
+    missingDims: diag.missingDims,
+    unavailable: diag.unavailable,
+    ...(diag.kernel === undefined ? {} : { kernel: diag.kernel }),
+    ...(diag.mmd === undefined ? {} : { mmd: diag.mmd }),
+    ...(diag.collapseThreshold === undefined ? {} : { collapseThreshold: diag.collapseThreshold }),
+  };
+}
+
+export function dumpDiversityDiag(diag: DiversityDiag): DiversityDiagDump {
+  if (!isPlainRecord(diag) || diag.binding !== SEARCH_SPACE_BINDING) {
+    throw new RangeError("DiversityDiag binding must be diagnostic_only");
+  }
+  nonEmpty("taskId", diag.taskId);
+  const digest = digestValue(diversityPayload(diag));
+  return deepFreeze({
+    ...diversityPayload(diag),
+    artifactId: `diversity:${diag.taskId}:${digest}`,
+    digest,
+    kind: "diversity_diag",
+    ...(diag.diversityOk === false ? { diversityOk: false } : {}),
+  }) as DiversityDiagDump;
+}
+
+export function attachDiversityDiag(input: {
+  readonly catalog: T48MappedCatalog;
+  readonly diag: DiversityDiag;
+}): {
+  readonly catalog: T48MappedCatalog;
+  readonly artifact: SearchSpaceArtifact;
+  readonly mapped: readonly T48MappedRef[];
+  readonly dump: DiversityDiagDump;
+} {
+  if (!isPlainRecord(input) || !(input.catalog instanceof T48MappedCatalog)) {
+    throw new TypeError("attachDiversityDiag requires a T48MappedCatalog");
+  }
+  const dump = dumpDiversityDiag(input.diag);
+  const artifact = deepFreeze({
+    artifactId: dump.artifactId,
+    digest: dump.digest,
+    kind: "diversity_diag",
+  }) as SearchSpaceArtifact;
+  const catalog = input.catalog.withArtifacts([artifact]);
+  return deepFreeze({
+    catalog,
+    artifact,
+    dump,
+    mapped: catalog.mapAll([artifact.artifactId]),
+  });
 }
 
 export function mapSearchSpaceEvidence(
