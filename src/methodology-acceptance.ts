@@ -3,7 +3,6 @@ import {
   compileMethodologyBlock,
   oofEnsembleGate,
   readMethodologyManifest,
-  resolveMethodologyContracts,
   type MethodologyContracts,
   type PluginMethodologyBlock,
 } from "./methodology";
@@ -24,9 +23,8 @@ import declaredEquivalentManifest from "./fixtures/methodology/manifest-declared
 import noOofManifest from "./fixtures/methodology/manifest-no-oof.json";
 import oofManifest from "./fixtures/methodology/manifest-oof.json";
 import splitMismatchManifest from "./fixtures/methodology/manifest-split-mismatch.json";
-import contractFixture from "./fixtures/methodology/plugin-task.contract.json";
 
-export const METHODOLOGY_MANIFEST_FILE = "methodology.json";
+const METHODOLOGY_MANIFEST_FILE = "methodology.json";
 
 export type FakeInnerVariant = "oof" | "declared-equivalent" | "no-oof" | "split-mismatch";
 export type MethodologyComponent = "feature_pipeline" | "oof_ensemble";
@@ -48,23 +46,23 @@ export interface PluginTaskJson {
   readonly methodology?: PluginMethodologyBlock;
 }
 
-export function toyMethodologyContracts(input: unknown = contractFixture): MethodologyContracts {
-  const contracts = resolveMethodologyContracts(input);
-  if (contracts === undefined) throw new TypeError("toy methodology contracts are required");
-  return contracts;
+export interface FakeInnerCandidate {
+  readonly task: PluginTaskJson;
+  readonly files: Readonly<Record<string, string>>;
+  readonly manifest: AlgorithmEvolveManifest;
 }
 
 /** Adapter T44 contracts → inner plugin task JSON (`methodology` via existing compile). */
 export function compilePluginTask(contracts: MethodologyContracts): PluginTaskJson {
   const methodology = compileMethodologyBlock(contracts);
-  return {
+  return deepFreeze({
     id: "toy-methodology",
     goal: "Maximize toy score under methodology contracts",
     artifact: "toy://methodology",
     evaluation: { mode: "objective", command: "true" },
     direction: "maximize",
     ...(methodology === undefined ? {} : { methodology }),
-  };
+  });
 }
 
 function cloneJson<T>(value: T): T {
@@ -78,29 +76,6 @@ const VARIANT_MANIFESTS: Readonly<Record<FakeInnerVariant, AlgorithmEvolveManife
   "split-mismatch": splitMismatchManifest as AlgorithmEvolveManifest,
 };
 
-export function fakeInnerManifest(variant: FakeInnerVariant): AlgorithmEvolveManifest {
-  return cloneJson(VARIANT_MANIFESTS[variant]);
-}
-
-/**
- * Fake inner loop: emit a candidate plus an algorithm-evolve-shaped methodology
- * manifest. No real models.
- */
-export function fakeInnerCandidate(input: {
-  readonly contracts: MethodologyContracts;
-  readonly variant: FakeInnerVariant;
-  readonly score?: string;
-}): { readonly files: Record<string, string>; readonly manifest: AlgorithmEvolveManifest } {
-  const manifest = fakeInnerManifest(input.variant);
-  return {
-    manifest,
-    files: {
-      score: input.score ?? "1",
-      [METHODOLOGY_MANIFEST_FILE]: JSON.stringify(manifest),
-    },
-  };
-}
-
 export function applyFakeInnerComponent(
   parent: AlgorithmEvolveManifest,
   component: MethodologyComponent,
@@ -108,17 +83,17 @@ export function applyFakeInnerComponent(
   const result = cloneJson(parent);
   if (component === "feature_pipeline") {
     const steps = [...(result.feature_pipeline?.steps ?? []), { name: "scripted_select" }];
-    return { ...result, feature_pipeline: { ...result.feature_pipeline, steps } };
+    return deepFreeze({ ...result, feature_pipeline: { ...result.feature_pipeline, steps } });
   }
-  const members = [...((result.oof_ensemble?.members as unknown[] | undefined) ?? ["baseline", "tree"])];
+  const members = [...((result.oof_ensemble?.members as readonly unknown[] | undefined) ?? ["baseline", "tree"])];
   if (!members.includes("scripted_linear")) {
     if (members.length >= 2) members[members.length - 1] = "scripted_linear";
     else members.push("scripted_linear");
   }
-  return {
+  return deepFreeze({
     ...result,
     oof_ensemble: { ...result.oof_ensemble, members },
-  };
+  });
 }
 
 export function componentRegionHash(
@@ -126,6 +101,45 @@ export function componentRegionHash(
   region: MethodologyComponentRegion,
 ): string {
   return digestValue(manifest[region]);
+}
+
+function manifestFromCompiledTask(
+  variant: FakeInnerVariant,
+  task: PluginTaskJson,
+  component?: MethodologyComponent,
+): AlgorithmEvolveManifest {
+  const compiledDigest = task.methodology?.split_contract?.split_ref.digest;
+  const base = cloneJson(VARIANT_MANIFESTS[variant]);
+  const digest = variant === "split-mismatch"
+    ? String(base.split_ref?.digest_summary ?? "sha256:different-split")
+    : compiledDigest ?? String(base.split_ref?.digest_summary ?? "");
+  const stamped = {
+    ...base,
+    split_ref: { ...base.split_ref, digest_summary: digest },
+  };
+  return component === undefined ? deepFreeze(stamped) : applyFakeInnerComponent(stamped, component);
+}
+
+/**
+ * Fake inner loop: compile the plugin task, then emit a candidate plus an
+ * algorithm-evolve-shaped methodology manifest. No real models.
+ */
+export function fakeInnerCandidate(input: {
+  readonly contracts: MethodologyContracts;
+  readonly variant: FakeInnerVariant;
+  readonly score?: string;
+  readonly component?: MethodologyComponent;
+}): FakeInnerCandidate {
+  const task = compilePluginTask(input.contracts);
+  const manifest = manifestFromCompiledTask(input.variant, task, input.component);
+  return deepFreeze({
+    task,
+    manifest,
+    files: {
+      score: input.score ?? "1",
+      [METHODOLOGY_MANIFEST_FILE]: JSON.stringify(manifest),
+    },
+  });
 }
 
 function parseCandidateManifest(snapshot: Readonly<CandidateSnapshot>): unknown {
@@ -166,9 +180,12 @@ export class MethodologyToyCompetitionAdapter implements ToyCompetitionAdapter {
     });
   }
 
+  private evidence(snapshot: Readonly<CandidateSnapshot>) {
+    return readMethodologyManifest(parseCandidateManifest(snapshot), this.contracts);
+  }
+
   validateRules(snapshot: Readonly<CandidateSnapshot>): CompetitionRuleValidation {
-    const evidence = readMethodologyManifest(parseCandidateManifest(snapshot), this.contracts);
-    const audit = auditMethodology(evidence, this.contracts);
+    const audit = auditMethodology(this.evidence(snapshot), this.contracts);
     if (!audit.ok) throw new TrustViolation(audit.objections.join("; "));
     return deepFreeze({ ok: true, violations: [] });
   }
@@ -176,32 +193,31 @@ export class MethodologyToyCompetitionAdapter implements ToyCompetitionAdapter {
   collectArtifacts(snapshot: Readonly<CandidateSnapshot>): readonly CompetitionArtifactReference[] {
     const content = snapshot.files[this.scoreFile] ?? "";
     const digest = digestValue(content);
-    return [{
+    return deepFreeze([{
       artifactId: `${this.scoreFile}:${digest}`,
       address: `artifact://${this.name}/${digest}`,
       digest,
       kind: "score",
-    }];
+    }]);
   }
 
   evaluate(snapshot: Readonly<CandidateSnapshot>): EvaluationResult {
     this.evaluations += 1;
-    const evidence = readMethodologyManifest(parseCandidateManifest(snapshot), this.contracts);
-    const oof = oofEnsembleGate(evidence, this.contracts);
+    const oof = oofEnsembleGate(this.evidence(snapshot), this.contracts);
     if (!oof.ok) throw new Error(oof.objections.join("; "));
     const raw = snapshot.files[this.scoreFile];
     const score = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : Number.NaN;
     if (!Number.isFinite(score)) throw new Error(`${this.scoreFile} is missing or not finite`);
-    return {
+    return deepFreeze({
       score,
       facts: [{ name: "score-file", value: score, source: this.scoreFile }],
       evaluatorId: this.name,
       evaluatorVersion: "1",
-    };
+    });
   }
 }
 
-function fakeInnerRuntime(files: Record<string, string>): ToyAgentRuntime {
+function fakeInnerRuntime(files: Readonly<Record<string, string>>): ToyAgentRuntime {
   return {
     selfVerify: () => ({ ok: true }),
     propose: () => ({ files: { ...files } }),
@@ -211,6 +227,7 @@ function fakeInnerRuntime(files: Record<string, string>): ToyAgentRuntime {
 
 export interface MethodologyAcceptanceResult {
   readonly adapter: MethodologyToyCompetitionAdapter;
+  readonly task: PluginTaskJson;
   readonly state: MissionState;
   readonly events: readonly MissionEvent[];
   readonly evaluations: number;
@@ -221,6 +238,7 @@ export async function runMethodologyAcceptance(input: {
   readonly contracts: MethodologyContracts;
   readonly variant: FakeInnerVariant;
   readonly score?: string;
+  readonly component?: MethodologyComponent;
 }): Promise<MethodologyAcceptanceResult> {
   const adapter = new MethodologyToyCompetitionAdapter(input.contracts);
   const inner = fakeInnerCandidate(input);
@@ -233,10 +251,11 @@ export async function runMethodologyAcceptance(input: {
     policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
   });
   const state = await harness.run();
-  return {
+  return deepFreeze({
     adapter,
+    task: inner.task,
     state,
     events: harness.events(),
     evaluations: adapter.evaluations,
-  };
+  });
 }

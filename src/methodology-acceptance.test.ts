@@ -8,13 +8,11 @@ import {
 } from "./methodology";
 import {
   MethodologyToyCompetitionAdapter,
-  applyFakeInnerComponent,
   compilePluginTask,
   componentRegionHash,
   fakeInnerCandidate,
   runMethodologyAcceptance,
 } from "./methodology-acceptance";
-import parentManifest from "./fixtures/methodology/manifest-parent.json";
 import oofManifest from "./fixtures/methodology/manifest-oof.json";
 import noOofManifest from "./fixtures/methodology/manifest-no-oof.json";
 import splitMismatchManifest from "./fixtures/methodology/manifest-split-mismatch.json";
@@ -30,6 +28,8 @@ describe("T48.5 methodology manifest seam (fake inner)", () => {
     expect(Object.keys(task.methodology!)).toEqual(["split_contract", "oof_ensemble", "feature_pipeline"]);
 
     const inner = fakeInnerCandidate({ contracts, variant: "oof", score: "3" });
+    expect(inner.task).toEqual(task);
+    expect(inner.task.methodology?.split_contract?.split_ref.digest).toBe(contracts.splitContract?.splitRef.digest);
     expect(inner.manifest).toEqual(oofManifest);
     expect(inner.files["methodology.json"]).toBe(JSON.stringify(oofManifest));
 
@@ -48,6 +48,7 @@ describe("T48.5 methodology manifest seam (fake inner)", () => {
 
     expect(result.state.phase).toBe("COMPLETED");
     expect(result.state.branches.candidate.status).toBe("PROMOTED_LOCAL");
+    expect(result.task.methodology).toEqual(compileMethodologyBlock(contracts));
     expect(result.state.champion?.snapshot.files["methodology.json"]).toBe(JSON.stringify(oofManifest));
     expect(result.adapter.name).toBe("methodology-toy");
     expect(result.evaluations).toBe(1);
@@ -109,18 +110,37 @@ describe("T48.5 methodology manifest seam (fake inner)", () => {
     expect(withoutOof.events.some((event) => event.type === "PROMOTED_LOCAL")).toBe(false);
   });
 
-  test("Demo C: FE-only keeps ensemble+split hash; ensemble-only keeps FE+split hash", () => {
-    const parent = parentManifest;
-    const feOnly = applyFakeInnerComponent(parent, "feature_pipeline");
-    const ensembleOnly = applyFakeInnerComponent(parent, "oof_ensemble");
+  test("Demo C: FE-only keeps ensemble+split hash; ensemble-only keeps FE+split hash", async () => {
+    const parent = fakeInnerCandidate({ contracts, variant: "oof" });
+    const feOnly = fakeInnerCandidate({ contracts, variant: "oof", component: "feature_pipeline" });
+    const ensembleOnly = fakeInnerCandidate({ contracts, variant: "oof", component: "oof_ensemble" });
+    const parentManifest = JSON.parse(parent.files["methodology.json"]);
+    const feManifest = JSON.parse(feOnly.files["methodology.json"]);
+    const ensembleManifest = JSON.parse(ensembleOnly.files["methodology.json"]);
 
-    expect(componentRegionHash(feOnly, "oof_ensemble")).toBe(componentRegionHash(parent, "oof_ensemble"));
-    expect(componentRegionHash(feOnly, "split_ref")).toBe(componentRegionHash(parent, "split_ref"));
-    expect(componentRegionHash(feOnly, "feature_pipeline")).not.toBe(componentRegionHash(parent, "feature_pipeline"));
+    expect(feOnly.task).toEqual(parent.task);
+    expect(componentRegionHash(feManifest, "oof_ensemble")).toBe(componentRegionHash(parentManifest, "oof_ensemble"));
+    expect(componentRegionHash(feManifest, "split_ref")).toBe(componentRegionHash(parentManifest, "split_ref"));
+    expect(componentRegionHash(feManifest, "feature_pipeline")).not.toBe(componentRegionHash(parentManifest, "feature_pipeline"));
 
-    expect(componentRegionHash(ensembleOnly, "feature_pipeline")).toBe(componentRegionHash(parent, "feature_pipeline"));
-    expect(componentRegionHash(ensembleOnly, "split_ref")).toBe(componentRegionHash(parent, "split_ref"));
-    expect(componentRegionHash(ensembleOnly, "oof_ensemble")).not.toBe(componentRegionHash(parent, "oof_ensemble"));
+    expect(componentRegionHash(ensembleManifest, "feature_pipeline")).toBe(componentRegionHash(parentManifest, "feature_pipeline"));
+    expect(componentRegionHash(ensembleManifest, "split_ref")).toBe(componentRegionHash(parentManifest, "split_ref"));
+    expect(componentRegionHash(ensembleManifest, "oof_ensemble")).not.toBe(componentRegionHash(parentManifest, "oof_ensemble"));
+
+    const feRun = await runMethodologyAcceptance({
+      missionId: "t48-5-fe-only",
+      contracts,
+      variant: "oof",
+      component: "feature_pipeline",
+    });
+    const ensembleRun = await runMethodologyAcceptance({
+      missionId: "t48-5-ensemble-only",
+      contracts,
+      variant: "oof",
+      component: "oof_ensemble",
+    });
+    expect(feRun.state.branches.candidate.status).toBe("PROMOTED_LOCAL");
+    expect(ensembleRun.state.branches.candidate.status).toBe("PROMOTED_LOCAL");
   });
 
   test("does not invent gate passage: compile and echoed contracts still sleep or fail closed", () => {
