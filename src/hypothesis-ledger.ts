@@ -1,12 +1,13 @@
 /**
- * H1 in-memory Hypothesis / KillTest ledger.
+ * In-memory Hypothesis / KillTest ledger (H1 schema + H2 write/projection).
  *
  * Deepens the existing T48 evidence catalog (`EvidenceMemory`,
  * `MissionDirector` artifacts) instead of a second mission store.
+ * Writes append events; `projectHypothesisLedger` / `replay` fold the log.
  * Expand is ledger-only (optional Campaign·Task enqueue) and has no
  * UCT / SelectionPolicy / search-node write path. Kill-test `fail`
  * may auto-`killed`; `pass` / `inconclusive` never auto-kill.
- * Durable sqlite, K1/K2 hang points, and S* param-space/MMD are out of scope.
+ * Durable sqlite, K2 hang points, and S* param-space/MMD are out of scope.
  */
 import { deepFreeze } from "./security-boundary";
 import {
@@ -107,6 +108,8 @@ export interface HypothesisLedgerState {
   readonly results: Readonly<Record<string, KillTestResult>>;
   readonly queuedCampaignTasks: readonly CampaignTask[];
   readonly expandQueue: readonly QueuedCampaignTask[];
+  /** Write-log order as projected from the event stream. */
+  readonly eventOrder: readonly HypothesisEventType[];
   /** Always empty: this ledger never writes search nodes. */
   readonly searchNodes: readonly SearchNode[];
 }
@@ -344,13 +347,14 @@ function emptyState(): MutableHypothesisState {
   return { hypotheses: new Map(), plans: new Map(), results: new Map(), queued: [], operations: new Map() };
 }
 
-function publicState(state: MutableHypothesisState): HypothesisLedgerState {
+function publicState(state: MutableHypothesisState, events: readonly HypothesisEvent[]): HypothesisLedgerState {
   return deepFreeze({
     hypotheses: Object.fromEntries(state.hypotheses),
     plans: Object.fromEntries(state.plans),
     results: Object.fromEntries(state.results),
     queuedCampaignTasks: frozenArray(state.queued.map((entry) => entry.task)),
     expandQueue: frozenArray(state.queued),
+    eventOrder: Object.freeze(events.map((event) => event.type)),
     searchNodes: Object.freeze([]),
   }) as HypothesisLedgerState;
 }
@@ -443,6 +447,11 @@ function project(events: readonly HypothesisEvent[]): MutableHypothesisState {
   return state;
 }
 
+/** Fold an append-only write log. Expand never contributes search nodes. */
+export function projectHypothesisLedger(events: readonly HypothesisEvent[]): HypothesisLedgerState {
+  return publicState(project(events), events);
+}
+
 export class HypothesisLedger {
   readonly store: HypothesisLedgerStore;
   private readonly catalog: T48MappedCatalog;
@@ -453,6 +462,18 @@ export class HypothesisLedger {
     this.catalog = options.catalog;
     this.clock = options.clock ?? (() => Date.now());
     this.store = store;
+  }
+
+  static replay(events: readonly HypothesisEvent[]): HypothesisLedgerState {
+    return projectHypothesisLedger(events);
+  }
+
+  static fromEvents(options: HypothesisLedgerOptions, events: readonly HypothesisEvent[]): HypothesisLedger {
+    const store = new InMemoryHypothesisLedger();
+    for (const event of events) {
+      store.append({ sequence: event.sequence, type: event.type, payload: clone(event.payload), eventId: event.eventId });
+    }
+    return new HypothesisLedger(options, store);
   }
 
   private operation(prefix: string, supplied?: string): string {
@@ -483,7 +504,7 @@ export class HypothesisLedger {
   }
 
   events(): readonly HypothesisEvent[] { return this.store.events(); }
-  state(): HypothesisLedgerState { return publicState(project(this.store.events())); }
+  state(): HypothesisLedgerState { return projectHypothesisLedger(this.store.events()); }
 
   plansFor(hypothesisId: string): readonly KillTestPlan[] {
     return frozenArray(this.state().hypotheses[hypothesisId]?.killTestPlanIds.map((id) => this.state().plans[id]!).filter(Boolean) ?? []);
