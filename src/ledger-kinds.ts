@@ -38,6 +38,7 @@ export const LEDGER_EVENT_KINDS: Record<MissionEventType, LedgerEventKind> = {
   AUDITOR_COMPLETED: "Evidence",
   SUCCESS_AUDITOR_COMPLETED: "Evidence",
   LEAKAGE_DISCLOSURE: "Evidence",
+  PUBLIC_PROBE_REFUSED: "Evidence",
   GAIN_BANKED: "Evaluation",
   PROMOTED_LOCAL: "Evaluation",
   BRANCH_REJECTED: "Evaluation",

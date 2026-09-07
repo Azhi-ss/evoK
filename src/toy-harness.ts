@@ -56,6 +56,19 @@ import {
   type TestSignalPolicy,
 } from "./data-honesty";
 import {
+  authorizePublicProbe,
+  isValidationLadderContract,
+  levelCanChampion,
+  normaliseValidationLevel,
+  publicProbesUsedFromEvents,
+  resolveValidationLadder,
+  type ValidationEventLike,
+  type ValidationLadderContract,
+  type ValidationLadderInput,
+  type ValidationLadderProvider,
+  type ValidationLevel,
+} from "./validation-ladder";
+import {
   normalizePrediction,
   normalizeReconcile,
   reconcilePrediction,
@@ -102,6 +115,16 @@ export type {
 };
 export { LeakageViolation, auditCandidateFiles, resolveDataHonestyContract };
 export type { DataHonestyContract, LeakageAuditContract, LeakageFinding, TestSignalPolicy };
+export {
+  authorizePublicProbe,
+  canReadScore,
+  isValidationLadderContract,
+  levelCanChampion,
+  normaliseValidationLevel,
+  publicProbesUsedFromEvents,
+  resolveValidationLadder,
+} from "./validation-ladder";
+export type { ValidationLadderContract, ValidationLadderInput, ValidationLadderProvider, ValidationLevel, ValidationReaderRole } from "./validation-ladder";
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -210,6 +233,12 @@ export interface EvaluationResult {
   runId?: string;
   seed?: number;
   digest?: string;
+  /**
+   * T41 validation ladder: which data split / leaderboard this score came from
+   * (`inner_cv` | `outer_holdout` | `public_lb`). The promotion gate only
+   * champions `outer_holdout` evidence.
+   */
+  validationLevel?: ValidationLevel;
 }
 
 export interface CompetitionAdapterDescription {
@@ -315,6 +344,9 @@ export type ToyCompetitionAdapter = {
   readonly leakageAudit?: (() => DataHonestyContract["leakage_audit"]) | DataHonestyContract["leakage_audit"];
   readonly test_signal_policy?: (() => DataHonestyContract["test_signal_policy"]) | DataHonestyContract["test_signal_policy"];
   readonly testSignalPolicy?: (() => DataHonestyContract["test_signal_policy"]) | DataHonestyContract["test_signal_policy"];
+  /** Validation ladder (T41): three-level data-split / LB policy; absent → gate inactive. */
+  readonly validation_ladder?: ValidationLadderProvider["validation_ladder"];
+  readonly validationLadder?: ValidationLadderProvider["validationLadder"];
   /** Adapter-owned immutable evaluation protocol; snake-case and camel-case forms are accepted. */
   readonly evaluation_contract?: EvaluationContractAccessor;
   readonly evaluationContract?: EvaluationContractAccessor;
@@ -399,6 +431,7 @@ export type MissionEventType =
   | "AUDITOR_COMPLETED"
   | "SUCCESS_AUDITOR_COMPLETED"
   | "LEAKAGE_DISCLOSURE"
+  | "PUBLIC_PROBE_REFUSED"
   | "GAIN_BANKED"
   | "PROMOTED_LOCAL"
   | "BRANCH_REJECTED"
@@ -535,6 +568,10 @@ export interface MissionState {
   evaluationFeedbackEnabled: boolean;
   evaluationContract?: Readonly<NormalizedEvaluationContract>;
   evaluationContractDigest?: string;
+  /** T41 validation ladder contract; undefined = ladder inactive for this adapter. */
+  validationLadder?: Readonly<ValidationLadderContract>;
+  /** Number of Public LB probes already consumed (projected from the ledger). */
+  publicProbesUsed?: number;
   evaluationControlSnapshotDigest?: string;
   gainBank?: readonly GainBankEntry[];
   branches: Record<string, BranchState>;
@@ -838,6 +875,11 @@ function initialState(event: MissionEvent): MissionState {
     contractDigest: p.contractDigest,
     evaluationFeedbackEnabled: p.evaluationFeedbackEnabled === true,
     ...(evaluationContract === undefined ? {} : { evaluationContract, evaluationContractDigest: evaluationDigest }),
+    ...(p.validationLadder === undefined ? {} : {
+      validationLadder: isValidationLadderContract(p.validationLadder)
+        ? p.validationLadder
+        : resolveValidationLadder({ validation_ladder: p.validationLadder as ValidationLadderInput }),
+    }),
     ...(evaluationControlSnapshotDigest === undefined ? {} : { evaluationControlSnapshotDigest }),
     gainBank: [],
     branches: Object.fromEntries(branchIds.map((branchId) => [branchId, {
@@ -1002,6 +1044,7 @@ function verifiedEvaluationFromPayload(state: MissionState, branch: BranchState,
       evaluatorVersion: payloadEvaluatorVersion,
       snapshotDigest: payloadSnapshotDigest,
       contractDigest: payloadContractDigest,
+      ...(payload.validationLevel === undefined ? {} : { validationLevel: normaliseValidationLevel(payload.validationLevel) }),
     };
     return { ...evaluation, evaluationDigest: evaluationDigest(evaluation) };
   }
@@ -1039,6 +1082,7 @@ function verifiedEvaluationFromPayload(state: MissionState, branch: BranchState,
     runs: clone(ladder.runs),
     ladder: deepFreeze(clone(ladder)),
     evaluationDigest: payload.evaluationDigest as string,
+    ...(payload.validationLevel === undefined ? {} : { validationLevel: normaliseValidationLevel(payload.validationLevel) }),
   };
   return evaluationDigest(evaluation) === payload.evaluationDigest ? withEvaluationLadderAlias(evaluation) : undefined;
 }
@@ -1413,6 +1457,8 @@ function project(events: readonly MissionEvent[]): MissionState {
         break;
     }
   }
+  // T41: spent Public LB probes are projected from evaluator-succeeded events.
+  state.publicProbesUsed = publicProbesUsedFromEvents(events as readonly ValidationEventLike[]);
   return state;
 }
 
@@ -1429,6 +1475,8 @@ export class ToyCompetitionHarness {
   private readonly evaluationContractDigest?: string;
   /** T40 data honesty contract; undefined = gate inactive for this adapter. */
   private readonly dataHonesty?: Readonly<DataHonestyContract>;
+  /** T41 validation ladder; undefined = the three-level split policy is inactive. */
+  private readonly validationLadder?: Readonly<ValidationLadderContract>;
   private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
   private readonly planVersion: number;
   private contractValue?: Readonly<TaskContract>;
@@ -1471,6 +1519,8 @@ export class ToyCompetitionHarness {
     this.adapter = options.adapter ?? options.competitionAdapter ?? { name: "toy", evaluate: options.evaluate ?? new ScoreFileToyCompetitionAdapter().evaluate.bind(new ScoreFileToyCompetitionAdapter()) };
     // Data honesty gate (T40): inactive when the adapter declares no contract; fail-closed on malformed declarations.
     this.dataHonesty = resolveDataHonestyContract(this.adapter);
+    // Validation ladder (T41): inactive when the adapter declares none; fail-closed on a non-holdout basis or bad cap.
+    this.validationLadder = resolveValidationLadder(this.adapter);
     const resolvedEvaluationContract = resolveEvaluationContract(this.adapter);
     this.evaluationContract = resolvedEvaluationContract;
     this.evaluationContractDigest = resolvedEvaluationContract === undefined ? undefined : evaluationContractDigest(resolvedEvaluationContract);
@@ -1511,6 +1561,9 @@ export class ToyCompetitionHarness {
         ...(this.evaluationContract === undefined ? {} : {
           evaluationContract: clone(this.evaluationContract),
           evaluationContractDigest: this.evaluationContractDigest,
+        }),
+        ...(this.validationLadder === undefined ? {} : {
+          validationLadder: clone(this.validationLadder),
         }),
         ...(this.evaluationControlSnapshot === undefined ? {} : {
           evaluationControlSnapshotDigest: this.evaluationControlSnapshot.digest,
@@ -1581,6 +1634,58 @@ export class ToyCompetitionHarness {
     return typeof decision === "boolean" ? { approved: decision } : decision ?? { approved: false };
   }
 
+  /**
+   * T41 validation ladder gate, run after an evaluation is produced and before
+   * it becomes trusted Evidence: tags the score with its declared validation
+   * level, and for a Public LB probe refuses (records `PUBLIC_PROBE_REFUSED` +
+   * rejects the branch) once the explicit probe cap is exhausted, so no public
+   * score is recorded past the budget. Returns `{ stop: true }` when the branch
+   * is terminally rejected; otherwise `{ evaluation }` with the level attached.
+   */
+  private validationLadderGate(
+    branchId: string,
+    fencingToken: number,
+    evaluation: EvaluationResult,
+  ): { stop: true } | { evaluation: EvaluationResult } {
+    const ladder = this.validationLadder;
+    if (!ladder) return { evaluation };
+    const token = evaluation.validationLevel
+      ?? (evaluation as unknown as Record<string, unknown>).validation_level;
+    let level: ValidationLevel | undefined;
+    if (token !== undefined) {
+      try {
+        level = normaliseValidationLevel(token);
+      } catch {
+        level = undefined;
+      }
+    }
+    if (level === undefined) {
+      this.append("BRANCH_REJECTED", {
+        branchId,
+        fencingToken,
+        reason: "validation ladder active but evaluation declared no validation level (inner_cv/outer_holdout/public_lb)",
+      });
+      return { stop: true };
+    }
+    if (level === "public_lb") {
+      const spent = publicProbesUsedFromEvents(this.ledger as readonly ValidationEventLike[]);
+      const authorization = authorizePublicProbe(ladder, spent);
+      if (!authorization.allowed) {
+        // Refused before any public score is recorded: the probe never becomes Evidence.
+        this.append("PUBLIC_PROBE_REFUSED", {
+          branchId,
+          fencingToken,
+          cap: ladder.publicProbeCap,
+          spent,
+          reason: authorization.reason,
+        });
+        this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: `public LB probe refused: ${authorization.reason}` });
+        return { stop: true };
+      }
+    }
+    return { evaluation: { ...evaluation, validationLevel: level } };
+  }
+
   private controlSnapshot(snapshot: Readonly<CandidateSnapshot>, state: MissionState): Readonly<CandidateSnapshot> {
     return this.evaluationControlSnapshot ?? state.champion?.snapshot ?? snapshot;
   }
@@ -1602,7 +1707,7 @@ export class ToyCompetitionHarness {
   private async evaluateRunFact(
     snapshot: Readonly<CandidateSnapshot>,
     context: EvaluationRunContext,
-  ): Promise<EvaluationRunFact> {
+  ): Promise<{ fact: EvaluationRunFact; validationLevel?: ValidationLevel }> {
     const protocol = this.evaluationContract!;
     const protocolDigest = this.evaluationContractDigest!;
     const trusted = await evaluateTrustedSnapshot(
@@ -1651,7 +1756,15 @@ export class ToyCompetitionHarness {
     };
     const fact = { ...base, digest: evaluationRunDigest(base) } as EvaluationRunFact;
     if (raw.digest !== undefined && raw.digest !== fact.digest) throw new TrustViolation("evaluator returned a forged run digest");
-    return deepFreeze(fact) as EvaluationRunFact;
+    // T41: the evaluator names the data split / leaderboard this score came from.
+    // A malformed level token fails closed on any side; only the candidate's level tags the result.
+    let validationLevel: ValidationLevel | undefined;
+    const levelToken = isRecord(raw) ? (raw.validationLevel ?? raw.validation_level) : undefined;
+    if (levelToken !== undefined) {
+      const normalized = normaliseValidationLevel(levelToken);
+      if (context.side === "candidate") validationLevel = normalized;
+    }
+    return { fact: deepFreeze(fact) as EvaluationRunFact, validationLevel };
   }
 
   private async evaluateWithNoiseProtocol(
@@ -1667,6 +1780,7 @@ export class ToyCompetitionHarness {
     const control = this.controlSnapshot(snapshot, before);
     const controlDigest = control.digest ?? snapshot.digest;
     const runs = [...existingRuns];
+    let runValidationLevel: ValidationLevel | undefined;
     for (const run of runs) {
       if (!validEvaluationRunFact(run, before, before.branches[branchId]!, controlDigest)) {
         throw new TrustViolation("evaluation run fact is not bound to the trusted protocol");
@@ -1706,7 +1820,8 @@ export class ToyCompetitionHarness {
             contract: protocol,
             ordinal: evaluationRunOrdinal(protocol, step.stage, side, repeat),
           }) as Readonly<EvaluationRunContext>;
-          const fact = await this.evaluateRunFact(target, context);
+          const { fact, validationLevel } = await this.evaluateRunFact(target, context);
+          if (validationLevel !== undefined) runValidationLevel = validationLevel;
           if (fact.evaluatorId !== evaluatorId && runs.length > 0) throw new TrustViolation("evaluator identity changed during ladder");
           if (runs.length === 0) evaluatorId = fact.evaluatorId;
           if (fact.evaluatorVersion !== evaluatorVersion && runs.length > 0) throw new TrustViolation("evaluator version changed during ladder");
@@ -1741,6 +1856,7 @@ export class ToyCompetitionHarness {
       promotionScore: ladder.promotionScore,
       runs: ladder.runs,
       ladder,
+      ...(runValidationLevel === undefined ? {} : { validationLevel: runValidationLevel }),
     };
     const result = { ...base, evaluationDigest: evaluationDigest(base) } as EvaluationResult;
     return deepFreeze(withEvaluationLadderAlias(result)) as EvaluationResult;
@@ -2169,6 +2285,10 @@ export class ToyCompetitionHarness {
             attempt,
             branch.evaluationRuns ?? [],
           );
+          // T41 validation ladder: tag the score level and refuse an exhausted Public probe.
+          const gated = this.validationLadderGate(branchId, fencingToken, evaluation);
+          if ("stop" in gated) return;
+          evaluation = gated.evaluation;
           this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, trusted_score: trustedScoreFromEvaluation(evaluation, snapshot), evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
         } else {
           const trusted = await evaluateTrustedSnapshot(
@@ -2196,6 +2316,18 @@ export class ToyCompetitionHarness {
             snapshotDigest: trusted.manifest.snapshotDigest,
             contractDigest: trusted.manifest.contractDigest,
           };
+          // T41 validation ladder: tag the score level and refuse an exhausted Public probe.
+          const legacyLevelToken = (raw as Record<string, unknown>).validationLevel ?? (raw as Record<string, unknown>).validation_level;
+          if (legacyLevelToken !== undefined) {
+            try {
+              evaluation = { ...evaluation, validationLevel: normaliseValidationLevel(legacyLevelToken) };
+            } catch {
+              /* fall through to the gate, which rejects an undeclared/invalid level */
+            }
+          }
+          const gated = this.validationLadderGate(branchId, fencingToken, evaluation);
+          if ("stop" in gated) return;
+          evaluation = gated.evaluation;
           // Every evaluator record is content-addressed so verdicts can cite it (T46).
           evaluation = { ...evaluation, evaluationDigest: evaluationDigest(evaluation) };
           this.append("EVALUATOR_SUCCEEDED", { branchId, fencingToken, ...evaluation, trusted_score: trustedScoreFromEvaluation(evaluation, snapshot), evidenceIds: evaluationEvidenceIds(evaluation, snapshot) });
@@ -2285,6 +2417,25 @@ export class ToyCompetitionHarness {
               });
               return;
             }
+          }
+        }
+        // T41 validation ladder: only outer-holdout evidence may champion. An
+        // inner-CV-only improvement or a Public LB probe is rejected even when
+        // its raw score is higher — the unattended promotion basis is the outer
+        // holdout, never the Public probe.
+        if (this.validationLadder) {
+          const level = evaluation.validationLevel;
+          if (level === undefined || !levelCanChampion(level)) {
+            this.append("BRANCH_REJECTED", {
+              branchId,
+              fencingToken,
+              reason: level === undefined
+                ? "validation level undeclared; cannot champion without outer-holdout evidence"
+                : level === "public_lb"
+                  ? "Public LB probe evidence can never champion (local promotion uses the outer holdout)"
+                  : "inner-CV-only improvement cannot champion without outer-holdout evidence",
+            });
+            return;
           }
         }
         if (this.options.promotionCrossModel === "both") {
