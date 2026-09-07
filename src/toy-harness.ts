@@ -58,6 +58,16 @@ import {
   type TestSignalPolicy,
 } from "./data-honesty";
 import {
+  MethodologyViolation,
+  applyComponentFanOut,
+  auditMethodology,
+  isMethodologyContracts,
+  resolveMethodologyContracts,
+  validateEnsemblePromotion,
+  type MethodologyContracts,
+  type MethodologyDeclaration,
+} from "./methodology-contracts";
+import {
   authorizePublicProbe,
   isValidationLadderContract,
   levelCanChampion,
@@ -137,6 +147,15 @@ export {
   resolveValidationLadder,
 } from "./validation-ladder";
 export type { ValidationLadderContract, ValidationLadderInput, ValidationLadderProvider, ValidationLevel, ValidationReaderRole } from "./validation-ladder";
+export {
+  MethodologyViolation,
+  applyComponentFanOut,
+  auditMethodology,
+  isMethodologyContracts,
+  resolveMethodologyContracts,
+  validateEnsemblePromotion,
+} from "./methodology-contracts";
+export type { MethodologyContracts, MethodologyDeclaration, MethodologyProvider } from "./methodology-contracts";
 export {
   authorizeHeavySearch,
   baselineSatisfied,
@@ -376,6 +395,16 @@ export type ToyCompetitionAdapter = {
   /** Validation ladder (T41): three-level data-split / LB policy; absent → gate inactive. */
   readonly validation_ladder?: ValidationLadderProvider["validation_ladder"];
   readonly validationLadder?: ValidationLadderProvider["validationLadder"];
+  /**
+   * Methodology contracts (T44): component-level feature pipeline, OOF ensemble,
+   * and time/group split discipline. Exposed via a snake/camel accessor (or plain
+   * field). Absent → methodology gates inactive. Violating a declared
+   * split_contract is a rule failure (MethodologyViolation → quarantine), and
+   * ensemble promotion requires OOF (or a declared leakage-safe equivalent).
+   */
+  readonly methodology_contracts?: (() => MethodologyDeclaration | undefined) | MethodologyDeclaration;
+  readonly methodologyContracts?: (() => MethodologyDeclaration | undefined) | MethodologyDeclaration;
+  readonly methodology?: (() => MethodologyDeclaration | undefined) | MethodologyDeclaration;
   /**
    * Strong-baseline / AutoML track (T43): vendor-neutral declaration of the cheap
    * baseline command/entry and success predicate; an adapter may additionally bind a
@@ -712,6 +741,12 @@ export interface ToyMissionOptions {
    * beat `baseline + δ`.
    */
   baselineTrack?: BaselineTrackInput | BaselineTrackContract;
+  /**
+   * T44 methodology contracts (feature pipeline / OOF ensemble / split discipline).
+   * May be a normalized bundle or a raw declaration; resolved fail-closed. The
+   * adapter port is used when this is omitted.
+   */
+  methodologyContracts?: MethodologyContracts | MethodologyDeclaration;
 }
 
 function validateInteger(name: string, value: number, minimum: number): void {
@@ -1555,6 +1590,8 @@ export class ToyCompetitionHarness {
   private readonly dataHonesty?: Readonly<DataHonestyContract>;
   /** T41 validation ladder; undefined = the three-level split policy is inactive. */
   private readonly validationLadder?: Readonly<ValidationLadderContract>;
+  /** T44 methodology contracts (feature pipeline / OOF ensemble / split discipline); undefined = inactive. */
+  private readonly methodology?: Readonly<MethodologyContracts>;
   /** T43 strong-baseline track; undefined = baseline-first gate inactive. */
   private readonly baselineTrack?: Readonly<BaselineTrackContract>;
   private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
@@ -1601,6 +1638,10 @@ export class ToyCompetitionHarness {
     this.dataHonesty = resolveDataHonestyContract(this.adapter);
     // Validation ladder (T41): inactive when the adapter declares none; fail-closed on a non-holdout basis or bad cap.
     this.validationLadder = resolveValidationLadder(this.adapter);
+    // Methodology contracts (T44): inactive when the adapter declares none; fail-closed on malformed declarations.
+    this.methodology = isMethodologyContracts(options.methodologyContracts)
+      ? options.methodologyContracts as Readonly<MethodologyContracts>
+      : resolveMethodologyContracts(this.adapter);
     // T43 baseline-first gate: resolve from the adapter port, or an explicit mission
     // option; inactive when neither declares a track. Malformed declarations fail closed.
     this.baselineTrack = isBaselineTrackContract(options.baselineTrack)
@@ -1779,6 +1820,34 @@ export class ToyCompetitionHarness {
       }
     }
     return { evaluation: { ...evaluation, validationLevel: level } };
+  }
+
+  /**
+   * T44 OOF ensemble gate (spec #1 G5): an ensemble candidate may be promoted
+   * only with out-of-fold predictions (or a contract-declared leakage-safe
+   * equivalent). The candidate signals `component=ensemble` and OOF presence
+   * via evaluation facts; absence of an OOF signal is treated as no-OOF and the
+   * promotion is rejected. Non-ensemble candidates and missions with no declared
+   * oof_ensemble pass through.
+   */
+  private oofEnsembleGate(branchId: string, fencingToken: number, evaluation: EvaluationResult): { stop: true } | { ok: true } {
+    const methodology = this.methodology;
+    if (!methodology?.oof_ensemble) return { ok: true };
+    const facts = evaluation.facts ?? [];
+    const fact = (name: string): string | undefined => {
+      const hit = facts.find((f) => typeof f?.name === "string" && f.name.toLowerCase() === name);
+      return hit === undefined ? undefined : String(hit.value).toLowerCase();
+    };
+    const component = fact("component") ?? fact("component_kind") ?? "model";
+    const isEnsemble = component === "ensemble" || component === "oof_ensemble";
+    if (!isEnsemble) return { ok: true };
+    const oofPresent = fact("oof_predictions") === "true" || fact("oof_present") === "true" || fact("oof") === "true";
+    const decision = validateEnsemblePromotion(methodology, { component, oofPredictionsPresent: oofPresent });
+    if (!decision.ok) {
+      this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: decision.reasons.join("; ") });
+      return { stop: true };
+    }
+    return { ok: true };
   }
 
   private controlSnapshot(snapshot: Readonly<CandidateSnapshot>, state: MissionState): Readonly<CandidateSnapshot> {
@@ -2336,6 +2405,16 @@ export class ToyCompetitionHarness {
               });
             }
           }
+          // Methodology split discipline (T44): a candidate that re-declares a random/
+          // shuffling splitter against a declared time/group split_contract is a RULE
+          // failure (MethodologyViolation is a TrustViolation → terminal quarantine),
+          // not merely a worse score. Inner search may not silently rewrite the split.
+          if (this.methodology) {
+            const methodologyFindings = auditMethodology(this.methodology, files);
+            if (methodologyFindings.length > 0) {
+              throw new MethodologyViolation(methodologyFindings);
+            }
+          }
           this.append("AGENT_COMPLETED", { branchId, fencingToken, ok: true });
           this.append("CANDIDATE_GENERATED", { branchId, fencingToken, files, filesDigest: digestValue(files) });
           this.append("CANDIDATE_MATERIALIZED", { branchId, fencingToken });
@@ -2546,6 +2625,10 @@ export class ToyCompetitionHarness {
             });
             return;
           }
+        }
+        if (this.methodology?.oof_ensemble) {
+          const oofGate = this.oofEnsembleGate(branchId, fencingToken, evaluation);
+          if ("stop" in oofGate) return;
         }
         if (this.options.promotionCrossModel === "both") {
           // Cross-model agreement is required before the promotion policy may
