@@ -5,9 +5,9 @@ import { deepFreeze } from "./security-boundary";
  * for the inner plugin task `methodology` block (ADR 0003 / #42).
  *
  * Compile: resolved contracts → snake_case plugin block.
- * Read: candidate manifest → evidence mapping for existing T44
- * `auditMethodology` / `oofEnsembleGate`. This module does not add gate
- * powers or change those functions' semantics.
+ * Read: candidate manifest → evidence mapping for T44
+ * `auditMethodology` / `oofEnsembleGate`. Those gates consume evidence only;
+ * they do not promote, and they sleep when no contract is injected.
  */
 
 export interface SplitRef {
@@ -229,16 +229,41 @@ function observedSplitDigest(root: Record<string, unknown>): string | undefined 
   const direct = pick(root, "split_ref_digest", "splitRefDigest");
   if (typeof direct === "string" && direct.trim() !== "") return direct;
   const splitRef = pick(root, "split_ref", "splitRef");
-  if (isPlainRecord(splitRef) && typeof splitRef.digest === "string" && splitRef.digest.trim() !== "") {
-    return splitRef.digest;
+  if (isPlainRecord(splitRef)) {
+    const digest = pick(splitRef, "digest", "digest_summary", "digestSummary", "sha256");
+    if (typeof digest === "string" && digest.trim() !== "") return digest;
   }
   return undefined;
 }
 
+function oofProtocolPresent(value: unknown): boolean | undefined {
+  if (value === true) return true;
+  if (value === false || value === null) return false;
+  if (!isPlainRecord(value)) return undefined;
+  if (typeof value.present === "boolean") return value.present;
+  if (value.declared_equivalent === true || value.declaredEquivalent === true) return true;
+  const protocol = pick(value, "oof", "oof_protocol", "oofProtocol", "protocol");
+  if (protocol === true) return true;
+  if (protocol === false || protocol === null) return false;
+  if (isPlainRecord(protocol)) {
+    if (typeof protocol.present === "boolean") return protocol.present;
+    return Object.keys(protocol).length > 0;
+  }
+  if (value.required !== undefined || value.strategy !== undefined) return undefined;
+  return Object.keys(value).length > 0 ? true : undefined;
+}
+
 function nestedOofPresent(record: Record<string, unknown>): boolean | undefined {
-  for (const key of ["oof", "oof_ensemble", "oofEnsemble"] as const) {
+  if (record.declared_equivalent === true || record.declaredEquivalent === true) return true;
+  const flag = oofProtocolPresent(pick(record, "oof", "oof_protocol", "oofProtocol"));
+  if (flag !== undefined) return flag;
+  for (const key of ["oof_ensemble", "oofEnsemble"] as const) {
     const nested = record[key];
-    if (isPlainRecord(nested) && typeof nested.present === "boolean") return nested.present;
+    if (!isPlainRecord(nested)) continue;
+    if (typeof nested.present === "boolean") return nested.present;
+    if (nested.declared_equivalent === true || nested.declaredEquivalent === true) return true;
+    const declared = oofProtocolPresent(pick(nested, "oof", "oof_protocol", "oofProtocol"));
+    if (declared !== undefined) return declared;
   }
   return undefined;
 }
@@ -250,7 +275,18 @@ function observedOofPresent(root: Record<string, unknown>): boolean {
 }
 
 function hasEvidenceFields(record: Record<string, unknown>): boolean {
-  return pick(record, "split_ref", "splitRef", "split_ref_digest", "splitRefDigest", "oof_present", "oofPresent", "oof") !== undefined
+  return pick(
+    record,
+    "split_ref",
+    "splitRef",
+    "split_ref_digest",
+    "splitRefDigest",
+    "oof_present",
+    "oofPresent",
+    "oof",
+    "declared_equivalent",
+    "declaredEquivalent",
+  ) !== undefined
     || nestedOofPresent(record) !== undefined;
 }
 
@@ -283,4 +319,44 @@ export function readMethodologyManifest(
     splitDigestAgreement: digestAgreement(contracts?.splitContract?.splitRef.digest, splitRefDigest),
     oofPresent,
   }) as MethodologyEvidence;
+}
+
+export interface MethodologyGateResult {
+  readonly ok: boolean;
+  readonly objections: readonly string[];
+}
+
+function gateResult(ok: boolean, objections: readonly string[] = []): MethodologyGateResult {
+  return deepFreeze({ ok, objections: Object.freeze([...objections]) }) as MethodologyGateResult;
+}
+
+/**
+ * T44 split-contract audit. Sleeps when no split contract is injected.
+ * A disagreeing used-split digest is a rule fail; a missing digest is not agree.
+ */
+export function auditMethodology(
+  evidence: MethodologyEvidence,
+  contracts?: MethodologyContracts,
+): MethodologyGateResult {
+  if (contracts?.splitContract === undefined) return gateResult(true);
+  if (evidence.splitDigestAgreement === "agree") return gateResult(true);
+  if (evidence.splitDigestAgreement === "disagree") {
+    return gateResult(false, ["split_ref digest disagrees with task split_contract"]);
+  }
+  return gateResult(false, ["split_ref digest is missing; used-split evidence is required"]);
+}
+
+/**
+ * T44 OOF ensemble gate. Sleeps when OOF is not required.
+ * Ensemble candidates without OOF or declared_equivalent fail closed for leak/OOF.
+ */
+export function oofEnsembleGate(
+  evidence: MethodologyEvidence,
+  contracts?: MethodologyContracts,
+): MethodologyGateResult {
+  if (contracts?.oofEnsemble?.required !== true) return gateResult(true);
+  if (evidence.oofPresent) return gateResult(true);
+  return gateResult(false, [
+    "OOF ensemble leak: manifest must declare an oof protocol or declared_equivalent",
+  ]);
 }
