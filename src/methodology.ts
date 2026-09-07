@@ -21,7 +21,6 @@ export interface SplitContract {
   readonly nSplits?: number;
   readonly seed?: number;
   readonly shuffle?: boolean;
-  readonly groups?: readonly string[];
 }
 
 export interface OofEnsembleContract {
@@ -41,19 +40,14 @@ export interface MethodologyContracts {
   readonly featurePipeline?: FeaturePipelineContract;
 }
 
-export interface PluginSplitRef {
-  readonly digest: string;
-  readonly id?: string;
-}
-
+/** Wire shape of the inner plugin task `methodology` block (snake_case / #42). */
 export interface PluginMethodologyBlock {
   readonly split_contract?: {
-    readonly split_ref: PluginSplitRef;
+    readonly split_ref: SplitRef;
     readonly scheme?: string;
     readonly n_splits?: number;
     readonly seed?: number;
     readonly shuffle?: boolean;
-    readonly groups?: readonly string[];
   };
   readonly oof_ensemble?: {
     readonly required: boolean;
@@ -79,6 +73,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function pick(record: Record<string, unknown>, ...keys: string[]): unknown {
   for (const key of keys) {
     if (record[key] !== undefined) return record[key];
@@ -90,9 +90,9 @@ function nonEmpty(name: string, value: unknown): asserts value is string {
   if (typeof value !== "string" || value.trim() === "") throw new TypeError(`${name} must be a non-empty string`);
 }
 
-function finiteInteger(name: string, value: unknown): asserts value is number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    throw new TypeError(`${name} must be a safe integer`);
+function finiteInteger(name: string, value: unknown, minimum: number): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new RangeError(`${name} must be a finite integer >= ${minimum}`);
   }
 }
 
@@ -117,34 +117,32 @@ function stringList(name: string, value: unknown): readonly string[] | undefined
 }
 
 function resolveSplitRef(value: unknown, name: string): SplitRef {
-  if (!isRecord(value)) throw new TypeError(`${name} must be an ordinary object`);
+  if (!isPlainRecord(value)) throw new TypeError(`${name} must be an ordinary object`);
   nonEmpty(`${name}.digest`, value.digest);
   const id = optionalString(`${name}.id`, value.id);
   return Object.freeze({ digest: value.digest, ...(id === undefined ? {} : { id }) });
 }
 
 function resolveSplitContract(value: unknown): SplitContract {
-  if (!isRecord(value)) throw new TypeError("split contract must be an ordinary object");
+  if (!isPlainRecord(value)) throw new TypeError("split contract must be an ordinary object");
   const splitRef = resolveSplitRef(pick(value, "splitRef", "split_ref"), "splitRef");
   const scheme = optionalString("splitContract.scheme", pick(value, "scheme"));
   const nSplits = pick(value, "nSplits", "n_splits");
   const seed = pick(value, "seed");
   const shuffle = optionalBoolean("splitContract.shuffle", pick(value, "shuffle"));
-  const groups = stringList("splitContract.groups", pick(value, "groups"));
-  if (nSplits !== undefined) finiteInteger("splitContract.nSplits", nSplits);
-  if (seed !== undefined) finiteInteger("splitContract.seed", seed);
+  if (nSplits !== undefined) finiteInteger("splitContract.nSplits", nSplits, 1);
+  if (seed !== undefined) finiteInteger("splitContract.seed", seed, 0);
   return Object.freeze({
     splitRef,
     ...(scheme === undefined ? {} : { scheme }),
     ...(nSplits === undefined ? {} : { nSplits }),
     ...(seed === undefined ? {} : { seed }),
     ...(shuffle === undefined ? {} : { shuffle }),
-    ...(groups === undefined ? {} : { groups }),
   });
 }
 
 function resolveOofEnsemble(value: unknown): OofEnsembleContract {
-  if (!isRecord(value)) throw new TypeError("oof ensemble contract must be an ordinary object");
+  if (!isPlainRecord(value)) throw new TypeError("oof ensemble contract must be an ordinary object");
   const required = pick(value, "required");
   if (typeof required !== "boolean") throw new TypeError("oofEnsemble.required must be boolean");
   const strategy = optionalString("oofEnsemble.strategy", pick(value, "strategy"));
@@ -152,7 +150,7 @@ function resolveOofEnsemble(value: unknown): OofEnsembleContract {
 }
 
 function resolveFeaturePipeline(value: unknown): FeaturePipelineContract {
-  if (!isRecord(value)) throw new TypeError("feature pipeline contract must be an ordinary object");
+  if (!isPlainRecord(value)) throw new TypeError("feature pipeline contract must be an ordinary object");
   const fitScope = optionalString("featurePipeline.fitScope", pick(value, "fitScope", "fit_scope"));
   const steps = stringList("featurePipeline.steps", pick(value, "steps"));
   const forbidTargetLeak = optionalBoolean(
@@ -175,7 +173,7 @@ function hasContent(contracts: MethodologyContracts): boolean {
 /** Normalize camel/snake input into the T44 MethodologyContracts surface. */
 export function resolveMethodologyContracts(input: unknown): MethodologyContracts | undefined {
   if (input === undefined || input === null) return undefined;
-  if (!isRecord(input)) throw new TypeError("methodology contracts must be an ordinary object");
+  if (!isPlainRecord(input)) throw new TypeError("methodology contracts must be an ordinary object");
   const split = pick(input, "splitContract", "split_contract");
   const oof = pick(input, "oofEnsemble", "oof_ensemble");
   const pipeline = pick(input, "featurePipeline", "feature_pipeline");
@@ -193,7 +191,6 @@ function compileSplit(contract: SplitContract): NonNullable<PluginMethodologyBlo
     ...(contract.nSplits === undefined ? {} : { n_splits: contract.nSplits }),
     ...(contract.seed === undefined ? {} : { seed: contract.seed }),
     ...(contract.shuffle === undefined ? {} : { shuffle: contract.shuffle }),
-    ...(contract.groups === undefined ? {} : { groups: contract.groups }),
     split_ref: Object.freeze({
       digest: contract.splitRef.digest,
       ...(contract.splitRef.id === undefined ? {} : { id: contract.splitRef.id }),
@@ -232,8 +229,16 @@ function observedSplitDigest(root: Record<string, unknown>): string | undefined 
   const direct = pick(root, "split_ref_digest", "splitRefDigest");
   if (typeof direct === "string" && direct.trim() !== "") return direct;
   const splitRef = pick(root, "split_ref", "splitRef");
-  if (isRecord(splitRef) && typeof splitRef.digest === "string" && splitRef.digest.trim() !== "") {
+  if (isPlainRecord(splitRef) && typeof splitRef.digest === "string" && splitRef.digest.trim() !== "") {
     return splitRef.digest;
+  }
+  return undefined;
+}
+
+function nestedOofPresent(record: Record<string, unknown>): boolean | undefined {
+  for (const key of ["oof", "oof_ensemble", "oofEnsemble"] as const) {
+    const nested = record[key];
+    if (isPlainRecord(nested) && typeof nested.present === "boolean") return nested.present;
   }
   return undefined;
 }
@@ -241,29 +246,19 @@ function observedSplitDigest(root: Record<string, unknown>): string | undefined 
 function observedOofPresent(root: Record<string, unknown>): boolean {
   const flag = pick(root, "oof_present", "oofPresent");
   if (typeof flag === "boolean") return flag;
-  for (const key of ["oof", "oof_ensemble", "oofEnsemble"] as const) {
-    const nested = root[key];
-    if (isRecord(nested) && typeof nested.present === "boolean") return nested.present;
-  }
-  return false;
+  return nestedOofPresent(root) ?? false;
 }
 
 function hasEvidenceFields(record: Record<string, unknown>): boolean {
-  if (pick(record, "split_ref", "splitRef", "split_ref_digest", "splitRefDigest", "oof_present", "oofPresent", "oof") !== undefined) {
-    return true;
-  }
-  for (const key of ["oof_ensemble", "oofEnsemble"] as const) {
-    const nested = record[key];
-    if (isRecord(nested) && typeof nested.present === "boolean") return true;
-  }
-  return false;
+  return pick(record, "split_ref", "splitRef", "split_ref_digest", "splitRefDigest", "oof_present", "oofPresent", "oof") !== undefined
+    || nestedOofPresent(record) !== undefined;
 }
 
 function evidenceRoot(manifest: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(manifest)) return undefined;
+  if (!isPlainRecord(manifest)) return undefined;
   if (hasEvidenceFields(manifest)) return manifest;
   const nested = pick(manifest, "methodology");
-  if (isRecord(nested) && hasEvidenceFields(nested)) return nested;
+  if (isPlainRecord(nested) && hasEvidenceFields(nested)) return nested;
   return manifest;
 }
 
