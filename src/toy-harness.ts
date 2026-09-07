@@ -71,6 +71,16 @@ import {
   type ValidationLevel,
 } from "./validation-ladder";
 import {
+  authorizeHeavySearch,
+  baselineSatisfied,
+  isBaselineTrackContract,
+  resolveBaselineTrack,
+  type BaselineTrackContract,
+  type BaselineTrackInput,
+  type BaselineTrackProvider,
+  type BaselineTrackResult,
+} from "./baseline-track";
+import {
   normalizePrediction,
   normalizeReconcile,
   reconcilePrediction,
@@ -127,6 +137,14 @@ export {
   resolveValidationLadder,
 } from "./validation-ladder";
 export type { ValidationLadderContract, ValidationLadderInput, ValidationLadderProvider, ValidationLevel, ValidationReaderRole } from "./validation-ladder";
+export {
+  authorizeHeavySearch,
+  baselineSatisfied,
+  directorAuthorizeHeavyTask,
+  isBaselineTrackContract,
+  resolveBaselineTrack,
+} from "./baseline-track";
+export type { BaselineTrackContract, BaselineTrackInput, BaselineTrackProvider, BaselineTrackResult, HeavySearchAuthorization } from "./baseline-track";
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -338,6 +356,13 @@ export interface CrossModelCheckResult {
   readonly reason?: string;
 }
 
+/** Context handed to an adapter's runnable baseline port (T43). */
+export interface BaselineRunContext {
+  readonly missionId: string;
+  /** Opaque entry declared by `baseline_track`; the adapter interprets it vendor-side. */
+  readonly entry: string;
+}
+
 export type ToyCompetitionAdapter = {
   readonly name?: string;
   readonly describe?: () => CompetitionAdapterDescription;
@@ -351,6 +376,15 @@ export type ToyCompetitionAdapter = {
   /** Validation ladder (T41): three-level data-split / LB policy; absent → gate inactive. */
   readonly validation_ladder?: ValidationLadderProvider["validation_ladder"];
   readonly validationLadder?: ValidationLadderProvider["validationLadder"];
+  /**
+   * Strong-baseline / AutoML track (T43): vendor-neutral declaration of the cheap
+   * baseline command/entry and success predicate; an adapter may additionally bind a
+   * runnable baseline port. Absent → baseline-first gate inactive.
+   */
+  readonly baseline_track?: (() => BaselineTrackInput | undefined) | BaselineTrackInput;
+  readonly baselineTrack?: (() => BaselineTrackInput | undefined) | BaselineTrackInput;
+  /** Runnable baseline entry; returns the baseline evaluation result. Adapter-provided, never vendor-bound. */
+  readonly runBaselineTrack?: (context: BaselineRunContext) => BaselineTrackResult | Promise<BaselineTrackResult>;
   /** Adapter-owned immutable evaluation protocol; snake-case and camel-case forms are accepted. */
   readonly evaluation_contract?: EvaluationContractAccessor;
   readonly evaluationContract?: EvaluationContractAccessor;
@@ -436,6 +470,10 @@ export type MissionEventType =
   | "SUCCESS_AUDITOR_COMPLETED"
   | "LEAKAGE_DISCLOSURE"
   | "PUBLIC_PROBE_REFUSED"
+  | "BASELINE_TRACK_STARTED"
+  | "BASELINE_TRACK_PASSED"
+  | "BASELINE_TRACK_FAILED"
+  | "HEAVY_SEARCH_REFUSED"
   | "GAIN_BANKED"
   | "PROMOTED_LOCAL"
   | "BRANCH_REJECTED"
@@ -574,6 +612,10 @@ export interface MissionState {
   evaluationContractDigest?: string;
   /** T41 validation ladder contract; undefined = ladder inactive for this adapter. */
   validationLadder?: Readonly<ValidationLadderContract>;
+  /** T43 strong-baseline track; undefined = baseline-first gate inactive for this adapter. */
+  baselineTrack?: Readonly<BaselineTrackContract>;
+  /** T43 result of the baseline run; absent until the baseline track completes. */
+  baseline?: Readonly<BaselineTrackResult>;
   /** Number of Public LB probes already consumed (projected from the ledger). */
   publicProbesUsed?: number;
   /** T42: number of external submissions already spent against submissionQuota (projected from the ledger). */
@@ -593,6 +635,8 @@ export interface PromotionPolicyInput {
   champion?: MissionState["champion"];
   evaluationContract?: Readonly<NormalizedEvaluationContract>;
   gainBank?: readonly GainBankEntry[];
+  /** T43: established strong-baseline score; local promotion must clear baseline + δ. */
+  baselineScore?: number;
 }
 
 export interface PromotionPolicyDecision {
@@ -661,6 +705,13 @@ export interface ToyMissionOptions {
    * record carries it. Defaults to 1.
    */
   planVersion?: number;
+  /**
+   * T43 forced strong-baseline track: overrides/declares the baseline when the
+   * adapter exposes none. When active, heavy/scale candidate search is refused
+   * until the baseline clears its success predicate, and local promotion must
+   * beat `baseline + δ`.
+   */
+  baselineTrack?: BaselineTrackInput | BaselineTrackContract;
 }
 
 function validateInteger(name: string, value: number, minimum: number): void {
@@ -887,6 +938,11 @@ function initialState(event: MissionEvent): MissionState {
       validationLadder: isValidationLadderContract(p.validationLadder)
         ? p.validationLadder
         : resolveValidationLadder({ validation_ladder: p.validationLadder as ValidationLadderInput }),
+    }),
+    ...(p.baselineTrack === undefined ? {} : {
+      baselineTrack: isBaselineTrackContract(p.baselineTrack)
+        ? p.baselineTrack
+        : resolveBaselineTrack({ baseline_track: p.baselineTrack as BaselineTrackInput }),
     }),
     ...(evaluationControlSnapshotDigest === undefined ? {} : { evaluationControlSnapshotDigest }),
     gainBank: [],
@@ -1472,6 +1528,15 @@ function project(events: readonly MissionEvent[]): MissionState {
   const quotaLimit = state.budget.submissionQuota;
   state.submissionQuotaRemaining = typeof quotaLimit === "number"
     ? Math.max(0, quotaLimit - state.submissionQuotaUsed) : undefined;
+  // T43: the established strong baseline is the last baseline verdict (passed or failed).
+  const baselineVerdict = [...events].reverse().find((event) => event.type === "BASELINE_TRACK_PASSED" || event.type === "BASELINE_TRACK_FAILED");
+  if (baselineVerdict) {
+    state.baseline = Object.freeze({
+      ok: baselineVerdict.type === "BASELINE_TRACK_PASSED",
+      ...(typeof baselineVerdict.payload.score === "number" ? { score: baselineVerdict.payload.score } : {}),
+      ...(typeof baselineVerdict.payload.evidence === "string" ? { evidence: baselineVerdict.payload.evidence } : {}),
+    }) as BaselineTrackResult;
+  }
   return state;
 }
 
@@ -1490,6 +1555,8 @@ export class ToyCompetitionHarness {
   private readonly dataHonesty?: Readonly<DataHonestyContract>;
   /** T41 validation ladder; undefined = the three-level split policy is inactive. */
   private readonly validationLadder?: Readonly<ValidationLadderContract>;
+  /** T43 strong-baseline track; undefined = baseline-first gate inactive. */
+  private readonly baselineTrack?: Readonly<BaselineTrackContract>;
   private readonly evaluationControlSnapshot?: Readonly<CandidateSnapshot>;
   private readonly planVersion: number;
   private contractValue?: Readonly<TaskContract>;
@@ -1534,6 +1601,13 @@ export class ToyCompetitionHarness {
     this.dataHonesty = resolveDataHonestyContract(this.adapter);
     // Validation ladder (T41): inactive when the adapter declares none; fail-closed on a non-holdout basis or bad cap.
     this.validationLadder = resolveValidationLadder(this.adapter);
+    // T43 baseline-first gate: resolve from the adapter port, or an explicit mission
+    // option; inactive when neither declares a track. Malformed declarations fail closed.
+    this.baselineTrack = isBaselineTrackContract(options.baselineTrack)
+      ? options.baselineTrack
+      : resolveBaselineTrack(this.adapter) ?? resolveBaselineTrack(
+        options.baselineTrack === undefined ? undefined : { baseline_track: options.baselineTrack as BaselineTrackInput },
+      );
     const resolvedEvaluationContract = resolveEvaluationContract(this.adapter);
     this.evaluationContract = resolvedEvaluationContract;
     this.evaluationContractDigest = resolvedEvaluationContract === undefined ? undefined : evaluationContractDigest(resolvedEvaluationContract);
@@ -1577,6 +1651,9 @@ export class ToyCompetitionHarness {
         }),
         ...(this.validationLadder === undefined ? {} : {
           validationLadder: clone(this.validationLadder),
+        }),
+        ...(this.baselineTrack === undefined ? {} : {
+          baselineTrack: clone(this.baselineTrack),
         }),
         ...(this.evaluationControlSnapshot === undefined ? {} : {
           evaluationControlSnapshotDigest: this.evaluationControlSnapshot.digest,
@@ -1636,6 +1713,10 @@ export class ToyCompetitionHarness {
   }
 
   private promotionDecision(candidate: PromotionCandidate, state: MissionState): PromotionPolicyDecision {
+    // T43: local promotion must clear baseline + δ. Fail closed when the baseline has not
+    // been established, before any promotion policy can promote.
+    const baselineGate = baselineSatisfied(this.baselineTrack, state.baseline, candidate.score);
+    if (!baselineGate.allowed) return { approved: false, reason: baselineGate.reason };
     const policy = this.options.promotionPolicy;
     if (!policy) return { approved: !state.champion || candidate.score > state.champion.score };
     const decision = policy({
@@ -1643,6 +1724,7 @@ export class ToyCompetitionHarness {
       champion: state.champion,
       evaluationContract: this.evaluationContract,
       gainBank: state.gainBank,
+      ...(state.baseline?.score === undefined ? {} : { baselineScore: state.baseline.score }),
     });
     return typeof decision === "boolean" ? { approved: decision } : decision ?? { approved: false };
   }
@@ -2199,6 +2281,15 @@ export class ToyCompetitionHarness {
         this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: "prediction required before expensive execution" });
         return;
       }
+      // T43 baseline-first Policy Guard: heavy/expensive candidate search is refused until
+      // the strong baseline clears its success predicate. Cheap branches are never gated.
+      const branchIdeaType = this.state().branches[branchId]?.snapshot?.ideaType ?? this.contract.ideaType;
+      const baselineDecision = authorizeHeavySearch(this.baselineTrack, this.state().baseline, branchIdeaType);
+      if (!baselineDecision.allowed) {
+        this.append("HEAVY_SEARCH_REFUSED", { branchId, fencingToken, reason: baselineDecision.reason });
+        this.append("BRANCH_REJECTED", { branchId, fencingToken, reason: `heavy search refused: ${baselineDecision.reason}` });
+        return;
+      }
       if (!snapshot) {
         try {
           const workspace = this.sandbox.createWorkspace();
@@ -2532,10 +2623,49 @@ export class ToyCompetitionHarness {
     }
   }
 
+  /**
+   * T43: establishes the strong baseline before any heavy/expensive search. Runs the
+   * adapter-provided baseline entry (vendor-neutral), records the verdict as Evidence
+   * (BASELINE_TRACK_PASSED/FAILED), and returns the result. Idempotent: once a verdict is
+   * on the ledger it is replayed, not re-run. No-op when no baseline track is declared.
+   */
+  async establishBaseline(): Promise<BaselineTrackResult | undefined> {
+    const existing = this.state().baseline;
+    if (existing !== undefined) return existing;
+    const contract = this.baselineTrack;
+    if (!contract) return undefined;
+    const port = this.adapter.runBaselineTrack;
+    if (typeof port !== "function") {
+      // Declared but no runnable entry: the gate stays closed (fail safe) and the
+      // reason is recorded so a supervisor can wire the adapter's baseline entry.
+      const reason = `baseline track '${contract.entry}' declares no runnable runBaselineTrack entry`;
+      this.append("BASELINE_TRACK_FAILED", { entry: contract.entry, reason, evidence: reason });
+      return this.state().baseline;
+    }
+    this.append("BASELINE_TRACK_STARTED", { entry: contract.entry, at: Date.now() });
+    let result: BaselineTrackResult;
+    try {
+      result = await port.call(this.adapter, { missionId: this.options.missionId, entry: contract.entry });
+    } catch (error) {
+      result = { ok: false, evidence: this.redactor.error(error).message };
+    }
+    const score = typeof result.score === "number" && Number.isFinite(result.score) ? result.score : undefined;
+    const passed = result.ok === true && score !== undefined && score >= contract.successScore;
+    this.append(passed ? "BASELINE_TRACK_PASSED" : "BASELINE_TRACK_FAILED", {
+      entry: contract.entry,
+      ...(score === undefined ? {} : { score }),
+      successScore: contract.successScore,
+      ...(result.evidence === undefined ? {} : { evidence: result.evidence }),
+    });
+    return this.state().baseline;
+  }
+
   async run(): Promise<MissionState> {
     const current = this.state();
     if (current.phase === "COMPLETED" || current.phase === "STOPPED") return current;
     if (current.phase === "CREATED") { this.append("MISSION_STARTED"); }
+    // T43 baseline-first: a strong baseline must be established before heavy/expensive search.
+    if (this.baselineTrack) await this.establishBaseline();
     const maxBranches = this.effectiveBudget.maxCandidates ?? this.branchIds.length;
     const ids = this.branchIds.slice(0, maxBranches);
     const concurrency = Math.max(1, this.options.policy?.maxParallelBranches ?? 1);

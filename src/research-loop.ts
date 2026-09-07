@@ -1,6 +1,13 @@
 import { deriveReconcileStatus, normalizeClaimCard, normalizePrediction, normalizeReconcile, type ClaimCard, type ClaimObjection, type PredictionArtifact, type ReconcileInput, type ReconcileRecord, type ReconcileStatus } from "./predict-reconcile";
 import { requireIdeaType } from "./idea-types";
 import {
+  directorAuthorizeHeavyTask,
+  isBaselineTrackContract,
+  resolveBaselineTrack,
+  type BaselineTrackContract,
+  type BaselineTrackInput,
+} from "./baseline-track";
+import {
   assertBlueprintAllowsStop,
   assertBlueprintRefsConsistent,
   blueprintArtifactId,
@@ -22,6 +29,8 @@ import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDige
 
 export type { ClaimCard, PredictionArtifact, ReconcileInput, ReconcileRecord, ReconcileStatus } from "./predict-reconcile";
 export type { BlueprintFile, BlueprintFileKind, BlueprintFileRef, CrossReviewRecord, MissionBlueprint } from "./file-blueprint";
+export { directorAuthorizeHeavyTask, resolveBaselineTrack } from "./baseline-track";
+export type { BaselineTrackContract, BaselineTrackInput } from "./baseline-track";
 
 export type TaskReconcileInput = ReconcileInput;
 
@@ -325,6 +334,13 @@ export interface MissionDirectorOptions {
    * algorithmic / open-search tasks out of the ready set.
    */
   readonly ideaTypePreference?: readonly string[];
+  /**
+   * T43 forced strong-baseline track: when declared, heavy idea kinds (default
+   * open-search) are ineligible for selection until a task tagged
+   * `baseline_track` completes, so a trivial strong baseline is always run
+   * first. Vendor-neutral; carries the same contract shape as the adapter.
+   */
+  readonly baselineTrack?: BaselineTrackInput | BaselineTrackContract;
 }
 
 export interface TrustedEvaluator {
@@ -1748,6 +1764,7 @@ export class MissionDirector {
   private readonly missionId: string;
   private readonly clock: () => number;
   private readonly ideaTypePreference: readonly string[] | undefined;
+  private readonly baselineTrack?: Readonly<BaselineTrackContract>;
   private nextOperation = 1;
 
   constructor(options: MissionDirectorOptions, ledger: ResearchLedger = new InMemoryResearchLedger()) {
@@ -1760,6 +1777,10 @@ export class MissionDirector {
     this.clock = options.clock ?? (() => Date.now());
     this.ledger = ledger;
     this.ideaTypePreference = options.ideaTypePreference === undefined ? undefined : Object.freeze([...options.ideaTypePreference].map(requireIdeaType));
+    // T43 baseline-first: resolve the declared baseline track; inactive when absent.
+    this.baselineTrack = isBaselineTrackContract(options.baselineTrack)
+      ? options.baselineTrack
+      : resolveBaselineTrack(options.baselineTrack === undefined ? undefined : { baseline_track: options.baselineTrack });
     const trustedEvaluators = normalizeTrustedEvaluators(options.trustedEvaluators);
     if (ledger.events().length === 0) {
       const tasks = validateTaskGraph(options.tasks ?? [], new Set(), declaredCampaigns);
@@ -1773,6 +1794,7 @@ export class MissionDirector {
         ...(declaredCampaigns.size === 0 ? {} : { campaigns: [...declaredCampaigns.values()] }),
         planVersion: 1,
         planDigest: planDigest(options.objective, totalBudget, tasks, scope, [...declaredCampaigns.values()]),
+        ...(this.baselineTrack === undefined ? {} : { baselineTrack: clone(this.baselineTrack) }),
         ...(trustedEvaluators.size === 0 ? {} : { trustedEvaluators: [...trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey })) }),
       }, "mission-created");
     } else {
@@ -1786,6 +1808,11 @@ export class MissionDirector {
       if (!same([...initialCampaigns.values()], [...declaredCampaigns.values()])) throw new Error("ledger belongs to another campaign declaration");
       const registered = [...state.trustedEvaluators].map(([evaluatorId, publicKey]) => ({ evaluatorId, publicKey }));
       if (!same(options.trustedEvaluators ?? [], registered)) throw new Error("ledger belongs to another evaluator trust root");
+      // T43: the baseline-first policy is mission configuration; a resumed ledger must not silently change it.
+      const initialBaseline = ledger.events()[0]?.payload.baselineTrack;
+      if (!same(initialBaseline ?? undefined, this.baselineTrack ? clone(this.baselineTrack) : undefined)) {
+        throw new Error("ledger belongs to another baseline-track policy");
+      }
     }
   }
 
@@ -1835,12 +1862,28 @@ export class MissionDirector {
   state(): ResearchMissionState { return publicState(project(this.ledger.events())); }
   evidenceMemory(): EvidenceMemory { return new EvidenceMemory(this.state()); }
 
+  /** T43: whether the baseline track has been established (a completed `baseline_track`-tagged task). */
+  private baselineEstablished(state?: MutableResearchState): boolean {
+    if (!this.baselineTrack) return true;
+    const projected = state ?? project(this.ledger.events());
+    return [...projected.tasks.values()].some(
+      (task) => task.status === "COMPLETED" && (task.task.tags ?? []).includes("baseline_track"),
+    );
+  }
+
+  /** T43: heavy idea-kind tasks are ineligible until the baseline is established. */
+  private baselineGateAllows(task: MutableTaskState, baselineEstablished: boolean): boolean {
+    return directorAuthorizeHeavyTask(this.baselineTrack, task.task.ideaType, baselineEstablished, task.task.tags).allowed;
+  }
+
   readyTasks(): readonly ResearchTaskState[] {
     const state = project(this.ledger.events());
     if (state.phase === "STOPPED") return Object.freeze([]);
     refreshStatuses(state);
+    const baselineEstablished = this.baselineEstablished(state);
     return frozenArray([...state.tasks.values()]
       .filter((task) => taskReady(state, task) && state.budgetConsumed + (task.task.estimatedCost ?? 1) <= state.budgetTotal && campaignAllows(state, task))
+      .filter((task) => this.baselineGateAllows(task, baselineEstablished))
       .sort((left, right) => priorityScore(state, right) - priorityScore(state, left) || (left.task.estimatedCost ?? 1) - (right.task.estimatedCost ?? 1) || left.task.taskId.localeCompare(right.task.taskId))
       .map((task) => taskState(state, task)));
   }
