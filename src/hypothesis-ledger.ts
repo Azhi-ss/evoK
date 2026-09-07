@@ -4,8 +4,9 @@
  * Deepens the existing T48 evidence catalog (`EvidenceMemory`,
  * `MissionDirector` artifacts) instead of a second mission store.
  * Expand is ledger-only (optional Campaign·Task enqueue) and has no
- * UCT / SelectionPolicy / search-node write path. Durable sqlite,
- * K1/K2 hang points, and S* param-space/MMD are out of scope.
+ * UCT / SelectionPolicy / search-node write path. Kill-test `fail`
+ * may auto-`killed`; `pass` / `inconclusive` never auto-kill.
+ * Durable sqlite, K1/K2 hang points, and S* param-space/MMD are out of scope.
  */
 import { deepFreeze } from "./security-boundary";
 import {
@@ -79,7 +80,7 @@ export interface Hypothesis {
 export interface KillTestPlan {
   readonly planId: string;
   readonly hypothesisId: string;
-  readonly criterion: string;
+  readonly predicate: string;
   readonly evidenceRefs: readonly T48MappedRef[];
 }
 
@@ -125,7 +126,7 @@ export interface CreateHypothesisInput {
 export interface PlanKillTestInput {
   readonly planId?: string;
   readonly hypothesisId: string;
-  readonly criterion: string;
+  readonly predicate: string;
   readonly evidenceRefs?: readonly unknown[];
   readonly operationId?: string;
 }
@@ -200,6 +201,14 @@ export function asKillTestPass(outcome: KillTestOutcome): "pass" {
   if (outcome === "inconclusive") throw new TypeError("inconclusive kill-test outcome is not pass");
   if (outcome !== "pass") throw new TypeError("kill-test outcome is not pass");
   return outcome;
+}
+
+/**
+ * Spec #50/#52 hang-point default: fail may kill the hypothesis.
+ * Pass and inconclusive must not auto-kill (pass may later become supported).
+ */
+export function killTestOutcomeKillsHypothesis(outcome: KillTestOutcome): boolean {
+  return outcome === "fail";
 }
 
 /** A replaceable in-memory log. Durable sqlite is out of scope for H1. */
@@ -415,12 +424,6 @@ function applyEvent(state: MutableHypothesisState, event: HypothesisEvent): void
         throw new Error(`kill-test plan already has a result: ${result.planId}`);
       }
       state.results.set(result.resultId, deepFreeze(result) as KillTestResult);
-      if (killTestOutcomeIsPass(result.outcome)) {
-        const hypothesis = state.hypotheses.get(result.hypothesisId);
-        if (hypothesis) {
-          state.hypotheses.set(result.hypothesisId, deepFreeze({ ...hypothesis, status: "killed" }) as Hypothesis);
-        }
-      }
       return;
     }
   }
@@ -543,7 +546,7 @@ export class HypothesisLedger {
 
   planKillTest(input: PlanKillTestInput): KillTestPlan {
     nonEmpty("hypothesisId", input.hypothesisId);
-    nonEmpty("kill-test criterion", input.criterion);
+    nonEmpty("kill-test predicate", input.predicate);
     const hypothesis = this.state().hypotheses[input.hypothesisId];
     if (!hypothesis) throw new Error(`unknown hypothesis: ${input.hypothesisId}`);
     if (hypothesis.status === "killed" || hypothesis.status === "superseded") {
@@ -555,7 +558,7 @@ export class HypothesisLedger {
     const plan: KillTestPlan = deepFreeze({
       planId,
       hypothesisId: input.hypothesisId,
-      criterion: input.criterion,
+      predicate: input.predicate,
       evidenceRefs,
     }) as KillTestPlan;
     const operationId = this.operation(`plan-${planId}`, input.operationId);
@@ -581,7 +584,7 @@ export class HypothesisLedger {
     }) as KillTestResult;
     const operationId = this.operation(`finish-${input.planId}`, input.operationId);
     this.append("kill_test.finished", { result }, operationId);
-    if (killTestOutcomeIsPass(outcome)) {
+    if (killTestOutcomeKillsHypothesis(outcome)) {
       const current = this.state().hypotheses[plan.hypothesisId];
       if (current && current.status !== "killed") {
         this.append("hypothesis.status_changed", { hypothesisId: plan.hypothesisId, from: current.status, status: "killed" }, `${operationId}-killed`);

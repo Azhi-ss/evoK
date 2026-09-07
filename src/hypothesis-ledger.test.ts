@@ -38,7 +38,7 @@ describe("hypothesis / kill-test ledger schema", () => {
     const plan = ledger.planKillTest({
       planId: "kt-1",
       hypothesisId: hypothesis.hypothesisId,
-      criterion: "retrain without the shared step; hold-out must not move",
+      predicate: "retrain without the shared step; hold-out must not move",
       evidenceRefs: ["ev-holdout"],
     });
     const result = ledger.finishKillTest({
@@ -50,14 +50,17 @@ describe("hypothesis / kill-test ledger schema", () => {
 
     expect(hypothesis.status).toBe("open");
     expect(plan.hypothesisId).toBe("h-leak");
+    expect(plan.predicate).toBe("retrain without the shared step; hold-out must not move");
     expect(result.planId).toBe("kt-1");
     expect(result.hypothesisId).toBe("h-leak");
     expect(ledger.plansFor("h-leak").map((entry) => entry.planId)).toEqual(["kt-1"]);
     expect(ledger.resultFor("kt-1")?.resultId).toBe("ktr-1");
+    expect(ledger.state().hypotheses["h-leak"]?.status).toBe("killed");
     expect(ledger.events().map((event) => event.type)).toEqual([
       "hypothesis.created",
       "kill_test.planned",
       "kill_test.finished",
+      "hypothesis.status_changed",
     ]);
     expect(ledger.state().hypotheses["h-leak"]?.killTestPlanIds).toEqual(["kt-1"]);
   });
@@ -107,9 +110,9 @@ describe("kill-test outcome tri-state", () => {
     ledger.createHypothesis({ hypothesisId: "h-a", statement: "A", evidenceRefs: ["ev-holdout"] });
     ledger.createHypothesis({ hypothesisId: "h-b", statement: "B", evidenceRefs: ["ev-holdout"] });
     ledger.createHypothesis({ hypothesisId: "h-c", statement: "C", evidenceRefs: ["ev-holdout"] });
-    ledger.planKillTest({ planId: "p-pass", hypothesisId: "h-a", criterion: "kill A" });
-    ledger.planKillTest({ planId: "p-fail", hypothesisId: "h-b", criterion: "kill B" });
-    ledger.planKillTest({ planId: "p-inc", hypothesisId: "h-c", criterion: "kill C" });
+    ledger.planKillTest({ planId: "p-pass", hypothesisId: "h-a", predicate: "A holds under the hold-out" });
+    ledger.planKillTest({ planId: "p-fail", hypothesisId: "h-b", predicate: "B is falsified by the hold-out" });
+    ledger.planKillTest({ planId: "p-inc", hypothesisId: "h-c", predicate: "C is under-determined" });
 
     expect(ledger.finishKillTest({ planId: "p-pass", outcome: "pass", evidenceRefs: ["ev-kill"] }).outcome).toBe("pass");
     expect(ledger.finishKillTest({ planId: "p-fail", outcome: "fail", evidenceRefs: ["ev-kill"] }).outcome).toBe("fail");
@@ -122,9 +125,11 @@ describe("kill-test outcome tri-state", () => {
     expect(() => asKillTestPass("inconclusive")).toThrow(/inconclusive|not pass/i);
     expect(() => asKillTestPass("fail")).toThrow(/not pass/i);
 
-    expect(ledger.state().hypotheses["h-a"]?.status).toBe("killed");
-    expect(ledger.state().hypotheses["h-b"]?.status).toBe("open");
+    expect(ledger.state().hypotheses["h-a"]?.status).toBe("open");
+    expect(ledger.state().hypotheses["h-a"]?.status).not.toBe("killed");
+    expect(ledger.state().hypotheses["h-b"]?.status).toBe("killed");
     expect(ledger.state().hypotheses["h-c"]?.status).toBe("open");
+    expect(ledger.changeStatus("h-a", "supported").status).toBe("supported");
     expect(requirePass("pass")).toBe(true);
     // @ts-expect-error inconclusive must not satisfy the pass brand
     requirePass("inconclusive");
