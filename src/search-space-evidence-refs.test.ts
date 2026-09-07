@@ -9,7 +9,7 @@ import {
   type MethodologyContracts,
   type MethodologyEvidence,
 } from "./methodology";
-import { EvidenceMemory, MissionDirector, type ResearchTask } from "./research-loop";
+import { MissionDirector, type ResearchTask } from "./research-loop";
 import { runKillTestHang } from "./kill-test-hang";
 import { verificationRoleContract } from "./verification-gates";
 import {
@@ -17,6 +17,7 @@ import {
   OUTER_MMD_PROFILE,
   OUTER_NEAR_DUP_PAIR,
   OUTER_NEAR_DUP_PROFILE,
+  buildOuterSearchSpaceCatalog,
 } from "./outer-search-space-fixtures";
 import {
   SEARCH_SPACE_BINDING,
@@ -35,12 +36,7 @@ const MMD_PROFILE = OUTER_MMD_PROFILE;
 const NEAR_DUP_PAIR = OUTER_NEAR_DUP_PAIR;
 const COLLAPSED_WINDOW = OUTER_COLLAPSE_WINDOW;
 
-function catalogWithMappedIds(): T48MappedCatalog {
-  const memory = new EvidenceMemory();
-  memory.addEvidence({ id: "ev-holdout", kind: "observation", summary: "hold-out split is isolated", verified: true });
-  memory.addEvidence({ id: "ev-kill", kind: "experiment", summary: "kill-test observation", verified: true, refs: ["ev-holdout"] });
-  return T48MappedCatalog.fromMemory(memory, [{ artifactId: "art-score" }]);
-}
+const catalogWithMappedIds = buildOuterSearchSpaceCatalog;
 
 function attachMappedDiagnoses(catalog: T48MappedCatalog) {
   const nearDup = attachSearchSpaceDiagnosis({

@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { HypothesisLedger } from "./hypothesis-ledger";
 import {
-  HypothesisLedger,
-  T48MappedCatalog,
-} from "./hypothesis-ledger";
-import {
-  EvidenceMemory,
   MissionDirector,
   type ResearchTask,
 } from "./research-loop";
@@ -16,6 +12,7 @@ import {
   OUTER_MMD_PROFILE,
   OUTER_NEAR_DUP_PAIR,
   OUTER_NEAR_DUP_PROFILE,
+  buildOuterSearchSpaceCatalog,
 } from "./outer-search-space-fixtures";
 import {
   SEARCH_SPACE_BINDING,
@@ -38,12 +35,7 @@ const NEAR_DUP_PAIR = OUTER_NEAR_DUP_PAIR;
 const COLLAPSED_WINDOW = OUTER_COLLAPSE_WINDOW;
 const DIVERSE_WINDOW = OUTER_DIVERSE_WINDOW;
 
-function catalogWithMappedIds(): T48MappedCatalog {
-  const memory = new EvidenceMemory();
-  memory.addEvidence({ id: "ev-holdout", kind: "observation", summary: "hold-out split is isolated", verified: true });
-  memory.addEvidence({ id: "ev-kill", kind: "experiment", summary: "kill-test observation", verified: true, refs: ["ev-holdout"] });
-  return T48MappedCatalog.fromMemory(memory, [{ artifactId: "art-score" }]);
-}
+const catalogWithMappedIds = buildOuterSearchSpaceCatalog;
 
 function smuggledSearchPorts() {
   const calls = { select: 0, uct: 0, write: 0 };

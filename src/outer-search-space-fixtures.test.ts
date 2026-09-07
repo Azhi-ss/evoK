@@ -80,6 +80,8 @@ describe("E3 outer search-space fixtures", () => {
     expect(fixtures.missingFeatures.verdict).not.toBe("ok");
     expect(raised.collapse.collapseThreshold).toBe(2);
     expect(raised.collapse.verdict).toBe("collapse_suspected");
+    expect(diagnoseDiversity(fixtures.binding, fixtures.diverseWindow).verdict).toBe("ok");
+    expect(diagnoseDiversity(raised.binding, raised.diverseWindow).verdict).toBe("collapse_suspected");
   });
 
   test("attach+map exports T48 mapped {kind,id}; scalars and unmapped cannot masquerade as evidence_refs", () => {

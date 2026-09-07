@@ -16,7 +16,6 @@ import {
   bindTaskSearchSpace,
   diagnoseDiversity,
   diagnoseNearDup,
-  dumpDiversityDiag,
   mapSearchSpaceEvidence,
   type DiversityDiag,
   type DiversityDiagDump,
@@ -95,6 +94,7 @@ export interface OuterSearchSpaceFixtures {
   readonly seed: number;
   readonly nearDupPair: readonly SearchSpaceCandidate[];
   readonly collapseWindow: readonly SearchSpaceCandidate[];
+  readonly diverseWindow: readonly SearchSpaceCandidate[];
   readonly missingFeatureWindow: readonly SearchSpaceCandidate[];
   readonly nearDup: NearDupDiagnosis;
   readonly collapse: DiversityDiag;
@@ -170,6 +170,7 @@ export function buildOuterSearchSpaceFixtures(
     seed,
     nearDupPair: OUTER_NEAR_DUP_PAIR,
     collapseWindow: OUTER_COLLAPSE_WINDOW,
+    diverseWindow: OUTER_DIVERSE_WINDOW,
     missingFeatureWindow: OUTER_MISSING_FEATURE_WINDOW,
     nearDup,
     collapse,
