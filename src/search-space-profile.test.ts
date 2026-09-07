@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { HypothesisLedger } from "./hypothesis-ledger";
 import {
-  HypothesisLedger,
-  T48MappedCatalog,
-} from "./hypothesis-ledger";
-import {
-  EvidenceMemory,
   MissionDirector,
   type ResearchTask,
 } from "./research-loop";
 import { runKillTestHang } from "./kill-test-hang";
+import {
+  OUTER_COLLAPSE_WINDOW,
+  OUTER_DIVERSE_WINDOW,
+  OUTER_MISSING_FEATURE_WINDOW,
+  OUTER_MMD_PROFILE,
+  OUTER_NEAR_DUP_PAIR,
+  OUTER_NEAR_DUP_PROFILE,
+  buildOuterSearchSpaceCatalog,
+} from "./outer-search-space-fixtures";
 import {
   SEARCH_SPACE_BINDING,
   attachDiversityDiag,
@@ -24,46 +29,13 @@ import {
   type SearchSpaceProfile,
 } from "./search-space-profile";
 
-const PROFILE: SearchSpaceProfile = {
-  featureDims: [{ name: "lr" }, { name: "width" }],
-  nearDup: { maxDistance: 0.05 },
-};
+const PROFILE = OUTER_NEAR_DUP_PROFILE;
+const MMD_PROFILE = OUTER_MMD_PROFILE;
+const NEAR_DUP_PAIR = OUTER_NEAR_DUP_PAIR;
+const COLLAPSED_WINDOW = OUTER_COLLAPSE_WINDOW;
+const DIVERSE_WINDOW = OUTER_DIVERSE_WINDOW;
 
-const MMD_PROFILE: SearchSpaceProfile = {
-  featureDims: [{ name: "lr" }, { name: "width" }],
-  nearDup: { maxDistance: 0.05 },
-  mmd: {
-    kernel: { name: "rbf", bandwidth: 1, seed: 42 },
-    collapseThreshold: 0.05,
-    windowSize: 4,
-  },
-};
-
-const NEAR_DUP_PAIR: readonly SearchSpaceCandidate[] = [
-  { candidateId: "cand-a", features: { lr: 0.01, width: 64 } },
-  { candidateId: "cand-b", features: { lr: 0.012, width: 64.01 } },
-];
-
-const COLLAPSED_WINDOW: readonly SearchSpaceCandidate[] = [
-  { candidateId: "c1", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c2", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c3", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c4", features: { lr: 0.01, width: 64 } },
-];
-
-const DIVERSE_WINDOW: readonly SearchSpaceCandidate[] = [
-  { candidateId: "d1", features: { lr: 0, width: 0 } },
-  { candidateId: "d2", features: { lr: 10, width: 0 } },
-  { candidateId: "d3", features: { lr: 0, width: 10 } },
-  { candidateId: "d4", features: { lr: 10, width: 10 } },
-];
-
-function catalogWithMappedIds(): T48MappedCatalog {
-  const memory = new EvidenceMemory();
-  memory.addEvidence({ id: "ev-holdout", kind: "observation", summary: "hold-out split is isolated", verified: true });
-  memory.addEvidence({ id: "ev-kill", kind: "experiment", summary: "kill-test observation", verified: true, refs: ["ev-holdout"] });
-  return T48MappedCatalog.fromMemory(memory, [{ artifactId: "art-score" }]);
-}
+const catalogWithMappedIds = buildOuterSearchSpaceCatalog;
 
 function smuggledSearchPorts() {
   const calls = { select: 0, uct: 0, write: 0 };
@@ -359,12 +331,7 @@ describe("SearchSpaceProfile MMD DiversityDiag (S2)", () => {
     const withMmd = bindSearchSpace({ taskId: "explore-lr", profile: MMD_PROFILE });
     const withoutMmd = bindSearchSpace({ taskId: "explore-lr", profile: PROFILE });
     const noProfile = bindSearchSpace({ taskId: "explore-lr" });
-    const incomplete: readonly SearchSpaceCandidate[] = [
-      { candidateId: "c1", features: { lr: 0.01 } },
-      { candidateId: "c2", features: { lr: 0.01, width: 64 } },
-      { candidateId: "c3", features: { lr: 0.01, width: 64 } },
-      { candidateId: "c4", features: { lr: 0.01, width: 64 } },
-    ];
+    const incomplete = OUTER_MISSING_FEATURE_WINDOW;
     const shortWindow: readonly SearchSpaceCandidate[] = COLLAPSED_WINDOW.slice(0, 2);
 
     const missing = diagnoseDiversity(withMmd, incomplete);
