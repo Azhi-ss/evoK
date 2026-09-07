@@ -13,6 +13,12 @@ import { EvidenceMemory, MissionDirector, type ResearchTask } from "./research-l
 import { runKillTestHang } from "./kill-test-hang";
 import { verificationRoleContract } from "./verification-gates";
 import {
+  OUTER_COLLAPSE_WINDOW,
+  OUTER_MMD_PROFILE,
+  OUTER_NEAR_DUP_PAIR,
+  OUTER_NEAR_DUP_PROFILE,
+} from "./outer-search-space-fixtures";
+import {
   SEARCH_SPACE_BINDING,
   attachDiversityDiag,
   attachSearchSpaceDiagnosis,
@@ -22,36 +28,12 @@ import {
   dumpDiversityDiag,
   projectHypothesisSearchSpaceRefs,
   readSearchSpaceEvidenceRefs,
-  type SearchSpaceCandidate,
-  type SearchSpaceProfile,
 } from "./search-space-profile";
 
-const PROFILE: SearchSpaceProfile = {
-  featureDims: [{ name: "lr" }, { name: "width" }],
-  nearDup: { maxDistance: 0.05 },
-};
-
-const MMD_PROFILE: SearchSpaceProfile = {
-  featureDims: [{ name: "lr" }, { name: "width" }],
-  nearDup: { maxDistance: 0.05 },
-  mmd: {
-    kernel: { name: "rbf", bandwidth: 1, seed: 42 },
-    collapseThreshold: 0.05,
-    windowSize: 4,
-  },
-};
-
-const NEAR_DUP_PAIR: readonly SearchSpaceCandidate[] = [
-  { candidateId: "cand-a", features: { lr: 0.01, width: 64 } },
-  { candidateId: "cand-b", features: { lr: 0.012, width: 64.01 } },
-];
-
-const COLLAPSED_WINDOW: readonly SearchSpaceCandidate[] = [
-  { candidateId: "c1", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c2", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c3", features: { lr: 0.01, width: 64 } },
-  { candidateId: "c4", features: { lr: 0.01, width: 64 } },
-];
+const PROFILE = OUTER_NEAR_DUP_PROFILE;
+const MMD_PROFILE = OUTER_MMD_PROFILE;
+const NEAR_DUP_PAIR = OUTER_NEAR_DUP_PAIR;
+const COLLAPSED_WINDOW = OUTER_COLLAPSE_WINDOW;
 
 function catalogWithMappedIds(): T48MappedCatalog {
   const memory = new EvidenceMemory();
