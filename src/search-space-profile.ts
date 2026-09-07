@@ -6,12 +6,14 @@
  * windows never change select_node / default inner A (tree+fixed_uct) or #40
  * SelectionPolicy. Missing dims or unavailable MMD are inconclusive — never
  * silent "diversity ok". Diagnostic artifacts enter Hypothesis `evidence_refs`
- * only after T48 mapping. Side-slot adapters and auto Hypothesis.killed (#59)
- * are out of scope.
+ * only after T48 mapping. S3 is the outer read-only projection of those
+ * already-mapped artifacts; it does not change gates or auto-kill.
+ * Side-slot adapters remain out of scope.
  */
 import { deepFreeze, digestValue } from "./security-boundary";
 import {
   T48MappedCatalog,
+  type Hypothesis,
   type T48MappedRef,
 } from "./hypothesis-ledger";
 
@@ -524,6 +526,85 @@ export function mapSearchSpaceEvidence(
   values: readonly unknown[],
 ): readonly T48MappedRef[] {
   return catalog.mapAll(values);
+}
+
+function isSearchSpaceAttachResult(value: unknown): value is {
+  readonly artifact: SearchSpaceArtifact;
+} {
+  return isPlainRecord(value) && isPlainRecord(value.artifact) && typeof value.artifact.artifactId === "string";
+}
+
+function isMappedSearchSpaceSource(value: unknown): value is { readonly artifactId: string } {
+  return isPlainRecord(value) && typeof value.artifactId === "string" && value.artifactId.trim() !== "";
+}
+
+function isRawSearchSpaceDiagnosis(value: unknown): boolean {
+  if (!isPlainRecord(value) || isMappedSearchSpaceSource(value) || isSearchSpaceAttachResult(value)) return false;
+  if (typeof value.id === "string") return false;
+  const statusLike = value.status === "hits" || value.status === "clear" || value.status === "inconclusive" || value.status === "skipped";
+  const verdictLike = value.verdict === "ok" || value.verdict === "collapse_suspected" || value.verdict === "inconclusive";
+  return value.binding === SEARCH_SPACE_BINDING && (statusLike || verdictLike);
+}
+
+function normalizeSearchSpaceSource(value: unknown): unknown {
+  if (isRawSearchSpaceDiagnosis(value)) {
+    throw new Error("unmapped DiversityDiag / near-dup diagnosis cannot enter evidence_refs");
+  }
+  if (isSearchSpaceAttachResult(value)) return value.artifact.artifactId;
+  if (isPlainRecord(value) && isPlainRecord(value.dump) && typeof value.dump.artifactId === "string") {
+    return value.dump.artifactId;
+  }
+  if (isMappedSearchSpaceSource(value)) return value.artifactId;
+  return value;
+}
+
+/**
+ * Outer read-only mapping of already T48-mapped DiversityDiag / near-dup
+ * artifacts into Hypothesis `evidence_refs`. Raw diagnoses, unknown ids, and
+ * side-slot / MMD scalars are rejected. Does not write gates or status.
+ */
+export function readSearchSpaceEvidenceRefs(
+  catalog: T48MappedCatalog,
+  sources: readonly unknown[],
+): readonly T48MappedRef[] {
+  if (!(catalog instanceof T48MappedCatalog)) {
+    throw new TypeError("readSearchSpaceEvidenceRefs requires a T48MappedCatalog");
+  }
+  if (!Array.isArray(sources)) throw new TypeError("search-space evidence refs must be an array");
+  return mapSearchSpaceEvidence(catalog, sources.map(normalizeSearchSpaceSource));
+}
+
+/**
+ * Read-only Hypothesis projection: attach mapped search-space refs without
+ * appending ledger events, changing status, or calling search ports.
+ */
+export function projectHypothesisSearchSpaceRefs(input: {
+  readonly catalog: T48MappedCatalog;
+  readonly hypothesis: Hypothesis;
+  readonly sources: readonly unknown[];
+}): Hypothesis {
+  if (!isPlainRecord(input) || !(input.catalog instanceof T48MappedCatalog)) {
+    throw new TypeError("projectHypothesisSearchSpaceRefs requires a T48MappedCatalog");
+  }
+  if (!isPlainRecord(input.hypothesis)) throw new TypeError("hypothesis must be an ordinary object");
+  nonEmpty("hypothesisId", input.hypothesis.hypothesisId);
+  const extra = readSearchSpaceEvidenceRefs(input.catalog, input.sources);
+  const seen = new Set(input.hypothesis.evidenceRefs.map((ref) => `${ref.kind}:${ref.id}`));
+  const merged = [...input.hypothesis.evidenceRefs];
+  for (const ref of extra) {
+    const key = `${ref.kind}:${ref.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(ref);
+  }
+  return deepFreeze({
+    hypothesisId: input.hypothesis.hypothesisId,
+    statement: input.hypothesis.statement,
+    status: input.hypothesis.status,
+    evidenceRefs: merged,
+    killTestPlanIds: [...input.hypothesis.killTestPlanIds],
+    ...(input.hypothesis.supersededBy === undefined ? {} : { supersededBy: input.hypothesis.supersededBy }),
+  }) as Hypothesis;
 }
 
 export function attachSearchSpaceDiagnosis(input: {
