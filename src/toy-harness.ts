@@ -1111,3 +1111,4 @@ export * from "./security-boundary";
 export * from "./verification-gates";
 export * from "./research-loop";
 export * from "./second-toy-adapter";
+export * from "./methodology";
