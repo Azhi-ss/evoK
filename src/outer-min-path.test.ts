@@ -72,9 +72,10 @@ describe("E2E.1 outer-min fixture + runner (control-plane steps 0–5)", () => {
       sources: [setup.fixture.nearDup, setup.fixture.diversity],
     });
 
-    expect(projected.hypothesisId).toBe("h-outer-min");
-    expect(projected.status).toBe("open");
-    expect(projected.evidenceRefs).toEqual(setup.evidenceRefs);
+    expect(setup.projected.hypothesisId).toBe("h-outer-min");
+    expect(setup.projected.status).toBe("open");
+    expect(setup.projected.evidenceRefs).toEqual(setup.evidenceRefs);
+    expect(projected).toEqual(setup.projected);
     expect(setup.ledger.state().hypotheses["h-outer-min"]?.evidenceRefs).toEqual([
       { kind: "evidence", id: "ev-holdout" },
       { kind: "artifact", id: setup.fixture.nearDup.artifact.artifactId },
@@ -117,6 +118,18 @@ describe("E2E.1 outer-min fixture + runner (control-plane steps 0–5)", () => {
     expect(setup.ledger.events().at(-1)?.type).toBe("hypothesis.expand_requested");
     expect(setup.ledger.searchNodes()).toEqual([]);
     expect(setup.ledger.state().searchNodes).toEqual([]);
+    projectHypothesisSearchSpaceRefs({
+      catalog: setup.fixture.catalog,
+      hypothesis: setup.hypothesis,
+      sources: [setup.fixture.nearDup.mapped[0], setup.fixture.diversity.mapped[0]],
+      select_node: ports.select_node,
+      uct: ports.uct,
+      selectionPolicy: { select: ports.select_node },
+    } as Parameters<typeof projectHypothesisSearchSpaceRefs>[0] & {
+      readonly select_node: () => never;
+      readonly uct: () => never;
+      readonly selectionPolicy: { readonly select: () => never };
+    });
     expect(ports.calls).toEqual({ select: 0, uct: 0, write: 0 });
   });
 
