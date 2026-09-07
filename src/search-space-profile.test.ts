@@ -13,6 +13,7 @@ import {
   SEARCH_SPACE_BINDING,
   attachSearchSpaceDiagnosis,
   bindSearchSpace,
+  bindTaskSearchSpace,
   diagnoseNearDup,
   extractSearchFeatures,
   mapSearchSpaceEvidence,
@@ -58,7 +59,12 @@ function smuggledSearchPorts() {
 
 describe("SearchSpaceProfile near-dup detection", () => {
   test("two near-dup fake candidates produce measurable non-empty hits", () => {
-    const binding = bindSearchSpace({ taskId: "explore-lr", profile: PROFILE });
+    const task: ResearchTask & { readonly searchSpaceProfile?: SearchSpaceProfile } = {
+      taskId: "explore-lr",
+      objective: "explore nearby learning rates",
+      searchSpaceProfile: PROFILE,
+    };
+    const binding = bindTaskSearchSpace(task);
     const diagnosis = diagnoseNearDup(binding, NEAR_DUP_PAIR);
 
     expect(diagnosis.hits.length).toBeGreaterThan(0);
@@ -134,7 +140,7 @@ describe("SearchSpaceProfile near-dup detection", () => {
       budget: 10,
       tasks,
     });
-    const skipped = diagnoseNearDup(bindSearchSpace({ taskId: "baseline" }), NEAR_DUP_PAIR);
+    const skipped = diagnoseNearDup(bindTaskSearchSpace(tasks[0]!), NEAR_DUP_PAIR);
 
     expect(skipped.status).toBe("skipped");
     expect(skipped.hits).toEqual([]);

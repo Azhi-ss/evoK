@@ -31,7 +31,7 @@ export interface SearchSpaceProfile {
 
 export interface SearchSpaceCandidate {
   readonly candidateId: string;
-  readonly features?: Readonly<Record<string, number | string | boolean | undefined>>;
+  readonly features?: Readonly<Record<string, number | undefined>>;
 }
 
 export interface SearchSpaceBinding {
@@ -107,6 +107,14 @@ function normalizeProfile(value: SearchSpaceProfile): SearchSpaceProfile {
     featureDims,
     nearDup: { maxDistance: value.nearDup.maxDistance },
   }) as SearchSpaceProfile;
+}
+
+export function bindTaskSearchSpace(task: {
+  readonly taskId: string;
+  readonly searchSpaceProfile?: SearchSpaceProfile;
+}): SearchSpaceBinding {
+  if (!isPlainRecord(task)) throw new TypeError("task must be an ordinary object");
+  return bindSearchSpace({ taskId: task.taskId, profile: task.searchSpaceProfile });
 }
 
 export function bindSearchSpace(input: {
