@@ -5,9 +5,6 @@ import {
   asKillTestPass,
   killTestOutcomeIsPass,
   type KillTestOutcome,
-  type SearchNodeStore,
-  type SelectionPolicy,
-  type UctPolicy,
 } from "./hypothesis-ledger";
 import {
   EvidenceMemory,
@@ -24,33 +21,6 @@ function catalogWithMappedIds(): T48MappedCatalog {
   memory.addEvidence({ id: "ev-holdout", kind: "observation", summary: "hold-out split is isolated", verified: true });
   memory.addEvidence({ id: "ev-kill", kind: "experiment", summary: "kill-test observation", verified: true, refs: ["ev-holdout"] });
   return T48MappedCatalog.fromMemory(memory, [{ artifactId: "art-score" }]);
-}
-
-function ledgerWithSpies(catalog = catalogWithMappedIds()) {
-  const calls = { select: 0, uct: 0, write: 0 };
-  const selectionPolicy: SelectionPolicy = {
-    select() {
-      calls.select += 1;
-      throw new Error("SelectionPolicy must not run on expand_requested");
-    },
-  };
-  const uct: UctPolicy = {
-    uct() {
-      calls.uct += 1;
-      throw new Error("UCT must not run on expand_requested");
-    },
-  };
-  const searchNodes: SearchNodeStore = {
-    write() {
-      calls.write += 1;
-      throw new Error("search nodes must not be written on expand_requested");
-    },
-    nodes() { return []; },
-  };
-  return {
-    calls,
-    ledger: new HypothesisLedger({ catalog, selectionPolicy, uct, searchNodes }),
-  };
 }
 
 function requirePass(_outcome: Extract<KillTestOutcome, "pass">): true {
@@ -106,7 +76,7 @@ describe("hypothesis / kill-test ledger schema", () => {
 
 describe("hypothesis.expand_requested isolation", () => {
   test("stays ledger-only, may enqueue a Campaign Task, and does not select or write search nodes", () => {
-    const { ledger, calls } = ledgerWithSpies();
+    const ledger = new HypothesisLedger({ catalog: catalogWithMappedIds() });
     ledger.createHypothesis({ hypothesisId: "h-expand", statement: "try a cheaper preprocessor", evidenceRefs: ["ev-holdout"] });
     const queued = {
       campaignId: "campaign-expand",
@@ -118,11 +88,16 @@ describe("hypothesis.expand_requested isolation", () => {
     expect(hypothesis.hypothesisId).toBe("h-expand");
     expect(ledger.events()).toHaveLength(eventCount + 1);
     expect(ledger.events().at(-1)?.type).toBe("hypothesis.expand_requested");
+    expect(ledger.events().at(-1)?.payload).toMatchObject({ hypothesisId: "h-expand", enqueue: queued });
     expect(ledger.queuedCampaignTasks()).toEqual([queued]);
     expect(ledger.campaignTasksFor("h-expand")).toEqual([queued]);
     expect(ledger.searchNodes()).toEqual([]);
-    expect(calls).toEqual({ select: 0, uct: 0, write: 0 });
-    expect(ledger.events().some((event) => String(event.type).includes("search") || String(event.type).includes("uct"))).toBe(false);
+    expect(ledger.state().searchNodes).toEqual([]);
+    expect(ledger.events().map((event) => event.type)).toEqual([
+      "hypothesis.created",
+      "hypothesis.expand_requested",
+    ]);
+    expect(ledger.events().some((event) => /uct|selection|search.?node/i.test(event.type))).toBe(false);
   });
 });
 

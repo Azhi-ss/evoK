@@ -1,3 +1,12 @@
+/**
+ * H1 in-memory Hypothesis / KillTest ledger.
+ *
+ * Deepens the existing T48 evidence catalog (`EvidenceMemory`,
+ * `MissionDirector` artifacts) instead of a second mission store.
+ * Expand is ledger-only (optional Campaign·Task enqueue) and has no
+ * UCT / SelectionPolicy / search-node write path. Durable sqlite,
+ * K1/K2 hang points, and S* param-space/MMD are out of scope.
+ */
 import { deepFreeze } from "./security-boundary";
 import {
   EvidenceMemory,
@@ -86,17 +95,9 @@ export interface SearchNode {
   readonly nodeId: string;
 }
 
-export interface SearchNodeStore {
-  write(node: SearchNode): void;
-  nodes(): readonly SearchNode[];
-}
-
-export interface SelectionPolicy {
-  select(nodes: readonly SearchNode[]): SearchNode | undefined;
-}
-
-export interface UctPolicy {
-  uct(node: SearchNode, parentVisits: number): number;
+export interface QueuedCampaignTask {
+  readonly hypothesisId: string;
+  readonly task: CampaignTask;
 }
 
 export interface HypothesisLedgerState {
@@ -104,15 +105,14 @@ export interface HypothesisLedgerState {
   readonly plans: Readonly<Record<string, KillTestPlan>>;
   readonly results: Readonly<Record<string, KillTestResult>>;
   readonly queuedCampaignTasks: readonly CampaignTask[];
+  readonly expandQueue: readonly QueuedCampaignTask[];
+  /** Always empty: this ledger never writes search nodes. */
   readonly searchNodes: readonly SearchNode[];
 }
 
 export interface HypothesisLedgerOptions {
   readonly catalog: T48MappedCatalog;
   readonly clock?: () => number;
-  readonly selectionPolicy?: SelectionPolicy;
-  readonly uct?: UctPolicy;
-  readonly searchNodes?: SearchNodeStore;
 }
 
 export interface CreateHypothesisInput {
@@ -327,7 +327,7 @@ interface MutableHypothesisState {
   hypotheses: Map<string, Hypothesis>;
   plans: Map<string, KillTestPlan>;
   results: Map<string, KillTestResult>;
-  queued: CampaignTask[];
+  queued: QueuedCampaignTask[];
   operations: Map<string, { type: HypothesisEventType; payload: Readonly<Record<string, unknown>> }>;
 }
 
@@ -340,7 +340,8 @@ function publicState(state: MutableHypothesisState): HypothesisLedgerState {
     hypotheses: Object.fromEntries(state.hypotheses),
     plans: Object.fromEntries(state.plans),
     results: Object.fromEntries(state.results),
-    queuedCampaignTasks: frozenArray(state.queued),
+    queuedCampaignTasks: frozenArray(state.queued.map((entry) => entry.task)),
+    expandQueue: frozenArray(state.queued),
     searchNodes: Object.freeze([]),
   }) as HypothesisLedgerState;
 }
@@ -386,7 +387,12 @@ function applyEvent(state: MutableHypothesisState, event: HypothesisEvent): void
     case "hypothesis.expand_requested": {
       const hypothesisId = p.hypothesisId as string;
       if (!state.hypotheses.has(hypothesisId)) throw new Error(`unknown hypothesis: ${hypothesisId}`);
-      if (p.enqueue !== undefined) state.queued.push(normalizeCampaignTask(p.enqueue as CampaignTask));
+      if (p.enqueue !== undefined) {
+        state.queued.push(deepFreeze({
+          hypothesisId,
+          task: normalizeCampaignTask(p.enqueue as CampaignTask),
+        }) as QueuedCampaignTask);
+      }
       return;
     }
     case "kill_test.planned": {
@@ -487,12 +493,11 @@ export class HypothesisLedger {
   queuedCampaignTasks(): readonly CampaignTask[] { return this.state().queuedCampaignTasks; }
 
   campaignTasksFor(hypothesisId: string): readonly CampaignTask[] {
-    const ids = new Set(
-      this.events()
-        .filter((event) => event.type === "hypothesis.expand_requested" && event.payload.hypothesisId === hypothesisId && event.payload.enqueue !== undefined)
-        .map((event) => (event.payload.enqueue as CampaignTask).task.taskId),
+    return frozenArray(
+      this.state().expandQueue
+        .filter((entry) => entry.hypothesisId === hypothesisId)
+        .map((entry) => entry.task),
     );
-    return frozenArray(this.queuedCampaignTasks().filter((task) => ids.has(task.task.taskId)));
   }
 
   /** Expand never writes search nodes; this projection stays empty. */
