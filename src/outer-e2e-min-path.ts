@@ -29,12 +29,7 @@ export interface AssembleOuterE2eMinPathInput {
   readonly evidenceRefs?: readonly unknown[];
   readonly killEvidenceRefs?: readonly unknown[];
   readonly artifacts?: readonly unknown[];
-  readonly verdictBasis?: readonly unknown[];
   readonly resultId?: string;
-  readonly hypothesisId?: string;
-  readonly planId?: string;
-  readonly statement?: string;
-  readonly predicate?: string;
 }
 
 export interface OuterE2eMinPath {
@@ -81,7 +76,6 @@ function hangInput(
     ...(input.contracts === undefined ? {} : { contracts: input.contracts }),
     ...(input.methodologyEvidence === undefined ? {} : { methodologyEvidence: input.methodologyEvidence }),
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
-    ...(input.verdictBasis === undefined ? {} : { verdictBasis: input.verdictBasis }),
   };
 }
 
@@ -96,10 +90,6 @@ export function assembleOuterE2eMinPath(
   const fixture = fixtureFromE3(searchSpace, input.contracts);
   const setup = runOuterMinPathSetup({
     fixture,
-    hypothesisId: input.hypothesisId,
-    planId: input.planId,
-    statement: input.statement,
-    predicate: input.predicate,
     evidenceRefs: input.evidenceRefs,
   });
   return Object.freeze({

@@ -25,7 +25,10 @@ import {
 } from "./outer-e2e-min-path";
 import { buildOuterSearchSpaceFixtures } from "./outer-search-space-fixtures";
 import { MissionDirector, type ResearchTask } from "./research-loop";
-import { SEARCH_SPACE_BINDING } from "./search-space-profile";
+import {
+  SEARCH_SPACE_BINDING,
+  projectHypothesisSearchSpaceRefs,
+} from "./search-space-profile";
 import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
@@ -95,16 +98,14 @@ describe("E2 before-promotion outer AC", () => {
     expect(path.setup.planId).toBe("kt-outer-min");
     expect(path.setup.hypothesis.hypothesisId).toBe(path.setup.hypothesisId);
     expect(path.setup.plan.planId).toBe(path.setup.planId);
+    expect(OUTER_MIN_HOLD_OUT_EVIDENCE_ID).toBe("ev-holdout");
     expect(path.setup.evidenceRefs).toEqual([
       { kind: "evidence", id: OUTER_MIN_HOLD_OUT_EVIDENCE_ID },
       path.searchSpace.mappedNearDup,
       path.searchSpace.mappedDiversity,
     ]);
-    expect(path.setup.evidenceRefs).toEqual([
-      { kind: "evidence", id: "ev-holdout" },
-      e3.mappedNearDup,
-      e3.mappedDiversity,
-    ]);
+    expect(path.searchSpace.mappedNearDup).toEqual(e3.mappedNearDup);
+    expect(path.searchSpace.mappedDiversity).toEqual(e3.mappedDiversity);
     expect(path.searchSpace.mappedRefs).toEqual([
       path.searchSpace.mappedNearDup,
       path.searchSpace.mappedDiversity,
@@ -138,6 +139,7 @@ describe("E2 before-promotion outer AC", () => {
     const promotedAt = types.indexOf("PROMOTED_LOCAL");
     expect(killAt).toBeGreaterThan(-1);
     expect(promotedAt).toBeGreaterThan(killAt);
+    expect(path.setup.ledger.resultFor(path.setup.planId)?.outcome).toBe("pass");
     expect(state.branches.candidate.status).toBe("PROMOTED_LOCAL");
     expect(harness.acceptChampion({
       acceptedBy: "operator",
@@ -212,7 +214,7 @@ describe("E2 before-promotion outer AC", () => {
     })).toThrow(/unknown|unmapped|T48|promotion key|side-slot|MMD|near-dup|diversity/i);
   });
 
-  test("does not wrap or relax auditMethodology / oofEnsembleGate / Broker semantics", () => {
+  test("does not wrap or relax auditMethodology / oofEnsembleGate / Broker semantics", async () => {
     const path = assembleOuterE2eMinPath();
     expect(path.killTestHang).toBeDefined();
     expect(createKillTestHangHook).toBeDefined();
@@ -253,19 +255,14 @@ describe("E2 before-promotion outer AC", () => {
       contracts,
       methodologyEvidence: disagree,
     });
-    const hang = runKillTestHang({
-      outcome: "pass",
-      evidenceRefs: [OUTER_MIN_KILL_EVIDENCE_ID],
-      catalog: t48Blocked.setup.fixture.catalog,
-      ledger: t48Blocked.setup.ledger,
-      planId: t48Blocked.setup.planId,
-      contracts,
-      methodologyEvidence: disagree,
-    });
-    expect(hang.ok).toBe(false);
-    expect(hang.blocksPromotion).toBe(true);
-    expect(hang.blocksBroker).toBe(true);
-    expect(hang.objections.join(" ")).toMatch(/split|OOF|leak/i);
+    const blocked = await runWiredHarness(t48Blocked, "e2-t48-block");
+    const killEvent = blocked.harness.events().find((event) => event.type === "KILL_TESTER_COMPLETED");
+    expect(killEvent?.payload.ok).toBe(false);
+    expect((killEvent?.payload.objections as string[]).join(" ")).toMatch(/split|OOF|leak/i);
+    expect(blocked.harness.events().some((event) => event.type === "PROMOTED_LOCAL")).toBe(false);
+    expect(blocked.state.champion).toBeUndefined();
+    expect(blocked.state.branches.candidate.status).toBe("REJECTED");
+    expect(() => blocked.harness.acceptChampion({ acceptedBy: "operator" })).toThrow(/champion/i);
     expect(t48Blocked.setup.ledger.resultFor(t48Blocked.setup.planId)).toBeUndefined();
   });
 
@@ -279,6 +276,18 @@ describe("E2 before-promotion outer AC", () => {
     });
     const path = assembleOuterE2eMinPath();
     path.setup.requestExpand();
+    projectHypothesisSearchSpaceRefs({
+      catalog: path.setup.fixture.catalog,
+      hypothesis: path.setup.hypothesis,
+      sources: [path.setup.fixture.nearDup, path.setup.fixture.diversity],
+      select_node: ports.select_node,
+      uct: ports.uct,
+      selectionPolicy: { select: ports.select_node },
+    } as Parameters<typeof projectHypothesisSearchSpaceRefs>[0] & {
+      readonly select_node: () => never;
+      readonly uct: () => never;
+      readonly selectionPolicy: { readonly select: () => never };
+    });
     const after = new MissionDirector({
       missionId: "e2-after",
       objective: "improve the competition result",
@@ -293,6 +302,7 @@ describe("E2 before-promotion outer AC", () => {
       after.readyTasks().map((task) => task.taskId),
     );
     expect(path.setup.ledger.searchNodes()).toEqual([]);
+    expect(path.setup.ledger.events().at(-1)?.type).toBe("hypothesis.expand_requested");
     expect(ports.calls).toEqual({ select: 0, uct: 0, write: 0 });
   });
 });
