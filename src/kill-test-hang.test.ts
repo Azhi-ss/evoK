@@ -280,6 +280,12 @@ describe("K2 kill-test hang reads and writes the H2 ledger", () => {
 
     expect(hang.ok).toBe(false);
     expect(hang.blocksBroker).toBe(true);
+    expect(hang.plan).toEqual({
+      planId: "kt-k2",
+      hypothesisId: "h-k2",
+      predicate: "retrain without the shared step; hold-out must not move",
+      evidenceRefs: [{ kind: "evidence", id: "ev-holdout" }],
+    });
     const result = ledger.resultFor("kt-k2");
     expect(result).toEqual({
       resultId: "ktr-k2",
@@ -460,5 +466,28 @@ describe("K2 kill-test hang reads and writes the H2 ledger", () => {
     expect(t48Blocked.ok).toBe(false);
     expect(t48Blocked.objections.join(" ")).toMatch(/split|OOF|leak/i);
     expect(ledger.resultFor("kt-k2")).toBeUndefined();
+
+    const first = runKillTestHang({
+      outcome: "fail",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: "kt-k2",
+      resultId: "ktr-first",
+    });
+    expect(first.plan?.planId).toBe("kt-k2");
+    expect(ledger.resultFor("kt-k2")?.resultId).toBe("ktr-first");
+    const replay = runKillTestHang({
+      outcome: "fail",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+      ledger,
+      planId: "kt-k2",
+      resultId: "ktr-replay",
+    });
+    expect(replay.ok).toBe(false);
+    expect(replay.objections.join(" ")).toMatch(/already has a result/i);
+    expect(ledger.resultFor("kt-k2")?.resultId).toBe("ktr-first");
+    expect(Object.keys(ledger.state().results)).toEqual(["ktr-first"]);
   });
 });
