@@ -1147,3 +1147,5 @@ export * from "./research-loop";
 export * from "./second-toy-adapter";
 export * from "./methodology";
 export * from "./methodology-acceptance";
+export * from "./newapi-client";
+export * from "./llm-competition-runtime";
