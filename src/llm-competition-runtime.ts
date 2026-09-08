@@ -10,9 +10,9 @@
  */
 import { deepFreeze } from "./security-boundary";
 import {
-  DEFAULT_NEWAPI_MODEL,
   NewapiClient,
   assertAllowlistedModel,
+  resolveDefaultNewapiModel,
   resolveNewapiLive,
   type FetchLike,
 } from "./newapi-client";
@@ -70,10 +70,11 @@ export interface LlmCompetitionRuntimeOptions {
 }
 
 export function createLlmCompetitionRuntime(options: LlmCompetitionRuntimeOptions = {}): ToyAgentRuntime {
-  if (options.model !== undefined) assertAllowlistedModel(options.model);
+  const model = options.model ?? resolveDefaultNewapiModel();
+  assertAllowlistedModel(model);
   if (!resolveNewapiLive(options)) return new MockLlmCompetitionRuntime();
   return new LiveLlmCompetitionRuntime(new NewapiClient({
-    model: options.model ?? DEFAULT_NEWAPI_MODEL,
+    model,
     live: true,
     fetch: options.fetch,
   }));
