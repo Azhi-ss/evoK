@@ -3,7 +3,12 @@
  *
  * Wires L1 `runtime.propose` → proposal Artifact → T48 map →
  * `runOuterMinPathSetup` / E3 fixtures (Hypothesis + mapped evidence_refs +
- * KillTestPlan, hang-ready). Default runtime is the L1 mock. Live stays off.
+ * KillTestPlan, hang-ready). Default runtime is the L1 mock.
+ *
+ * Explicit live product path (LP.1):
+ * `createLlmCompetitionRuntime({ live: true, model: resolveDefaultNewapiModel() })`
+ * → propose → T48 map → `assembleLlmCompArmSetup({ live: true, … })`.
+ * `EVOK_NEWAPI_LIVE` alone does not enable live (L2 contract).
  *
  * Unmapped proposals and side-slot / MMD / near-dup scalars never enter the
  * ledger. Does not change gate semantics, thaw #40, or add L3 hang AC.
@@ -18,6 +23,10 @@ import {
   createLlmCompetitionRuntime,
   type LlmCompetitionRuntimeOptions,
 } from "./llm-competition-runtime";
+import {
+  resolveDefaultNewapiModel,
+  type FetchLike,
+} from "./newapi-client";
 import type { MethodologyContracts, MethodologyEvidence } from "./methodology";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
@@ -56,6 +65,7 @@ export interface AssembleLlmCompArmSetupInput {
   readonly runtime?: ToyAgentRuntime;
   readonly live?: boolean;
   readonly model?: string;
+  readonly fetch?: FetchLike;
   readonly proposeInput?: Parameters<ToyAgentRuntime["propose"]>[0];
   readonly evidenceRefs?: readonly unknown[];
   readonly killEvidenceRefs?: readonly unknown[];
@@ -175,13 +185,18 @@ function hangInput(
 function runtimeOptions(input: AssembleLlmCompArmSetupInput): LlmCompetitionRuntimeOptions {
   return {
     live: input.live === true,
-    ...(input.model === undefined ? {} : { model: input.model }),
+    model: input.model ?? resolveDefaultNewapiModel(),
+    ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
   };
 }
 
 /**
  * One-call glue: L1 propose → T48-mapped proposal Artifact → Outer E2E min
  * path. SearchSpace attachments stay diagnostic_only extras.
+ *
+ * `live: true` builds `createLlmCompetitionRuntime({ live: true, model })`
+ * with `resolveDefaultNewapiModel()` when model is omitted. Omit / `live:
+ * false` stays Mock. Env `EVOK_NEWAPI_LIVE` is ignored here.
  */
 export async function assembleLlmCompArmSetup(
   input: AssembleLlmCompArmSetupInput = {},

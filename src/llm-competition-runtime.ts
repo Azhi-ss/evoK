@@ -3,7 +3,8 @@
  *
  * `MockLlmCompetitionRuntime` is the default: deterministic `propose`, zero
  * network. Live newapi stays off; enabling it without `NEWAPI_API_KEY` fails
- * closed and never silently falls back to the mock.
+ * closed and never silently falls back to the mock. Live proposal `files`
+ * are parseable-only (`parseLiveProposalFiles`).
  *
  * Does not assemble Outer E2E (#81), change gates, unfreeze #40, or change
  * default parent-selection A (tree+fixed_uct).
@@ -55,7 +56,7 @@ export class LiveLlmCompetitionRuntime implements ToyAgentRuntime {
         content: `Produce the candidate. Return JSON {"files":{"score":"number"}} with no prose. Objective: ${input.taskContract.objective}`,
       }],
     });
-    return { files: filesFromChat(result.choices[0]?.message.content ?? "") };
+    return { files: parseLiveProposalFiles(result.choices[0]?.message.content ?? "") };
   }
 
   falsify(_input: Parameters<ToyAgentRuntime["falsify"]>[0]): { ok: boolean; objections: string[] } {
@@ -84,13 +85,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function filesFromChat(text: string): Record<string, string> {
-  const candidate = text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1] ?? (text.includes("{") ? text.slice(text.indexOf("{")) : "");
+/**
+ * Live proposal files contract: parseable `{"files":{...}}` only.
+ * Malformed JSON, unstructured prose, or missing/empty files fail closed
+ * and never fall back to mock candidate files.
+ */
+export function parseLiveProposalFiles(text: string): Record<string, string> {
+  const source = typeof text === "string" ? text : "";
+  const candidate = source.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]
+    ?? (source.includes("{") ? source.slice(source.indexOf("{")) : "");
   try {
     const parsed: unknown = JSON.parse(candidate.trim());
     const files = isRecord(parsed) ? parsed.files : undefined;
     if (isRecord(files)) {
-      return Object.fromEntries(Object.entries(files).map(([key, value]) => [key, String(value)]));
+      const entries = Object.entries(files).map(([key, value]) => [key, String(value)] as const);
+      if (entries.length > 0) {
+        return Object.fromEntries(entries);
+      }
     }
   } catch {
     // fall through to the explicit failure below

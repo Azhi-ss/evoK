@@ -10,6 +10,7 @@ import {
   MOCK_LLM_CANDIDATE_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
+  parseLiveProposalFiles,
 } from "./llm-competition-runtime";
 import {
   ToyCompetitionHarness,
@@ -174,6 +175,72 @@ describe("createLlmCompetitionRuntime", () => {
     expect(runtime).toBeInstanceOf(LiveLlmCompetitionRuntime);
     expect(runtime).not.toBeInstanceOf(MockLlmCompetitionRuntime);
     expect(JSON.stringify(runtime)).not.toContain("sk-present");
+  });
+});
+
+describe("parseLiveProposalFiles", () => {
+  const liveFiles = { score: "7", source: "live-fixture" };
+
+  test("accepts parseable files from raw or fenced JSON", () => {
+    expect(parseLiveProposalFiles(JSON.stringify({ files: liveFiles }))).toEqual(liveFiles);
+    expect(parseLiveProposalFiles("```json\n" + JSON.stringify({ files: liveFiles }) + "\n```")).toEqual(liveFiles);
+    expect(parseLiveProposalFiles("here\n```\n{\"files\":{\"score\":\"7\",\"source\":\"live-fixture\"}}\n```")).toEqual(liveFiles);
+  });
+
+  test("malformed JSON, missing files, and unstructured prose fail closed", () => {
+    const closed = [
+      "",
+      "here is a proposal with no json",
+      "{",
+      "{ files:",
+      "{}",
+      "{\"files\":{}}",
+      "{\"not_files\":{\"score\":\"1\"}}",
+      "{\"files\":[]}",
+    ];
+    for (const text of closed) {
+      expect(() => parseLiveProposalFiles(text)).toThrow(/candidate files/i);
+    }
+  });
+
+  test("never silently falls back to mock candidate files", () => {
+    expect(() => parseLiveProposalFiles("not json")).toThrow(/candidate files/i);
+    expect(parseLiveProposalFiles(JSON.stringify({ files: liveFiles }))).not.toEqual({
+      ...MOCK_LLM_CANDIDATE_FILES,
+    });
+  });
+});
+
+describe("LiveLlmCompetitionRuntime propose files", () => {
+  test("stub files stay parseable; unstructured or missing files fail closed", async () => {
+    process.env[NEWAPI_API_KEY_ENV] = "sk-present-but-must-not-be-logged";
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+    const liveFiles = { score: "7", source: "live-fixture" };
+    const ok = createLlmCompetitionRuntime({
+      live: true,
+      fetch: async () => new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: JSON.stringify({ files: liveFiles }) } }],
+      }), { status: 200 }),
+    });
+    await expect(ok.propose(proposeInput)).resolves.toEqual({ files: liveFiles });
+
+    for (const content of ["just prose", "{", "{}", "{\"files\":{}}"]) {
+      const runtime = createLlmCompetitionRuntime({
+        live: true,
+        fetch: async () => new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content } }],
+        }), { status: 200 }),
+      });
+      let thrown: unknown;
+      try {
+        await runtime.propose(proposeInput);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown instanceof Error ? thrown.message : "").toMatch(/candidate files/i);
+      expect(thrown instanceof Error ? thrown.message : "").not.toContain("sk-present");
+    }
   });
 });
 

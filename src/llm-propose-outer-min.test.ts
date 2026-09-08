@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  DEFAULT_NEWAPI_MODEL,
+  LiveLlmKeyMissingError,
   NEWAPI_API_KEY_ENV,
+  NEWAPI_DEFAULT_MODEL_ENV,
   NEWAPI_LIVE_ENV,
+  resolveDefaultNewapiModel,
+  type FetchLike,
 } from "./newapi-client";
 import {
+  LiveLlmCompetitionRuntime,
   MOCK_LLM_CANDIDATE_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
@@ -46,13 +52,24 @@ const TASKS: readonly ResearchTask[] = [
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];
+const savedDefaultModel = process.env[NEWAPI_DEFAULT_MODEL_ENV];
+const LIVE_STUB_FILES = { score: "7", source: "live-fixture" } as const;
+const LIVE_STUB_KEY = "sk-lp1-stub-must-not-appear";
 
 afterEach(() => {
   if (savedKey === undefined) delete process.env[NEWAPI_API_KEY_ENV];
   else process.env[NEWAPI_API_KEY_ENV] = savedKey;
   if (savedLive === undefined) delete process.env[NEWAPI_LIVE_ENV];
   else process.env[NEWAPI_LIVE_ENV] = savedLive;
+  if (savedDefaultModel === undefined) delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+  else process.env[NEWAPI_DEFAULT_MODEL_ENV] = savedDefaultModel;
 });
+
+function stubProposalFetch(content: string): FetchLike {
+  return async () => new Response(JSON.stringify({
+    choices: [{ message: { role: "assistant", content } }],
+  }), { status: 200 });
+}
 
 function runtimeReturning(proposal: unknown): ToyAgentRuntime {
   return {
@@ -295,5 +312,126 @@ describe("LLM.2 propose → Outer E2E assembly", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+});
+
+describe("LP.1 explicit live propose → L2 assemble", () => {
+  test("without live: true the product path stays Mock even when env live is set", async () => {
+    process.env[NEWAPI_LIVE_ENV] = "1";
+    process.env[NEWAPI_API_KEY_ENV] = LIVE_STUB_KEY;
+    let fetches = 0;
+    const arm = await assembleLlmCompArmSetup({
+      fetch: async () => {
+        fetches += 1;
+        throw new Error("product assemble must not go live from EVOK_NEWAPI_LIVE alone");
+      },
+    });
+    expect(arm.runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
+    expect(arm.runtime).not.toBeInstanceOf(LiveLlmCompetitionRuntime);
+    expect(arm.proposal.files).toEqual({ ...MOCK_LLM_CANDIDATE_FILES });
+    expect(fetches).toBe(0);
+    expect(JSON.stringify(arm)).not.toContain(LIVE_STUB_KEY);
+  });
+
+  test("live: true without a key fails closed and does not fall back to mock", async () => {
+    delete process.env[NEWAPI_API_KEY_ENV];
+    delete process.env[NEWAPI_LIVE_ENV];
+    let result: unknown;
+    try {
+      result = await assembleLlmCompArmSetup({ live: true });
+    } catch (error) {
+      expect(error).toBeInstanceOf(LiveLlmKeyMissingError);
+      expect(error instanceof Error ? error.message : "").not.toMatch(/sk-|Bearer /);
+    }
+    expect(result).toBeUndefined();
+  });
+
+  test("live: true + stub files is a one-shot hypothesisId+planId+mapped refs", async () => {
+    process.env[NEWAPI_API_KEY_ENV] = LIVE_STUB_KEY;
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+    delete process.env[NEWAPI_LIVE_ENV];
+    let body = "";
+    const runtime = createLlmCompetitionRuntime({
+      live: true,
+      model: resolveDefaultNewapiModel(),
+      fetch: async (_input, init) => {
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({
+          choices: [{
+            message: { role: "assistant", content: JSON.stringify({ files: LIVE_STUB_FILES }) },
+          }],
+        }), { status: 200 });
+      },
+    });
+
+    const viaRuntime = await assembleLlmCompArmSetup({ live: true, runtime });
+    const oneShot = await assembleLlmCompArmSetup({
+      live: true,
+      model: resolveDefaultNewapiModel(),
+      fetch: stubProposalFetch(JSON.stringify({ files: LIVE_STUB_FILES })),
+    });
+
+    expect(runtime).toBeInstanceOf(LiveLlmCompetitionRuntime);
+    expect(viaRuntime.runtime).toBe(runtime);
+    expect(oneShot.runtime).toBeInstanceOf(LiveLlmCompetitionRuntime);
+    expect(oneShot.runtime).not.toBeInstanceOf(MockLlmCompetitionRuntime);
+    expect(viaRuntime.proposal.files).toEqual({ ...LIVE_STUB_FILES });
+    expect(oneShot.proposal.files).toEqual({ ...LIVE_STUB_FILES });
+    expect(oneShot.proposal.files).not.toEqual({ ...MOCK_LLM_CANDIDATE_FILES });
+    expect(oneShot.hypothesisId).toBe("h-llm-comp");
+    expect(oneShot.planId).toBe("kt-llm-comp");
+    expect(oneShot.setup.hypothesisId).toBe(oneShot.hypothesisId);
+    expect(oneShot.setup.planId).toBe(oneShot.planId);
+    expect(oneShot.proposalRef).toEqual({ kind: "artifact", id: oneShot.proposalArtifact.artifactId });
+    expect(oneShot.evidenceRefs[0]).toEqual(oneShot.proposalRef);
+    expect(oneShot.evidenceRefs).toEqual([
+      oneShot.proposalRef,
+      { kind: "evidence", id: OUTER_MIN_HOLD_OUT_EVIDENCE_ID },
+      oneShot.searchSpace.mappedNearDup,
+      oneShot.searchSpace.mappedDiversity,
+    ]);
+    expect(oneShot.setup.ledger.state().hypotheses[oneShot.hypothesisId]?.evidenceRefs).toEqual(
+      oneShot.evidenceRefs,
+    );
+    expect(oneShot.killTestHang).toBeDefined();
+    expect(body).toContain(DEFAULT_NEWAPI_MODEL);
+    expect(body).not.toContain(LIVE_STUB_KEY);
+    expect(JSON.stringify(oneShot)).not.toContain(LIVE_STUB_KEY);
+    expect(JSON.stringify(viaRuntime)).not.toContain(LIVE_STUB_KEY);
+  });
+
+  test("unstructured or missing live files fail closed on the product path", async () => {
+    process.env[NEWAPI_API_KEY_ENV] = LIVE_STUB_KEY;
+    delete process.env[NEWAPI_LIVE_ENV];
+    for (const content of ["just prose", "{", "{}", "{\"files\":{}}"]) {
+      let thrown: unknown;
+      try {
+        await assembleLlmCompArmSetup({
+          live: true,
+          fetch: stubProposalFetch(content),
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown instanceof Error ? thrown.message : "").toMatch(/candidate files/i);
+      expect(thrown instanceof Error ? thrown.message : "").not.toContain(LIVE_STUB_KEY);
+    }
+  });
+
+  test("illegal GPT* models are rejected; default comes from resolveDefaultNewapiModel", async () => {
+    process.env[NEWAPI_API_KEY_ENV] = LIVE_STUB_KEY;
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+    expect(resolveDefaultNewapiModel()).toBe(DEFAULT_NEWAPI_MODEL);
+    await expect(assembleLlmCompArmSetup({ live: true, model: "gpt-4" })).rejects.toThrow(
+      /allowlist|not allowlisted/i,
+    );
+    await expect(assembleLlmCompArmSetup({ live: true, model: "GPT-4o" })).rejects.toThrow(
+      /allowlist|not allowlisted/i,
+    );
+    process.env[NEWAPI_DEFAULT_MODEL_ENV] = "gpt-4";
+    await expect(assembleLlmCompArmSetup({ live: true })).rejects.toThrow(
+      /allowlist|not allowlisted/i,
+    );
   });
 });
