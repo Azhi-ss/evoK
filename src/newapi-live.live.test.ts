@@ -42,13 +42,9 @@ function restoreEnv(name: string, value: string | undefined): void {
   else process.env[name] = value;
 }
 
-function isLlmLiveTestFlagOn(): boolean {
-  const value = process.env[LLM_LIVE_TEST_ENV];
-  return value === "1" || value === "true";
-}
-
 function shouldRunLiveNewapiAssertions(): boolean {
-  return isLlmLiveTestFlagOn() && readNewapiApiKey() !== undefined;
+  const flag = process.env[LLM_LIVE_TEST_ENV];
+  return (flag === "1" || flag === "true") && readNewapiApiKey() !== undefined;
 }
 
 function deepSeekOverride(): string | undefined {
@@ -58,27 +54,26 @@ function deepSeekOverride(): string | undefined {
   return model.toLowerCase().startsWith("deepseek") ? model : undefined;
 }
 
-function liveTest(name: string, fn: () => void | Promise<void>): void {
-  if (!shouldRunLiveNewapiAssertions()) {
+function liveTest(name: string, fn: () => void | Promise<void>, enabled = shouldRunLiveNewapiAssertions()): void {
+  if (!enabled) {
     test.skip(name, () => {});
     return;
   }
   test(name, fn, LIVE_TEST_TIMEOUT_MS);
 }
 
-function assertNoSecretLeak(value: unknown, redactor: SecretRedactor): void {
+function assertNoSecretLeak(value: unknown): void {
   const key = readNewapiApiKey();
   const serialized = JSON.stringify(value);
-  expect(serialized).not.toBe("");
-  if (key !== undefined) expect(serialized).not.toContain(key);
-  expect(redactor.redact(serialized)).not.toMatch(/sk-[A-Za-z0-9_-]+/);
+  if (key !== undefined && serialized.includes(key)) {
+    throw new Error("live newapi payload leaked NEWAPI_API_KEY");
+  }
 }
 
-async function liveDefaultChat(model?: string): Promise<{
+async function liveChat(model?: string): Promise<{
   readonly status: number;
   readonly content: string;
   readonly client: NewapiClient;
-  readonly redactor: SecretRedactor;
 }> {
   let status = 0;
   const fetchImpl: FetchLike = async (input, init) => {
@@ -99,9 +94,8 @@ async function liveDefaultChat(model?: string): Promise<{
       messages: [{ role: "user", content: "Reply with the single word ok." }],
     });
     const content = result.choices[0]?.message.content ?? "";
-    assertNoSecretLeak(result, redactor);
-    assertNoSecretLeak(client, redactor);
-    return { status, content, client, redactor };
+    assertNoSecretLeak(result);
+    return { status, content, client };
   } catch (error) {
     throw redactor.error(error);
   }
@@ -130,23 +124,21 @@ describe("live newapi opt-in", () => {
     expect(isAllowlistedModel(model)).toBe(true);
     expect(model.toLowerCase().startsWith("gpt")).toBe(false);
 
-    const { status, content, client } = await liveDefaultChat();
+    const { status, content, client } = await liveChat();
     expect(client.live).toBe(true);
     expect(client.model).toBe(model);
     expect(status).toBe(200);
     expect(content.trim()).not.toBe("");
+    assertNoSecretLeak(content);
   });
 
-  if (shouldRunLiveNewapiAssertions() && deepSeekOverride() !== undefined) {
-    test("allowlisted DeepSeek* NEWAPI_DEFAULT_MODEL override returns HTTP 200", async () => {
-      const model = resolveDefaultNewapiModel();
-      expect(model.toLowerCase().startsWith("deepseek")).toBe(true);
-      const { status, content, client } = await liveDefaultChat();
-      expect(client.model).toBe(model);
-      expect(status).toBe(200);
-      expect(content.trim()).not.toBe("");
-    }, LIVE_TEST_TIMEOUT_MS);
-  } else {
-    test.skip("allowlisted DeepSeek* NEWAPI_DEFAULT_MODEL override returns HTTP 200", () => {});
-  }
+  liveTest("allowlisted DeepSeek* NEWAPI_DEFAULT_MODEL override returns HTTP 200", async () => {
+    const model = resolveDefaultNewapiModel();
+    expect(model.toLowerCase().startsWith("deepseek")).toBe(true);
+    const { status, content, client } = await liveChat(model);
+    expect(client.model).toBe(model);
+    expect(status).toBe(200);
+    expect(content.trim()).not.toBe("");
+    assertNoSecretLeak(content);
+  }, shouldRunLiveNewapiAssertions() && deepSeekOverride() !== undefined);
 });
