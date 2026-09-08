@@ -31,11 +31,12 @@ import {
   type KillTestHangDecision,
   type KillTestHangInput,
 } from "./kill-test-hang";
-import type {
-  HypothesisEvent,
-  HypothesisEventType,
-  HypothesisStatus,
-  T48MappedRef,
+import {
+  killTestOutcomeIsPass,
+  type HypothesisEvent,
+  type HypothesisEventType,
+  type HypothesisStatus,
+  type T48MappedRef,
 } from "./hypothesis-ledger";
 import {
   assembleLlmCompArmSetup,
@@ -127,11 +128,15 @@ export function projectGoldenPathReview(
 ): GoldenPathReview {
   const hypothesisId = path.arm.hypothesisId;
   const planId = path.arm.planId;
-  const events = path.arm.setup.ledger.events();
-  const status = path.arm.setup.ledger.state().hypotheses[hypothesisId]?.status ?? "open";
-  const hangRun = path.hang !== undefined;
-  const passed = path.hang?.ok === true;
-  const blocked = hangRun && path.hang?.ok !== true;
+  const ledger = path.arm.setup.ledger;
+  const events = ledger.events();
+  const status = ledger.state().hypotheses[hypothesisId]?.status ?? "open";
+  const recorded = ledger.resultFor(planId);
+  const hangRun = path.hang !== undefined || recorded !== undefined;
+  const passed = path.hang !== undefined
+    ? path.hang.ok === true
+    : recorded !== undefined && killTestOutcomeIsPass(recorded.outcome);
+  const blocked = hangRun && !passed;
   return Object.freeze({
     hypothesisId,
     planId,
@@ -160,8 +165,9 @@ function pack(arm: LlmCompArmSetup, hang?: KillTestHangDecision): V1GoldenPath {
 }
 
 /**
- * Setup step: propose/claim → T48 map → `assembleOuterMinPath` / L2 assemble.
- * Attaches the existing hang hook; does not run hang.
+ * Setup step: propose/claim → T48 map → L2 assemble (which calls
+ * `assembleOuterMinPath` / `runOuterMinPathSetup`). Attaches the existing
+ * hang hook; does not run hang.
  */
 export async function assembleV1GoldenPath(
   input: AssembleV1GoldenPathInput = {},

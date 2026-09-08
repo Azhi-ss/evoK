@@ -124,6 +124,7 @@ describe("V1-G self-serve golden-path glue", () => {
     const oneShot = await runGoldenPath({ statement: CLAIM });
     const setup = await assembleV1GoldenPath({ statement: CLAIM });
     const attached = attachGoldenPathHang(setup);
+    const hookSetup = await assembleV1GoldenPath({ statement: CLAIM });
 
     expect(assembleOuterMinPath).toBeDefined();
     expect(assembleLlmCompArmSetup).toBeDefined();
@@ -142,6 +143,22 @@ describe("V1-G self-serve golden-path glue", () => {
     expect(createKillTestHangHook).toBeDefined();
     expect(setup.hang).toBeUndefined();
     expect(setup.summary.hangRun).toBe(false);
+    const hooked = await hookSetup.killTestHang({
+      role: "KillTester",
+      contract: verificationRoleContract("KillTester"),
+      missionId: "v1g-attach-hook",
+      branchId: "candidate",
+      taskContract: { objective: CLAIM },
+    });
+    expect(hooked.ok).toBe(true);
+    const afterHook = projectGoldenPathReview(hookSetup);
+    expect(afterHook.timeline.map((event) => event.type)).toEqual([
+      "hypothesis.created",
+      "kill_test.planned",
+      "kill_test.finished",
+    ]);
+    expect(afterHook.summary.hangRun).toBe(true);
+    expect(afterHook.summary.passed).toBe(true);
     expect(attached.hang?.ok).toBe(true);
     expect(attached.summary.hangRun).toBe(true);
     expect(oneShot.hang?.ok).toBe(true);
