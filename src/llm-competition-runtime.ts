@@ -15,7 +15,6 @@ import {
   assertAllowlistedModel,
   resolveNewapiLive,
   type FetchLike,
-  type ProcessEnvLike,
 } from "./newapi-client";
 import type { ToyAgentRuntime } from "./toy-harness";
 
@@ -67,7 +66,6 @@ export class LiveLlmCompetitionRuntime implements ToyAgentRuntime {
 export interface LlmCompetitionRuntimeOptions {
   readonly live?: boolean;
   readonly model?: string;
-  readonly env?: ProcessEnvLike;
   readonly fetch?: FetchLike;
 }
 
@@ -77,7 +75,6 @@ export function createLlmCompetitionRuntime(options: LlmCompetitionRuntimeOption
   return new LiveLlmCompetitionRuntime(new NewapiClient({
     model: options.model ?? DEFAULT_NEWAPI_MODEL,
     live: true,
-    env: options.env,
     fetch: options.fetch,
   }));
 }

@@ -17,7 +17,6 @@ export const NEWAPI_API_KEY_ENV = "NEWAPI_API_KEY";
 export const NEWAPI_LIVE_ENV = "EVOK_NEWAPI_LIVE";
 export const DEFAULT_NEWAPI_MODEL = "DeepSeek-V3";
 
-export type ProcessEnvLike = Record<string, string | undefined>;
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export class ModelNotAllowlistedError extends Error {
@@ -37,10 +36,6 @@ export class LiveLlmKeyMissingError extends Error {
   }
 }
 
-function envOf(env?: ProcessEnvLike): ProcessEnvLike {
-  return env ?? process.env;
-}
-
 export function isAllowlistedModel(model: string): boolean {
   if (typeof model !== "string") return false;
   const name = model.trim();
@@ -55,21 +50,21 @@ export function assertAllowlistedModel(model: string): void {
   }
 }
 
-export function isNewapiLiveEnabled(env?: ProcessEnvLike): boolean {
-  const value = envOf(env)[NEWAPI_LIVE_ENV];
+export function isNewapiLiveEnabled(): boolean {
+  const value = process.env[NEWAPI_LIVE_ENV];
   return value === "1" || value === "true";
 }
 
-export function readNewapiApiKey(env?: ProcessEnvLike): string | undefined {
-  const key = envOf(env)[NEWAPI_API_KEY_ENV];
+export function readNewapiApiKey(): string | undefined {
+  const key = process.env[NEWAPI_API_KEY_ENV];
   if (typeof key !== "string" || key.trim() === "") return undefined;
   return key;
 }
 
-export function resolveNewapiLive(options: { readonly live?: boolean; readonly env?: ProcessEnvLike } = {}): boolean {
+export function resolveNewapiLive(options: { readonly live?: boolean } = {}): boolean {
   if (options.live === true) return true;
   if (options.live === false) return false;
-  return isNewapiLiveEnabled(options.env);
+  return isNewapiLiveEnabled();
 }
 
 export interface ChatMessage {
@@ -95,9 +90,7 @@ export interface NewapiClientOptions {
   readonly model: string;
   /** Default false. Live also turns on when `EVOK_NEWAPI_LIVE` is `1` or `true`. */
   readonly live?: boolean;
-  readonly env?: ProcessEnvLike;
   readonly fetch?: FetchLike;
-  readonly baseURL?: string;
 }
 
 export class NewapiClient {
@@ -111,10 +104,10 @@ export class NewapiClient {
   constructor(options: NewapiClientOptions) {
     assertAllowlistedModel(options.model);
     this.model = options.model.trim();
-    this.baseURL = (options.baseURL ?? NEWAPI_BASE_URL).replace(/\/$/, "");
+    this.baseURL = NEWAPI_BASE_URL;
     this.live = resolveNewapiLive(options);
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
-    const key = this.live ? readNewapiApiKey(options.env) : undefined;
+    const key = this.live ? readNewapiApiKey() : undefined;
     if (this.live && key === undefined) throw new LiveLlmKeyMissingError();
     this.#apiKey = key;
     this.#redactor = new SecretRedactor(key === undefined ? [] : [key]);
