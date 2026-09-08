@@ -91,9 +91,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * and never fall back to mock candidate files.
  */
 export function parseLiveProposalFiles(text: string): Record<string, string> {
-  const source = typeof text === "string" ? text : "";
-  const candidate = source.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]
-    ?? (source.includes("{") ? source.slice(source.indexOf("{")) : "");
+  const candidate = text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]
+    ?? (text.includes("{") ? text.slice(text.indexOf("{")) : "");
   try {
     const parsed: unknown = JSON.parse(candidate.trim());
     const files = isRecord(parsed) ? parsed.files : undefined;
