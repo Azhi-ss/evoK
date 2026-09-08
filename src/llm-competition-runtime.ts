@@ -25,15 +25,15 @@ export const MOCK_LLM_CANDIDATE_FILES: Readonly<Record<string, string>> = deepFr
 });
 
 export class MockLlmCompetitionRuntime implements ToyAgentRuntime {
-  selfVerify(): { ok: boolean; objections: string[] } {
+  selfVerify(_input: Parameters<ToyAgentRuntime["selfVerify"]>[0]): { ok: boolean; objections: string[] } {
     return { ok: true, objections: [] };
   }
 
-  propose(): { files: Record<string, string> } {
+  propose(_input: Parameters<ToyAgentRuntime["propose"]>[0]): { files: Record<string, string> } {
     return { files: { ...MOCK_LLM_CANDIDATE_FILES } };
   }
 
-  falsify(): { ok: boolean; objections: string[] } {
+  falsify(_input: Parameters<ToyAgentRuntime["falsify"]>[0]): { ok: boolean; objections: string[] } {
     return { ok: true, objections: [] };
   }
 }
@@ -45,7 +45,7 @@ export class LiveLlmCompetitionRuntime implements ToyAgentRuntime {
     this.#client = client;
   }
 
-  selfVerify(): { ok: boolean; objections: string[] } {
+  selfVerify(_input: Parameters<ToyAgentRuntime["selfVerify"]>[0]): { ok: boolean; objections: string[] } {
     return { ok: true, objections: [] };
   }
 
@@ -59,7 +59,7 @@ export class LiveLlmCompetitionRuntime implements ToyAgentRuntime {
     return { files: filesFromChat(result.choices[0]?.message.content ?? "") };
   }
 
-  falsify(): { ok: boolean; objections: string[] } {
+  falsify(_input: Parameters<ToyAgentRuntime["falsify"]>[0]): { ok: boolean; objections: string[] } {
     return { ok: true, objections: [] };
   }
 }
