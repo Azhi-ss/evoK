@@ -1,10 +1,10 @@
 /**
  * LLM.3 before-promotion named AC (control-plane).
  *
- * Consumes L2 `assembleLlmCompArmSetup` and L1 `MockLlmCompetitionRuntime`.
- * Wires the existing Outer E2 / `createKillTestHangHook` into
- * `ToyCompetitionHarness.verification.killTestHang`. Does not invent a gate,
- * wrap T48 / Broker, thaw #40, or enable live newapi.
+ * Consumes L2 `assembleLlmCompArmSetup` (mock default; LP1 `{ live: true }`
+ * product path) and wires the existing Outer E2 / `createKillTestHangHook`
+ * into `ToyCompetitionHarness.verification.killTestHang`. Does not invent a
+ * gate, wrap T48 / Broker, thaw #40, or treat `EVOK_NEWAPI_LIVE` as live.
  */
 import {
   assembleLlmCompArmSetup,
