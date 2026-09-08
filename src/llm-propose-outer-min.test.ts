@@ -275,8 +275,13 @@ describe("LLM.2 propose → Outer E2E assembly", () => {
         tasks: TASKS,
       });
 
+      process.env[NEWAPI_LIVE_ENV] = "1";
+      process.env[NEWAPI_API_KEY_ENV] = "sk-must-not-enable-live-from-env";
+      const envArmed = await assembleLlmCompArmSetup();
+      expect(envArmed.runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
       expect(runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
       expect(arm.runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
+      expect(JSON.stringify(envArmed)).not.toContain("sk-must-not-enable-live-from-env");
       expect(SEARCH_SPACE_BINDING).toBe("diagnostic_only");
       expect(before.selectNextTask()?.taskId).toBe("baseline");
       expect(after.selectNextTask()?.taskId).toBe("baseline");

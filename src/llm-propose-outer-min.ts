@@ -174,7 +174,7 @@ function hangInput(
 
 function runtimeOptions(input: AssembleLlmCompArmSetupInput): LlmCompetitionRuntimeOptions {
   return {
-    ...(input.live === undefined ? {} : { live: input.live }),
+    live: input.live === true,
     ...(input.model === undefined ? {} : { model: input.model }),
   };
 }
