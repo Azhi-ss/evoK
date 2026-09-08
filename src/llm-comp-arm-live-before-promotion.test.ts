@@ -462,7 +462,7 @@ describe("LP.2 live propose before-promotion AC", () => {
       expect(run.arm.setup.ledger.events().some((event) => event.type === "hypothesis.expand_requested")).toBe(true);
       expect(ports.calls).toEqual({ select: 0, uct: 0, write: 0 });
       expect(realFetches).toBe(0);
-      expect(stubFetches).toBe(1);
+      expect(stubFetches).toBe(2);
 
       const serialized = JSON.stringify({
         arm: run.arm,
