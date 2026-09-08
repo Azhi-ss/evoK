@@ -15,7 +15,9 @@ export const NEWAPI_BASE_URL = "https://newapi.ai-modeling.top/v1";
 export const NEWAPI_API_KEY_ENV = "NEWAPI_API_KEY";
 /** Opt-in live switch. Unset / anything other than `1` or `true` keeps live off. */
 export const NEWAPI_LIVE_ENV = "EVOK_NEWAPI_LIVE";
-export const DEFAULT_NEWAPI_MODEL = "DeepSeek-V3";
+/** Optional allowlisted override for the catalog default. Empty falls back. */
+export const NEWAPI_DEFAULT_MODEL_ENV = "NEWAPI_DEFAULT_MODEL";
+export const DEFAULT_NEWAPI_MODEL = "deepseek-v4-flash-ga-260731";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -67,6 +69,13 @@ export function resolveNewapiLive(options: { readonly live?: boolean } = {}): bo
   return isNewapiLiveEnabled();
 }
 
+export function resolveDefaultNewapiModel(): string {
+  const raw = process.env[NEWAPI_DEFAULT_MODEL_ENV];
+  const model = typeof raw === "string" && raw.trim() !== "" ? raw.trim() : DEFAULT_NEWAPI_MODEL;
+  assertAllowlistedModel(model);
+  return model;
+}
+
 export interface ChatMessage {
   readonly role: "system" | "user" | "assistant";
   readonly content: string;
@@ -87,7 +96,7 @@ export interface ChatCompletionsResponse {
 }
 
 export interface NewapiClientOptions {
-  readonly model: string;
+  readonly model?: string;
   /** Default false. Live also turns on when `EVOK_NEWAPI_LIVE` is `1` or `true`. */
   readonly live?: boolean;
   readonly fetch?: FetchLike;
@@ -101,9 +110,10 @@ export class NewapiClient {
   readonly #fetch: FetchLike;
   readonly #redactor: SecretRedactor;
 
-  constructor(options: NewapiClientOptions) {
-    assertAllowlistedModel(options.model);
-    this.model = options.model.trim();
+  constructor(options: NewapiClientOptions = {}) {
+    const model = options.model ?? resolveDefaultNewapiModel();
+    assertAllowlistedModel(model);
+    this.model = model.trim();
     this.baseURL = NEWAPI_BASE_URL;
     this.live = resolveNewapiLive(options);
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));

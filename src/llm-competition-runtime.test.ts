@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   LiveLlmKeyMissingError,
   NEWAPI_API_KEY_ENV,
+  NEWAPI_DEFAULT_MODEL_ENV,
   NEWAPI_LIVE_ENV,
 } from "./newapi-client";
 import {
@@ -27,12 +28,15 @@ const proposeInput = {
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];
+const savedDefaultModel = process.env[NEWAPI_DEFAULT_MODEL_ENV];
 
 afterEach(() => {
   if (savedKey === undefined) delete process.env[NEWAPI_API_KEY_ENV];
   else process.env[NEWAPI_API_KEY_ENV] = savedKey;
   if (savedLive === undefined) delete process.env[NEWAPI_LIVE_ENV];
   else process.env[NEWAPI_LIVE_ENV] = savedLive;
+  if (savedDefaultModel === undefined) delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+  else process.env[NEWAPI_DEFAULT_MODEL_ENV] = savedDefaultModel;
 });
 
 describe("MockLlmCompetitionRuntime", () => {
@@ -98,16 +102,57 @@ describe("createLlmCompetitionRuntime", () => {
   test("defaults to the mock runtime while live is off", () => {
     delete process.env[NEWAPI_LIVE_ENV];
     delete process.env[NEWAPI_API_KEY_ENV];
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
     const runtime = createLlmCompetitionRuntime();
     expect(runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
     expect(runtime).not.toBeInstanceOf(LiveLlmCompetitionRuntime);
   });
 
   test("rejects non-allowlisted models before propose", () => {
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
     expect(() => createLlmCompetitionRuntime({ model: "gpt-4" })).toThrow(/allowlist|not allowlisted/i);
     expect(() => createLlmCompetitionRuntime({ model: "claude-3" })).toThrow(/allowlist|not allowlisted/i);
     expect(() => createLlmCompetitionRuntime({ model: "DeepSeek-V3" })).not.toThrow();
     expect(() => createLlmCompetitionRuntime({ model: "Gemini-2.5-pro" })).not.toThrow();
+  });
+
+  test("unspecified model uses the catalog default and allowlisted NEWAPI_DEFAULT_MODEL override", async () => {
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
+    process.env[NEWAPI_API_KEY_ENV] = "sk-present-but-must-not-be-logged";
+    let body = "";
+    const catalogRuntime = createLlmCompetitionRuntime({
+      live: true,
+      fetch: async (_input, init) => {
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "{\"files\":{\"score\":\"1\"}}" } }],
+        }), { status: 200 });
+      },
+    });
+    await catalogRuntime.propose(proposeInput);
+    expect(body).toContain("deepseek-v4-flash-ga-260731");
+    expect(body).not.toContain("DeepSeek-V3");
+    expect(body).not.toContain("sk-present");
+
+    process.env[NEWAPI_DEFAULT_MODEL_ENV] = "Gemini-2.5-pro";
+    const overrideRuntime = createLlmCompetitionRuntime({
+      live: true,
+      fetch: async (_input, init) => {
+        body = String(init?.body ?? "");
+        return new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "{\"files\":{\"score\":\"1\"}}" } }],
+        }), { status: 200 });
+      },
+    });
+    await overrideRuntime.propose(proposeInput);
+    expect(body).toContain("Gemini-2.5-pro");
+    expect(JSON.stringify(overrideRuntime)).not.toContain("sk-present");
+  });
+
+  test("NEWAPI_DEFAULT_MODEL gpt-* fails closed before propose", () => {
+    process.env[NEWAPI_DEFAULT_MODEL_ENV] = "gpt-4";
+    expect(() => createLlmCompetitionRuntime()).toThrow(/allowlist|not allowlisted/i);
+    expect(() => createLlmCompetitionRuntime({ live: true })).toThrow(/allowlist|not allowlisted/i);
   });
 
   test("enabling live without a key fails closed and does not fall back to mock", () => {
@@ -134,6 +179,7 @@ describe("createLlmCompetitionRuntime", () => {
 
 describe("LLM.1 control-plane isolation", () => {
   test("does not change default parent selection A or thaw #40 SelectionPolicy", () => {
+    delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
     const tasks: readonly ResearchTask[] = [
       { taskId: "baseline", objective: "measure the baseline", estimatedCost: 2, priority: 3 },
       { taskId: "cheap-check", objective: "check a cheap alternative", estimatedCost: 1, priority: 2 },
