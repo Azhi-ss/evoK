@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   DEFAULT_NEWAPI_MODEL,
   LiveLlmKeyMissingError,
@@ -20,10 +20,6 @@ const CATALOG_DEFAULT_MODEL = "deepseek-v4-flash-ga-260731";
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];
 const savedDefaultModel = process.env[NEWAPI_DEFAULT_MODEL_ENV];
-
-beforeEach(() => {
-  delete process.env[NEWAPI_DEFAULT_MODEL_ENV];
-});
 
 afterEach(() => {
   if (savedKey === undefined) delete process.env[NEWAPI_API_KEY_ENV];
