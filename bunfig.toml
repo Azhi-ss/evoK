@@ -1,5 +1,6 @@
 # Default `bun test` / `bun test --rerun-all-tests` must not load opt-in live
 # cases. Explicit run (skips unless EVOK_LLM_LIVE_TEST=1|true and NEWAPI_API_KEY):
-#   EVOK_LLM_LIVE_TEST=1 bun test --path-ignore-patterns="" src/newapi-live.live.test.ts
+#   bun run test:live
+#   EVOK_LLM_LIVE_TEST=1 bun test --path-ignore-patterns="" ./src/newapi-live.live.test.ts
 [test]
 pathIgnorePatterns = ["**/*.live.test.ts"]
