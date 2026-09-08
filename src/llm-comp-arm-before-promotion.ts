@@ -1,5 +1,5 @@
 /**
- * LLM.3 / LP.2 before-promotion named AC (control-plane).
+ * LLM.3 before-promotion named AC (control-plane).
  *
  * Consumes L2 `assembleLlmCompArmSetup` (mock default; LP1 `{ live: true }`
  * product path) and wires the existing Outer E2 / `createKillTestHangHook`

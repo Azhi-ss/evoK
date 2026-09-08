@@ -75,8 +75,8 @@ function stubProposalFetch(content: string): FetchLike {
   }), { status: 200 });
 }
 
-function liveFixtureFetch(files: Record<string, string> = { ...LIVE_STUB_FILES }): FetchLike {
-  return stubProposalFetch(JSON.stringify({ files }));
+function liveFixtureFetch(): FetchLike {
+  return stubProposalFetch(JSON.stringify({ files: LIVE_STUB_FILES }));
 }
 
 function smuggledSearchPorts() {
@@ -219,9 +219,10 @@ describe("LP.2 live propose before-promotion AC", () => {
       missionId: "lp2-score-fail",
       outcome: "fail",
       resultId: "ktr-lp2-score-fail",
+      fetch: stubProposalFetch(JSON.stringify({ files: { score: "99", source: "live-fixture" } })),
     });
-    expect(scoreBypass.arm.proposal.files.score).toBe("7");
-    expect(scoreBypass.state.branches.candidate.score).toBe(7);
+    expect(scoreBypass.arm.proposal.files.score).toBe("99");
+    expect(scoreBypass.state.branches.candidate.score).toBe(99);
     expect(scoreBypass.harness.events().some((event) => event.type === "PROMOTED_LOCAL")).toBe(false);
     expect(scoreBypass.state.branches.candidate.status).toBe("REJECTED");
     expect(() => scoreBypass.harness.acceptChampion({ acceptedBy: "operator" })).toThrow(/champion/i);
