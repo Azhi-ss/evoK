@@ -97,6 +97,7 @@ function hangInput(
   arm: LlmCompArmSetup,
   input: AssembleV1GoldenPathInput,
 ): KillTestHangInput {
+  const methodologyEvidence = input.methodologyEvidence ?? arm.methodologyEvidence;
   return {
     outcome: input.outcome ?? "pass",
     evidenceRefs: input.killEvidenceRefs ?? [OUTER_MIN_KILL_EVIDENCE_ID],
@@ -105,7 +106,7 @@ function hangInput(
     planId: arm.setup.planId,
     ...(input.resultId === undefined ? {} : { resultId: input.resultId }),
     ...(input.contracts === undefined ? {} : { contracts: input.contracts }),
-    ...(input.methodologyEvidence === undefined ? {} : { methodologyEvidence: input.methodologyEvidence }),
+    ...(methodologyEvidence === undefined ? {} : { methodologyEvidence }),
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
   };
 }

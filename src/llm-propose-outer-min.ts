@@ -12,6 +12,10 @@
  *
  * Unmapped proposals and side-slot / MMD / near-dup scalars never enter the
  * ledger. Does not change gate semantics, thaw #40, or add L3 hang AC.
+ *
+ * ME-1: when the caller omits `methodologyEvidence`, optional proposal file
+ * `methodology.json` (also `manifest.json` / `methodology`) is parsed through
+ * `readMethodologyEvidence` and forwarded to hang. Explicit inject wins.
  */
 import { createKillTestHangHook, type KillTestHangInput } from "./kill-test-hang";
 import {
@@ -27,7 +31,11 @@ import {
   resolveDefaultNewapiModel,
   type FetchLike,
 } from "./newapi-client";
-import type { MethodologyContracts, MethodologyEvidence } from "./methodology";
+import {
+  readMethodologyEvidence,
+  type MethodologyContracts,
+  type MethodologyEvidence,
+} from "./methodology";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
   OUTER_MIN_KILL_EVIDENCE_ID,
@@ -72,6 +80,8 @@ export interface AssembleLlmCompArmSetupInput {
   readonly artifacts?: readonly unknown[];
   readonly contracts?: MethodologyContracts;
   readonly methodologyEvidence?: MethodologyEvidence;
+  /** Mock-only: emit convention `methodology.json` from the OOF-present fixture. */
+  readonly emitMethodologyManifest?: boolean;
   readonly outcome?: KillTestOutcome;
   readonly resultId?: string;
   readonly hypothesisId?: string;
@@ -90,6 +100,7 @@ export interface LlmCompArmSetup {
   readonly hypothesisId: string;
   readonly planId: string;
   readonly evidenceRefs: readonly T48MappedRef[];
+  readonly methodologyEvidence?: MethodologyEvidence;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -165,9 +176,47 @@ function fixtureFromE3(
   };
 }
 
+const METHODOLOGY_FILE_KEYS = ["methodology.json", "manifest.json", "methodology"] as const;
+
+/**
+ * Proposal `files` convention: optional `methodology.json` (also
+ * `manifest.json` / `methodology`) as JSON text. Missing key returns
+ * undefined (do not invent evidence). Present but unparsable / not a
+ * plain object fails closed.
+ */
+export function readProposalMethodologyEvidence(
+  files: Record<string, string>,
+  contracts?: MethodologyContracts,
+): MethodologyEvidence | undefined {
+  const key = METHODOLOGY_FILE_KEYS.find((candidate) => (
+    Object.prototype.hasOwnProperty.call(files, candidate)
+  ));
+  if (key === undefined) return undefined;
+  const raw = files[key];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`proposal ${key} is not valid JSON`);
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error(`proposal ${key} must be a plain object`);
+  }
+  return readMethodologyEvidence(parsed, contracts);
+}
+
+function resolveAssembledMethodologyEvidence(
+  files: Record<string, string>,
+  input: AssembleLlmCompArmSetupInput,
+): MethodologyEvidence | undefined {
+  if (input.methodologyEvidence !== undefined) return input.methodologyEvidence;
+  return readProposalMethodologyEvidence(files, input.contracts);
+}
+
 function hangInput(
   setup: OuterMinPathAssembly,
   input: AssembleLlmCompArmSetupInput,
+  methodologyEvidence?: MethodologyEvidence,
 ): KillTestHangInput {
   return {
     outcome: input.outcome ?? "pass",
@@ -177,7 +226,7 @@ function hangInput(
     planId: setup.planId,
     ...(input.resultId === undefined ? {} : { resultId: input.resultId }),
     ...(input.contracts === undefined ? {} : { contracts: input.contracts }),
-    ...(input.methodologyEvidence === undefined ? {} : { methodologyEvidence: input.methodologyEvidence }),
+    ...(methodologyEvidence === undefined ? {} : { methodologyEvidence }),
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
   };
 }
@@ -187,6 +236,9 @@ function runtimeOptions(input: AssembleLlmCompArmSetupInput): LlmCompetitionRunt
     live: input.live === true,
     model: input.model ?? resolveDefaultNewapiModel(),
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+    ...(input.emitMethodologyManifest === undefined
+      ? {}
+      : { emitMethodologyManifest: input.emitMethodologyManifest }),
   };
 }
 
@@ -222,6 +274,7 @@ export async function assembleLlmCompArmSetup(
     statement: input.statement ?? "llm competition-arm: mapped proposal artifact and diagnostic search-space refs",
     evidenceRefs: sources,
   });
+  const methodologyEvidence = resolveAssembledMethodologyEvidence(proposal.files, input);
   return Object.freeze({
     runtime,
     proposal: deepFreeze({ files: { ...proposal.files } }),
@@ -229,10 +282,11 @@ export async function assembleLlmCompArmSetup(
     proposalRef: attached.mapped,
     setup,
     searchSpace,
-    killTestHang: createKillTestHangHook(hangInput(setup, input)),
+    killTestHang: createKillTestHangHook(hangInput(setup, input, methodologyEvidence)),
     hypothesisId: setup.hypothesisId,
     planId: setup.planId,
     evidenceRefs: setup.evidenceRefs,
+    ...(methodologyEvidence === undefined ? {} : { methodologyEvidence }),
   }) as LlmCompArmSetup;
 }
 

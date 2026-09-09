@@ -8,6 +8,7 @@ import {
 import {
   LiveLlmCompetitionRuntime,
   MOCK_LLM_CANDIDATE_FILES,
+  MOCK_LLM_METHODOLOGY_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
   parseLiveProposalFiles,
@@ -41,6 +42,24 @@ afterEach(() => {
 });
 
 describe("MockLlmCompetitionRuntime", () => {
+  test("optionally emits OOF-present methodology.json; default files stay score-only", () => {
+    const emitted = new MockLlmCompetitionRuntime({ emitMethodologyManifest: true });
+    const files = emitted.propose(proposeInput).files;
+    expect(files.score).toBe(MOCK_LLM_CANDIDATE_FILES.score);
+    expect(files["methodology.json"]).toBe(MOCK_LLM_METHODOLOGY_FILES["methodology.json"]);
+    expect(JSON.parse(files["methodology.json"]!)).toEqual(
+      JSON.parse(MOCK_LLM_METHODOLOGY_FILES["methodology.json"]!),
+    );
+    expect(new MockLlmCompetitionRuntime().propose(proposeInput).files).toEqual({
+      ...MOCK_LLM_CANDIDATE_FILES,
+    });
+    const factory = createLlmCompetitionRuntime({ emitMethodologyManifest: true });
+    expect(factory).toBeInstanceOf(MockLlmCompetitionRuntime);
+    expect((factory as MockLlmCompetitionRuntime).propose(proposeInput).files).toEqual({
+      ...MOCK_LLM_METHODOLOGY_FILES,
+    });
+  });
+
   test("propose is deterministic and makes zero network calls", async () => {
     let fetches = 0;
     const original = globalThis.fetch;

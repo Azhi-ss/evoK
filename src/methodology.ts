@@ -321,6 +321,9 @@ export function readMethodologyManifest(
   }) as MethodologyEvidence;
 }
 
+/** Spec / seam alias for `readMethodologyManifest`. */
+export const readMethodologyEvidence = readMethodologyManifest;
+
 export interface MethodologyGateResult {
   readonly ok: boolean;
   readonly objections: readonly string[];
