@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, generateKeyPairSync, sign as signDigest, verify as verifyDigest } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export type SandboxViolationKind =
@@ -30,6 +31,13 @@ export class TrustViolation extends SandboxViolation {
 
 export interface SandboxPolicy {
   readonly root?: string;
+  /**
+   * Additional absolute directories readable by read/inspect tools (e.g. the
+   * research project the foreground CLI opened). Writes never leave `root`;
+   * readRoots never widen bash/write/network authority. Trusted-side only:
+   * restrictSandboxPolicy intersects them, so a run cannot add roots.
+   */
+  readonly readRoots?: readonly string[];
   /** Omit or set to `none` to deny all network access. */
   readonly network?: "none" | readonly string[];
   readonly credentialPaths?: readonly string[];
@@ -71,6 +79,20 @@ export function deepFreeze<T>(value: T, seen = new WeakSet<object>()): Readonly<
 function within(root: string, child: string): boolean {
   const path = relative(root, child);
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+/** realpath when the path exists, lexical path otherwise (missing targets stay lexical). */
+function realpathSafe(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/** True if `target` (already resolved) is lexically inside a real approved root. */
+function withinRealRoots(realRoots: readonly string[], target: string): boolean {
+  return realRoots.some((root) => within(root, target));
 }
 
 function normalizedPath(value: string): string {
@@ -119,6 +141,12 @@ function validatePolicy(policy: SandboxPolicy): void {
   stringList("sandbox credentialPaths", policy.credentialPaths);
   stringList("sandbox protectedPaths", policy.protectedPaths);
   stringList("sandbox allowedTools", policy.allowedTools);
+  if (policy.readRoots !== undefined) {
+    const roots = stringList("sandbox readRoots", policy.readRoots);
+    if (roots!.some((path) => !isAbsolute(path))) {
+      throw new TypeError("sandbox readRoots must be absolute paths");
+    }
+  }
   if (policy.allowBash !== undefined && typeof policy.allowBash !== "boolean") throw new TypeError("sandbox allowBash must be boolean");
   if (policy.allowHostSockets !== undefined && typeof policy.allowHostSockets !== "boolean") throw new TypeError("sandbox allowHostSockets must be boolean");
   if (policy.maxFileBytes !== undefined) safeInteger("sandbox maxFileBytes", policy.maxFileBytes, 1);
@@ -160,9 +188,29 @@ export function restrictSandboxPolicy(base: SandboxPolicy = {}, overlay: Sandbox
     : baseTools === undefined ? [...overlay.allowedTools] : baseTools.filter((tool) => overlay.allowedTools!.includes(tool));
   const maxFileBytes = base.maxFileBytes === undefined ? overlay.maxFileBytes
     : overlay.maxFileBytes === undefined ? base.maxFileBytes : Math.min(base.maxFileBytes, overlay.maxFileBytes);
+  // readRoots are trusted grants: the result must be within BOTH base and
+  // overlay (a per-run policy narrows, never widens). Keep whichever side is
+  // the narrower root so a broader overlay still yields the base grant.
+  const readRoots = overlay.readRoots === undefined
+    ? base.readRoots && [...base.readRoots].map((path) => resolve(path))
+    : base.readRoots === undefined
+      ? undefined
+      : (() => {
+          const baseReal = (base.readRoots ?? []).map((path) => resolve(path));
+          const overlayReal = overlay.readRoots!.map((path) => resolve(path));
+          const kept = new Set<string>();
+          for (const baseRoot of baseReal) {
+            if (overlayReal.some((overlayRoot) => within(overlayRoot, baseRoot))) kept.add(baseRoot);
+          }
+          for (const overlayRoot of overlayReal) {
+            if (baseReal.some((baseRoot) => within(baseRoot, overlayRoot))) kept.add(overlayRoot);
+          }
+          return [...kept];
+        })();
   return deepFreeze({
     ...(base.root === undefined ? (overlay.root === undefined ? {} : { root: overlay.root }) : { root: base.root }),
     network,
+    ...(readRoots === undefined ? {} : { readRoots }),
     ...(base.credentialPaths || overlay.credentialPaths ? { credentialPaths: [...new Set([...(base.credentialPaths ?? []), ...(overlay.credentialPaths ?? [])])] } : {}),
     ...(base.protectedPaths || overlay.protectedPaths ? { protectedPaths: [...new Set([...(base.protectedPaths ?? []), ...(overlay.protectedPaths ?? [])])] } : {}),
     ...(allowedTools === undefined ? {} : { allowedTools }),
@@ -176,13 +224,18 @@ export class SandboxBoundary {
   readonly root: string;
   readonly policy: Readonly<SandboxPolicy>;
   private readonly protectedPaths: readonly string[];
+  private readonly readRoots: readonly string[];
+  private readonly realReadRoots: readonly string[];
 
   constructor(policy: SandboxPolicy = {}) {
     validatePolicy(policy);
     this.root = resolve(policy.root ?? "/tmp/evok-sandbox");
+    this.readRoots = Object.freeze([...new Set((policy.readRoots ?? []).map((path) => resolve(path)))]);
+    this.realReadRoots = Object.freeze(this.readRoots.map((path) => realpathSafe(path)));
     this.policy = deepFreeze({
       ...policy,
       root: this.root,
+      ...(this.readRoots.length > 0 ? { readRoots: [...this.readRoots] } : {}),
       ...(policy.network === undefined ? {} : { network: policy.network === "none" ? "none" : [...policy.network] }),
       ...(policy.credentialPaths === undefined ? {} : { credentialPaths: [...policy.credentialPaths] }),
       ...(policy.protectedPaths === undefined ? {} : { protectedPaths: [...policy.protectedPaths] }),
@@ -210,13 +263,30 @@ export class SandboxBoundary {
     const parts = normalizedPath(path).split("/");
     if (parts.includes("..")) throw new SandboxViolation("path-traversal", `path traversal is not allowed: ${path}`);
     const target = isAbsolute(path) ? resolve(path) : resolve(this.root, path);
-    if (!within(this.root, target)) throw new SandboxViolation("path-traversal", `path escapes sandbox root: ${path}`);
+    const readOnly = operation === "read" || operation === "inspect";
+    const inRoot = within(this.root, target);
+    const inReadRoot = readOnly && this.readRoots.some((readRoot) => within(readRoot, target));
+    if (!inRoot && !inReadRoot) throw new SandboxViolation("path-traversal", `path escapes sandbox root: ${path}`);
+    if (!inRoot && !readOnly) throw new SandboxViolation("path-traversal", `write/execute path must stay inside the run workspace: ${path}`);
     if (this.isProtected(target)) throw new SandboxViolation("protected-path", `protected path is not accessible: ${path}`);
+    // Symlink containment: every existing path component must resolve inside
+    // the run workspace or an explicitly approved read root (sync chokepoint
+    // for read tool calls; assertPathAsync adds component-level checks for writes).
+    if (readOnly && !inRoot) {
+      const realTarget = realpathSafe(target);
+      if (!withinRealRoots(this.realReadRoots, realTarget)) {
+        throw new SandboxViolation("symlink", `path resolves outside approved read roots: ${path}`);
+      }
+    }
     return target;
   }
 
   async assertPathAsync(path: string, operation: "read" | "write" | "execute" | "inspect" = "read"): Promise<string> {
     const target = this.assertPath(path, operation);
+    const containingRoot = within(this.root, target)
+      ? this.root
+      : this.readRoots.find((readRoot) => within(readRoot, target));
+    if (!containingRoot) throw new SandboxViolation("path-traversal", `path escapes sandbox root: ${path}`);
     let existing = target;
     while (true) {
       try {
@@ -229,19 +299,19 @@ export class SandboxBoundary {
         existing = parent;
       }
     }
-    const rootStat = await lstat(this.root).catch((error: unknown) => {
+    const rootStat = await lstat(containingRoot).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     });
-    if (rootStat?.isSymbolicLink()) throw new SandboxViolation("symlink", `sandbox root is a symlink: ${this.root}`);
-    const canonicalRoot = await realpath(this.root).catch(() => this.root);
+    if (rootStat?.isSymbolicLink()) throw new SandboxViolation("symlink", `sandbox root is a symlink: ${containingRoot}`);
+    const canonicalRoot = await realpath(containingRoot).catch(() => containingRoot);
     const canonicalExisting = await realpath(existing).catch(() => existing);
-    if (within(this.root, existing) && !within(canonicalRoot, canonicalExisting)) {
+    if (within(containingRoot, existing) && !within(canonicalRoot, canonicalExisting)) {
       throw new SandboxViolation("symlink", `path resolves outside sandbox root: ${path}`);
     }
 
-    const relativeExisting = relative(this.root, existing);
-    let cursor = this.root;
+    const relativeExisting = relative(containingRoot, existing);
+    let cursor = containingRoot;
     for (const segment of relativeExisting.split(sep).filter(Boolean)) {
       cursor = resolve(cursor, segment);
       const stat = await lstat(cursor);

@@ -2,7 +2,11 @@
   "name": "evok",
   "private": true,
   "type": "module",
+  "bin": {
+    "evok": "./bin/evok.ts"
+  },
   "scripts": {
+    "evok": "bun bin/evok.ts",
     "test": "bun test",
     "test:live": "bun test --path-ignore-patterns=\"\" ./src/newapi-live.live.test.ts",
     "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json"

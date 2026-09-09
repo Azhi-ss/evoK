@@ -334,6 +334,13 @@ export interface PiModelCatalogOptions {
   readonly modelsPath?: string;
   /** Pi settings.json path used for defaultModel/defaultProvider; defaults to Pi's own (~/.pi/agent/settings.json). */
   readonly settingsPath?: string;
+  /**
+   * Shared ModelRuntime (the SDK-resolved model/auth source). When supplied,
+   * modelsPath is ignored for catalog reads — the caller owns the same runtime
+   * that reaches the actual AgentSession, so tier resolution cannot diverge
+   * from execution. Defaults to a fresh SDK-resolved runtime.
+   */
+  readonly modelRuntime?: ModelRuntime;
 }
 
 /** Reads Pi's settings.json for the default model (no provider config duplication). */
@@ -357,7 +364,7 @@ function joinPiAgentDir(name: string): string {
 
 /** Build the ModelCatalog over Pi's model registry (models.json). */
 export async function createPiModelCatalog(options: PiModelCatalogOptions = {}): Promise<ModelCatalog> {
-  const runtime = await ModelRuntime.create({ modelsPath: options.modelsPath, allowModelNetwork: false });
+  const runtime = options.modelRuntime ?? await ModelRuntime.create({ modelsPath: options.modelsPath, allowModelNetwork: false });
   const registry = new ModelRegistry(runtime);
   const models = registry.getAll();
 

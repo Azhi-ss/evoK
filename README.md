@@ -27,6 +27,53 @@ The Orchestra config (RunPolicy) only **binds tiers to model ids already registe
 - `promotion_cross_model: "both"` schedules two tiered evaluation attempts (one fast, one deep ModelConfig) at the promotion gate. Disagreement denies promotion with the runtime's explicit reason; agreement only keeps the candidate eligible for the existing promotion policy — it never auto-promotes and never auto-submits. The Orchestra supplies the two ModelConfigs; the promotion policy and SubmissionBroker keep their authority.
 - Cross-model agreement is **model-level independence only**: it is not a sandbox/trust verdict (#7) and does not replace the evaluation noise protocol (#11). Those gates stay separate — a candidate can agree across models and still fail trust verification or noise policy.
 
+## evok foreground CLI (v1 T1, #109)
+
+`bun run evok -- [request] [options]` (or `bun bin/evok.ts`) opens the bounded
+foreground entry over the existing `PiAgentRuntime` Pi SDK execution path:
+
+```text
+bun run evok "inspect this research project and summarize what you see"
+bun run evok --tier deep "compare these two approaches" --project /path/to/project
+echo "request text" | bun run evok        # piped stdin; no tty
+bun run evok                             # tty: line-oriented REPL; ctrl+c cancels a Run, ctrl+d exits
+```
+
+Options: `--project <dir>` (default cwd), `--tier default|fast|deep|mid`
+(default `default`), `--orchestra <file.json>` (tier bindings to Pi catalog
+refs), `--timeout-ms <n>` (per-Run bound, default 10 min), `-h/--help`.
+
+- Models and credentials come **only** from Pi's SDK-resolved stores
+  (`~/.pi/agent/models.json`, `auth.json`; honors `PI_CODING_AGENT_DIR`). evoK
+  copies, displays, or stores no credentials and adds no login system.
+- The resolved default/tier model (and its `ModelRuntime`) is the model that
+  actually executes the session; the footer reports its identity, session id,
+  stop reason, tokens, and cost. Reporting a tier without using its model is
+  not possible on this path.
+- Missing model/auth configuration fails before dispatch with distinct exit
+  codes (`2` usage, `3` model configuration, `4` authentication, `5` runtime
+  error, `130` cancelled). A `--tier fast|deep|mid` request with no matching
+  orchestra binding fails closed instead of silently running the default
+  model. Provider auth failures stay explicit; there is no silent
+  provider/model fallback and no use of the development assistant's own
+  connection.
+- Each request runs in the selected research project, which is exposed to the
+  model **read-only**; writes stay in the request's isolated temp workspace.
+  Each request is a fresh Run: fresh SDK session/attempt identity, disposed
+  session, existing read-only tool authority, and the runtime policy that keeps
+  hidden SDK retry/compaction disabled. A one-shot invocation and a REPL line
+  each create a fresh runtime + intent store, so identical requests never
+  replay a stored result. `Ctrl+C` cancels the in-flight Run only — no
+  Mission-pause meaning is bound to it.
+- The process loads no personal Pi prompts, skills, extensions, packages, or
+  history (the SDK loader stays in `noSkills/noExtensions/noPromptTemplates/
+  noContextFiles` mode). Approved evoK/project resources arrive in T2 (#110).
+
+Offline contract tests use the SDK faux provider (`src/evok-cli.test.ts`,
+`src/evok-model.test.ts`): response path, exact tier routing, usage display,
+  missing-configuration/auth failure, and cancellation — no real credentials.
+Any live-model smoke check requires a separately authorized budget.
+
 ## Claim-card research loop (Co-Scientist-light)
 
 Steals the **orchestration clarity** of Google Co-Scientist — Generation → Reflection → Ranking/Tournament → Evolution — not its literature/AI-scientist product thickness. The loop turns every candidate/hypothesis into a durable **Claim card** and forces **objection write-back** into the next search step.

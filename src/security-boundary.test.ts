@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, symlink } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,7 @@ import {
   signEvaluationDigest,
   validEvaluationPublicKey,
   verifyEvaluationDigest,
+  restrictSandboxPolicy,
 } from "./security-boundary";
 
 describe("security boundary", () => {
@@ -77,6 +78,64 @@ describe("security boundary", () => {
     const restricted = new SandboxBoundary({ root: "/tmp/evok-policy", allowedTools: ["bash"], allowBash: true });
     expect(() => restricted.assertToolCall("bash", { command: "cat /etc/passwd" })).toThrow(SandboxViolation);
     expect(() => restricted.assertToolCall("bash", { command: "curl https://example.com" })).toThrow(SandboxViolation);
+  });
+
+  test("readRoots permit read access to approved project roots but never writes or escapes", () => {
+    const boundary = new SandboxBoundary({
+      root: "/tmp/evok-run",
+      readRoots: ["/home/me/research-project"],
+    });
+    expect(boundary.assertPath("/home/me/research-project/README.md", "read")).toBe("/home/me/research-project/README.md");
+    expect(boundary.assertPath("result.txt", "read")).toBe("/tmp/evok-run/result.txt");
+    // writes stay confined to the run workspace
+    expect(() => boundary.assertPath("/home/me/research-project/README.md", "write")).toThrow(SandboxViolation);
+    // an unrelated absolute path is still a traversal
+    expect(() => boundary.assertPath("/home/me/other/secret.txt", "read")).toThrow(SandboxViolation);
+    // protected segments remain protected even inside a read root
+    expect(() => boundary.assertPath("/home/me/research-project/.env", "read")).toThrow(SandboxViolation);
+  });
+
+  test("readRoots cannot escape through a symlink committed inside the project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "evok-readroot-"));
+    const secret = await mkdtemp(join(tmpdir(), "evok-readroot-secret-"));
+    await writeFile(join(secret, "id_rsa"), "private key");
+    await symlink(secret, join(root, "link"));
+    const boundary = new SandboxBoundary({
+      root: await mkdtemp(join(tmpdir(), "evok-readroot-run-")),
+      readRoots: [root],
+    });
+    // lexical containment passes, but the symlink resolves outside every approved root
+    expect(() => boundary.assertPath(join(root, "link", "id_rsa"), "read")).toThrow(SandboxViolation);
+    expect(() => boundary.assertPath(join(root, "link"), "read")).toThrow(SandboxViolation);
+  });
+
+  test("restrictSandboxPolicy intersects readRoots so a run cannot widen project access", () => {
+    const restricted = restrictSandboxPolicy(
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project", "/home/me/shared"] },
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project"] },
+    );
+    expect(restricted.readRoots).toEqual(["/home/me/project"]);
+    const unrestricted = restrictSandboxPolicy({ root: "/tmp/evok-run", readRoots: ["/home/me/project"] }, { root: "/tmp/evok-run" });
+    expect(unrestricted.readRoots).toEqual(["/home/me/project"]);
+    const adding = restrictSandboxPolicy({ root: "/tmp/evok-run" }, { root: "/tmp/evok-run", readRoots: ["/home/me/project"] });
+    expect(adding.readRoots).toBeUndefined();
+    // strict containment both directions keeps the narrower root
+    const overlayNarrower = restrictSandboxPolicy(
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project"] },
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project/sub"] },
+    );
+    expect(overlayNarrower.readRoots).toEqual(["/home/me/project/sub"]);
+    const baseNarrower = restrictSandboxPolicy(
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project/sub"] },
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project"] },
+    );
+    expect(baseNarrower.readRoots).toEqual(["/home/me/project/sub"]);
+    // disjoint grants collapse to nothing
+    const disjoint = restrictSandboxPolicy(
+      { root: "/tmp/evok-run", readRoots: ["/home/me/project"] },
+      { root: "/tmp/evok-run", readRoots: ["/home/me/other"] },
+    );
+    expect(disjoint.readRoots).toEqual([]);
   });
 
   test("requires an explicit human decision after local promotion", () => {

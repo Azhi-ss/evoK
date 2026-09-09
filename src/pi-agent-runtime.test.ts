@@ -12,10 +12,14 @@ import {
   FileDurableIntentStore,
   UncertainExecutionError,
   RuntimeCrashError,
+  MissingAuthenticationError,
   type AgentRuntimeResult,
   type AgentRuntimeSession,
   type PiAgentRuntimeRequest,
+  type SessionModelResolver,
 } from "./pi-agent-runtime";
+import { createEvokModelResolver } from "./evok-model";
+import { OrchestraValidationError } from "./model-orchestra";
 import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "./toy-harness";
 
 const prediction = {
@@ -460,6 +464,208 @@ describe("PiAgentRuntime", () => {
     const first = runtime.execute(request());
     await expect(first).rejects.toThrow("stop reason");
     await expect(runtime.execute(request())).rejects.toThrow("workspace");
+  });
+});
+
+describe("PiAgentRuntime resolved-model wiring (#109)", () => {
+  const sdkModelStub = (provider: string, id: string) => ({ provider, id }) as never;
+
+  function stubResolver(opts: {
+    fast?: { provider: string; id: string };
+    deep?: { provider: string; id: string };
+    def?: { provider: string; id: string };
+    failAuth?: string;
+  }): SessionModelResolver & { calls: string[] } {
+    const configs = new Map<string, { provider: string; id: string }>();
+    if (opts.fast) configs.set("fast", opts.fast);
+    if (opts.deep) configs.set("deep", opts.deep);
+    if (opts.def) configs.set("default", opts.def);
+    const calls: string[] = [];
+    return {
+      calls,
+      async resolve(tier) {
+        calls.push(`resolve:${tier}`);
+        const found = configs.get(tier) ?? configs.get("default");
+        if (!found) throw new OrchestraValidationError(`tier ${tier} not bound`);
+        return {
+          tier: (configs.get(tier) ? tier : "default") as never,
+          reason: "forced" as never,
+          model: { provider: found.provider, model: found.id, id: `${found.provider}/${found.id}` },
+          modelId: sdkModelStub(found.provider, found.id),
+          modelRuntime: {} as never,
+        };
+      },
+      async preflight(model) {
+        if (opts.failAuth && model.provider === opts.failAuth) return { ok: false, error: `no credentials for ${model.provider}` };
+        return { ok: true };
+      },
+    };
+  }
+
+  function uniqueSession(events: readonly Record<string, unknown>[]) {
+    const fake = fakeSession(events);
+    return { ...fake, session: { ...fake.session, sessionId: `fake-${Math.random()}` } };
+  }
+
+  test("feeds the tier-resolved model and shared runtime into the actual session and reports its identity", async () => {
+    const fast = { provider: "acme", id: "flash-2" };
+    const deep = { provider: "acme", id: "pro-2" };
+    const modelResolver = stubResolver({ fast, deep, def: fast });
+    const seenOptions: Array<{ model?: unknown; modelRuntime?: unknown }> = [];
+    const runtime = new PiAgentRuntime({
+      modelResolver,
+      sessionFactory: async (options) => {
+        seenOptions.push({ model: options.model, modelRuntime: options.modelRuntime });
+        return uniqueSession([completeEnd]).session;
+      },
+    });
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const first = await runtime.execute(request({ tier: "fast", workspace: workspace(`/tmp/evok-wired-stub-fast-${stamp}`) }));
+    const second = await runtime.execute(request({ tier: "deep", workspace: workspace(`/tmp/evok-wired-stub-deep-${stamp}`) }));
+    expect(seenOptions[0].model).toMatchObject({ provider: "acme", id: "flash-2" });
+    expect(seenOptions[1].model).toMatchObject({ provider: "acme", id: "pro-2" });
+    expect(seenOptions[0].modelRuntime).toBeDefined();
+    expect(first.model).toEqual({ provider: "acme", model: "flash-2", id: "acme/flash-2" });
+    expect(second.model?.id).toBe("acme/pro-2");
+  });
+
+  test("default tier is resolved when the request omits a tier", async () => {
+    const modelResolver = stubResolver({ def: { provider: "pi", id: "default-9" } });
+    const seen: unknown[] = [];
+    const runtime = new PiAgentRuntime({
+      modelResolver,
+      sessionFactory: async (options) => { seen.push(options.model); return uniqueSession([completeEnd]).session; },
+    });
+    const result = await runtime.execute(request());
+    expect(modelResolver.calls).toEqual(["resolve:default"]);
+    expect(seen[0]).toMatchObject({ provider: "pi", id: "default-9" });
+    expect(result.model?.id).toBe("pi/default-9");
+  });
+
+  test("missing or invalid model configuration fails before any intent is dispatched", async () => {
+    const modelResolver = stubResolver({});
+    let dispatched = false;
+    const runtime = new PiAgentRuntime({
+      modelResolver,
+      sessionFactory: async () => { dispatched = true; return fakeSession([completeEnd]).session; },
+    });
+    await expect(runtime.execute(request())).rejects.toBeInstanceOf(OrchestraValidationError);
+    expect(dispatched).toBe(false);
+    expect(modelResolver.calls).toEqual(["resolve:default"]);
+  });
+
+  test("missing authentication fails clearly before work is dispatched, without silent fallback", async () => {
+    const modelResolver = stubResolver({ def: { provider: "locked", id: "m-1" }, failAuth: "locked" });
+    let dispatched = false;
+    const runtime = new PiAgentRuntime({
+      modelResolver,
+      sessionFactory: async () => { dispatched = true; return fakeSession([completeEnd]).session; },
+    });
+    const error = await runtime.execute(request()).catch((caught) => caught);
+    expect(error).toBeInstanceOf(MissingAuthenticationError);
+    expect(String((error as Error).message)).toContain("locked");
+    expect(dispatched).toBe(false);
+  });
+
+  test("a real faux-provider Run routes to the resolved tier model through the default SDK factory", async () => {
+    const fastFaux = fauxProvider({ provider: "evok-tier-fast", models: [{ id: "flash-2" }] });
+    const deepFaux = fauxProvider({ provider: "evok-tier-deep", models: [{ id: "pro-2" }] });
+    fastFaux.setResponses([fauxAssistantMessage("fast answer")]);
+    deepFaux.setResponses([fauxAssistantMessage("deep answer")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(fastFaux.provider);
+    modelRuntime.registerNativeProvider(deepFaux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: {
+        findModel(ref) {
+          if (ref === "evok-tier-fast/flash-2") return { provider: "evok-tier-fast", model: "flash-2", id: ref };
+          if (ref === "evok-tier-deep/pro-2") return { provider: "evok-tier-deep", model: "pro-2", id: ref };
+          return undefined;
+        },
+        defaultModel: () => ({ provider: "evok-tier-fast", model: "flash-2", id: "evok-tier-fast/flash-2" }),
+      },
+      orchestra: { fast: "evok-tier-fast/flash-2", deep: "evok-tier-deep/pro-2" },
+    });
+    const runtime = new PiAgentRuntime({ workspaceRoot: "/tmp", modelResolver: resolver });
+    const fastRoot = `/tmp/evok-wired-fast-${Date.now()}`;
+    const fastResult = await runtime.execute(request({ tier: "fast", workspace: workspace(fastRoot) }));
+    const deepRoot = `/tmp/evok-wired-deep-${Date.now()}-1`;
+    const deepResult = await runtime.execute(request({ tier: "deep", workspace: workspace(deepRoot) }));
+    expect(fastResult.text).toBe("fast answer");
+    expect(deepResult.text).toBe("deep answer");
+    expect(fastResult.model?.id).toBe("evok-tier-fast/flash-2");
+    expect(deepResult.model?.id).toBe("evok-tier-deep/pro-2");
+    expect(fastFaux.state.callCount).toBe(1);
+    expect(deepFaux.state.callCount).toBe(1);
+    expect(fastResult.sessionId).not.toBe(deepResult.sessionId);
+  });
+
+  test("the SDK session created for a wired Run keeps hidden retry/compaction disabled", async () => {
+    const faux = fauxProvider({ provider: "evok-tier-policy", models: [{ id: "deterministic" }] });
+    faux.setResponses([fauxAssistantMessage("policy ok")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-tier-policy/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: {
+        findModel(r) { return r === ref ? { provider: "evok-tier-policy", model: "deterministic", id: r } : undefined; },
+        defaultModel: () => ({ provider: "evok-tier-policy", model: "deterministic", id: ref }),
+      },
+    });
+    let capturedSettings: unknown;
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: "/tmp",
+      modelResolver: resolver,
+      sessionFactory: async (options) => {
+        capturedSettings = options.settingsManager;
+        return defaultSessionFactory(options);
+      },
+    });
+    const root = `/tmp/evok-wired-policy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const result = await runtime.execute(request({ workspace: workspace(root) }));
+    expect(result.text).toBe("policy ok");
+    const settings = capturedSettings as SettingsManager;
+    expect(settings.getCompactionEnabled()).toBe(false);
+    expect(settings.getRetryEnabled()).toBe(false);
+  });
+
+  test("aborting the signal cancels the wired Run explicitly with no retry", async () => {
+    const faux = fauxProvider({ provider: "evok-tier-abort", models: [{ id: "deterministic" }] });
+    // A factory that never responds: cancellation must abort the session itself.
+    let aborted = false;
+    faux.setResponses([() => new Promise(() => {}) as never]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-tier-abort/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: {
+        findModel(r) { return r === ref ? { provider: "evok-tier-abort", model: "deterministic", id: r } : undefined; },
+        defaultModel: () => ({ provider: "evok-tier-abort", model: "deterministic", id: ref }),
+      },
+    });
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: "/tmp",
+      modelResolver: resolver,
+      sessionFactory: async (options) => {
+        const created = await defaultSessionFactory(options);
+        const abort = created.abort.bind(created);
+        created.abort = async () => { aborted = true; await abort(); };
+        return created;
+      },
+    });
+    const controller = new AbortController();
+    const root = `/tmp/evok-wired-abort-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const run = runtime.execute(request({ workspace: workspace(root) }), controller.signal);
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ name: "AbortError" });
+    expect(aborted).toBe(true);
+    expect(faux.state.callCount).toBeLessThanOrEqual(1);
   });
 });
 

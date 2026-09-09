@@ -21,6 +21,8 @@ import {
   type CreateAgentSessionOptions,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
+import { MissingAuthenticationError, type SessionModelResolver } from "./evok-model";
+export { MissingAuthenticationError } from "./evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export const CODING_TOOLS = ["bash", "edit", "write"] as const;
@@ -47,6 +49,12 @@ export interface ApprovedWorkspace {
   readonly isolated: boolean;
   readonly approved: boolean;
   readonly sandbox?: SandboxPolicy;
+  /**
+   * Additional trusted absolute directories the Run may read but never write
+   * (e.g. the research project opened by the foreground CLI). Merged into the
+   * sandbox policy; runs cannot widen them (#109).
+   */
+  readonly readRoots?: readonly string[];
 }
 
 export interface PiAgentRuntimeRequest {
@@ -338,7 +346,18 @@ export interface AgentRuntimeResult {
   readonly usage: RuntimeUsage;
   readonly stopReason: string;
   readonly text?: string;
+  /** Actual model that executed the Run (canonical provider/model identity). */
+  readonly model?: ModelConfigView;
 }
+
+/** Minimal model identity view (structurally compatible with evok-model ModelConfig). */
+export interface ModelConfigView {
+  readonly provider: string;
+  readonly model: string;
+  readonly id: string;
+}
+
+export type { SessionModelResolver };
 
 export interface AgentRuntimeSession {
   readonly sessionId: string;
@@ -371,6 +390,13 @@ export interface PiAgentRuntimeOptions {
   readonly onDispose?: () => void;
   readonly intentStore?: DurableIntentStore;
   readonly faultInjection?: RuntimeFaultInjection;
+  /**
+   * Resolves the actual SDK model for a request tier and verifies
+   * credentials before dispatch. When supplied, the resolved model and its
+   * ModelRuntime are handed to the session factory, so the reported tier is
+   * the model that really executes (#109).
+   */
+  readonly modelResolver?: SessionModelResolver;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -610,6 +636,7 @@ export class PiAgentRuntime {
   private readonly redactor: SecretRedactor;
   private readonly secrets: readonly string[];
   private readonly onDispose?: () => void;
+  private readonly modelResolver?: SessionModelResolver;
   private harnessRun = 0;
   private auditPromise?: Promise<readonly DurableIntentRecord[]>;
 
@@ -623,6 +650,7 @@ export class PiAgentRuntime {
     this.secrets = Object.freeze([...(options.secrets ?? [])]);
     this.redactor = options.redactor ?? new SecretRedactor(this.secrets);
     this.onDispose = options.onDispose;
+    this.modelResolver = options.modelResolver;
   }
 
   private async ensureAudited(): Promise<void> {
@@ -700,6 +728,16 @@ export class PiAgentRuntime {
 
     await this.ensureAudited();
     const tier = input.tier ?? "default";
+
+    // Resolve the actual SDK model and verify credentials BEFORE any intent is
+    // declared/dispatched: missing model/auth configuration must fail clearly
+    // rather than silently falling back to another provider (#109).
+    let resolvedModel: Awaited<ReturnType<SessionModelResolver["resolve"]>> | undefined;
+    if (this.modelResolver) {
+      resolvedModel = await this.modelResolver.resolve(tier);
+      const preflight = await this.modelResolver.preflight(resolvedModel.model);
+      if (!preflight.ok) throw new MissingAuthenticationError(preflight.error);
+    }
     const inputDigest = computeInputDigest(input);
     const baseIntentId = input.intentId ?? (input.identity ? `${input.identity.runId}:${input.identity.attempt}:intent` : `intent-${inputDigest}`);
 
@@ -764,9 +802,21 @@ export class PiAgentRuntime {
 
     try {
       const workspace = await realpath(await mkdtemp(join(approvedRoot, "run-")));
+      // Trusted read-only project roots: validated as absolute real paths that
+      // cannot be widened by the run. Writes remain rooted at `workspace`.
+      const readRoots: string[] = [];
+      for (const readRoot of input.workspace.readRoots ?? []) {
+        if (typeof readRoot !== "string" || !isAbsolute(readRoot)) {
+          throw new SandboxViolation("path-traversal", "workspace readRoots must be absolute paths");
+        }
+        const realReadRoot = await realpath(readRoot);
+        if (within(workspace, realReadRoot)) continue; // already covered by the run workspace
+        readRoots.push(realReadRoot);
+      }
       const boundary = new SandboxBoundary({
         ...requestedPolicy,
         root: workspace,
+        ...(readRoots.length > 0 ? { readRoots } : {}),
         allowedTools: tools,
         allowBash: requestedPolicy.allowBash === true,
       });
@@ -775,6 +825,7 @@ export class PiAgentRuntime {
       const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
       session = await this.factory({
         ...sessionOptions,
+        ...(resolvedModel ? { model: resolvedModel.modelId, modelRuntime: resolvedModel.modelRuntime } : {}),
         customTools: [],
         settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
         cwd: workspace,
@@ -912,7 +963,7 @@ export class PiAgentRuntime {
         throw new RuntimeCrashError("fault injection: crash before result confirmation");
       }
       add({ type: "session_end", sessionId, reason: stopReason });
-      const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText };
+      const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText, model: resolvedModel?.model };
       await this.intentStore.updateIntent(intentId, {
         status: "COMPLETED",
         result,
