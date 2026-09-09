@@ -22,8 +22,9 @@ import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { PiAgentRuntime } from "./pi-agent-runtime";
 import type { SessionModelResolver } from "./evok-model";
+import { discoverEvokResources, EvokResourceError, type EvokResources } from "./evok-resources";
 
-export const EVOK_VERSION = "0.1.0-t1";
+export const EVOK_VERSION = "0.1.0-t2";
 
 /** Exit codes distinguish the visible failure classes the spec calls out. */
 export const EVOK_EXIT = Object.freeze({
@@ -167,10 +168,23 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   // A fresh runtime per request keeps every REPL line a fresh Run with its
   // own session, attempt identity, workspace, and intent store (ADR-0001) —
   // identical requests never replay a stored Run result.
+  // Approved evoK prompts/skills are discovered ONCE here against the research
+  // project (#110); they are read in place, never copied into Run workspaces.
+  let resources: EvokResources;
+  try {
+    resources = await discoverEvokResources({ projectRoot: projectReal });
+  } catch (error) {
+    if (error instanceof EvokResourceError) {
+      stderr.write(`evok: resource configuration error: ${error.message}\n`);
+      return EVOK_EXIT.configError;
+    }
+    throw error;
+  }
   const createRuntime = (): PiAgentRuntime =>
     new PiAgentRuntime({
       workspaceRoot: options.workspaceRoot ?? tmpdir(),
       modelResolver: resolver,
+      resources,
     });
   try {
     const probe = await resolver.resolve(args.tier);
@@ -183,19 +197,20 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
     stdout.write(`tools:   read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace\n`);
-    stdout.write(`         personal Pi prompts/skills/extensions/history are not loaded\n`);
+    stdout.write(`         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
+    writeResourceReport(stdout, resources);
   } catch (error) {
     stderr.write(`evok: model configuration error: ${(error as Error).message}\n`);
     return EVOK_EXIT.configError;
   }
 
   if (args.request !== undefined) {
-    return runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal);
+    return runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal, resources);
   }
 
   const stdin = (options.stdin ?? process.stdin) as NodeJS.ReadStream;
   if (isatty((stdin as { fd?: number }).fd ?? 0)) {
-    return runRepl(createRuntime, args, options, stdin, stdout, stderr, projectReal);
+    return runRepl(createRuntime, args, options, stdin, stdout, stderr, projectReal, resources);
   }
   const piped = await readAll(stdin);
   const request = piped.trim();
@@ -203,7 +218,7 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stderr.write("evok: no request text provided\n");
     return EVOK_EXIT.usage;
   }
-  return runOne(createRuntime, args, request, options, stdout, stderr, projectReal);
+  return runOne(createRuntime, args, request, options, stdout, stderr, projectReal, resources);
 }
 
 async function runOne(
@@ -214,6 +229,7 @@ async function runOne(
   stdout: Out,
   stderr: Out,
   projectRoot: string,
+  resources: EvokResources,
 ): Promise<number> {
   if (options.signal?.aborted) {
     stderr.write("evok: request cancelled before completion; no retry was attempted\n");
@@ -238,7 +254,7 @@ async function runOne(
       {
         task: { objective: requestText },
         role: { name: "evok-foreground", tools: ["read", "grep", "find", "ls"] },
-        workspace: { path: workspaceParent, isolated: true, approved: true, readRoots: [projectRoot] },
+        workspace: { path: workspaceParent, isolated: true, approved: true, readRoots: [projectRoot, ...resources.readRoots] },
         tier: args.tier,
       },
       controller.signal,
@@ -278,6 +294,7 @@ async function runRepl(
   stdout: Out,
   stderr: Out,
   projectRoot: string,
+  resources: EvokResources,
 ): Promise<number> {
   const rl = createInterface({ input: stdin, terminal: Boolean(stdin.isTTY) });
 
@@ -319,13 +336,47 @@ async function runRepl(
       continue;
     }
     busy = true;
-    lastCode = await runOne(createRuntime, args, text, options, stdout, stderr, projectRoot);
+    lastCode = await runOne(createRuntime, args, text, options, stdout, stderr, projectRoot, resources);
     busy = false;
     if (closed) break;
     stdout.write("\n> ");
   }
   if (!closed) rl.close();
   return lastCode;
+}
+
+const SCOPE_LABEL: Readonly<Record<string, string>> = Object.freeze({
+  project: "project .evok",
+  "project-shared": "project .agents",
+  user: "user ~/.evok",
+});
+
+/**
+ * Startup resource report (#110, US21/US23): which prompt sources won and the
+ * name/description/location of every discovered skill. Metadata only — skill
+ * bodies are never printed — plus every SDK collision/invalid-skill diagnostic.
+ */
+function writeResourceReport(stdout: Out, resources: EvokResources): void {
+  const system = resources.systemPromptPath ? resources.systemPromptPath : "(SDK built-in default)";
+  const append = resources.appendSystemPromptPaths[0] ?? "(none)";
+  stdout.write(`system:  ${system}\n`);
+  stdout.write(`append:  ${append} (project before user; only one copy)\n`);
+  if (resources.skills.length === 0) {
+    stdout.write("skills:  none discovered\n");
+  } else {
+    stdout.write("skills:  metadata only (bodies are read on demand, in place)\n");
+    for (const entry of resources.skills) {
+      stdout.write(`         - ${entry.skill.name} [${SCOPE_LABEL[entry.scope] ?? entry.scope}]\n`);
+      stdout.write(`             ${entry.skill.description}\n`);
+      stdout.write(`             ${entry.skill.filePath}\n`);
+    }
+  }
+  for (const diagnostic of resources.diagnostics) {
+    const target = diagnostic.collision
+      ? `${diagnostic.message}: ${diagnostic.collision.winnerPath} wins over ${diagnostic.collision.loserPath}`
+      : `${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`;
+    stdout.write(`resource ${diagnostic.type}: ${target}\n`);
+  }
 }
 
 function uniqueWorkspace(workspaceRoot?: string): string {

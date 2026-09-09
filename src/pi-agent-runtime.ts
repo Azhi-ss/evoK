@@ -22,6 +22,7 @@ import {
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { MissingAuthenticationError, type SessionModelResolver } from "./evok-model";
+import type { EvokResources } from "./evok-resources";
 export { MissingAuthenticationError } from "./evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -371,7 +372,19 @@ export interface AgentRuntimeSession {
 export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd" | "tools"> & Partial<CreateAgentSessionOptions> & {
   readonly sandbox?: SandboxPolicy;
   readonly redactor?: SecretRedactor;
+  /** Trusted-side evoK resource selection (#110); undefined => no prompts/skills. */
+  readonly evokResources?: EvokSessionResources;
 }) => Promise<AgentRuntimeSession>;
+
+/** The subset of EvokResources the session factory needs to build its loader. */
+export interface EvokSessionResources {
+  readonly systemPrompt?: string;
+  readonly appendSystemPrompt?: string;
+  /** Ordered, already-enumerated approved SKILL.md files (project-first). */
+  readonly skillFiles: readonly string[];
+  /** evoK user resource root (normally ~/.evok); used as SDK agentDir. */
+  readonly userRoot?: string;
+}
 
 export interface RuntimeFaultInjection {
   readonly crashBeforeDispatch?: boolean;
@@ -397,6 +410,14 @@ export interface PiAgentRuntimeOptions {
    * the model that really executes (#109).
    */
   readonly modelResolver?: SessionModelResolver;
+  /**
+   * Approved evoK research resources for this Run's sessions (#110): explicit
+   * SYSTEM/APPEND prompts and enumerated skills parsed by the SDK. Discovery
+   * happens against the research project, never the Run workspace; the loader
+   * adds no other Pi/global/package/extension sources. Undefined keeps the
+   * locked-down #109 loader (no skills/context).
+   */
+  readonly resources?: EvokResources;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -580,9 +601,12 @@ function verificationFromText(text: string | undefined, stage: string): { ok: bo
 }
 
 export const defaultSessionFactory: AgentSessionFactory = async (options) => {
-  const { sandbox, redactor, ...sdkOptions } = options;
+  const { sandbox, redactor, evokResources, ...sdkOptions } = options;
   const cwd = sdkOptions.cwd!;
-  const agentDir = sdkOptions.agentDir ?? join(tmpdir(), "evok-pi-agent");
+  // The user namespace root (normally ~/.evok); the locked tmp fallback keeps
+  // #109 behavior when no resources were discovered.
+  const evokUserRoot = evokResources?.userRoot;
+  const agentDir = sdkOptions.agentDir ?? (evokUserRoot ?? join(tmpdir(), "evok-pi-agent"));
   const boundary = new SandboxBoundary({
     ...(sandbox ?? {}),
     root: cwd,
@@ -603,6 +627,15 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
       });
     },
   };
+  // #110: explicit evoK resource sources. noSkills stays true UNCONDITIONALLY:
+  // flipping it false when resources are absent would re-enable the SDK default
+  // project .pi and global ~/.agents skill discovery on non-CLI runtime paths,
+  // reopening the namespace isolation #110 closes (#108 decision 9). Approved,
+  // pre-enumerated SKILL.md files still load via additionalSkillPaths because
+  // those are merged independently of noSkills (SDK resource-loader). The SDK
+  // (not evoK) parses frontmatter and builds the metadata index. SYSTEM/APPEND
+  // are selected one-each project-before-user by discovery. The security
+  // extension is always wired, even with a custom set.
   const resourceLoader = sdkOptions.resourceLoader ?? new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -610,6 +643,13 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
     noSkills: true,
     noPromptTemplates: true,
     noContextFiles: true,
+    ...(evokResources
+      ? {
+          additionalSkillPaths: [...evokResources.skillFiles],
+          ...(evokResources.systemPrompt !== undefined ? { systemPrompt: evokResources.systemPrompt } : {}),
+          ...(evokResources.appendSystemPrompt !== undefined ? { appendSystemPrompt: [evokResources.appendSystemPrompt] } : {}),
+        }
+      : {}),
     extensionFactories: [securityExtension],
   });
   if (!sdkOptions.resourceLoader) await resourceLoader.reload();
@@ -637,6 +677,7 @@ export class PiAgentRuntime {
   private readonly secrets: readonly string[];
   private readonly onDispose?: () => void;
   private readonly modelResolver?: SessionModelResolver;
+  private readonly resources?: EvokResources;
   private harnessRun = 0;
   private auditPromise?: Promise<readonly DurableIntentRecord[]>;
 
@@ -651,6 +692,7 @@ export class PiAgentRuntime {
     this.redactor = options.redactor ?? new SecretRedactor(this.secrets);
     this.onDispose = options.onDispose;
     this.modelResolver = options.modelResolver;
+    this.resources = options.resources;
   }
 
   private async ensureAudited(): Promise<void> {
@@ -832,6 +874,16 @@ export class PiAgentRuntime {
         tools,
         sandbox: boundary.policy,
         redactor,
+        ...(this.resources
+          ? {
+              evokResources: {
+                skillFiles: this.resources.skills.map((entry) => entry.skill.filePath),
+                ...(this.resources.systemPrompt !== undefined ? { systemPrompt: this.resources.systemPrompt } : {}),
+                ...(this.resources.appendSystemPrompt !== undefined ? { appendSystemPrompt: this.resources.appendSystemPrompt } : {}),
+                userRoot: this.resources.userRoot,
+              },
+            }
+          : {}),
       });
       const sessionId = session.sessionId;
       if (typeof sessionId !== "string" || sessionId.trim() === "" || this.usedSessions.has(sessionId)) {

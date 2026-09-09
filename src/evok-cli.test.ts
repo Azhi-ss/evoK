@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -293,6 +293,155 @@ describe("runEvok project validation (#109)", () => {
       stderr,
     });
     expect(code).toBe(EVOK_EXIT.usage);
+  });
+});
+
+describe("runEvok research resources (#110)", () => {
+  async function evokProject(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "evok-cli-res-"));
+    await mkdir(join(dir, "src"), { recursive: true });
+    await mkdir(join(dir, ".evok", "skills"), { recursive: true });
+    await mkdir(join(dir, ".agents", "skills"), { recursive: true });
+    return dir;
+  }
+
+  async function skillFile(path: string, name: string, description: string): Promise<void> {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `---\nname: ${name}\ndescription: ${description}\n---\n# ${name}\n`);
+  }
+
+  test("startup reports selected prompt sources and skill metadata only, not bodies", async () => {
+    const project = await evokProject();
+    await writeFile(join(project, ".evok", "SYSTEM.md"), "project system marker");
+    await writeFile(join(project, ".evok", "APPEND_SYSTEM.md"), "project append marker");
+    await skillFile(join(project, ".agents", "skills", "shared-skill", "SKILL.md"), "shared-skill", "a shared project skill");
+    await writeFile(join(project, ".agents", "skills", "shared-skill", "BODY-ONLY-MARKER.txt"), "x");
+
+    const faux = fauxProvider({ provider: "evok-cli-res1", models: [{ id: "deterministic" }] });
+    faux.setResponses([fauxAssistantMessage("done")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-cli-res1/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "hi", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    const report = stdout.text();
+    expect(report).toContain(join(project, ".evok", "SYSTEM.md"));
+    expect(report).toContain(join(project, ".evok", "APPEND_SYSTEM.md"));
+    expect(report).toContain("shared-skill");
+    expect(report).toContain("a shared project skill");
+    expect(report).toContain(join(project, ".agents", "skills", "shared-skill", "SKILL.md"));
+    expect(report).not.toContain("BODY-ONLY-MARKER");
+    expect(report).toMatch(/metadata only/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("plain agents/ and .pi/ never enter discovery (global ~/.agents exclusion is covered in evok-resources.test)", async () => {
+    const project = await evokProject();
+    await mkdir(join(project, "agents", "skills", "plain"), { recursive: true });
+    await writeFile(join(project, "agents", "skills", "plain", "SKILL.md"), "---\nname: plain\ndescription: plain agents\n---\n");
+    await mkdir(join(project, ".pi", "skills", "pi"), { recursive: true });
+    await writeFile(join(project, ".pi", "skills", "pi", "SKILL.md"), "---\nname: pi\ndescription: pi skill\n---\n");
+    await skillFile(join(project, ".evok", "skills", "keep", "SKILL.md"), "keep", "kept skill");
+
+    const faux = fauxProvider({ provider: "evok-cli-res2", models: [{ id: "deterministic" }] });
+    faux.setResponses([fauxAssistantMessage("done")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-cli-res2/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "hi", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    const report = stdout.text();
+    expect(report).toContain("keep");
+    expect(report).not.toContain("plain");
+    expect(report).not.toContain("pi skill");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("a name collision is resolved project-first and surfaced as a visible diagnostic", async () => {
+    const project = await evokProject();
+    await skillFile(join(project, ".agents", "skills", "dup", "SKILL.md"), "dup", "shared dup");
+    await skillFile(join(project, ".evok", "skills", "dup", "SKILL.md"), "dup", "project dup");
+    const faux = fauxProvider({ provider: "evok-cli-res3", models: [{ id: "deterministic" }] });
+    faux.setResponses([fauxAssistantMessage("done")]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-cli-res3/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "hi", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    const report = stdout.text();
+    expect(report).toMatch(/resource collision/);
+    expect(report).toContain(join(project, ".evok", "skills", "dup", "SKILL.md"));
+    expect(report).toContain("wins over");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("a real SDK tool call reads an in-place skill reference even though the Run workspace differs", async () => {
+    const project = await evokProject();
+    const skillDir = join(project, ".evok", "skills", "method");
+    await mkdir(join(skillDir, "references"), { recursive: true });
+    await writeFile(join(skillDir, "references", "guide.md"), "CLI-RELATIVE-REF-9");
+    await skillFile(join(skillDir, "SKILL.md"), "method", "method skill");
+    const faux = fauxProvider({ provider: "evok-cli-res4", models: [{ id: "deterministic" }] });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read", { path: join(skillDir, "SKILL.md") }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("read", { path: join(skillDir, "references", "guide.md") }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("skill reference read complete"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const ref = "evok-cli-res4/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "use the method skill", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    // Tool results go to the model, not stdout. The model saw both reads succeed
+    // (2 call cycles) and the final assistant text proves the in-place reads
+    // were allowed through the boundary; content is asserted in the runtime test.
+    expect(stdout.text()).toContain("skill reference read complete");
+    expect(faux.state.callCount).toBe(3);
+    await rm(project, { recursive: true, force: true });
   });
 });
 
