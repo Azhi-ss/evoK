@@ -1,0 +1,12 @@
+{
+  "feature_pipeline": {
+    "steps": [{ "name": "impute" }, { "name": "scale" }]
+  },
+  "oof_ensemble": {
+    "members": ["baseline", "tree"],
+    "declared_equivalent": true
+  },
+  "split_ref": {
+    "digest_summary": "sha256:toy-split-ref-v1"
+  }
+}

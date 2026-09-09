@@ -72,6 +72,25 @@ from quietly trading a valid (purge/embargo-protected) CV for an optimistic,
 leaking one — the same story-11 separation that keeps search from reading the
 holdout.
 
+## Manifest evidence seam (T48)
+
+`src/methodology.ts` handles the plugin wire contract and manifest digest/OOF
+checks. It is not a replacement for this module's source audit or evaluator-fact
+OOF gate. Its camel-case contract (`splitRef`, `required`, etc.) differs from
+T44's component contracts; do not feed one resolver's output into the other.
+
+The `src/toy-harness.ts` barrel retains the T44 names (`MethodologyContracts`,
+`resolveMethodologyContracts`, `auditMethodology`). Manifest APIs are available
+under `methodologyManifest` and their contract types have `Manifest*` aliases.
+Direct imports from either module remain supported. A unified schema/converter
+is deferred rather than silently dropping T44 purge/embargo or component data.
+
+When both paths are wired, candidate source and adapter rule validation run
+before evaluation; the local OOF/holdout gates run before `KillTester` writes its
+result. `KillTester` still follows `SuccessAuditor`, and passing it never replaces
+claim-card, cross-model, baseline, promotion-policy, or human-acceptance checks.
+The combined path is covered by `tests/integration/merged-promotion.test.ts`.
+
 ## Ledger / seam
 
 - A split violation rides the existing trust-violation path: the branch is
