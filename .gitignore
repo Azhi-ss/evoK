@@ -2,6 +2,10 @@
 .feishu-agent/
 pi-session-*.html
 .scratch/
+# Generated Mission storage for projects opened inside this repo (ADR-0004).
+# A real project also gets .evok/missions/.gitignore written by the store;
+# project .evok config and skills remain versionable.
+.evok/missions/
 node_modules/
 dist/
 *.log

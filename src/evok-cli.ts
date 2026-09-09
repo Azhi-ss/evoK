@@ -23,8 +23,10 @@ import { createInterface } from "node:readline";
 import { PiAgentRuntime } from "./pi-agent-runtime";
 import type { SessionModelResolver } from "./evok-model";
 import { discoverEvokResources, EvokResourceError, type EvokResources } from "./evok-resources";
+import { MissionDraftCorruptionError } from "./mission-draft";
+import { runIntakeTurn } from "./mission-intake";
 
-export const EVOK_VERSION = "0.1.0-t2";
+export const EVOK_VERSION = "0.1.0-t3";
 
 /** Exit codes distinguish the visible failure classes the spec calls out. */
 export const EVOK_EXIT = Object.freeze({
@@ -50,6 +52,10 @@ export interface ParsedEvokArgs {
   readonly tier: string;
   readonly orchestra?: string;
   readonly timeoutMs: number;
+  /** #111: skill-led Mission intake/drafting path (ends at draft review). */
+  readonly intake?: boolean;
+  /** Reopen an existing Mission draft during intake. */
+  readonly mission?: string;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -65,6 +71,10 @@ options:
   --tier <tier>     model tier: default | fast | deep | mid (default: default)
   --orchestra <f>   JSON file binding {fast?, deep?, mid?} to Pi catalog refs
   --timeout-ms <n>  bound one Run to n milliseconds (default: ${DEFAULT_TIMEOUT_MS})
+  --intake          Mission intake: turn the request into a saved, reviewable
+                    Mission draft + initial plan via the mission-intake skill.
+                    Ends at draft review; it never starts or dispatches work.
+  --mission <id>    reopen an existing Mission draft during --intake
   -h, --help        show this help
 
 ctrl+c cancels the in-flight request (second/interrupted idle press exits);
@@ -78,6 +88,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let tier = "default";
   let orchestra: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
+  let intake = false;
+  let mission: string | undefined;
   const positionals: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -100,6 +112,11 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
       const parsed = parseTimeout(arg.slice("--timeout-ms=".length));
       if (typeof parsed === "string") return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, error: parsed };
       timeoutMs = parsed;
+    } else if (arg === "--intake") {
+      intake = true;
+    } else if (arg === "--mission") {
+      mission = argv[++i];
+      if (!mission) return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, error: "--mission requires a mission id" };
     } else if (arg.startsWith("--")) {
       return { tier, timeoutMs, error: `unknown option "${arg}"` };
     } else {
@@ -107,7 +124,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     }
   }
   if (positionals.length > 0) request = positionals.join(" ");
-  return { request, project, tier, orchestra, timeoutMs };
+  return { request, project, tier, orchestra, timeoutMs, ...(intake ? { intake: true } : {}), ...(mission ? { mission } : {}) };
 }
 
 export interface EvokRunOptions {
@@ -116,6 +133,10 @@ export interface EvokRunOptions {
   readonly createResolver: (args: ParsedEvokArgs) => Promise<SessionModelResolver>;
   /** Workspace root for isolated per-Run workspaces (default: OS tmpdir). */
   readonly workspaceRoot?: string;
+  /** #111: operator-configured retrieval capability for intake (default: none). */
+  readonly retrieval?: import("./mission-intake").RetrievalCapability;
+  /** Override the intake turn runner (tests); defaults to the skill-led runtime. */
+  readonly intakeRunner?: typeof runIntakeTurn;
   readonly stdout?: { write(chunk: string): boolean };
   readonly stderr?: { write(chunk: string): boolean };
   readonly stdin?: NodeJS.ReadStream;
@@ -196,7 +217,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`evok ${EVOK_VERSION}\n`);
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
-    stdout.write(`tools:   read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace\n`);
+    stdout.write(`tools:   ${args.intake
+      ? "intake: read-only project inspection plus the trusted draft-record tool"
+      : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
     stdout.write(`         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
     writeResourceReport(stdout, resources);
   } catch (error) {
@@ -205,12 +228,14 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   }
 
   if (args.request !== undefined) {
-    return runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal, resources);
+    return args.intake
+      ? runIntake(resolver, args, args.request, options, stdout, stderr, projectReal, resources)
+      : runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal, resources);
   }
 
   const stdin = (options.stdin ?? process.stdin) as NodeJS.ReadStream;
   if (isatty((stdin as { fd?: number }).fd ?? 0)) {
-    return runRepl(createRuntime, args, options, stdin, stdout, stderr, projectReal, resources);
+    return runRepl(resolver, createRuntime, args, options, stdin, stdout, stderr, projectReal, resources);
   }
   const piped = await readAll(stdin);
   const request = piped.trim();
@@ -218,7 +243,111 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stderr.write("evok: no request text provided\n");
     return EVOK_EXIT.usage;
   }
-  return runOne(createRuntime, args, request, options, stdout, stderr, projectReal, resources);
+  return args.intake
+    ? runIntake(resolver, args, request, options, stdout, stderr, projectReal, resources)
+    : runOne(createRuntime, args, request, options, stdout, stderr, projectReal, resources);
+}
+
+/**
+ * Shared Run bound (#111): the same AbortController + --timeout-ms timer +
+ * SIGINT wiring runOne uses, so an intake Run is no less cancellable than a
+ * foreground request. Returns cleanup the caller runs in finally.
+ */
+function boundSignal(args: ParsedEvokArgs, external?: AbortSignal): { signal: AbortSignal; cleanup(): void } {
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  external?.addEventListener("abort", onExternalAbort, { once: true });
+  const onSigint = () => controller.abort();
+  process.on("SIGINT", onSigint);
+  const boundMs = Number.isInteger(args.timeoutMs) && args.timeoutMs > 0 ? args.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(new Error(`Run exceeded bound of ${boundMs}ms`)), boundMs);
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timer);
+      process.off("SIGINT", onSigint);
+      external?.removeEventListener("abort", onExternalAbort);
+    },
+  };
+}
+
+/**
+ * #111: one skill-led Mission intake turn. The draft is saved under
+ * <project>/.evok/missions and presented for review; this path constructs its
+ * own runtime with the trusted draft/retrieval tools and reports discussion
+ * cost as ordinary model usage. It returns a non-zero code on corruption or
+ * runtime failure, but it never dispatches an Experiment (no such tool exists).
+ */
+async function runIntake(
+  resolver: SessionModelResolver,
+  args: ParsedEvokArgs,
+  message: string,
+  options: EvokRunOptions,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+  resources: EvokResources,
+): Promise<number> {
+  if (options.signal?.aborted) {
+    stderr.write("evok: intake cancelled before completion; no retry was attempted\n");
+    return EVOK_EXIT.cancelled;
+  }
+  const bound = boundSignal(args, options.signal);
+  const workspaceRoot = uniqueWorkspace(options.workspaceRoot);
+  try {
+    const result = await (options.intakeRunner ?? runIntakeTurn)({
+      resolver,
+      resources,
+      projectRoot,
+      message,
+      workspaceRoot,
+      missionId: args.mission,
+      tier: args.tier,
+      signal: bound.signal,
+      tools: { ...(options.retrieval ? { retrieval: options.retrieval } : {}) },
+    });
+    stdout.write(`\n${result.text}\n`);
+    if (result.draft) {
+      const d = result.draft;
+      stdout.write(
+        `\n-- mission ${d.id} · status draft (unstarted; nothing dispatched) · ready for review: ${result.readyForReview}\n`
+        + `   saved: .evok/missions/${d.id}/draft.json\n`
+        + `   objective: ${d.objective}\n`
+        + `   data: ${d.data.description} · evaluation: ${d.evaluation.method}${d.evaluation.metric ? ` (${d.evaluation.metric})` : ""}\n`
+        + `   budget: ${d.budget.total} ${d.budget.units} · outputs: ${d.outputs.join(", ") || "(none yet)"}\n`
+        + `   stop: ${d.stopConditions.join(", ") || "(none yet)"}\n`
+        + (d.unresolvedPrerequisites.length ? `   unresolved: ${d.unresolvedPrerequisites.join("; ")}\n` : "")
+        + `   plan: ${d.plan.baselineHypothesis}\n`
+        + `         ${d.plan.tasks.map((t) => t.taskId).join(" → ") || "(no task contracts yet)"}\n`,
+      );
+    } else {
+      stderr.write("evok: no Mission draft was saved; continue the conversation and record the current draft\n");
+    }
+    stdout.write(
+      `-- model usage · tokens ${result.usage.tokens.total} (in ${result.usage.tokens.input} out ${result.usage.tokens.output})`
+      + ` · cost ${result.usage.cost.total.toFixed(6)} — discussion is ordinary model usage, not free\n`,
+    );
+    return EVOK_EXIT.ok;
+  } catch (error) {
+    if (options.signal?.aborted || (error as Error).name === "AbortError" || bound.signal.aborted) {
+      stderr.write("\nevok: intake cancelled before completion; no retry was attempted\n");
+      return EVOK_EXIT.cancelled;
+    }
+    if (error instanceof MissionDraftCorruptionError) {
+      stderr.write(`evok: mission storage is corrupted and was not overwritten: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if ((error as Error).name === "MissingAuthenticationError") {
+      stderr.write(`\nevok: ${(error as Error).message}\n`);
+      return EVOK_EXIT.authError;
+    }
+    stderr.write(`\nevok: intake run failed: ${(error as Error).message}\n`);
+    return EVOK_EXIT.runtimeError;
+  } finally {
+    bound.cleanup();
+    await rm(workspaceRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function runOne(
@@ -287,6 +416,7 @@ async function runOne(
 }
 
 async function runRepl(
+  resolver: SessionModelResolver,
   createRuntime: () => PiAgentRuntime,
   args: ParsedEvokArgs,
   options: EvokRunOptions,
@@ -336,7 +466,9 @@ async function runRepl(
       continue;
     }
     busy = true;
-    lastCode = await runOne(createRuntime, args, text, options, stdout, stderr, projectRoot, resources);
+    lastCode = await (args.intake
+      ? runIntake(resolver, args, text, options, stdout, stderr, projectRoot, resources)
+      : runOne(createRuntime, args, text, options, stdout, stderr, projectRoot, resources));
     busy = false;
     if (closed) break;
     stdout.write("\n> ");
@@ -349,6 +481,7 @@ const SCOPE_LABEL: Readonly<Record<string, string>> = Object.freeze({
   project: "project .evok",
   "project-shared": "project .agents",
   user: "user ~/.evok",
+  bundled: "evok bundled",
 });
 
 /**

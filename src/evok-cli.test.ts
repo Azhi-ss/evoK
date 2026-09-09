@@ -445,6 +445,103 @@ describe("runEvok research resources (#110)", () => {
   });
 });
 
+describe("runEvok Mission intake (#111)", () => {
+  test("parseEvokArgs reads --intake and --mission", () => {
+    const parsed = parseEvokArgs(["beat baseline", "--intake", "--mission", "m-abc123"]);
+    expect(parsed.intake).toBe(true);
+    expect(parsed.mission).toBe("m-abc123");
+    expect(parsed.request).toBe("beat baseline");
+  });
+
+  test("--intake routes to the skill-led intake runner, shows the saved draft and metered usage, and never reports dispatch", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-intake", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-intake-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const calls: Array<{ missionId?: string; hasRetrieval: boolean }> = [];
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "beat the baseline", project, tier: "default", timeoutMs: 600000, intake: true },
+      createResolver: async () => resolver,
+      intakeRunner: async (opts) => {
+        calls.push({ missionId: opts.missionId, hasRetrieval: Boolean(opts.tools.retrieval) });
+        return {
+          text: "draft ready for review; unstarted",
+          readyForReview: true,
+          dispatched: false,
+          sessionId: "s",
+          ledger: [],
+          usage: {
+            tokens: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, total: 120 },
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+          },
+          draft: {
+            schemaVersion: 1,
+            id: "m-deadbeef0000",
+            status: "draft" as const,
+            objective: "beat the baseline",
+            successCriteria: ["+0.02"],
+            data: { description: "train.csv" },
+            evaluation: { method: "CV", metric: "NDCG@10" },
+            constraints: { permissions: ["read"] },
+            budget: { total: 20, units: "model-USD" },
+            outputs: ["report"],
+            stopConditions: ["budget"],
+            unresolvedPrerequisites: [],
+            decisions: [],
+            sources: [],
+            plan: { baselineHypothesis: "gbm baseline", tasks: [{ taskId: "t1", objective: "reproduce" }] },
+            usage: { tokens: { input: 100, output: 20, total: 120 }, cost: { total: 0.001, units: "model-USD" } },
+            createdAt: "2026-09-10T00:00:00.000Z",
+            updatedAt: "2026-09-10T00:00:00.000Z",
+          },
+        };
+      },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].hasRetrieval).toBe(false);
+    const out = stdout.text();
+    expect(out).toContain("m-deadbeef0000");
+    expect(out).toContain("status draft (unstarted; nothing dispatched)");
+    expect(out).toMatch(/tokens 120/);
+    expect(out).toMatch(/ordinary model usage, not free/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--intake --mission passes the reopened mission id", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-reopen", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-reopen-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const seen: Array<string | undefined> = [];
+    const code = await runEvok({
+      args: { request: "where were we", project, tier: "default", timeoutMs: 600000, intake: true, mission: "m-abc123" },
+      createResolver: async () => resolver,
+      intakeRunner: async (opts) => {
+        seen.push(opts.missionId);
+        return {
+          text: "reopened", readyForReview: false, dispatched: false, sessionId: "s", ledger: [],
+          usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        };
+      },
+      stdout: new CollectStream(),
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(seen).toEqual(["m-abc123"]);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
 class CollectStream {
   private chunks: string[] = [];
   write(chunk: string) {

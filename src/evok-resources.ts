@@ -6,6 +6,8 @@
  *   ~/.evok/                     SYSTEM.md, APPEND_SYSTEM.md, skills/
  *   <project>/.evok/             SYSTEM.md, APPEND_SYSTEM.md, skills/
  *   <project>/.agents/skills/    explicitly shared skills (leading dot required)
+ *   <pkg>/resources/skills/       evoK-owned bundled fallback skills (#111),
+ *                                lowest precedence (project/user copies win)
  *
  * Plain `agents/`, ordinary Pi resources (`.pi/`), global shared skills
  * (`~/.agents/skills`), packages, and extensions never enter discovery. The
@@ -24,8 +26,21 @@
  */
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadSkills, type ResourceDiagnostic, type Skill } from "@earendil-works/pi-coding-agent";
+
+/**
+ * Root of the evoK-owned skills shipped with the package (#111):
+ * <pkg>/resources/skills. Packaged as ordinary files next to src/, read in
+ * place like every other approved skill root. Test/dev layouts resolve it
+ * from this module's URL (src/ -> ../resources); an installed layout ships
+ * the same directory alongside the transpiled modules (dist/ -> ../resources).
+ */
+export function bundledSkillRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "resources", "skills");
+}
 
 /** Trusted-side configuration error: never confused with a model/run failure. */
 export class EvokResourceError extends Error {
@@ -36,7 +51,7 @@ export class EvokResourceError extends Error {
   }
 }
 
-export type EvokSkillScope = "project" | "project-shared" | "user";
+export type EvokSkillScope = "project" | "project-shared" | "user" | "bundled";
 
 export interface EvokSkillSource {
   readonly dir: string;
@@ -189,6 +204,9 @@ export async function discoverEvokResources(options: DiscoverEvokResourcesOption
     { dir: join(projectEvok, "skills"), scope: "project" },
     { dir: projectShared, scope: "project-shared" },
     { dir: userSkills, scope: "user" },
+    // Lowest precedence: evoK-owned fallback shipped with the package (#111).
+    // A project/user copy of the same name wins first-wins above.
+    { dir: join(bundledSkillRoot()), scope: "bundled" },
   ];
 
   const diagnostics: ResourceDiagnostic[] = [];
@@ -210,14 +228,16 @@ export async function discoverEvokResources(options: DiscoverEvokResourcesOption
 
   const skills: DiscoveredSkill[] = result.skills.map((skill) => ({
     skill,
-    scope: scopeByFile.get(skill.filePath) ?? "user",
+    // Every parsed file was enumerated from one of the approved sources; an
+    // unknown one is discovery drift and fails closed rather than mislabeling.
+    scope: scopeByFile.get(skill.filePath) ?? (() => { throw new EvokResourceError(`skill parsed from an unapproved source: ${skill.filePath}`); })(),
   }));
 
   // Each winning skill's own directory is an in-place read-only root (its
   // SKILL.md and relative references). Dedupe by real lexical path; never grant
   // a parent such as the home directory.
   const readRoots = [...new Set(skills.map((entry) => entry.skill.baseDir))]
-    .filter((dir) => within(userRoot, dir) || within(projectRoot, dir))
+    .filter((dir) => within(userRoot, dir) || within(projectRoot, dir) || within(bundledSkillRoot(), dir))
     .sort();
 
   const [systemPromptPath, appendPath] = await Promise.all([

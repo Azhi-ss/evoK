@@ -20,6 +20,7 @@ import {
   SettingsManager,
   type CreateAgentSessionOptions,
   type InlineExtension,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { MissingAuthenticationError, type SessionModelResolver } from "./evok-model";
 import type { EvokResources } from "./evok-resources";
@@ -369,7 +370,7 @@ export interface AgentRuntimeSession {
   getSessionStats?(): unknown;
 }
 
-export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd" | "tools"> & Partial<CreateAgentSessionOptions> & {
+export type AgentSessionFactory = (options: Pick<CreateAgentSessionOptions, "cwd" | "tools"> & Partial<Omit<CreateAgentSessionOptions, "cwd" | "tools">> & {
   readonly sandbox?: SandboxPolicy;
   readonly redactor?: SecretRedactor;
   /** Trusted-side evoK resource selection (#110); undefined => no prompts/skills. */
@@ -418,6 +419,8 @@ export interface PiAgentRuntimeOptions {
    * locked-down #109 loader (no skills/context).
    */
   readonly resources?: EvokResources;
+  /** Trusted non-filesystem tools this runtime may register (#111). */
+  readonly configuredTools?: readonly ToolDefinition[];
 }
 
 function isRecord(value: unknown): value is Record<string, any> {
@@ -532,12 +535,20 @@ export class SessionPolicyViolation extends Error {
   }
 }
 
-function toolsFor(role: RolePlan, workspace: ApprovedWorkspace, sandboxPolicy: SandboxPolicy): string[] {
+function toolsFor(
+  role: RolePlan,
+  workspace: ApprovedWorkspace,
+  sandboxPolicy: SandboxPolicy,
+  configuredTools: readonly ToolDefinition[] = [],
+): string[] {
   if (role.tools !== undefined && !Array.isArray(role.tools)) throw new TypeError("role tools must be an array");
   const requested = role.tools ? [...role.tools] : [...READ_ONLY_TOOLS];
   if (requested.some((tool) => typeof tool !== "string" || tool.trim() === "")) throw new TypeError("role tools must contain non-empty strings");
   if (new Set(requested).size !== requested.length) throw new TypeError("role tools must be unique");
-  if (requested.some((tool) => !(READ_ONLY_TOOLS as readonly string[]).includes(tool) && !(CODING_TOOLS as readonly string[]).includes(tool))) {
+  const configuredNames = new Set(configuredTools.map((tool) => tool.name));
+  if (requested.some((tool) => !(READ_ONLY_TOOLS as readonly string[]).includes(tool)
+    && !(CODING_TOOLS as readonly string[]).includes(tool)
+    && !configuredNames.has(tool))) {
     throw new Error("role requests an unknown tool");
   }
   if (sandboxPolicy.allowedTools && requested.some((tool) => !sandboxPolicy.allowedTools!.includes(tool))) {
@@ -657,7 +668,9 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
     ...sdkOptions,
     agentDir,
     resourceLoader,
-    customTools: [],
+    // Trusted, runtime-registered configured tools (#111); callers cannot
+    // inject tools because PiAgentRuntime builds this list itself.
+    customTools: sdkOptions.customTools ?? [],
     settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
     sessionManager: SessionManager.inMemory(cwd),
   });
@@ -678,6 +691,7 @@ export class PiAgentRuntime {
   private readonly onDispose?: () => void;
   private readonly modelResolver?: SessionModelResolver;
   private readonly resources?: EvokResources;
+  private readonly configuredTools: readonly ToolDefinition[];
   private harnessRun = 0;
   private auditPromise?: Promise<readonly DurableIntentRecord[]>;
 
@@ -693,6 +707,9 @@ export class PiAgentRuntime {
     this.onDispose = options.onDispose;
     this.modelResolver = options.modelResolver;
     this.resources = options.resources;
+    // ponytail: one shared list; role-level gating is the SDK allowlist. A
+    // multi-tenant runtime would carry per-role capability registries.
+    this.configuredTools = Object.freeze([...(options.configuredTools ?? [])]);
   }
 
   private async ensureAudited(): Promise<void> {
@@ -761,7 +778,7 @@ export class PiAgentRuntime {
     if (this.usedWorkspaces.has(requestedRoot)) throw new Error("workspace/session reuse is not allowed");
     const rootBoundary = new SandboxBoundary({ ...requestedPolicy, root: this.root });
     await rootBoundary.assertPathAsync(input.workspace.path, "write");
-    const tools = toolsFor(input.role, input.workspace, requestedPolicy);
+    const tools = toolsFor(input.role, input.workspace, requestedPolicy, this.configuredTools);
     await mkdir(requestedRoot, { recursive: true });
     const approvedRoot = await realpath(requestedRoot);
     const approvedWorkspaceRoot = await realpath(this.root);
@@ -864,11 +881,14 @@ export class PiAgentRuntime {
       });
       const events: RuntimeEvent[] = [];
       const seen = new Set<string>();
-      const { customTools: _customTools, ...sessionOptions } = this.sessionOptions ?? {};
+      const { customTools: _callerCustomTools, ...sessionOptions } = this.sessionOptions ?? {};
       session = await this.factory({
         ...sessionOptions,
         ...(resolvedModel ? { model: resolvedModel.modelId, modelRuntime: resolvedModel.modelRuntime } : {}),
-        customTools: [],
+        // Trusted configured tools only; caller session options cannot inject
+        // tools (#111). The per-Run `tools` allowlist still hides any
+        // unselected capability from the model.
+        customTools: [...this.configuredTools],
         settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
         cwd: workspace,
         tools,
