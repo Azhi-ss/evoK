@@ -36,6 +36,14 @@ _Avoid_: Idea (when a testable statement is intended)
 A concrete proposed solution or implementation that can be materialized, tested, evaluated, and compared with other candidates.
 _Avoid_: Answer, result
 
+**Methodology Manifest**:
+The structured, machine-checkable declaration accompanying a Candidate that indexes its methodology components — feature pipeline steps, ensemble composition and OOF protocol, and the split contract reference. It is a declarative index over the candidate artifact, never the source of truth: the artifact stays authoritative, and a manifest that disagrees with the artifact fails verification.
+_Avoid_: Gene, candidate schema
+
+**Split Contract**:
+The task-level, immutable split discipline (kfold/time/group with purge and embargo) that every Candidate under a Task inherits by reference. Inner search cannot rewrite it; violating it is a rule failure, not merely a worse score.
+_Avoid_: Folds, CV config
+
 **Experiment**:
 A controlled attempt to learn about a Candidate under a declared environment, budget, and evaluation contract.
 _Avoid_: Run (a Run is one execution attempt)
@@ -87,8 +95,8 @@ A reusable declaration of an execution shape and its required stages or gates; a
 _Avoid_: Mode, hard-coded router
 
 **Research Loop**:
-The repeated cycle of selecting a Task, proposing and executing work, evaluating evidence, updating beliefs, and deciding what to do next.
-_Avoid_: Chat loop
+The evidence-driven cycle of selecting Tasks, proposing and executing Experiments, evaluating their results, updating beliefs, and choosing the next research action within an authorized Mission. It advances without a human prompt for every iteration, while the Research Objective and Mission Policy remain human-owned.
+_Avoid_: Chat loop, fixed execution script
 
 **File Blueprint**:
 The durable, content-addressed workspace files that make a Mission's GOAL, RULES, experiment log, and SCOREBOARD auditable outside the chat transcript. The files are Evidence; they do not score, promote, or authorize Stop by themselves.
