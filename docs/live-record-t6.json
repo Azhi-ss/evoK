@@ -1,0 +1,157 @@
+{
+  "distinguishing": "live",
+  "generatedAt": "2026-09-10T05:23:22.462Z",
+  "providerConfig": "Pi models.json provider ai-modeling (newapi OpenAI-compatible); auth via models.json apiKey; network real",
+  "model": {
+    "tier": "default",
+    "id": "ai-modeling/doubao-seed-evolving",
+    "runModels": {
+      "m-live-t6:baseline:1": "ai-modeling/doubao-seed-evolving",
+      "m-live-t6:exp:2": "ai-modeling/doubao-seed-evolving"
+    },
+    "directorModel": "same default tier, fresh read-only Pi session per decision"
+  },
+  "sourceAndToolUse": {
+    "referenceRead": "MISSION.md (operator-created; absolute-path read required — relative 'read MISSION.md' failed, recorded as a live finding)",
+    "candidateTools": [
+      "write (answer.txt in isolated workspace)"
+    ],
+    "directorTools": "read-only (read/grep/find/ls), no coding/network tools",
+    "network": "none granted to any Run",
+    "decisions": [
+      {
+        "action": "retry",
+        "accepted": true,
+        "stateVersion": 1,
+        "costTotal": 0.015543000000000001
+      },
+      {
+        "action": "stop",
+        "accepted": true,
+        "stateVersion": 2,
+        "costTotal": 0.010896000000000001
+      },
+      {
+        "action": "stop",
+        "accepted": true,
+        "stateVersion": 2,
+        "costTotal": 0.010773000000000001
+      }
+    ]
+  },
+  "artifacts": {
+    "m-live-t6:baseline:1": {
+      "snapshotRef": "runs/m-live-t6:baseline:1/snapshot",
+      "resultRef": "runs/m-live-t6:baseline:1/result.json",
+      "sessionId": "01a089c1-58bc-7009-86df-71c46b62a434"
+    },
+    "m-live-t6:exp:2": {
+      "snapshotRef": "runs/m-live-t6:exp:2/snapshot",
+      "resultRef": "runs/m-live-t6:exp:2/result.json",
+      "sessionId": "01a089c1-ed2d-7bf5-b8e2-f4b189e78680"
+    }
+  },
+  "independentObservations": [
+    {
+      "runId": "m-live-t6:baseline:1",
+      "kind": "baseline",
+      "evaluator": {
+        "id": "live-answer-eval",
+        "version": "1"
+      },
+      "score": 0.4,
+      "snapshotDigest": "afae04ece5b79438d5a7a81d96535f02c55ec24f8333ddc690afea211326842e",
+      "measuredFrom": "frozen snapshot bytes, not model text"
+    },
+    {
+      "runId": "m-live-t6:exp:2",
+      "kind": "experiment",
+      "action": "retry",
+      "evaluator": {
+        "id": "live-answer-eval",
+        "version": "1"
+      },
+      "score": 0.9,
+      "snapshotDigest": "f45cbc9b70137e3a45e3bf129c90b5875cc444fff666f860abcf73af6a4ec0de"
+    }
+  ],
+  "usage": {
+    "intakeCost": 0,
+    "runCost": 0.018735,
+    "decisionCost": 0.037212,
+    "runTokens": [
+      5466,
+      5859
+    ],
+    "decisionCalls": 3,
+    "distinctRunSessions": 2
+  },
+  "costUsd": 0.055947,
+  "budgetCapUsd": 0.5,
+  "withinBudget": true,
+  "stopAndRecovery": {
+    "firstStop": {
+      "status": "director-stopped",
+      "reason": "director proposed stop after follow-up measured 0.9 (evidence conclusive)"
+    },
+    "reopen": {
+      "command": "evok --missions",
+      "showed": [
+        "progress",
+        "stop reason",
+        "remaining budget"
+      ],
+      "autoResumed": false
+    },
+    "resume": {
+      "command": "evok /resume --mission m-live-t6",
+      "adoptedConfirmedRuns": [
+        "m-live-t6:baseline:1",
+        "m-live-t6:exp:2"
+      ],
+      "remeasured": [],
+      "abandonedUnconfirmed": [],
+      "duplicateExecution": false,
+      "duplicateEvaluation": false,
+      "freshDecisionSession": true,
+      "postResume": "director stopped again (evidence conclusive); consumed budget only grew by one priced decision call",
+      "historyEvents": [
+        "RECOVERY_COMPLETED",
+        "MISSION_RESUMED",
+        "DIRECTOR_CALLED",
+        "DIRECTOR_STOPPED"
+      ]
+    },
+    "interruptionBoundaryNote": "The autonomous start reached its own director-stop before the operator SIGINT, so the live scenario exercised a clean model-proposed stop + explicit reopen + resume-with-adoption (US41/42/43/45). The hard before/after-confirmation kill boundaries are proven separately by deterministic separate-process tests (tests/integration/mission-resume.test.ts); they were not force-killed in this paid run."
+  },
+  "objectivePreserved": "raise the independent answer metric toward 0.9 without cheating",
+  "evaluationContractPreserved": {
+    "objective": "raise the independent answer metric toward 0.9 without cheating",
+    "expectedOutputs": [
+      "answer.txt"
+    ],
+    "evaluationMethod": "live-answer-eval",
+    "metric": "answer in [0,1]",
+    "hardRules": [
+      "no external submission",
+      "never write a score file or self-report a score"
+    ]
+  },
+  "permissionsPreserved": [
+    "read-project",
+    "isolated-workspace-write"
+  ],
+  "modelRoutingPreserved": "default",
+  "budgetFinal": {
+    "total": 0.5,
+    "units": "model-USD",
+    "consumed": 0.05594700000000001,
+    "remaining": 0.444053
+  },
+  "externalSubmission": false,
+  "humanAcceptance": false,
+  "notes": [
+    "Live intake with a real model first produced a rich draft but with non-controlled permission strings/evaluation.method and an unresolved prerequisite, so start validation refused it; a schema-conformant draft (same objective, controlled vocab) was then supplied. This confirms start validation actually enforces the controlled contract on live output.",
+    "Candidate read tool requires absolute paths under approved read roots (relative 'MISSION.md' failed)."
+  ]
+}

@@ -68,9 +68,13 @@ The acceptance record (`EVOK_LIVE_RECORD`) must contain:
 
 ## Gate
 
+A recorded, authorized live run for #114 is checked in at
+`docs/live-record-t6.json` (model `ai-modeling/doubao-seed-evolving`, total
+$0.0559 of a $0.50 cap, externalSubmission=false). Verify it with:
+
 ```bash
 EVOK_LIVE_TEST=1 EVOK_LIVE_TEST_BUDGET_USD=0.5 \
-  EVOK_LIVE_RECORD=./live-record.json \
+  EVOK_LIVE_RECORD=./docs/live-record-t6.json \
   bun test --path-ignore-patterns="" tests/integration/live-recovery-acceptance.live.test.ts
 ```
 
