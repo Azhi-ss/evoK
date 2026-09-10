@@ -552,6 +552,16 @@ describe("runEvok Mission start (#112)", () => {
     expect(parsed.request).toBe("/start");
   });
 
+  test("parseEvokArgs reads #113 --baseline-only and --max-experiments", () => {
+    const parsed = parseEvokArgs(["--start", "--baseline-only", "--max-experiments", "5", "--mission", "m-1"]);
+    expect(parsed.baselineOnly).toBe(true);
+    expect(parsed.maxExperiments).toBe(5);
+    const bad = parseEvokArgs(["--start", "--max-experiments", "nope"]);
+    expect(bad.error).toMatch(/max-experiments/);
+    const neg = parseEvokArgs(["--start", "--max-experiments", "-1"]);
+    expect(neg.error).toMatch(/max-experiments/);
+  });
+
   test("an explicit natural-language start request routes to the validated start action", async () => {
     const project = await tempProject();
     await mkdir(join(project, ".evok", "missions", "m-displayed"), { recursive: true });
@@ -578,6 +588,7 @@ describe("runEvok Mission start (#112)", () => {
           budget: { total: 1, units: "model-USD", consumed: 0, remaining: 1 },
           evaluation: { ok: true, score: 0.5 },
           record: {} as never,
+          experiments: [],
         };
       },
       stdout,
@@ -699,6 +710,51 @@ describe("runEvok Mission start (#112)", () => {
     });
     expect(code).toBe(EVOK_EXIT.runtimeError);
     expect(stderr.text()).toMatch(/damaged|corrupt/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("#113 --baseline-only omits the director; otherwise the injected director option is passed through", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-loop"), { recursive: true });
+    const { modelRuntime } = await fauxRuntime("evok-cli-loop", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-loop-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const seen: Array<{ hasDirector: boolean; maxExperiments?: number }> = [];
+    const director = { id: "test-director", async decide() { return {} as never; } };
+    const runner = async (opts: never) => {
+      const o = opts as { director?: unknown; maxExperiments?: number };
+      seen.push({ hasDirector: Boolean(o.director), ...(typeof o.maxExperiments === "number" ? { maxExperiments: o.maxExperiments } : {}) });
+      return {
+        runId: "m-loop:baseline:1", status: "baseline-complete", stopReason: "baseline-complete",
+        model: { provider: "p", model: "m", id: ref },
+        usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        budget: { total: 1, units: "model-USD", consumed: 0, remaining: 1 },
+        evaluation: { ok: true, score: 0.5 }, record: {} as never, experiments: [],
+      };
+    };
+    const makeArgs = (extra: string[]) => ({
+      request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-loop", ...(parseEvokArgs(["/start", "--mission", "m-loop", ...extra]) as object),
+    }) as Parameters<typeof runEvok>[0]["args"];
+    // With an explicit director option and max-experiments, the runner receives them.
+    await runEvok({
+      args: makeArgs(["--max-experiments", "2"]),
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      startRunner: runner as never, director, stdout: new CollectStream(), stderr: new CollectStream(),
+    });
+    // --baseline-only suppresses the real Pi director construction and the
+    // injected director is also treated as baseline-only when the flag is set.
+    await runEvok({
+      args: makeArgs(["--baseline-only"]),
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      startRunner: runner as never, stdout: new CollectStream(), stderr: new CollectStream(),
+    });
+    expect(seen[0]).toEqual({ hasDirector: true, maxExperiments: 2 });
+    expect(seen[1]).toEqual({ hasDirector: false });
     await rm(project, { recursive: true, force: true });
   });
 });

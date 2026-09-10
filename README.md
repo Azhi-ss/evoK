@@ -48,7 +48,8 @@ Mission intake and start (#111/#112):
 ```text
 bun run evok --intake "beat the NDCG baseline on this project"
 bun run evok --intake --mission m-ab12 "where were we?"   # reopen a draft
-bun run evok /start --mission m-ab12                     # start the reviewed Mission
+bun run evok /start --mission m-ab12                     # start + continue autonomously
+bun run evok /start --mission m-ab12 --baseline-only     # baseline only, no continuation
 bun run evok --status --mission m-ab12                   # reopen durable result/usage
 ```
 
@@ -82,6 +83,35 @@ bun run evok --status --mission m-ab12                   # reopen durable result
   each record a truthful terminal/blocked stop reason. An interrupted in-flight
   Run blocks a second controller until the recovery slice (#114). No External
   Submission or implicit Human Acceptance exists on this path.
+
+Autonomous continuation from measured evidence (#113):
+
+- One explicit `/start` runs the baseline and then CONTINUES without a
+  "continue" prompt: after each measured Run, a read-only Mission Director
+  decision model receives the trusted Mission projection (objective/policy,
+  remaining `model-USD` budget, and real evaluator observations with Positive
+  and Negative Evidence refs) and proposes one bounded next action —
+  investigate, repair, retry, change-direction, or stop. `--baseline-only`
+  restores the single-baseline slice; `--max-experiments <n>` bounds Runs after
+  the baseline (default 3).
+- The controller, not the model, owns authority: proposals are validated before
+  execution and malformed, stale (`stateVersion`), unsupported, or over-budget
+  proposals, objective/permission/budget expansion, and model-asserted
+  success/score claims are rejected. Up to three bounded correction attempts
+  consume real resources; exhausting them stops the Mission explicitly
+  (`director-blocked`) rather than guessing. Accepted proposals run through the
+  SAME Task/Run/snapshot/evaluator operations as the baseline — there is no
+  second state model.
+- Every Experiment is a fresh Run with a fresh Pi session, attempt identity,
+  and approved workspace while sharing the durable authoritative evidence. Failed
+  and inconclusive attempts (dispatch failures and rule failures) are retained
+  as Negative Evidence; a model-only claim can never become a measured result,
+  and independent evaluation/promotion gates stay outside model authority.
+- Decision-model calls are themselves priced in `model-USD` and recorded in a
+  separate usage ledger. Budget/permission/interruption boundaries stop the
+  next dispatch truthfully even when the model would continue or a success
+  report is missing (`budget-exhausted`, `director-stopped`, `decision-failed`,
+  `iteration-limit`). No External Submission or Human Acceptance is produced.
 
 - Models and credentials come **only** from Pi's SDK-resolved stores
   (`~/.pi/agent/models.json`, `auth.json`; honors `PI_CODING_AGENT_DIR`). evoK

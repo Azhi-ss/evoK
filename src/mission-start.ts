@@ -1,10 +1,10 @@
 /**
- * Authorized Mission start + measured baseline (#112, T4; spec #108
- * US12–13/25/30–35/38–40/44–46; ADR-0001/0004/0005/0006).
+ * Authorized Mission start + measured baseline (#112, T4) and the autonomous
+ * evidence-driven Research Loop (#113, T5; spec #108
+ * US12–13/25–35/38–40/44–46; ADR-0001/0004/0005/0006).
  *
  * One validated start action turns a reviewed Mission DRAFT (mission-draft.ts)
- * into exactly one bounded baseline Experiment on the existing Pi execution
- * path:
+ * into a bounded baseline Experiment on the existing Pi execution path:
  *
  *   authorization check → persist accepted Mission + execution intent
  *   → reserve budget → dispatch ONE Run through PiAgentRuntime (fresh
@@ -13,17 +13,21 @@
  *   → independent BaselineEvaluator measures the snapshot (a model-supplied
  *   score can never replace measurement) → persist result/usage/stop reason.
  *
- * Controller records, evaluator inputs, credentials, and skill sources stay
- * outside candidate write authority: the Run workspace is disposable temp
- * storage, the project .evok tree is a read root only and is sandbox-protected,
- * and snapshot/result files are written by THIS trusted controller after the
- * Run ends.
+ * #113 adds the missing feedback connection: when a MissionDirector decision
+ * port is supplied, the same explicit start then continues WITHOUT a "continue"
+ * prompt. The controller builds a trusted read-only projection of the durable
+ * state (real observations, Positive/Negative Evidence with refs, objective/
+ * policy, remaining budget), the director proposes one bounded next action,
+ * and the proposal is applied through THIS module's existing Task/Run/replan/
+ * independent-evaluation operations. There is no second state model: the
+ * durable MissionRecord is the only authority, and model text is never a Task,
+ * a result, or evidence.
  *
- * No autonomous continuation, External Submission, or implicit Human
- * Acceptance lives here (later slices). Crash-safety is deliberately simple:
- * a controller lock plus terminal status; an interrupted in-flight execution
- * is reported as blocked until the recovery slice (#114) — never silently
- * re-dispatched and never adopted on hope.
+ * Controller records, evaluator inputs, credentials, and skill sources stay
+ * outside candidate write authority. No External Submission or implicit Human
+ * Acceptance lives here. Crash-safety stays simple: a controller lock plus
+ * terminal status; an interrupted in-flight execution is reported blocked
+ * until the recovery slice (#114) — never silently re-dispatched.
  */
 import { createHash } from "node:crypto";
 import {
@@ -45,6 +49,7 @@ import {
   isMissionId,
   loadMissionDraft,
   missionsDir,
+  type DraftPlanTask,
   type MissionDraft,
 } from "./mission-draft";
 import { draftReadyForReview } from "./mission-intake";
@@ -56,6 +61,16 @@ import {
   type RuntimeUsage,
   type SessionModelResolver,
 } from "./pi-agent-runtime";
+export type { RuntimeUsage } from "./pi-agent-runtime";
+import {
+  buildDirectorInput,
+  DirectorDecisionFailedError,
+  DirectorProposalRejectedError,
+  validateDirectorProposal,
+  type DirectorAction,
+  type DirectorProposal,
+  type MissionDirector,
+} from "./mission-director";
 
 export const MISSION_SCHEMA_VERSION = 1 as const;
 const MISSION_FILENAME = "mission.json";
@@ -67,7 +82,13 @@ const RESULT_FILENAME = "result.json";
 /** Only this budget unit is enforceable on this path (priced model usage). */
 export const ENFORCEABLE_BUDGET_UNITS = "model-USD" as const;
 
-/** Permissions the draft may declare that this baseline path actually grants. */
+/** Maximum bounded decision correction attempts at one decision point (AC4). */
+export const MAX_DECISION_ATTEMPTS = 3;
+
+/** Default bound on Experiments AFTER the baseline within one start. */
+export const DEFAULT_MAX_EXPERIMENTS = 3;
+
+/** Permissions the draft may declare that this path actually grants. */
 const SUPPORTED_PERMISSIONS = new Set([
   "read-project",
   "isolated-workspace-write",
@@ -76,6 +97,11 @@ const SUPPORTED_PERMISSIONS = new Set([
 
 /** Declared permissions that can never be granted by start (later authority). */
 const FORBIDDEN_PERMISSION = /submi|external|network|internet|credential|deploy|publish/i;
+
+const ZERO_USAGE: RuntimeUsage = {
+  tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 export class MissionStartRejectedError extends Error {
   readonly kind = "mission-start-rejected" as const;
@@ -116,6 +142,21 @@ export class EvaluatorFailureError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "EvaluatorFailureError";
+  }
+}
+
+/**
+ * The decision model returned only invalid proposals at one decision point
+ * (malformed/stale/over-budget/authority-expanding). Bounded correction
+ * attempts are exhausted, so the Mission stops truthfully instead of guessing.
+ */
+export class DirectorBlockedError extends Error {
+  readonly kind = "director-blocked" as const;
+  readonly reason: string;
+  constructor(message: string, reason: string) {
+    super(message);
+    this.name = "DirectorBlockedError";
+    this.reason = reason;
   }
 }
 
@@ -192,8 +233,10 @@ export interface MissionUsageLedger {
     readonly tokens: MissionDraft["usage"]["tokens"];
     readonly cost: MissionDraft["usage"]["cost"];
   };
-  /** One priced usage line per dispatched baseline Run. */
+  /** One priced usage line per dispatched baseline/experiment Run. */
   readonly runs: readonly UsageLine[];
+  /** One priced usage line per decision-model call (#113, US31). */
+  readonly decisions?: readonly UsageLine[];
 }
 
 export interface MissionRunRecord {
@@ -221,6 +264,50 @@ export interface BaselineResultRecord {
   readonly measuredAt: string;
 }
 
+/** A later independently-measured Experiment (#113); same shape as baseline. */
+export type ExperimentResultRecord = BaselineResultRecord;
+
+/** A Task applied in this Mission: the intake plan or a Director proposal. */
+export type MissionTaskRecord = DraftPlanTask & { readonly source?: "intake" | "director" };
+
+/**
+ * One attempt carried in the Mission's experiment trail. Holds a measured
+ * result OR a dispatch failure, so failed/inconclusive attempts survive as
+ * Negative Evidence instead of being silently dropped.
+ */
+export interface ExperimentTrailEntry {
+  readonly runId: string;
+  readonly attempt: number;
+  readonly action: DirectorAction | "baseline";
+  readonly ok: boolean;
+  readonly taskObjective: string;
+  /** True for failed/inconclusive attempts retained as Negative Evidence. */
+  readonly negativeEvidence?: boolean;
+  readonly candidateId?: string;
+  readonly snapshotDigest?: string;
+  readonly evaluator?: { readonly id: string; readonly version: string };
+  readonly evaluation?: BaselineMeasurement;
+  readonly evidenceRefs: readonly string[];
+  readonly error?: string;
+  readonly ruleViolations?: readonly string[];
+  readonly at: string;
+}
+
+/** One priced decision-model call, persisted for explicit-unit accounting. */
+export interface DecisionRecord {
+  readonly decisionId: string;
+  readonly stateVersion: number;
+  readonly attempt: number;
+  readonly sessionId?: string;
+  readonly accepted: boolean;
+  readonly action?: DirectorAction;
+  readonly rationale?: string;
+  readonly rejection?: string;
+  readonly tokens: RuntimeUsage["tokens"];
+  readonly cost: number;
+  readonly at: string;
+}
+
 export type MissionStatus =
   | "accepted"
   | "running"
@@ -229,21 +316,34 @@ export type MissionStatus =
   | "evaluator-failed"
   | "budget-exhausted"
   | "run-failed"
-  | "interrupted";
+  | "interrupted"
+  // #113 autonomous continuation terminal/blocker states
+  | "director-stopped"
+  | "director-blocked"
+  | "decision-failed"
+  | "iteration-limit";
+
+export type HistoryEventType =
+  | "MISSION_ACCEPTED"
+  | "EXECUTION_INTENT_PERSISTED"
+  | "BUDGET_RESERVED"
+  | "RUN_DISPATCHED"
+  | "RUN_INTERRUPTED"
+  | "RUN_FAILED"
+  | "SNAPSHOT_COMMITTED"
+  | "EVALUATION_MEASURED"
+  | "EVALUATOR_FAILED"
+  | "BUDGET_EXHAUSTED"
+  | "BASELINE_COMPLETED"
+  // #113 Research Loop
+  | "DIRECTOR_CALLED"
+  | "PROPOSAL_REJECTED"
+  | "PROPOSAL_APPLIED"
+  | "DIRECTOR_STOPPED"
+  | "ITERATION_LIMIT";
 
 export interface HistoryEvent {
-  readonly type:
-    | "MISSION_ACCEPTED"
-    | "EXECUTION_INTENT_PERSISTED"
-    | "BUDGET_RESERVED"
-    | "RUN_DISPATCHED"
-    | "RUN_INTERRUPTED"
-    | "RUN_FAILED"
-    | "SNAPSHOT_COMMITTED"
-    | "EVALUATION_MEASURED"
-    | "EVALUATOR_FAILED"
-    | "BUDGET_EXHAUSTED"
-    | "BASELINE_COMPLETED";
+  readonly type: HistoryEventType;
   readonly at: string;
   readonly detail?: Readonly<Record<string, unknown>>;
 }
@@ -260,6 +360,11 @@ export interface MissionRecord {
   readonly runs: Readonly<Record<string, MissionRunRecord>>;
   readonly baselineRunId?: string;
   readonly baseline?: BaselineResultRecord;
+  /** #113: experiment/attempt trail and priced decision records. */
+  readonly stateVersion?: number;
+  readonly tasks?: readonly MissionTaskRecord[];
+  readonly decisions?: readonly DecisionRecord[];
+  readonly experiments?: readonly ExperimentTrailEntry[];
   readonly history: readonly HistoryEvent[];
   readonly stopReason?: string;
   readonly createdAt: string;
@@ -278,10 +383,8 @@ export interface StartMissionOptions {
   readonly tier?: string;
   readonly signal?: AbortSignal;
   /**
-   * Model/control cost reserved BEFORE dispatch for the single baseline Run
-   * (same unit as the budget). Unknown cost is never assumed zero: callers
-   * that cannot bound the Run pass an honest bound; zero reserves nothing and
-   * enforcement happens on observed cost.
+   * Model/control cost reserved BEFORE dispatch for a single Run/decision call
+   * (same unit as the budget). Unknown cost is never assumed zero.
    */
   readonly reserveCost?: number;
   /** Isolated workspace parent (default: OS temp dir). */
@@ -290,12 +393,20 @@ export interface StartMissionOptions {
    * Trusted-side model pricing (cost per token). Provider-reported cost is
    * used when the SDK returns a positive total; this pricing is the honest
    * fallback for runtimes that emit token counts without cost (faux/local).
-   * Unknown cost is never silently treated as zero: when both are absent the
-   * caller must supply pricing or the bound cannot be claimed.
+   * Unknown cost is never silently treated as zero.
    */
   readonly priceModelCost?: (model: ModelConfigView) => (tokens: RuntimeUsage["tokens"]) => number | undefined;
   /** Test seam: leave the controller lock in place (simulates a live controller). */
   readonly leaveLock?: boolean;
+  /**
+   * #113: Mission Director decision port. When supplied, one explicit start
+   * runs the measured baseline and then continues autonomously through the
+   * evidence-driven Research Loop until a budget/stop/iteration boundary. When
+   * absent, behavior stays the T4 single-baseline slice.
+   */
+  readonly director?: MissionDirector;
+  /** Maximum Experiments AFTER the baseline in one authorized start (default 3). */
+  readonly maxExperiments?: number;
 }
 
 export interface StartMissionOutcome {
@@ -307,6 +418,8 @@ export interface StartMissionOutcome {
   readonly budget: MissionRecord["budget"];
   readonly evaluation: BaselineMeasurement;
   readonly record: MissionRecord;
+  /** #113: every dispatched Run beyond the baseline (empty for T4 path). */
+  readonly experiments: readonly ExperimentTrailEntry[];
 }
 
 function missionDir(projectRoot: string, missionId: string): string {
@@ -382,7 +495,7 @@ function validateRecord(value: unknown, expectedId: string): MissionRecord {
     throw new MissionRecordCorruptionError(`mission.json for ${expectedId} has a damaged budget ledger`);
   }
   if (!Array.isArray(value.history)) {
-    throw new MissionRecordCorruptionError(`mission.json for ${expectedId} has a damaged history`);
+    throw new MissionRecordCorruptionError(`mission.json for ${expectedId} has damaged history`);
   }
   if (!isRecord(value.usage) || !isRecord(value.usage.intake) || !Array.isArray(value.usage.runs)) {
     throw new MissionRecordCorruptionError(`mission.json for ${expectedId} has damaged usage records`);
@@ -536,12 +649,29 @@ async function commitSnapshot(
   return { files, digest, ref: join(RUNS_DIRNAME, runId, SNAPSHOT_DIRNAME) };
 }
 
+/** Outcome of one candidate dispatch (shared by baseline and each Experiment). */
+type AttemptOutcome =
+  | { readonly kind: "run-failed"; readonly runId: string; readonly attempt: number; readonly error: string }
+  | {
+      readonly kind: "measured";
+      readonly runId: string;
+      readonly attempt: number;
+      readonly measurement: BaselineMeasurement;
+      readonly budgetCrossed: boolean;
+      readonly evidenceRefs: readonly string[];
+      readonly candidateId: string;
+      readonly snapshotDigest: string;
+      readonly evaluator: { readonly id: string; readonly version: string };
+    };
+
 /**
- * Start one authorized Mission and run its measured baseline. Throws
- * MissionStartRejectedError for validation failures (nothing dispatched),
- * MissionControllerConflictError for concurrent/uncertain ownership,
- * BudgetExhaustedError / EvaluatorFailureError for truthful terminal stops,
- * and AbortError on user interruption.
+ * Start one authorized Mission and run its measured baseline; when a
+ * MissionDirector is supplied, continue autonomously through the evidence
+ * driven Research Loop (#113). Throws MissionStartRejectedError for validation
+ * failures (nothing dispatched), MissionControllerConflictError for
+ * concurrent/uncertain ownership, BudgetExhaustedError / EvaluatorFailureError
+ * / DirectorBlockedError / DirectorDecisionFailedError for truthful terminal
+ * stops, and AbortError on user interruption.
  */
 export async function startAuthorizedMission(options: StartMissionOptions): Promise<StartMissionOutcome> {
   if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
@@ -560,9 +690,12 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   if (!Number.isFinite(reserveCost) || reserveCost < 0) {
     throw new MissionStartRejectedError("reserveCost must be a finite non-negative number; unknown cost is not zero");
   }
+  const maxExperiments = options.maxExperiments ?? DEFAULT_MAX_EXPERIMENTS;
+  if (!Number.isInteger(maxExperiments) || maxExperiments < 0) {
+    throw new MissionStartRejectedError("maxExperiments must be a non-negative integer");
+  }
 
-  // Ownership fencing BEFORE any accepted record can be reused: a live lock or
-  // an interrupted in-flight Run blocks a second controller.
+  // Ownership fencing BEFORE any accepted record can be reused.
   let previous: MissionRecord | undefined;
   try {
     previous = await loadMissionRecord(options.projectRoot, draft.id);
@@ -590,27 +723,19 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
         "uncertain interrupted execution awaits recovery",
       );
     }
-    // Any other accepted record (running, complete, failed, budget-stopped,
-    // rule-failed) is authoritative history: a second start must never reuse
-    // the run id or overwrite its snapshot/result. Retries are new Runs and
-    // belong to the recovery/continuation slices (#113/#114).
     throw new MissionStartRejectedError(
       `mission ${draft.id} was already started (status ${previous.status}); start is not idempotent — resume through the recovery path; the existing record was not overwritten`,
     );
   }
 
   const now = () => new Date().toISOString();
-  const runId = `${draft.id}:baseline:1`;
-  const intentId = `${runId}:intent`;
-  const attempt = 1;
+  const baselineRunId = `${draft.id}:baseline:1`;
+  const baselineIntentId = `${baselineRunId}:intent`;
 
-  // Acquire the controller lock BEFORE any accepted record is persisted, so
-  // two concurrent starts cannot both pass the ownership check above (the
-  // disk stat check plus this O_EXCL create are the fence; recovery (#114)
-  // owns stale-lock interpretation).
+  // Acquire the controller lock BEFORE any accepted record is persisted.
   const lock = lockPath(options.projectRoot, draft.id);
   try {
-    await writeFile(lock, JSON.stringify({ pid: process.pid, runId, since: now() }, null, 2), { flag: "wx" });
+    await writeFile(lock, JSON.stringify({ pid: process.pid, runId: baselineRunId, since: now() }, null, 2), { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new MissionControllerConflictError(
@@ -624,7 +749,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     if (!options.leaveLock) await rm(lock, { force: true }).catch(() => {});
   };
 
-  let record: MissionRecord = previous ?? {
+  let record: MissionRecord = {
     schemaVersion: MISSION_SCHEMA_VERSION,
     id: draft.id,
     status: "accepted",
@@ -636,23 +761,27 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     runs: {},
     history: [],
     stopReason: undefined,
+    // #113: the single authoritative state; the director only reads a
+    // projection of it and proposes bounded changes validated by this module.
+    stateVersion: 0,
+    tasks: draft.plan.tasks.map((task) => ({ ...task, source: "intake" as const })) as MissionTaskRecord[],
+    decisions: [],
+    experiments: [],
     createdAt: now(),
     updatedAt: now(),
   };
 
-  // Persist the accepted Mission + execution intent BEFORE dispatch (AC2).
   record = withEvent(record, { type: "MISSION_ACCEPTED", at: now(), detail: { authorizationToken: options.authorization.token, source: options.authorization.source ?? "user" } });
-  record = withEvent(record, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId, intentId, attempt } }, {
-    runs: { ...record.runs, [runId]: { runId, intentId, attempt, status: "dispatched", workspace: "", dispatchedAt: now() } },
+  record = withEvent(record, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: baselineRunId, intentId: baselineIntentId, attempt: 1 } }, {
+    runs: { ...record.runs, [baselineRunId]: { runId: baselineRunId, intentId: baselineIntentId, attempt: 1, status: "dispatched", workspace: "", dispatchedAt: now() } },
   });
 
-  // Reserve/check the declared bound before further dispatch. The reservation
-  // is explicit, priced in the budget unit, and never silently assumed zero.
-  const available = record.budget.remaining - record.reserved;
-  if (available < reserveCost) {
-    record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { available, requested: reserveCost } }, {
+  // Reserve/check the declared baseline bound before further dispatch.
+  const initialAvailable = record.budget.remaining - record.reserved;
+  if (initialAvailable < reserveCost) {
+    record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { available: initialAvailable, requested: reserveCost } }, {
       status: "budget-exhausted",
-      stopReason: `budget exhausted before dispatch: ${available} ${record.budget.units} available, ${reserveCost} reserved`,
+      stopReason: `budget exhausted before dispatch: ${initialAvailable} ${record.budget.units} available, ${reserveCost} reserved`,
     });
     await persist(options.projectRoot, record);
     await releaseLock();
@@ -663,18 +792,306 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   });
   await persist(options.projectRoot, record);
 
-  const workspaceParent = join(
-    options.workspaceRoot ?? tmpdir(),
-    `evok-baseline-${draft.id.replace(/[^a-z0-9._-]/gi, "_")}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  );
-  // ADR-0001: the Run workspace is disposable; its durable copy is the
-  // immutable snapshot committed below. Best-effort cleanup on every exit.
-  const disposeWorkspace = () => rm(workspaceParent, { recursive: true, force: true }).catch(() => {});
-
-  const baselineTask = draft.plan.tasks[0]!;
   const allowBash = (draft.constraints.permissions ?? []).includes("local-shell-in-workspace");
   const roleTools = [...READ_ONLY_TOOLS, "write", "edit", ...(allowBash ? ["bash"] : [])];
-  const instructions = [
+
+  // A single abort owner: an external user signal aborts every dispatch in
+  // this start (baseline + loop + decisions).
+  const runController = new AbortController();
+  const onExternalAbort = () => runController.abort();
+  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+  if (options.signal?.aborted) runController.abort();
+  const aborted = () => options.signal?.aborted || runController.signal.aborted;
+  const abortError = (label: string) => {
+    const error = new Error(`${label} interrupted by the user; no unconfirmed result was adopted`);
+    error.name = "AbortError";
+    return error;
+  };
+
+  let lastResult: AgentRuntimeResult | undefined;
+  let lastMeasurement: BaselineMeasurement | undefined;
+  let lastRunId = baselineRunId;
+
+  /**
+   * Dispatch ONE bounded candidate Run through the existing Pi execution path:
+   * fresh runtime/session/workspace/attempt (ADR-0001) → freeze immutable
+   * snapshot → independent measurement → meter cost. Shared by the baseline
+   * and every Director-proposed Experiment, so proposals run through the
+   * existing Task/Run/evaluation ops rather than a second state model.
+   *
+   * Run failures and non-ok measurements are RETURNED (the loop retains them
+   * as Negative Evidence); budget/unknown-cost/evaluator/abort conditions are
+   * terminal and persist + release the lock before throwing.
+   */
+  const dispatchCandidateAttempt = async (args: {
+    current: MissionRecord;
+    runId: string;
+    attempt: number;
+    branchId: string;
+    roleName: string;
+    instructions: string;
+    objective: string;
+    expectedOutputs: readonly string[];
+    reserve: number;
+    kind: "baseline" | "experiment";
+  }): Promise<{ record: MissionRecord; outcome: AttemptOutcome; result?: AgentRuntimeResult }> => {
+    let r = args.current;
+    if (aborted()) {
+      r = withEvent(r, { type: "RUN_INTERRUPTED", at: now(), detail: { runId: args.runId } }, {
+        status: "interrupted",
+        stopReason: `user interruption before the ${args.kind} Run; result unconfirmed until recovery`,
+        runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "interrupted", finishedAt: now() } },
+      });
+      await persist(options.projectRoot, r);
+      await releaseLock();
+      throw abortError(args.kind);
+    }
+
+    const available = r.budget.remaining - r.reserved;
+    if (available + 1e-12 < args.reserve) {
+      r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { runId: args.runId, available, requested: args.reserve } }, {
+        status: "budget-exhausted",
+        stopReason: `budget exhausted before ${args.kind} dispatch: ${available} ${r.budget.units} available, ${args.reserve} reserved; no further dispatch`,
+      });
+      await persist(options.projectRoot, r);
+      await releaseLock();
+      throw new BudgetExhaustedError(r.stopReason!);
+    }
+    r = { ...r, reserved: r.reserved + args.reserve };
+    const intentId = `${args.runId}:intent`;
+    r = withEvent(r, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: args.runId, intentId, attempt: args.attempt } }, {
+      runs: { ...r.runs, [args.runId]: { runId: args.runId, intentId, attempt: args.attempt, status: "dispatched", workspace: "", dispatchedAt: now() } },
+    });
+    await persist(options.projectRoot, r);
+
+    const workspaceParent = join(
+      options.workspaceRoot ?? tmpdir(),
+      `evok-${args.kind}-${draft.id.replace(/[^a-z0-9._-]/gi, "_")}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const disposeWorkspace = () => rm(workspaceParent, { recursive: true, force: true }).catch(() => {});
+
+    // A fresh runtime per attempt: no reused session, workspace, or attempt id.
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: workspaceParent,
+      modelResolver: options.resolver,
+      resources: options.resources,
+      sandbox: { allowBash },
+    });
+
+    let result: AgentRuntimeResult;
+    try {
+      result = await runtime.execute(
+        {
+          task: {
+            objective: args.objective,
+            constraints: { missionId: draft.id, runId: args.runId, hardRules: draft.constraints.hardRules ?? [] },
+            expectedOutputs: args.expectedOutputs,
+          },
+          role: {
+            name: args.roleName,
+            instructions: args.instructions,
+            tools: roleTools,
+            allowCodingTools: true,
+            ...(allowBash ? { allowTestExecution: true } : {}),
+          },
+          workspace: {
+            path: join(workspaceParent, args.kind),
+            isolated: true,
+            approved: true,
+            readRoots: [options.projectRoot, ...options.resources.readRoots],
+            sandbox: {
+              allowBash,
+              network: "none",
+              allowedTools: roleTools,
+              protectedPaths: [
+                join(options.projectRoot, ".evok"),
+                join(options.projectRoot, ".agents"),
+                getAgentDir(),
+              ],
+              ...(options.resources.userRoot
+                ? { credentialPaths: [options.resources.userRoot, getAgentDir()] }
+                : { credentialPaths: [getAgentDir()] }),
+            },
+          },
+          tier: options.tier ?? "default",
+          intentId,
+          identity: { branchId: args.branchId, runId: args.runId, attempt: args.attempt, workspaceId: workspaceParent, fencingToken: args.attempt },
+        },
+        runController.signal,
+      );
+    } catch (error) {
+      await disposeWorkspace();
+      if ((error as Error).name === "AbortError" || aborted()) {
+        r = withEvent(r, { type: "RUN_INTERRUPTED", at: now(), detail: { runId: args.runId } }, {
+          status: "interrupted",
+          stopReason: `user interruption during the ${args.kind} Run; result unconfirmed until recovery`,
+          runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "interrupted", finishedAt: now() } },
+        });
+        await persist(options.projectRoot, r);
+        await releaseLock();
+        throw abortError(args.kind);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      r = withEvent(r, { type: "RUN_FAILED", at: now(), detail: { runId: args.runId, error: message } }, {
+        reserved: Math.max(0, r.reserved - args.reserve),
+        runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "failed", error: message, finishedAt: now() } },
+      });
+      return { record: r, outcome: { kind: "run-failed", runId: args.runId, attempt: args.attempt, error: message } };
+    }
+
+    const modelCost = result.model && options.priceModelCost ? options.priceModelCost(result.model) : undefined;
+    let runCost = result.usage.cost.total;
+    if (!Number.isFinite(runCost) || runCost === 0) {
+      const priced = modelCost ? modelCost(result.usage.tokens) : undefined;
+      if (result.usage.tokens.total > 0 && (priced === undefined || !Number.isFinite(priced))) {
+        r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { runId: args.runId, reason: "observed model usage without meterable cost" } }, {
+          status: "budget-exhausted",
+          stopReason: "model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+          runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], sessionId: result.sessionId, model: result.model, workspace: result.workspace, status: "failed", finishedAt: now() } },
+        });
+        await persist(options.projectRoot, r);
+        await releaseLock();
+        await disposeWorkspace();
+        throw new BudgetExhaustedError(r.stopReason!);
+      }
+      if (priced !== undefined && Number.isFinite(priced)) runCost = priced;
+    }
+    const consumed = r.budget.consumed + runCost;
+    const runLine: UsageLine = { at: now(), sessionId: result.sessionId, tokens: { ...result.usage.tokens }, cost: { ...result.usage.cost, total: runCost } };
+    r = {
+      ...r,
+      reserved: Math.max(0, r.reserved - args.reserve),
+      budget: { ...r.budget, consumed, remaining: r.budget.total - consumed },
+      usage: { ...r.usage, runs: [...r.usage.runs, runLine] },
+      runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "dispatched", sessionId: result.sessionId, model: result.model, workspace: result.workspace } },
+    };
+    r = withEvent(r, { type: "RUN_DISPATCHED", at: now(), detail: { runId: args.runId, sessionId: result.sessionId, model: result.model?.id, cost: runCost } });
+
+    const snapshot = await commitSnapshot(options.projectRoot, draft.id, args.runId, result.workspace);
+    await disposeWorkspace();
+    r = withEvent(r, { type: "SNAPSHOT_COMMITTED", at: now(), detail: { runId: args.runId, snapshotDigest: snapshot.digest, files: Object.keys(snapshot.files).length } }, {
+      runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], snapshotRef: snapshot.ref } },
+    });
+
+    let measurement: BaselineMeasurement;
+    try {
+      measurement = await options.evaluator.evaluate(snapshot.files, {
+        missionId: draft.id, runId: args.runId, snapshotDigest: snapshot.digest, contract: r.contract,
+      });
+    } catch (error) {
+      r = withEvent(r, { type: "EVALUATOR_FAILED", at: now(), detail: { runId: args.runId, error: (error as Error).message, snapshotDigest: snapshot.digest } }, {
+        status: "evaluator-failed",
+        stopReason: `independent evaluator failed: ${(error as Error).message}`,
+        ...(args.kind === "baseline" ? { baselineRunId: args.runId } : {}),
+        runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "failed", snapshotRef: snapshot.ref, finishedAt: now() } },
+      });
+      await persist(options.projectRoot, r);
+      await releaseLock();
+      throw new EvaluatorFailureError((error as Error).message);
+    }
+
+    const evidenceRefs = [snapshot.ref, join(RUNS_DIRNAME, args.runId, RESULT_FILENAME)];
+    const resultRecord: BaselineResultRecord = {
+      runId: args.runId,
+      candidateId: `candidate:${snapshot.digest.slice(0, 16)}`,
+      snapshotDigest: snapshot.digest,
+      evaluator: { id: options.evaluator.id, version: options.evaluator.version },
+      evaluation: measurement,
+      evidenceRefs,
+      measuredAt: now(),
+    };
+    await atomicWrite(baselineResultPath(options.projectRoot, draft.id, args.runId), JSON.stringify(resultRecord, null, 2));
+    r = withEvent(r, { type: "EVALUATION_MEASURED", at: now(), detail: { runId: args.runId, ok: measurement.ok, score: measurement.score } }, {
+      runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], status: "measured", resultRef: join(RUNS_DIRNAME, args.runId, RESULT_FILENAME), finishedAt: now() } },
+    });
+
+    const budgetCrossed = consumed > r.budget.total + 1e-12;
+    if (budgetCrossed) {
+      r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { consumed, total: r.budget.total, runId: args.runId } }, {
+        status: "budget-exhausted",
+        stopReason: `declared budget ${r.budget.total} ${r.budget.units} exceeded by observed cost ${consumed}; no further dispatch`,
+      });
+    }
+    lastResult = result;
+    lastMeasurement = measurement;
+    lastRunId = args.runId;
+    return {
+      record: r,
+      result,
+      outcome: {
+        kind: "measured", runId: args.runId, attempt: args.attempt, measurement, budgetCrossed,
+        evidenceRefs, candidateId: resultRecord.candidateId, snapshotDigest: resultRecord.snapshotDigest, evaluator: resultRecord.evaluator,
+      },
+    };
+  };
+
+  /** Meter one decision-model call with the same honest cost rules as Runs. */
+  const meterDecision = async (args: {
+    current: MissionRecord;
+    decisionId: string;
+    stateVersion: number;
+    attempt: number;
+    usage: RuntimeUsage;
+    sessionId?: string;
+    model?: ModelConfigView;
+  }): Promise<{ record: MissionRecord; cost: number; unknownCost: boolean }> => {
+    let cost = args.usage.cost.total;
+    let unknownCost = false;
+    if (!Number.isFinite(cost) || cost === 0) {
+      const pricer = options.priceModelCost;
+      const priced = pricer && args.model ? pricer(args.model)(args.usage.tokens) : undefined;
+      if (args.usage.tokens.total > 0 && (priced === undefined || !Number.isFinite(priced))) {
+        // Token-positive usage with no meterable price is UNKNOWN cost, never a
+        // verified zero: record the call and stop rather than dispatch again.
+        unknownCost = true;
+        cost = 0;
+      } else if (priced !== undefined && Number.isFinite(priced)) {
+        cost = priced;
+      }
+    }
+    const consumed = args.current.budget.consumed + cost;
+    const line: UsageLine = {
+      at: now(), sessionId: args.sessionId ?? args.decisionId,
+      tokens: { ...args.usage.tokens }, cost: { ...args.usage.cost, total: cost },
+    };
+    const r: MissionRecord = {
+      ...args.current,
+      budget: { ...args.current.budget, consumed, remaining: args.current.budget.total - consumed },
+      usage: { ...args.current.usage, decisions: [...(args.current.usage.decisions ?? []), line] },
+    };
+    return { record: r, cost, unknownCost };
+  };
+
+  const appendDecision = async (
+    r: MissionRecord,
+    args: { decisionId: string; stateVersion: number; attempt: number; sessionId?: string },
+    cost: number,
+    accepted: boolean,
+    rejection: string | undefined,
+    proposal?: DirectorProposal,
+    usage?: RuntimeUsage,
+  ): Promise<MissionRecord> => {
+    const decision: DecisionRecord = {
+      decisionId: args.decisionId,
+      stateVersion: args.stateVersion,
+      attempt: args.attempt,
+      ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+      accepted,
+      ...(proposal?.action ? { action: proposal.action } : {}),
+      ...(proposal?.rationale ? { rationale: proposal.rationale } : {}),
+      ...(rejection ? { rejection } : {}),
+      tokens: { ...(usage?.tokens ?? ZERO_USAGE.tokens) },
+      cost,
+      at: now(),
+    };
+    const event: HistoryEvent = accepted
+      ? { type: "DIRECTOR_CALLED", at: now(), detail: { decisionId: args.decisionId, action: proposal?.action, cost } }
+      : { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: args.decisionId, attempt: args.attempt, reason: rejection } };
+    return withEvent(r, event, { decisions: [...(r.decisions ?? []), decision] });
+  };
+
+  const baselineTask = draft.plan.tasks[0]!;
+  const baselineInstructions = [
     "You are executing the BASELINE Task of one authorized evoK Mission. Work only inside your isolated run workspace; it is the current working directory.",
     `Mission objective: ${draft.objective}`,
     `Baseline task (${baselineTask.taskId}): ${baselineTask.objective}`,
@@ -686,247 +1103,371 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     "Read-only project inspection is allowed; writes are confined to this workspace. Stop when the baseline artifact is materialized.",
   ].filter((line) => line !== "").join("\n");
 
-  const runtime = new PiAgentRuntime({
-    workspaceRoot: workspaceParent,
-    modelResolver: options.resolver,
-    resources: options.resources,
-    // bash only when the draft explicitly grants local-shell-in-workspace;
-    // the per-Run policy below carries the real tool/network restrictions.
-    sandbox: { allowBash },
+  const buildOutcome = (r: MissionRecord): StartMissionOutcome => ({
+    runId: lastRunId,
+    status: r.status,
+    stopReason: r.stopReason ?? r.status,
+    model: lastResult?.model ?? r.runs[r.baselineRunId!]?.model ?? { provider: "unknown", model: "unknown", id: "unknown" },
+    usage: lastResult?.usage ?? ZERO_USAGE,
+    budget: r.budget,
+    evaluation: lastMeasurement ?? r.baseline?.evaluation ?? { ok: false },
+    record: r,
+    experiments: r.experiments ?? [],
   });
 
-  let result: AgentRuntimeResult;
-  // A single abort owner: an external user signal and the deterministic
-  // mid-Run interruption seam both abort this controller.
-  const runController = new AbortController();
-  const onExternalAbort = () => runController.abort();
-  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
-  if (options.signal?.aborted) runController.abort();
   try {
-    result = await runtime.execute(
-      {
-        task: {
-          objective: baselineTask.objective,
-          constraints: { missionId: draft.id, runId, hardRules: draft.constraints.hardRules ?? [] },
-          expectedOutputs: draft.outputs,
-        },
-        role: {
-          name: "evok-baseline-candidate",
-          instructions,
-          tools: roleTools,
-          allowCodingTools: true,
-          // Real local execution inside the isolated workspace only when the
-          // draft explicitly grants it; the network stays "none" regardless.
-          ...(allowBash ? { allowTestExecution: true } : {}),
-        },
-        workspace: {
-          path: join(workspaceParent, "baseline"),
-          isolated: true,
-          approved: true,
-          // Project facts and approved skill sources are READ-ONLY. The
-          // mission dir sits under the project root, so it is readable but
-          // sandbox-protected; every write is rooted at the run workspace.
-          readRoots: [options.projectRoot, ...options.resources.readRoots],
-          // bash is a coding tool: the per-run policy must also allow it.
-          sandbox: {
-            allowBash,
-            network: "none",
-            allowedTools: roleTools,
-            // Controller records, evoK config/skills, the shared project skill
-            // namespace, and Pi's own model/credential stores stay outside
-            // candidate authority even though the project is a read root
-            // (US40, ADR-0005/0006).
-            protectedPaths: [
-              join(options.projectRoot, ".evok"),
-              join(options.projectRoot, ".agents"),
-              getAgentDir(),
-            ],
-            ...(options.resources.userRoot
-              ? { credentialPaths: [options.resources.userRoot, getAgentDir()] }
-              : { credentialPaths: [getAgentDir()] }),
-          },
-        },
-        tier: options.tier ?? "default",
-        intentId,
-        identity: { branchId: "baseline", runId, attempt, workspaceId: workspaceParent, fencingToken: attempt },
-      },
-      runController.signal,
-    );
-  } catch (error) {
-    const at = now();
-    if ((error as Error).name === "AbortError" || options.signal?.aborted || runController.signal.aborted) {
-      record = withEvent(record, { type: "RUN_INTERRUPTED", at, detail: { runId } }, {
-        status: "interrupted",
-        stopReason: "user interruption during the baseline Run; result unconfirmed until recovery",
-        runs: { ...record.runs, [runId]: { ...record.runs[runId], status: "interrupted", finishedAt: at } },
-      });
+    // ── Baseline ──────────────────────────────────────────────────────────
+    let dispatched = await dispatchCandidateAttempt({
+      current: record,
+      runId: baselineRunId,
+      attempt: 1,
+      branchId: "baseline",
+      roleName: "evok-baseline-candidate",
+      instructions: baselineInstructions,
+      objective: baselineTask.objective,
+      expectedOutputs: draft.outputs,
+      reserve: reserveCost,
+      kind: "baseline",
+    });
+    record = dispatched.record;
+
+    // Record the baseline measurement (or its failure in loop mode) as the
+    // first authoritative observation and advance the state version.
+    if (dispatched.outcome.kind === "measured") {
+      const o = dispatched.outcome;
+      const baseline: BaselineResultRecord = {
+        runId: baselineRunId,
+        candidateId: o.candidateId,
+        snapshotDigest: o.snapshotDigest,
+        evaluator: o.evaluator,
+        evaluation: o.measurement,
+        evidenceRefs: o.evidenceRefs,
+        measuredAt: now(),
+      };
+      record = {
+        ...record,
+        baselineRunId,
+        baseline,
+        stateVersion: (record.stateVersion ?? 0) + 1,
+      };
+      if (o.measurement.ok) {
+        record = withEvent(record, { type: "BASELINE_COMPLETED", at: now(), detail: { runId: baselineRunId, score: o.measurement.score } });
+      }
+    }
+
+    // A failed baseline DISPATCH (no measurement at all) is still Negative
+    // Evidence the director can act on; record the run failure and advance the
+    // state so the next decision sees it. A measured rule failure is already
+    // in record.baseline and projected by buildDirectorInput.
+    if (dispatched.outcome.kind === "run-failed" && options.director) {
+      const entry: ExperimentTrailEntry = {
+        runId: baselineRunId, attempt: 1, action: "baseline", ok: false,
+        negativeEvidence: true, taskObjective: baselineTask.objective, evidenceRefs: [],
+        error: dispatched.outcome.error, at: now(),
+      };
+      record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
+    }
+
+    // ── T4 path: one baseline, then a truthful terminal status ────────────
+    if (!options.director) {
+      if (dispatched.outcome.kind === "run-failed") {
+        // T4: a baseline dispatch failure is terminal (RUN_FAILED is already
+        // recorded in the run ledger by the dispatcher).
+        record = { ...record, status: "run-failed", stopReason: `baseline Run failed before measurement: ${dispatched.outcome.error}` };
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw new Error(dispatched.outcome.error);
+      }
+      const m = dispatched.outcome.measurement;
+      if (!record.stopReason) {
+        const ok = m.ok;
+        record = { ...record, status: ok ? "baseline-complete" : "evaluator-rule-failure", stopReason: ok ? "baseline-complete" : "evaluator-rule-failure" };
+      }
       await persist(options.projectRoot, record);
       await releaseLock();
-      await disposeWorkspace();
-      const abortError = new Error("baseline Run interrupted by the user; no result was adopted");
-      abortError.name = "AbortError";
-      throw abortError;
+      return buildOutcome(record);
     }
-    const message = error instanceof Error ? error.message : String(error);
-    record = withEvent(record, { type: "RUN_FAILED", at, detail: { runId, error: message } }, {
-      status: "run-failed",
-      stopReason: `baseline Run failed before measurement: ${message}`,
-      reserved: 0,
-      runs: { ...record.runs, [runId]: { ...record.runs[runId], status: "failed", error: message, finishedAt: at } },
-    });
+
+    // ── #113 autonomous Research Loop ─────────────────────────────────────
+    let experimentCount = 0;
+
+    const experimentInstructions = (proposal: DirectorProposal, projected: { observations: ReturnType<typeof buildDirectorInput>["observations"] }): string => {
+      const evidence = projected.observations.map((obs) => {
+        const measured = obs.ok ? `measured score ${obs.score ?? "n/a"}` : `NOT ok${obs.ruleViolations?.length ? ` (${obs.ruleViolations.join("; ")})` : ""}${obs.error ? ` (${obs.error})` : ""}`;
+        return `- ${obs.runId} [${obs.action}] ${measured}; refs: ${obs.evidenceRefs.join(", ") || "(none; dispatch failed)"}`;
+      }).join("\n");
+      const outputs = proposal.task?.expectedOutputs?.length ? proposal.task!.expectedOutputs : draft.outputs;
+      return [
+        "You are executing the NEXT Experiment of one authorized evoK Mission, chosen by the Mission Director from measured evidence. Work only inside your isolated run workspace; it is the current working directory. This is a FRESH Run: prior sessions are not available, only the evidence summary below.",
+        `Mission objective: ${draft.objective}`,
+        `Director action: ${proposal.action}. Rationale: ${proposal.rationale}`,
+        `Task: ${proposal.task!.objective}`,
+        `Required output artifacts: ${outputs.join(", ")}`,
+        `Measured evidence so far (independent evaluator; durable refs live under this mission's runs dir):\n${evidence}`,
+        draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
+        "Produce the real artifact files. Do NOT write a score file, do NOT self-report a score, do NOT claim success: an independent evaluator measures the immutable snapshot after you finish. Failed attempts are evidence, not results to hide.",
+        `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
+        "Read-only project inspection is allowed; writes are confined to this workspace.",
+      ].join("\n");
+    };
+
+    // Reserve/check around one decision call, then release after metering.
+    const decisionReserve = reserveCost;
+    const reserveDecisionSlot = (r: MissionRecord): MissionRecord => {
+      const available = r.budget.remaining - r.reserved;
+      if (available + 1e-12 < decisionReserve) {
+        const stopped = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { available, requested: decisionReserve, stage: "before-director-decision" } }, {
+          status: "budget-exhausted",
+          stopReason: `budget exhausted before the next decision: ${available} ${r.budget.units} available; no further dispatch even if the model would continue`,
+        });
+        return stopped;
+      }
+      return { ...r, reserved: r.reserved + decisionReserve };
+    };
+
+    while (true) {
+      // After a candidate Run or priced decision crosses the budget the loop
+      // ends with a truthful persisted terminal status (no throw needed).
+      if (record.status === "budget-exhausted") break;
+      if (experimentCount >= maxExperiments) {
+        record = withEvent(record, { type: "ITERATION_LIMIT", at: now(), detail: { maxExperiments } }, {
+          status: "iteration-limit",
+          stopReason: `reached the authorized bound of ${maxExperiments} Experiment(s) after the baseline; stopped explicitly rather than waiting for another prompt`,
+        });
+        break;
+      }
+      if (aborted()) {
+        record = withEvent(record, { type: "RUN_INTERRUPTED", at: now() }, {
+          status: "interrupted",
+          stopReason: "user interruption during the Research Loop; result unconfirmed until recovery",
+        });
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw abortError("Research Loop");
+      }
+
+      const directorInput = buildDirectorInput(record, {
+        permissions: draft.constraints.permissions ?? [],
+        hardRules: draft.constraints.hardRules ?? [],
+        stopConditions: draft.stopConditions,
+      });
+
+      // Bounded decision with correction attempts. EVERY call is a fresh,
+      // priced Run; correction consumes the same authorized resources.
+      let proposal: DirectorProposal | undefined;
+      let blockedReason: string | undefined;
+      for (let decisionAttempt = 1; decisionAttempt <= MAX_DECISION_ATTEMPTS; decisionAttempt++) {
+        const stateVersion = record.stateVersion ?? 0;
+        const decisionId = `${draft.id}:director:${stateVersion}:${decisionAttempt}`;
+        const reserved = reserveDecisionSlot(record);
+        if (reserved.status === "budget-exhausted") {
+          record = reserved;
+          break;
+        }
+        record = reserved;
+        let call;
+        try {
+          call = await options.director.decide(directorInput, runController.signal, decisionAttempt);
+        } catch (error) {
+          if ((error as Error).name === "AbortError" || aborted()) {
+            record = withEvent(record, { type: "RUN_INTERRUPTED", at: now(), detail: { decisionId } }, {
+              status: "interrupted",
+              stopReason: "user interruption during a director decision; result unconfirmed until recovery",
+            });
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw abortError("director decision");
+          }
+          if (error instanceof DirectorDecisionFailedError) {
+            record = { ...record, reserved: Math.max(0, record.reserved - decisionReserve) };
+            record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId, reason: error.message } }, {
+              status: "decision-failed",
+              stopReason: `decision-model run failed: ${error.message}`,
+            });
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw error;
+          }
+          // A rejection surfaced by the adapter (non-JSON / invalid JSON) is
+          // still a REAL priced model call: meter its carried usage so the
+          // correction attempt counts against the budget (AC6), then retry.
+          if (error instanceof DirectorProposalRejectedError && error.usage) {
+            const metered = await meterDecision({
+              current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
+              decisionId, stateVersion, attempt: decisionAttempt,
+              usage: error.usage, sessionId: error.sessionId, model: error.model,
+            });
+            record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: error.sessionId }, metered.cost, false, error.message, undefined, error.usage);
+            if (metered.unknownCost) {
+              record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+                status: "budget-exhausted",
+                stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+              });
+              await persist(options.projectRoot, record);
+              await releaseLock();
+              throw new BudgetExhaustedError(record.stopReason!);
+            }
+            blockedReason = error.message;
+            await persist(options.projectRoot, record);
+            continue;
+          }
+          // A rejection without any carried usage (no model call happened).
+          const reason = error instanceof DirectorProposalRejectedError ? error.message : String((error as Error).message ?? error);
+          record = { ...record, reserved: Math.max(0, record.reserved - decisionReserve) };
+          record = await appendDecision(record, { decisionId, stateVersion, attempt: decisionAttempt }, 0, false, reason, undefined, ZERO_USAGE);
+          blockedReason = reason;
+          await persist(options.projectRoot, record);
+          continue;
+        }
+
+        // Validate AGAIN in the controller (never trust the adapter).
+        let accepted: DirectorProposal;
+        try {
+          accepted = validateDirectorProposal(call.proposal, directorInput);
+        } catch (error) {
+          const reason = (error as Error).message;
+          const metered = await meterDecision({
+            current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
+            decisionId, stateVersion, attempt: decisionAttempt,
+            usage: call.usage, sessionId: call.sessionId, model: call.model,
+          });
+          record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, false, reason, undefined, call.usage);
+          if (metered.unknownCost) {
+            record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+              status: "budget-exhausted",
+              stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+            });
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw new BudgetExhaustedError(record.stopReason!);
+          }
+          blockedReason = reason;
+          await persist(options.projectRoot, record);
+          continue;
+        }
+
+        const metered = await meterDecision({
+          current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
+          decisionId, stateVersion, attempt: decisionAttempt,
+          usage: call.usage, sessionId: call.sessionId, model: call.model,
+        });
+        record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, true, undefined, accepted, call.usage);
+        if (metered.unknownCost) {
+          record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+            status: "budget-exhausted",
+            stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+          });
+          await persist(options.projectRoot, record);
+          await releaseLock();
+          throw new BudgetExhaustedError(record.stopReason!);
+        }
+        // A priced decision may itself cross the budget: metered cost leaves
+        // consumed/remaining honest; enforce a hard stop here.
+        if (record.budget.consumed > record.budget.total + 1e-12) {
+          record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { consumed: record.budget.consumed, total: record.budget.total } }, {
+            status: "budget-exhausted",
+            stopReason: `declared budget ${record.budget.total} ${record.budget.units} exceeded after a decision call; no further dispatch`,
+          });
+        }
+        proposal = accepted;
+        await persist(options.projectRoot, record);
+        break;
+      }
+
+      if (record.status === "budget-exhausted") {
+        // Pre-decision budget stop: persist and surface a truthful error, never
+        // silently wait for another prompt.
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the next decision; no further dispatch");
+      }
+      if (!proposal) {
+        const reason = blockedReason ?? "the decision model returned no usable proposal";
+        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason } }, {
+          status: "director-blocked",
+          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts (${reason}); stopping for an explicit decision instead of guessing`,
+        });
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw new DirectorBlockedError(record.stopReason!, reason);
+      }
+
+      if (proposal.action === "stop") {
+        record = withEvent(record, { type: "DIRECTOR_STOPPED", at: now(), detail: { stateVersion: record.stateVersion, stopReason: proposal.stopReason, rationale: proposal.rationale } }, {
+          status: "director-stopped",
+          stopReason: proposal.stopReason || `model-proposed stop: ${proposal.rationale}`,
+        });
+        break;
+      }
+
+      // Apply the bounded proposal THROUGH the existing operations: generate a
+      // Task Contract entry, then dispatch a fresh Run and independently measure.
+      experimentCount += 1;
+      const expAttempt = experimentCount + 1; // baseline is attempt 1
+      const expRunId = `${draft.id}:exp:${expAttempt}`;
+      const task: NonNullable<MissionRecord["tasks"]>[number] = {
+        taskId: `task-exp-${expAttempt}`,
+        objective: proposal.task!.objective,
+        ...(proposal.task!.expectedOutputs ? { expectedOutputs: proposal.task!.expectedOutputs } : {}),
+        ...(proposal.task!.constraints ? { constraints: proposal.task!.constraints } : {}),
+        ...(proposal.basedOn ? { dependencies: proposal.basedOn } : {}),
+        source: "director",
+      };
+      record = withEvent(record, {
+        type: "PROPOSAL_APPLIED",
+        at: now(),
+        detail: { runId: expRunId, action: proposal.action, stateVersion: record.stateVersion, taskId: task.taskId, basedOn: proposal.basedOn ?? [] },
+      }, { tasks: [...(record.tasks ?? []), task] });
+
+      const outputs = proposal.task!.expectedOutputs?.length ? proposal.task!.expectedOutputs! : draft.outputs;
+      const expDispatched = await dispatchCandidateAttempt({
+        current: record,
+        runId: expRunId,
+        attempt: expAttempt,
+        branchId: `exp-${expAttempt}`,
+        roleName: `evok-experiment-${proposal.action}`,
+        instructions: experimentInstructions(proposal, directorInput),
+        objective: proposal.task!.objective,
+        expectedOutputs: outputs,
+        reserve: proposal.expectedCost ?? reserveCost,
+        kind: "experiment",
+      });
+      record = expDispatched.record;
+      const at = now();
+      const entry: ExperimentTrailEntry = expDispatched.outcome.kind === "measured"
+        ? {
+            runId: expRunId, attempt: expAttempt, action: proposal.action, ok: expDispatched.outcome.measurement.ok,
+            // A rule-failed measurement is Negative Evidence, not a drop.
+            ...(expDispatched.outcome.measurement.ok ? {} : { negativeEvidence: true }),
+            taskObjective: proposal.task!.objective,
+            candidateId: expDispatched.outcome.candidateId, snapshotDigest: expDispatched.outcome.snapshotDigest,
+            evaluator: expDispatched.outcome.evaluator, evaluation: expDispatched.outcome.measurement,
+            evidenceRefs: expDispatched.outcome.evidenceRefs,
+            ...(expDispatched.outcome.measurement.ruleViolations?.length ? { ruleViolations: [...expDispatched.outcome.measurement.ruleViolations] } : {}),
+            at,
+          }
+        : {
+            runId: expRunId, attempt: expAttempt, action: proposal.action, ok: false, negativeEvidence: true,
+            taskObjective: proposal.task!.objective, evidenceRefs: [],
+            error: expDispatched.outcome.error, at,
+          };
+      // New observation => authoritative state advances; the next decision
+      // must echo this new stateVersion (stale proposals are rejected).
+      record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
+      await persist(options.projectRoot, record);
+      if (record.status === "budget-exhausted") break;
+    }
+
     await persist(options.projectRoot, record);
     await releaseLock();
-    await disposeWorkspace();
-    throw error;
+    return buildOutcome(record);
   } finally {
     options.signal?.removeEventListener("abort", onExternalAbort);
   }
-  // Provider-reported cost wins when positive; otherwise the trusted-side
-  // pricing fallback turns REAL token usage into the budget unit. Both zero
-  // with no pricing callback means cost is unknown — it is never treated as a
-  // verified zero against the bound.
-  const modelCost = result.model && options.priceModelCost ? options.priceModelCost(result.model) : undefined;
-  let runCost = result.usage.cost.total;
-  if (!Number.isFinite(runCost) || runCost === 0) {
-    // Provider cost is absent/zero. Token-positive usage without a trusted
-    // meterable price is UNKNOWN cost, never a verified zero: the bound
-    // cannot be enforced honestly, so the Mission stops without further dispatch.
-    const priced = modelCost ? modelCost(result.usage.tokens) : undefined;
-    if (result.usage.tokens.total > 0 && (priced === undefined || !Number.isFinite(priced))) {
-      const at = now();
-      record = withEvent(record, { type: "BUDGET_EXHAUSTED", at, detail: { runId, reason: "observed model usage without meterable cost" } }, {
-        status: "budget-exhausted",
-        stopReason: "model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
-        runs: { ...record.runs, [runId]: { ...record.runs[runId], sessionId: result.sessionId, model: result.model, workspace: result.workspace, status: "failed", finishedAt: at } },
-      });
-      await persist(options.projectRoot, record);
-      await releaseLock();
-      await disposeWorkspace();
-      throw new BudgetExhaustedError(record.stopReason!);
-    }
-    if (priced !== undefined && Number.isFinite(priced)) runCost = priced;
-  }
-  const consumed = record.budget.consumed + runCost;
-  const runLine: UsageLine = {
-    at: now(),
-    sessionId: result.sessionId,
-    tokens: { ...result.usage.tokens },
-    cost: { ...result.usage.cost, total: runCost },
-  };
-  record = {
-    ...record,
-    reserved: Math.max(0, record.reserved - reserveCost),
-    budget: { ...record.budget, consumed, remaining: record.budget.total - consumed },
-    usage: { ...record.usage, runs: [...record.usage.runs, runLine] },
-    runs: {
-      ...record.runs,
-      [runId]: {
-        ...record.runs[runId],
-        status: "dispatched",
-        sessionId: result.sessionId,
-        model: result.model,
-        workspace: result.workspace,
-      },
-    },
-  };
-  record = withEvent(record, { type: "RUN_DISPATCHED", at: now(), detail: { runId, sessionId: result.sessionId, model: result.model?.id, cost: runCost } });
-
-  // Freeze the immutable Candidate snapshot from the (about-to-be-deleted)
-  // workspace BEFORE evaluating: the evaluator measures frozen bytes, never
-  // the live workspace or model text.
-  const snapshot = await commitSnapshot(options.projectRoot, draft.id, runId, result.workspace);
-  record = withEvent(record, {
-    type: "SNAPSHOT_COMMITTED",
-    at: now(),
-    detail: { runId, snapshotDigest: snapshot.digest, files: Object.keys(snapshot.files).length },
-  }, {
-    runs: { ...record.runs, [runId]: { ...record.runs[runId], snapshotRef: snapshot.ref } },
-  });
-
-  // Independent measurement. A model-supplied score never reaches here: the
-  // evaluator only sees snapshot files + the declared contract.
-  let measurement: BaselineMeasurement;
-  try {
-    measurement = await options.evaluator.evaluate(snapshot.files, {
-      missionId: draft.id,
-      runId,
-      snapshotDigest: snapshot.digest,
-      contract: record.contract,
-    });
-  } catch (error) {
-    const at = now();
-    record = withEvent(record, { type: "EVALUATOR_FAILED", at, detail: { runId, error: (error as Error).message, snapshotDigest: snapshot.digest } }, {
-      status: "evaluator-failed",
-      stopReason: `independent evaluator failed: ${(error as Error).message}`,
-      baselineRunId: runId,
-      runs: { ...record.runs, [runId]: { ...record.runs[runId], status: "failed", snapshotRef: snapshot.ref, finishedAt: at } },
-    });
-    await persist(options.projectRoot, record);
-    await releaseLock();
-    await disposeWorkspace();
-    throw new EvaluatorFailureError((error as Error).message);
-  }
-
-  const evidenceRefs = [
-    snapshot.ref,
-    join(RUNS_DIRNAME, runId, RESULT_FILENAME),
-  ];
-  const baseline: BaselineResultRecord = {
-    runId,
-    candidateId: `candidate:${snapshot.digest.slice(0, 16)}`,
-    snapshotDigest: snapshot.digest,
-    evaluator: { id: options.evaluator.id, version: options.evaluator.version },
-    evaluation: measurement,
-    evidenceRefs,
-    measuredAt: now(),
-  };
-  await atomicWrite(baselineResultPath(options.projectRoot, draft.id, runId), JSON.stringify(baseline, null, 2));
-
-  const budgetCrossed = consumed > record.budget.total + 1e-12;
-  let status: MissionStatus;
-  let stopReason: string;
-  let event: HistoryEvent;
-  if (budgetCrossed) {
-    status = "budget-exhausted";
-    stopReason = `declared budget ${record.budget.total} ${record.budget.units} exceeded by observed cost ${consumed}; no further dispatch`;
-    event = { type: "BUDGET_EXHAUSTED", at: now(), detail: { consumed, total: record.budget.total } };
-  } else if (measurement.ok) {
-    status = "baseline-complete";
-    stopReason = "baseline-complete";
-    event = { type: "BASELINE_COMPLETED", at: now(), detail: { runId, score: measurement.score } };
-  } else {
-    status = "evaluator-rule-failure";
-    // Machine-readable stop reason; rule detail is retained in history/baseline.
-    stopReason = "evaluator-rule-failure";
-    event = { type: "EVALUATION_MEASURED", at: now(), detail: { runId, ok: false, violations: measurement.ruleViolations ?? [] } };
-  }
-  if (measurement.ok || budgetCrossed) {
-    record = withEvent(record, { type: "EVALUATION_MEASURED", at: now(), detail: { runId, ok: measurement.ok, score: measurement.score } });
-  }
-  record = withEvent(record, event, {
-    status,
-    stopReason,
-    baselineRunId: runId,
-    baseline,
-    runs: { ...record.runs, [runId]: { ...record.runs[runId], status: "measured", resultRef: join(RUNS_DIRNAME, runId, RESULT_FILENAME), finishedAt: now() } },
-  });
-  await persist(options.projectRoot, record);
-  await releaseLock();
-  await disposeWorkspace();
-
-  return {
-    runId,
-    status,
-    stopReason,
-    model: result.model!,
-    usage: result.usage,
-    budget: record.budget,
-    evaluation: measurement,
-    record,
-  };
 }
 
-/** Build the minimal "display + reopen" projection over a durable record. */export function summarizeMission(record: MissionRecord): {
+/** Build the minimal "display + reopen" projection over a durable record. */
+export function summarizeMission(record: MissionRecord): {
   readonly id: string;
   readonly status: MissionStatus;
   readonly stopReason?: string;
@@ -934,7 +1475,11 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   readonly model?: string;
   readonly evaluation?: BaselineMeasurement;
   readonly evidenceRefs: readonly string[];
+  readonly experiments: number;
+  readonly decisions: number;
+  readonly negativeEvidence: number;
 } {
+  const experiments = record.experiments ?? [];
   return {
     id: record.id,
     status: record.status,
@@ -945,5 +1490,8 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
       evaluation: record.baseline.evaluation,
       evidenceRefs: record.baseline.evidenceRefs,
     } : { evidenceRefs: [] }),
+    experiments: experiments.length,
+    decisions: record.decisions?.length ?? 0,
+    negativeEvidence: experiments.filter((entry) => !entry.ok).length,
   };
 }

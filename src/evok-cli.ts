@@ -32,17 +32,20 @@ import {
   startAuthorizedMission,
   summarizeMission,
   BudgetExhaustedError,
+  DirectorBlockedError,
   EvaluatorFailureError,
   MissionControllerConflictError,
   MissionRecordCorruptionError,
   MissionStartRejectedError,
   type BaselineEvaluator,
   type StartMissionOutcome,
+  DEFAULT_MAX_EXPERIMENTS,
 } from "./mission-start";
+import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "./mission-director";
 import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "./local-file-evaluator";
 import { loadMissionDraft, missionsDir } from "./mission-draft";
 
-export const EVOK_VERSION = "0.1.0-t4";
+export const EVOK_VERSION = "0.1.0-t5";
 
 /** Exit codes distinguish the visible failure classes the spec calls out. */
 export const EVOK_EXIT = Object.freeze({
@@ -79,6 +82,10 @@ export interface ParsedEvokArgs {
   readonly status?: boolean;
   /** #112: cost reserved before the baseline Run is dispatched (model-USD). */
   readonly reserveCost?: number;
+  /** #113: run only the measured baseline (no autonomous continuation). */
+  readonly baselineOnly?: boolean;
+  /** #113: bound on Experiments after the baseline in one start. */
+  readonly maxExperiments?: number;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -105,6 +112,8 @@ options:
                     enforceable model-USD budget, and an evaluator contract.
   --reserve-cost <n>  cost (model-USD) reserved before baseline dispatch
                     (default: ${DEFAULT_RESERVE_COST}); an unboundable Run is refused
+  --baseline-only   run only the measured baseline; do not continue autonomously
+  --max-experiments <n>  bound Experiments after the baseline (default: ${DEFAULT_MAX_EXPERIMENTS})
   --status          print the durable Mission/draft state and stop
   -h, --help        show this help
 
@@ -122,6 +131,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let intake = false;
   let start = false;
   let status = false;
+  let baselineOnly = false;
+  let maxExperiments: number | undefined;
   let mission: string | undefined;
   let reserveCost = DEFAULT_RESERVE_COST;
   const positionals: string[] = [];
@@ -148,6 +159,13 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
       timeoutMs = parsed;
     } else if (arg === "--intake") {
       intake = true;
+    } else if (arg === "--baseline-only") {
+      baselineOnly = true;
+    } else if (arg === "--max-experiments") {
+      const raw = argv[++i];
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 0) return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, reserveCost, error: `--max-experiments must be a non-negative integer (got "${raw}")` };
+      maxExperiments = parsed;
     } else if (arg === "--start") {
       start = true;
     } else if (arg === "--status") {
@@ -172,6 +190,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     ...(intake ? { intake: true } : {}),
     ...(start ? { start: true } : {}),
     ...(status ? { status: true } : {}),
+    ...(baselineOnly ? { baselineOnly: true } : {}),
+    ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     reserveCost,
     ...(mission ? { mission } : {}),
   };
@@ -193,6 +213,12 @@ export interface EvokRunOptions {
   readonly startRunner?: typeof startAuthorizedMission;
   /** Cost reserved before the baseline Run (model-USD); defaults to parser value. */
   readonly reserveCost?: number;
+  /** #113: inject the decision boundary (tests); default is the Pi director. */
+  readonly director?: MissionDirector;
+  /** #113: disable autonomous continuation (baseline Run only). */
+  readonly baselineOnly?: boolean;
+  /** #113: bound Experiments after the baseline (defaults to parser value). */
+  readonly maxExperiments?: number;
   readonly stdout?: { write(chunk: string): boolean };
   readonly stderr?: { write(chunk: string): boolean };
   readonly stdin?: NodeJS.ReadStream;
@@ -453,6 +479,14 @@ async function runMissionStatus(
   stdout.write(`-- mission ${view.id} · status ${view.status}\n`);
   if (view.stopReason) stdout.write(`   stop reason: ${view.stopReason}\n`);
   stdout.write(`   budget: ${view.budget.consumed.toFixed(6)} / ${view.budget.total} ${view.budget.units} consumed · ${view.budget.remaining.toFixed(6)} remaining\n`);
+  if (view.experiments > 0) {
+    stdout.write(`   experiments after baseline: ${view.experiments} · negative evidence: ${view.negativeEvidence} · director decisions: ${view.decisions}\n`);
+  }
+  for (const experiment of record.experiments ?? []) {
+    const score = typeof experiment.evaluation?.score === "number" ? ` score=${experiment.evaluation!.score}` : "";
+    const why = experiment.error ? ` error=${experiment.error}` : experiment.ruleViolations?.length ? ` rules=${experiment.ruleViolations.join(";")}` : "";
+    stdout.write(`     - ${experiment.runId} [${experiment.action}] ok=${experiment.ok}${score}${why}\n`);
+  }
   if (record.baseline) {
     const run = record.runs[record.baselineRunId!];
     stdout.write(`   baseline run ${record.baselineRunId} · model ${view.model ?? run?.model?.id ?? "unknown"}\n`);
@@ -534,6 +568,19 @@ async function runMissionStart(
         return Number.isFinite(cost?.total) ? cost!.total : undefined;
       }
     : undefined;
+  // #113: unless --baseline-only (or an injected test director opts out), the
+  // real path continues autonomously via a fresh read-only Pi director per
+  // decision. Injected startRunner tests that want baseline behavior omit it.
+  const baselineOnly = options.baselineOnly ?? args.baselineOnly ?? false;
+  const maxExperiments = options.maxExperiments ?? args.maxExperiments;
+  let director: MissionDirector | undefined = options.director;
+  if (!options.startRunner && !baselineOnly && director === undefined) {
+    director = createPiMissionDirector({
+      resources,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources }),
+      tier: args.tier,
+    });
+  }
   try {
     const outcome: StartMissionOutcome = await (options.startRunner ?? startAuthorizedMission)({
       projectRoot,
@@ -546,15 +593,25 @@ async function runMissionStart(
       signal: bound.signal,
       reserveCost: options.reserveCost ?? args.reserveCost ?? DEFAULT_RESERVE_COST,
       ...(priceModelCost ? { priceModelCost } : {}),
+      ...(director ? { director } : {}),
+      ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     });
-    stdout.write(`\n-- mission ${missionId} baseline run ${outcome.runId}\n`);
-    stdout.write(`   model: ${outcome.model.id} · stop: ${outcome.stopReason}\n`);
+    stdout.write(`\n-- mission ${missionId} run ${outcome.runId} · stop: ${outcome.status}\n`);
+    if (outcome.stopReason && outcome.stopReason !== outcome.status) stdout.write(`   reason: ${outcome.stopReason}\n`);
+    stdout.write(`   model: ${outcome.model.id}\n`);
     stdout.write(`   measurement: ok=${outcome.evaluation.ok}${typeof outcome.evaluation.score === "number" ? ` score=${outcome.evaluation.score}` : ""}\n`);
     if (outcome.evaluation.ruleViolations?.length) stdout.write(`   rule violations: ${outcome.evaluation.ruleViolations.join("; ")}\n`);
-    stdout.write(`   evidence: .evok/missions/${missionId}/runs/${outcome.runId}/\n`);
+    if (outcome.experiments.length) {
+      stdout.write(`   experiments after baseline: ${outcome.experiments.length} (${outcome.experiments.filter((e) => !e.ok).length} negative evidence)\n`);
+      for (const experiment of outcome.experiments) {
+        stdout.write(`     - ${experiment.runId} [${experiment.action}] ok=${experiment.ok}${typeof experiment.evaluation?.score === "number" ? ` score=${experiment.evaluation!.score}` : ""}\n`);
+      }
+    }
+    stdout.write(`   evidence: .evok/missions/${missionId}/runs/\n`);
     stdout.write(`   budget: ${outcome.budget.consumed.toFixed(6)} / ${outcome.budget.total} ${outcome.budget.units} consumed · ${outcome.budget.remaining.toFixed(6)} remaining\n`);
+    const decisionCalls = outcome.record?.usage?.decisions?.length ?? 0;
     const meteredRun = outcome.record?.usage?.runs?.[outcome.record.usage.runs.length - 1]?.cost.total;
-    stdout.write(`   usage: tokens ${outcome.usage.tokens.total} · metered cost ${(meteredRun ?? outcome.usage.cost.total).toFixed(6)} (intake usage stays visible via --status)\n`);
+    stdout.write(`   usage: tokens ${outcome.usage.tokens.total} · metered cost ${(meteredRun ?? outcome.usage.cost.total).toFixed(6)} · ${decisionCalls} decision call(s) (intake usage stays visible via --status)\n`);
     return EVOK_EXIT.ok;
   } catch (error) {
     if (bound.signal.aborted || (error as Error).name === "AbortError") {
@@ -571,6 +628,14 @@ async function runMissionStart(
     }
     if (error instanceof BudgetExhaustedError) {
       stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof DirectorDecisionFailedError) {
+      stderr.write(`evok: the decision-model run failed: ${(error as Error).message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof DirectorBlockedError) {
+      stderr.write(`evok: autonomous continuation stopped (no invalid proposal was executed): ${error.message}\n`);
       return EVOK_EXIT.runtimeError;
     }
     if (error instanceof EvaluatorFailureError) {
