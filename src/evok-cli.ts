@@ -30,6 +30,7 @@ import {
   isExplicitStartRequest,
   loadMissionRecord,
   startAuthorizedMission,
+  resumeAuthorizedMission,
   summarizeMission,
   BudgetExhaustedError,
   DirectorBlockedError,
@@ -37,6 +38,10 @@ import {
   MissionControllerConflictError,
   MissionRecordCorruptionError,
   MissionStartRejectedError,
+  MissionResumeRejectedError,
+  ReconciliationBlockedError,
+  isExplicitResumeRequest,
+  listUnfinishedMissions,
   type BaselineEvaluator,
   type StartMissionOutcome,
   DEFAULT_MAX_EXPERIMENTS,
@@ -45,7 +50,7 @@ import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirec
 import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "./local-file-evaluator";
 import { loadMissionDraft, missionsDir } from "./mission-draft";
 
-export const EVOK_VERSION = "0.1.0-t5";
+export const EVOK_VERSION = "0.1.0-t6";
 
 /** Exit codes distinguish the visible failure classes the spec calls out. */
 export const EVOK_EXIT = Object.freeze({
@@ -86,6 +91,10 @@ export interface ParsedEvokArgs {
   readonly baselineOnly?: boolean;
   /** #113: bound on Experiments after the baseline in one start. */
   readonly maxExperiments?: number;
+  /** #114: explicitly resume an unfinished Mission without repeating intake. */
+  readonly resume?: boolean;
+  /** #114: list unfinished Missions (progress/stop/remaining budget) and stop. */
+  readonly missions?: boolean;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -115,6 +124,14 @@ options:
   --baseline-only   run only the measured baseline; do not continue autonomously
   --max-experiments <n>  bound Experiments after the baseline (default: ${DEFAULT_MAX_EXPERIMENTS})
   --status          print the durable Mission/draft state and stop
+  --missions        list unfinished Missions: progress, stop/blocker, remaining
+                    budget; resumable Missions are marked. Nothing is dispatched.
+  --resume          explicitly RESUME the named (or displayed) unfinished
+                    Mission from durable records and remaining budget. No intake
+                    is repeated, no spent budget is restored; unconfirmed
+                    pre-interrupt work is reconciled from evidence first. In a
+                    REPL an explicit "/resume" or "resume mission <id>" line
+                    does the same. Status questions and negations never resume.
   -h, --help        show this help
 
 ctrl+c cancels the in-flight request (second/interrupted idle press exits);
@@ -132,6 +149,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let start = false;
   let status = false;
   let baselineOnly = false;
+  let resume = false;
+  let missions = false;
   let maxExperiments: number | undefined;
   let mission: string | undefined;
   let reserveCost = DEFAULT_RESERVE_COST;
@@ -161,6 +180,10 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
       intake = true;
     } else if (arg === "--baseline-only") {
       baselineOnly = true;
+    } else if (arg === "--resume") {
+      resume = true;
+    } else if (arg === "--missions") {
+      missions = true;
     } else if (arg === "--max-experiments") {
       const raw = argv[++i];
       const parsed = Number(raw);
@@ -191,6 +214,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     ...(start ? { start: true } : {}),
     ...(status ? { status: true } : {}),
     ...(baselineOnly ? { baselineOnly: true } : {}),
+    ...(resume ? { resume: true } : {}),
+    ...(missions ? { missions: true } : {}),
     ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     reserveCost,
     ...(mission ? { mission } : {}),
@@ -215,6 +240,8 @@ export interface EvokRunOptions {
   readonly reserveCost?: number;
   /** #113: inject the decision boundary (tests); default is the Pi director. */
   readonly director?: MissionDirector;
+  /** #114: override the resume runner (tests); defaults to mission-start. */
+  readonly resumeRunner?: typeof resumeAuthorizedMission;
   /** #113: disable autonomous continuation (baseline Run only). */
   readonly baselineOnly?: boolean;
   /** #113: bound Experiments after the baseline (defaults to parser value). */
@@ -256,6 +283,12 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   } catch {
     stderr.write(`evok: research project directory not found: ${project}\n`);
     return EVOK_EXIT.usage;
+  }
+
+  // Reopening a project reads durable records only and must work with no model
+  // or auth configuration (AC2): handle --missions before resolver/preflight.
+  if (args.missions) {
+    return runMissionsList(stdout, stderr, projectReal);
   }
 
   let resolver: SessionModelResolver;
@@ -316,6 +349,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   }
 
   if (args.request !== undefined) {
+    if (args.resume || (!args.intake && !args.start && isExplicitResumeRequest(args.request).resume)) {
+      return runMissionResume(resolver, { ...args, mission: args.mission ?? isExplicitResumeRequest(args.request).missionId }, options, stdout, stderr, projectReal, resources);
+    }
     if (args.start || (!args.intake && isExplicitStartRequest(args.request))) {
       return runMissionStart(resolver, args, options, stdout, stderr, projectReal, resources);
     }
@@ -333,6 +369,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   if (!request) {
     stderr.write("evok: no request text provided\n");
     return EVOK_EXIT.usage;
+  }
+  if (args.resume || (!args.intake && !args.start && isExplicitResumeRequest(request).resume)) {
+    return runMissionResume(resolver, { ...args, request, mission: args.mission ?? isExplicitResumeRequest(request).missionId }, options, stdout, stderr, projectReal, resources);
   }
   if (args.start || (!args.intake && isExplicitStartRequest(request))) {
     return runMissionStart(resolver, { ...args, request }, options, stdout, stderr, projectReal, resources);
@@ -657,6 +696,183 @@ async function runMissionStart(
   }
 }
 
+/** #114: reopen a project — list unfinished Missions and unstarted drafts. */
+async function runMissionsList(stdout: Out, stderr: Out, projectRoot: string): Promise<number> {
+  const view = await listUnfinishedMissions(projectRoot).catch((error: unknown) => {
+    stderr.write(`evok: ${(error as Error).message}; the damaged record was not overwritten\n`);
+    return { failed: true as const };
+  });
+  if ("failed" in view) return EVOK_EXIT.runtimeError;
+  if (view.missions.length === 0 && view.drafts.length === 0) {
+    stdout.write(`-- no Missions in this project (run --intake to draft one)\n`);
+    return EVOK_EXIT.ok;
+  }
+  if (view.missions.length > 0) {
+    stdout.write(`-- Missions (newest activity first)\n`);
+    for (const m of view.missions) {
+      const tag = m.resumable ? "resumable" : "stopped (not resumable)";
+      stdout.write(`   ${m.id} · ${m.status} · ${tag}\n`);
+      stdout.write(`     progress: baseline ${m.hasBaseline ? "measured" : "not measured"} · ${m.experiments} experiment(s) · ${m.negativeEvidence} negative evidence\n`);
+      stdout.write(`     budget: ${m.consumedBudget.toFixed(6)} / ${m.totalBudget} ${m.units} consumed · ${m.remainingBudget.toFixed(6)} remaining\n`);
+      if (m.stopReason) stdout.write(`     stop/blocker: ${m.stopReason}\n`);
+    }
+  }
+  if (view.drafts.length > 0) {
+    stdout.write(`-- unstarted drafts (intake resumes the conversation, not a Run): ${view.drafts.map((d) => d.id).join(", ")}\n`);
+  }
+  stdout.write(`-- resume explicitly with: evok /resume --mission <id> (status questions never resume)\n`);
+  return EVOK_EXIT.ok;
+}
+
+/**
+ * #114: the validated RESUME action. Natural-language "resume mission <id>"
+ * and /resume share this path; it reconstructs from durable records, reuses
+ * confirmed results, reconciles unconfirmed work, and continues autonomously
+ * with remaining budget — no intake repeat, no budget restore.
+ */
+async function runMissionResume(
+  resolver: SessionModelResolver,
+  args: ParsedEvokArgs,
+  options: EvokRunOptions,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+  resources: EvokResources,
+): Promise<number> {
+  let evaluator: BaselineEvaluator | undefined = options.evaluator;
+  if (!evaluator) {
+    const contract = await loadEvaluationContract(projectRoot).catch((error: unknown) => {
+      if (error instanceof EvaluationContractError) {
+        stderr.write(`evok: ${error.message}\n`);
+        return undefined;
+      }
+      throw error;
+    });
+    if (!contract) return EVOK_EXIT.configError;
+    evaluator = createFileMetricEvaluator(contract);
+  }
+  let missionId: string | undefined = args.mission;
+  if (!missionId) {
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(missionsDir(projectRoot), { withFileTypes: true }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    const ids = entries.filter((entry) => entry.isDirectory()).map((entry) => String(entry.name));
+    if (ids.length === 0) {
+      stderr.write("evok: no Mission in this project to resume; run --intake then /start first\n");
+      return EVOK_EXIT.usage;
+    }
+    if (ids.length > 1) {
+      stderr.write(`evok: multiple saved Missions (${ids.join(", ")}); name one with --mission <id>\n`);
+      return EVOK_EXIT.usage;
+    }
+    missionId = ids[0]!;
+  }
+
+  const bound = boundSignal(args, options.signal);
+  const resolved = options.resumeRunner ? undefined : await resolver.resolve(args.tier).catch(() => undefined);
+  const priceModelCost = resolved
+    ? () => (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
+        const rates = (resolved.modelId as unknown as { cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).cost;
+        if (!rates || typeof rates.input !== "number") return undefined;
+        const cost = calculateCost(resolved.modelId, {
+          input: tokens.input,
+          output: tokens.output,
+          cacheRead: tokens.cacheRead,
+          cacheWrite: tokens.cacheWrite,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        } as Parameters<typeof calculateCost>[1]);
+        return Number.isFinite(cost?.total) ? cost!.total : undefined;
+      }
+    : undefined;
+  // A resume ALWAYS needs the autonomous director; --baseline-only is a start
+  // option and does not apply. The Pi-backed director is the real default.
+  let director: MissionDirector | undefined = options.director;
+  if (!options.resumeRunner && director === undefined) {
+    director = createPiMissionDirector({
+      resources,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources }),
+      tier: args.tier,
+    });
+  }
+  try {
+    const outcome = await (options.resumeRunner ?? resumeAuthorizedMission)({
+      projectRoot,
+      missionId,
+      authorization: { requested: true, token: args.request ?? "/resume", missionSelector: "displayed" },
+      resolver,
+      resources,
+      evaluator,
+      tier: args.tier,
+      signal: bound.signal,
+      reserveCost: options.reserveCost ?? args.reserveCost ?? DEFAULT_RESERVE_COST,
+      ...(priceModelCost ? { priceModelCost } : {}),
+      director,
+      ...(typeof options.maxExperiments === "number" ? { maxExperiments: options.maxExperiments }
+        : typeof args.maxExperiments === "number" ? { maxExperiments: args.maxExperiments } : {}),
+    });
+    const reconciliation = (outcome as unknown as { reconciliation?: { adoptedRunIds: readonly string[]; remeasuredRunIds: readonly string[]; abandonedIntents: readonly { runId: string }[] } }).reconciliation;
+    if (reconciliation) {
+      stdout.write(`\n-- mission ${missionId} resumed from durable records\n`);
+      stdout.write(`   adopted confirmed runs (no duplicate work): ${reconciliation.adoptedRunIds.join(", ") || "(none)"}\n`);
+      stdout.write(`   independently re-measured from durable snapshots: ${reconciliation.remeasuredRunIds.join(", ") || "(none)"}\n`);
+      stdout.write(`   unconfirmed intents abandoned as Negative Evidence: ${reconciliation.abandonedIntents.map((a) => a.runId).join(", ") || "(none)"}\n`);
+    }
+    stdout.write(`-- run ${outcome.runId} · stop: ${outcome.status}\n`);
+    if (outcome.stopReason && outcome.stopReason !== outcome.status) stdout.write(`   reason: ${outcome.stopReason}\n`);
+    stdout.write(`   model: ${outcome.model.id}\n`);
+    stdout.write(`   measurement: ok=${outcome.evaluation.ok}${typeof outcome.evaluation.score === "number" ? ` score=${outcome.evaluation.score}` : ""}\n`);
+    if (outcome.experiments.length) {
+      stdout.write(`   experiments on record: ${outcome.experiments.length} (${outcome.experiments.filter((e) => !e.ok).length} negative evidence)\n`);
+    }
+    stdout.write(`   evidence: .evok/missions/${missionId}/runs/\n`);
+    stdout.write(`   budget: ${outcome.budget.consumed.toFixed(6)} / ${outcome.budget.total} ${outcome.budget.units} consumed · ${outcome.budget.remaining.toFixed(6)} remaining\n`);
+    return EVOK_EXIT.ok;
+  } catch (error) {
+    if (bound.signal.aborted || (error as Error).name === "AbortError") {
+      stderr.write("\nevok: resume interrupted; confirmed results are retained and unconfirmed work is marked for the next reconciliation\n");
+      return EVOK_EXIT.cancelled;
+    }
+    if (error instanceof MissionResumeRejectedError || error instanceof MissionStartRejectedError) {
+      stderr.write(`evok: resume refused: ${(error as Error).message}\n`);
+      return EVOK_EXIT.usage;
+    }
+    if (error instanceof MissionControllerConflictError) {
+      stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof ReconciliationBlockedError || error instanceof MissionRecordCorruptionError) {
+      stderr.write(`evok: recovery blocked on damaged state; nothing was replayed or overwritten: ${(error as Error).message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof BudgetExhaustedError) {
+      stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof DirectorBlockedError) {
+      stderr.write(`evok: autonomous continuation stopped (no invalid proposal was executed): ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof DirectorDecisionFailedError) {
+      stderr.write(`evok: the decision-model run failed: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof EvaluatorFailureError) {
+      stderr.write(`evok: independent evaluator failed; no score was produced: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if ((error as Error).name === "MissingAuthenticationError") {
+      stderr.write(`\nevok: ${(error as Error).message}\n`);
+      return EVOK_EXIT.authError;
+    }
+    stderr.write(`\nevok: resume failed: ${(error as Error).message}\n`);
+    return EVOK_EXIT.runtimeError;
+  } finally {
+    bound.cleanup();
+  }
+}
+
 async function runOne(
   createRuntime: () => PiAgentRuntime,
   args: ParsedEvokArgs,
@@ -770,6 +986,15 @@ async function runRepl(
     const text = line.trim();
     if (!text) {
       stdout.write("> ");
+      continue;
+    }
+    if (isExplicitResumeRequest(text).resume) {
+      const resumeArgs: ParsedEvokArgs = { ...args, request: text, ...(isExplicitResumeRequest(text).missionId ? { mission: isExplicitResumeRequest(text).missionId } : {}) };
+      busy = true;
+      lastCode = await runMissionResume(resolver, resumeArgs, options, stdout, stderr, projectRoot, resources);
+      busy = false;
+      if (closed) break;
+      stdout.write("\n> ");
       continue;
     }
     if (isExplicitStartRequest(text)) {

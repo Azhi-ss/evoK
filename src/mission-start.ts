@@ -71,6 +71,14 @@ import {
   type DirectorProposal,
   type MissionDirector,
 } from "./mission-director";
+import {
+  RESUMABLE_STATUSES,
+  reconcileInterruptedMission,
+  staleControllerLock,
+  MissionResumeRejectedError,
+  isExplicitResumeRequest,
+  type ReconciliationReport,
+} from "./mission-resume";
 
 export const MISSION_SCHEMA_VERSION = 1 as const;
 const MISSION_FILENAME = "mission.json";
@@ -340,7 +348,12 @@ export type HistoryEventType =
   | "PROPOSAL_REJECTED"
   | "PROPOSAL_APPLIED"
   | "DIRECTOR_STOPPED"
-  | "ITERATION_LIMIT";
+  | "ITERATION_LIMIT"
+  // #114 recovery
+  | "MISSION_RESUMED"
+  | "RECOVERY_COMPLETED"
+  | "RECOVERY_REMEASURED"
+  | "RECOVERY_ABANDONED_INTENT";
 
 export interface HistoryEvent {
   readonly type: HistoryEventType;
@@ -363,6 +376,11 @@ export interface MissionRecord {
   /** #113: experiment/attempt trail and priced decision records. */
   readonly stateVersion?: number;
   readonly tasks?: readonly MissionTaskRecord[];
+  /** #114: execution policy captured at acceptance and preserved across recovery. */
+  readonly permissions?: readonly string[];
+  readonly stopConditions?: readonly string[];
+  /** The model tier that served this Mission; a resume must not silently reroute. */
+  readonly modelTier?: string;
   readonly decisions?: readonly DecisionRecord[];
   readonly experiments?: readonly ExperimentTrailEntry[];
   readonly history: readonly HistoryEvent[];
@@ -407,6 +425,30 @@ export interface StartMissionOptions {
   readonly director?: MissionDirector;
   /** Maximum Experiments AFTER the baseline in one authorized start (default 3). */
   readonly maxExperiments?: number;
+  /**
+   * Observability seam (#114): invoked after EACH durable event persistence
+   * with the event and the post-persist record. Read-only — it must not mutate
+   * state. It exists so separate-process recovery tests can interrupt at
+   * meaningful, deterministic boundaries instead of racing fixed timers; it
+   * is not an execution or authorization path.
+   */
+  readonly onPersistedEvent?: (event: HistoryEvent, record: MissionRecord) => void | Promise<void>;
+}
+
+/**
+ * #114: explicit, user-sourced authorization to RESUME an existing Mission.
+ * Distinct from a start: it names the durable Mission, never repeats intake,
+ * and never restores spent budget. `source: "model"` is rejected.
+ */
+export interface ResumeAuthorization {
+  readonly requested: boolean;
+  readonly token: string;
+  readonly missionSelector: string;
+  readonly source?: "user" | "model";
+}
+
+export interface ResumeMissionOptions extends Omit<StartMissionOptions, "authorization"> {
+  readonly authorization: ResumeAuthorization;
 }
 
 export interface StartMissionOutcome {
@@ -462,6 +504,11 @@ async function atomicWrite(file: string, data: string): Promise<void> {
   await rename(tmp, file);
   const dir = await open(join(file, ".."), "r");
   try { await dir.sync(); } finally { await dir.close(); }
+}
+
+/** Crash-safe JSON write; the single durable-write primitive for recovery too. */
+export async function atomicWriteJson(file: string, value: unknown): Promise<void> {
+  await atomicWrite(file, JSON.stringify(value, null, 2));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -599,6 +646,24 @@ async function persist(projectRoot: string, record: MissionRecord): Promise<void
   await atomicWrite(missionRecordPath(projectRoot, record.id), JSON.stringify(record, null, 2));
 }
 
+/**
+ * Build a persist wrapper that also fires the #114 observability seam once per
+ * newly appended history event (identity-tracked), AFTER the durable write.
+ * Shadowing the module-level `persist` with this wrapper needs no call-site
+ * changes in the start/controller scopes.
+ */
+function makePersistNotifier(options: StartMissionOptions): (projectRoot: string, record: MissionRecord) => Promise<void> {
+  let lastNotified: HistoryEvent | undefined;
+  return async (projectRoot, record) => {
+    await persist(projectRoot, record);
+    const event = record.history[record.history.length - 1];
+    if (event && event !== lastNotified) {
+      lastNotified = event;
+      await options.onPersistedEvent?.(event, record);
+    }
+  };
+}
+
 function withEvent(record: MissionRecord, event: HistoryEvent, patch: Partial<MissionRecord> = {}): MissionRecord {
   return {
     ...record,
@@ -682,7 +747,6 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   }
   const draft = await loadMissionDraft(options.projectRoot, options.missionId);
   assertStartable(draft, options);
-
   const dir = missionDir(options.projectRoot, draft.id);
   await mkdir(dir, { recursive: true });
 
@@ -694,6 +758,8 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   if (!Number.isInteger(maxExperiments) || maxExperiments < 0) {
     throw new MissionStartRejectedError("maxExperiments must be a non-negative integer");
   }
+  // #114 observability seam (shadows the module writer; no call-site churn).
+  const persist = makePersistNotifier(options);
 
   // Ownership fencing BEFORE any accepted record can be reused.
   let previous: MissionRecord | undefined;
@@ -765,6 +831,11 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     // projection of it and proposes bounded changes validated by this module.
     stateVersion: 0,
     tasks: draft.plan.tasks.map((task) => ({ ...task, source: "intake" as const })) as MissionTaskRecord[],
+    // #114: the accepted execution policy is authoritative; a resume enforces
+    // these values rather than re-reading the mutable draft.
+    permissions: draft.constraints.permissions ?? [],
+    stopConditions: draft.stopConditions,
+    modelTier: options.tier ?? "default",
     decisions: [],
     experiments: [],
     createdAt: now(),
@@ -792,7 +863,58 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   });
   await persist(options.projectRoot, record);
 
-  const allowBash = (draft.constraints.permissions ?? []).includes("local-shell-in-workspace");
+  const baselineTask = draft.plan.tasks[0]!;
+  const baselineInstructions = [
+    "You are executing the BASELINE Task of one authorized evoK Mission. Work only inside your isolated run workspace; it is the current working directory.",
+    `Mission objective: ${draft.objective}`,
+    `Baseline task (${baselineTask.taskId}): ${baselineTask.objective}`,
+    `Required output artifacts: ${draft.outputs.join(", ")}`,
+    baselineTask.expectedOutputs?.length ? `Expected outputs: ${baselineTask.expectedOutputs.join("; ")}` : "",
+    draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
+    "Produce the real artifact files in the workspace. Do NOT write a score file, do NOT self-report a score, and do NOT claim verification: an independent evaluator measures the immutable snapshot after you finish. Text claims are never evidence.",
+    `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
+    "Read-only project inspection is allowed; writes are confined to this workspace. Stop when the baseline artifact is materialized.",
+  ].filter((line) => line !== "").join("\n");
+
+  return runMissionController({
+    options, draft, record, reserveCost, releaseLock,
+    mode: { kind: "start", baselineRunId, baselineTask, baselineInstructions },
+  });
+}
+
+
+/**
+ * Shared autonomous-loop controller for BOTH a fresh start (#112/#113) and
+ * a recovered resume (#114). It owns the single abort owner, the bounded
+ * candidate dispatcher, decision metering, the validated Director loop, and
+ * all persistence/locking after the caller has established authority and
+ * the initial durable `record`. A resume supplies the reconciled record and
+ * enters the SAME decision/Experiment loop without a baseline dispatch or
+ * any intake; consumed budget and confirmed results are already on record.
+ */
+export interface ControllerInit {
+  readonly options: StartMissionOptions;
+  readonly draft: MissionDraft;
+  readonly record: MissionRecord;
+  readonly reserveCost: number;
+  readonly releaseLock: () => Promise<void>;
+  readonly mode:
+    | { readonly kind: "start"; readonly baselineRunId: string; readonly baselineTask: DraftPlanTask; readonly baselineInstructions: string }
+    | { readonly kind: "resume" };
+}
+
+export async function runMissionController(init: ControllerInit): Promise<StartMissionOutcome> {
+  const { options, draft, reserveCost, releaseLock } = init;
+  let record: MissionRecord = init.record;
+  // #114 observability seam (shadows the module writer; no call-site churn).
+  const persist = makePersistNotifier(options);
+  // Mode-derived baseline context: a fresh start names its baseline Run; a
+  // resume enters with the reconciled record and no baseline to dispatch.
+  const now = () => new Date().toISOString();
+  const maxExperiments = options.maxExperiments ?? DEFAULT_MAX_EXPERIMENTS;
+  const startMode = init.mode.kind === "start" ? init.mode : undefined;
+  const baselineRunId = startMode?.baselineRunId ?? record.baselineRunId ?? `${draft.id}:baseline:1`;
+  const allowBash = (record.permissions ?? draft.constraints.permissions ?? []).includes("local-shell-in-workspace");
   const roleTools = [...READ_ONLY_TOOLS, "write", "edit", ...(allowBash ? ["bash"] : [])];
 
   // A single abort owner: an external user signal aborts every dispatch in
@@ -884,7 +1006,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
         {
           task: {
             objective: args.objective,
-            constraints: { missionId: draft.id, runId: args.runId, hardRules: draft.constraints.hardRules ?? [] },
+            constraints: { missionId: draft.id, runId: args.runId, hardRules: record.contract.hardRules },
             expectedOutputs: args.expectedOutputs,
           },
           role: {
@@ -1090,18 +1212,10 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     return withEvent(r, event, { decisions: [...(r.decisions ?? []), decision] });
   };
 
-  const baselineTask = draft.plan.tasks[0]!;
-  const baselineInstructions = [
-    "You are executing the BASELINE Task of one authorized evoK Mission. Work only inside your isolated run workspace; it is the current working directory.",
-    `Mission objective: ${draft.objective}`,
-    `Baseline task (${baselineTask.taskId}): ${baselineTask.objective}`,
-    `Required output artifacts: ${draft.outputs.join(", ")}`,
-    baselineTask.expectedOutputs?.length ? `Expected outputs: ${baselineTask.expectedOutputs.join("; ")}` : "",
-    draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
-    "Produce the real artifact files in the workspace. Do NOT write a score file, do NOT self-report a score, and do NOT claim verification: an independent evaluator measures the immutable snapshot after you finish. Text claims are never evidence.",
-    `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
-    "Read-only project inspection is allowed; writes are confined to this workspace. Stop when the baseline artifact is materialized.",
-  ].filter((line) => line !== "").join("\n");
+  // start mode carries the entry-built baseline context; resume never
+  // dispatches a baseline, so these are the start mode's values or empty.
+  const baselineTask = startMode?.baselineTask ?? draft.plan.tasks[0]!;
+  const baselineInstructions = startMode?.baselineInstructions ?? "";
 
   const buildOutcome = (r: MissionRecord): StartMissionOutcome => ({
     runId: lastRunId,
@@ -1116,80 +1230,90 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   });
 
   try {
-    // ── Baseline ──────────────────────────────────────────────────────────
-    let dispatched = await dispatchCandidateAttempt({
-      current: record,
-      runId: baselineRunId,
-      attempt: 1,
-      branchId: "baseline",
-      roleName: "evok-baseline-candidate",
-      instructions: baselineInstructions,
-      objective: baselineTask.objective,
-      expectedOutputs: draft.outputs,
-      reserve: reserveCost,
-      kind: "baseline",
-    });
-    record = dispatched.record;
-
-    // Record the baseline measurement (or its failure in loop mode) as the
-    // first authoritative observation and advance the state version.
-    if (dispatched.outcome.kind === "measured") {
-      const o = dispatched.outcome;
-      const baseline: BaselineResultRecord = {
+    // ── Baseline (fresh start only; a resume reuses reconciled evidence) ──
+    let dispatched: Awaited<ReturnType<typeof dispatchCandidateAttempt>> | undefined;
+    if (startMode) {
+      dispatched = await dispatchCandidateAttempt({
+        current: record,
         runId: baselineRunId,
-        candidateId: o.candidateId,
-        snapshotDigest: o.snapshotDigest,
-        evaluator: o.evaluator,
-        evaluation: o.measurement,
-        evidenceRefs: o.evidenceRefs,
-        measuredAt: now(),
-      };
-      record = {
-        ...record,
-        baselineRunId,
-        baseline,
-        stateVersion: (record.stateVersion ?? 0) + 1,
-      };
-      if (o.measurement.ok) {
-        record = withEvent(record, { type: "BASELINE_COMPLETED", at: now(), detail: { runId: baselineRunId, score: o.measurement.score } });
+        attempt: 1,
+        branchId: "baseline",
+        roleName: "evok-baseline-candidate",
+        instructions: baselineInstructions,
+        objective: baselineTask.objective,
+        expectedOutputs: draft.outputs,
+        reserve: reserveCost,
+        kind: "baseline",
+      });
+      record = dispatched.record;
+
+      // Record the baseline measurement (or its failure in loop mode) as the
+      // first authoritative observation and advance the state version.
+      if (dispatched.outcome.kind === "measured") {
+        const o = dispatched.outcome;
+        const baseline: BaselineResultRecord = {
+          runId: baselineRunId,
+          candidateId: o.candidateId,
+          snapshotDigest: o.snapshotDigest,
+          evaluator: o.evaluator,
+          evaluation: o.measurement,
+          evidenceRefs: o.evidenceRefs,
+          measuredAt: now(),
+        };
+        record = {
+          ...record,
+          baselineRunId,
+          baseline,
+          stateVersion: (record.stateVersion ?? 0) + 1,
+        };
+        if (o.measurement.ok) {
+          record = withEvent(record, { type: "BASELINE_COMPLETED", at: now(), detail: { runId: baselineRunId, score: o.measurement.score } });
+        }
       }
-    }
 
-    // A failed baseline DISPATCH (no measurement at all) is still Negative
-    // Evidence the director can act on; record the run failure and advance the
-    // state so the next decision sees it. A measured rule failure is already
-    // in record.baseline and projected by buildDirectorInput.
-    if (dispatched.outcome.kind === "run-failed" && options.director) {
-      const entry: ExperimentTrailEntry = {
-        runId: baselineRunId, attempt: 1, action: "baseline", ok: false,
-        negativeEvidence: true, taskObjective: baselineTask.objective, evidenceRefs: [],
-        error: dispatched.outcome.error, at: now(),
-      };
-      record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
-    }
+      // A failed baseline DISPATCH (no measurement at all) is still Negative
+      // Evidence the director can act on; record the run failure and advance
+      // the state so the next decision sees it. A measured rule failure is
+      // already in record.baseline and projected by buildDirectorInput.
+      if (dispatched.outcome.kind === "run-failed" && options.director) {
+        const entry: ExperimentTrailEntry = {
+          runId: baselineRunId, attempt: 1, action: "baseline", ok: false,
+          negativeEvidence: true, taskObjective: baselineTask.objective, evidenceRefs: [],
+          error: dispatched.outcome.error, at: now(),
+        };
+        record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
+      }
 
-    // ── T4 path: one baseline, then a truthful terminal status ────────────
-    if (!options.director) {
-      if (dispatched.outcome.kind === "run-failed") {
-        // T4: a baseline dispatch failure is terminal (RUN_FAILED is already
-        // recorded in the run ledger by the dispatcher).
-        record = { ...record, status: "run-failed", stopReason: `baseline Run failed before measurement: ${dispatched.outcome.error}` };
+      // ── T4 path: one baseline, then a truthful terminal status ──────────
+      if (!options.director) {
+        if (dispatched.outcome.kind === "run-failed") {
+          // T4: a baseline dispatch failure is terminal (RUN_FAILED is already
+          // recorded in the run ledger by the dispatcher).
+          record = { ...record, status: "run-failed", stopReason: `baseline Run failed before measurement: ${dispatched.outcome.error}` };
+          await persist(options.projectRoot, record);
+          await releaseLock();
+          throw new Error(dispatched.outcome.error);
+        }
+        const m = dispatched.outcome.measurement;
+        if (!record.stopReason) {
+          const ok = m.ok;
+          record = { ...record, status: ok ? "baseline-complete" : "evaluator-rule-failure", stopReason: ok ? "baseline-complete" : "evaluator-rule-failure" };
+        }
         await persist(options.projectRoot, record);
         await releaseLock();
-        throw new Error(dispatched.outcome.error);
+        return buildOutcome(record);
       }
-      const m = dispatched.outcome.measurement;
-      if (!record.stopReason) {
-        const ok = m.ok;
-        record = { ...record, status: ok ? "baseline-complete" : "evaluator-rule-failure", stopReason: ok ? "baseline-complete" : "evaluator-rule-failure" };
-      }
-      await persist(options.projectRoot, record);
-      await releaseLock();
-      return buildOutcome(record);
+    } else if (!options.director) {
+      // Resuming without a decision boundary would have nothing new to do.
+      throw new MissionStartRejectedError("resuming a Mission without a Mission Director is not supported; the baseline path is not resumable work");
     }
 
     // ── #113 autonomous Research Loop ─────────────────────────────────────
-    let experimentCount = 0;
+    // Candidate Run attempts are numbered 1 (baseline), 2, 3, … across the
+    // WHOLE Mission. A resume keeps climbing from the reconciled trail so a
+    // retried/abandoned attempt id is never reused or silently replayed.
+    let nextAttemptNumber = Object.values(record.runs).reduce((m, r) => Math.max(m, r.attempt), 1) + 1;
+    let experimentCount = 0; // Experiments dispatched in THIS controller run
 
     const experimentInstructions = (proposal: DirectorProposal, projected: { observations: ReturnType<typeof buildDirectorInput>["observations"] }): string => {
       const evidence = projected.observations.map((obs) => {
@@ -1206,7 +1330,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
         `Measured evidence so far (independent evaluator; durable refs live under this mission's runs dir):\n${evidence}`,
         draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
         "Produce the real artifact files. Do NOT write a score file, do NOT self-report a score, do NOT claim success: an independent evaluator measures the immutable snapshot after you finish. Failed attempts are evidence, not results to hide.",
-        `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
+        `Hard rules: ${[...record.contract.hardRules, "no network", "no external submission"].join("; ")}`,
         "Read-only project inspection is allowed; writes are confined to this workspace.",
       ].join("\n");
     };
@@ -1247,9 +1371,9 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
       }
 
       const directorInput = buildDirectorInput(record, {
-        permissions: draft.constraints.permissions ?? [],
-        hardRules: draft.constraints.hardRules ?? [],
-        stopConditions: draft.stopConditions,
+        permissions: record.permissions ?? draft.constraints.permissions ?? [],
+        hardRules: record.contract.hardRules,
+        stopConditions: record.stopConditions ?? draft.stopConditions,
       });
 
       // Bounded decision with correction attempts. EVERY call is a fresh,
@@ -1403,7 +1527,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
       // Apply the bounded proposal THROUGH the existing operations: generate a
       // Task Contract entry, then dispatch a fresh Run and independently measure.
       experimentCount += 1;
-      const expAttempt = experimentCount + 1; // baseline is attempt 1
+      const expAttempt = nextAttemptNumber++; // baseline is attempt 1; resume climbs past every prior attempt
       const expRunId = `${draft.id}:exp:${expAttempt}`;
       const task: NonNullable<MissionRecord["tasks"]>[number] = {
         taskId: `task-exp-${expAttempt}`,
@@ -1466,6 +1590,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   }
 }
 
+
 /** Build the minimal "display + reopen" projection over a durable record. */
 export function summarizeMission(record: MissionRecord): {
   readonly id: string;
@@ -1494,4 +1619,169 @@ export function summarizeMission(record: MissionRecord): {
     decisions: record.decisions?.length ?? 0,
     negativeEvidence: experiments.filter((entry) => !entry.ok).length,
   };
+}
+
+// ── #114 explicit resume into the SAME autonomous controller ────────────────
+
+export {
+  ReconciliationBlockedError,
+  MissionResumeRejectedError,
+  isExplicitResumeRequest,
+  listUnfinishedMissions,
+  staleControllerLock,
+  RESUMABLE_STATUSES,
+} from "./mission-resume";
+export type { ReconciliationReport, UnfinishedMissionsView, UnfinishedMissionView } from "./mission-resume";
+
+/**
+ * Resume an interrupted/stopped Mission from durable records (#114). The flow
+ * is authority → fencing → reconcile → persist → continue through the SAME
+ * shared controller as a start:
+ *
+ *   explicit user resume (model cannot authorize) → reject stale/double claims
+ *   → reclaim only a STALE lock (a live controller stays fenced)
+ *   → reconcile every dispatched Run from durable evidence (adopt confirmed,
+ *     independently re-measure snapshot-only, abandon unconfirmed intents)
+ *   → persist the reconciled record, then enter the decision/Experiment loop
+ *     with remaining budget. Intake is never repeated and budget is never
+ *     restored.
+ */
+export async function resumeAuthorizedMission(options: ResumeMissionOptions): Promise<StartMissionOutcome & { readonly reconciliation: ReconciliationReport }> {
+  if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
+  const auth = options.authorization;
+  if (!auth.requested) {
+    throw new MissionResumeRejectedError("resume intent is absent; status browsing never dispatches work");
+  }
+  if (auth.source === "model") {
+    throw new MissionResumeRejectedError("resume authorization must come from the user; a model cannot resume a Mission");
+  }
+  if (!isExplicitResumeRequest(auth.token).resume) {
+    throw new MissionResumeRejectedError("resume intent is ambiguous; a question, negation, or status chat does not resume a Mission");
+  }
+
+  const draft = await loadMissionDraft(options.projectRoot, options.missionId);
+  // Re-open the authoritative record; corrupted bytes fail visibly here.
+  const previous = await loadMissionRecord(options.projectRoot, options.missionId);
+  const selector = auth.missionSelector;
+  if (selector !== "displayed" && selector !== draft.id) {
+    throw new MissionResumeRejectedError(`resume targets mission ${selector} but the displayed mission is ${draft.id}; refusing to guess`);
+  }
+  if (!RESUMABLE_STATUSES.has(previous.status)) {
+    throw new MissionResumeRejectedError(
+      `mission ${draft.id} is ${previous.status} and is not resumable; an exhausted/failed Mission needs an explicit new decision, not a silent restart`,
+    );
+  }
+  if (previous.objective !== draft.objective) {
+    throw new MissionRecordCorruptionError(`mission ${draft.id}: the draft objective no longer matches the accepted Mission objective`);
+  }
+
+  // Fence concurrent controllers BEFORE validating the mutable draft against
+  // the accepted policy: a live owner keeps authority regardless of the draft.
+  const lock = lockPath(options.projectRoot, draft.id);
+  const stale = await staleControllerLock(options.projectRoot, draft.id).catch((error: unknown) => {
+    throw new MissionControllerConflictError(
+      `mission ${draft.id} controller lock could not be verified: ${(error as Error).message}`,
+      "unverifiable-controller-lock",
+    );
+  });
+  if (!stale) {
+    throw new MissionControllerConflictError(
+      `mission ${draft.id} still has a live controller (${LOCK_FILENAME}); a second controller cannot resume it`,
+      "active-controller-lock",
+    );
+  }
+
+  // Preserve the accepted execution policy (AC5): a re-saved draft cannot
+  // widen permissions or silently reroute the model tier on recovery. Records
+  // accepted before the policy was persisted (T4/T5) are not retroactively
+  // restricted by a missing field; only a record that captures permissions is
+  // enforced. A draft dropping permissions only reduces authority (safe).
+  if (previous.permissions) {
+    for (const permission of draft.constraints.permissions ?? []) {
+      if (!previous.permissions.includes(permission)) {
+        throw new MissionResumeRejectedError(
+          `the draft grants permission "${permission}" that the accepted Mission did not have; widening authority on resume is rejected`,
+        );
+      }
+    }
+  }
+  if (previous.contract?.hardRules) {
+    const acceptedHardRules = new Set(previous.contract.hardRules);
+    for (const rule of draft.constraints.hardRules ?? []) {
+      if (!acceptedHardRules.has(rule)) {
+        throw new MissionResumeRejectedError(
+          `the draft adds hard rule "${rule}" not present on the accepted Mission; changing the evaluation contract on resume is rejected`,
+        );
+      }
+    }
+  }
+  const requestedTier = options.tier ?? "default";
+  if (previous.modelTier && requestedTier !== previous.modelTier) {
+    throw new MissionResumeRejectedError(
+      `the accepted Mission was served by tier "${previous.modelTier}" but resume requests "${requestedTier}"; silent model rerouting is rejected (resume with the accepted tier)`,
+    );
+  }
+
+  // A stale lock (dead process) is reclaimed atomically.
+  await rm(lock, { force: true }).catch(() => {});
+  const now = () => new Date().toISOString();
+  try {
+    await writeFile(lock, JSON.stringify({ pid: process.pid, resumedFrom: previous.status, since: now() }, null, 2), { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new MissionControllerConflictError(
+        `mission ${draft.id} acquired a live controller while recovery was starting; refusing to race it`,
+        "active-controller-lock",
+      );
+    }
+    throw error;
+  }
+  const releaseLock = async () => {
+    if (!options.leaveLock) await rm(lock, { force: true }).catch(() => {});
+  };
+
+  if (!options.director) {
+    await releaseLock();
+    throw new MissionResumeRejectedError("resuming requires a Mission Director: the single-baseline path has no autonomous continuation to resume");
+  }
+
+  // Reconstruct authoritative state from durable records/confirmed artifacts.
+  // Reconciliation can fail visibly (damaged state): release the controller
+  // lock on every such failure rather than leaving this process's fence on disk.
+  const persistRecovered = makePersistNotifier(options);
+  let reconciliation: ReconciliationReport;
+  try {
+    reconciliation = await reconcileInterruptedMission({
+      projectRoot: options.projectRoot,
+      draft,
+      record: previous,
+      evaluator: options.evaluator,
+    });
+  } catch (error) {
+    await releaseLock();
+    throw error;
+  }
+  let record = reconciliation.record;
+  record = withEvent(record, {
+    type: "MISSION_RESUMED",
+    at: now(),
+    detail: {
+      authorizationToken: auth.token,
+      adopted: reconciliation.adoptedRunIds.length,
+      remeasured: reconciliation.remeasuredRunIds.length,
+      abandoned: reconciliation.abandonedIntents.map((a) => a.runId),
+      remainingBudget: record.budget.remaining,
+    },
+  });
+  await persistRecovered(options.projectRoot, record);
+
+  const outcome = await runMissionController({
+    options,
+    draft,
+    record,
+    reserveCost: options.reserveCost ?? 0,
+    releaseLock,
+    mode: { kind: "resume" },
+  });
+  return { ...outcome, reconciliation };
 }

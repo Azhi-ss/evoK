@@ -759,6 +759,141 @@ describe("runEvok Mission start (#112)", () => {
   });
 });
 
+describe("runEvok Mission resume and reopen (#114)", () => {
+  test("parseEvokArgs reads --resume and --missions", () => {
+    const parsed = parseEvokArgs(["/resume", "m-abc123def456", "--resume", "--missions", "--mission", "m-abc123def456"]);
+    expect(parsed.resume).toBe(true);
+    expect(parsed.missions).toBe(true);
+  });
+
+  test("an explicit NL resume routes to the resume runner with the named mission", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-resume", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-resume-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({ modelRuntime, catalog: catalogFrom(modelRuntime, [ref], ref) });
+    const seen: Array<{ missionId?: string; token?: string }> = [];
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "resume mission m-abc123def456 now", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      resumeRunner: async (opts) => {
+        seen.push({ missionId: opts.missionId, token: opts.authorization.token });
+        return {
+          runId: "m-abc123def456:exp:3", status: "director-stopped", stopReason: "example complete",
+          model: { provider: "p", model: "m", id: ref },
+          usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          budget: { total: 1, units: "model-USD", consumed: 0.2, remaining: 0.8 },
+          evaluation: { ok: true, score: 0.9 }, record: {} as never, experiments: [],
+          reconciliation: { record: {} as never, adoptedRunIds: ["m-abc123def456:baseline:1"], remeasuredRunIds: [], abandonedIntents: [] },
+        } as never;
+      },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.missionId).toBe("m-abc123def456");
+    expect(stdout.text()).toMatch(/adopted confirmed runs/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("a status question about resuming never dispatches the resume runner", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-question", [{ id: "deterministic", text: "nothing to run" }]);
+    const ref = "evok-cli-question-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({ modelRuntime, catalog: catalogFrom(modelRuntime, [ref], ref) });
+    const stderr = new CollectStream();
+    let resumed = false;
+    const code = await runEvok({
+      args: { request: "can we continue later?", project, tier: "default", timeoutMs: 600000, mission: "m-x" },
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true }; } },
+      resumeRunner: async () => { resumed = true; throw new Error("must not resume"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    // Routed to an ordinary foreground request (a real faux completion), not resume.
+    expect(code).toBe(0);
+    expect(resumed).toBe(false);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--missions lists unfinished Missions without dispatching", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-missions", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-missions-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({ modelRuntime, catalog: catalogFrom(modelRuntime, [ref], ref) });
+    await mkdir(join(project, ".evok", "missions", "m-abc123def456"), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", "m-abc123def456", "mission.json"), JSON.stringify({
+      schemaVersion: 1, id: "m-abc123def456", status: "interrupted", objective: "x",
+      contract: { objective: "x", expectedOutputs: [], evaluationMethod: "e", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 0.2, remaining: 0.8 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {}, stateVersion: 1, tasks: [], experiments: [], history: [],
+      createdAt: "2026-09-11T00:00:00.000Z", updatedAt: "2026-09-11T00:00:00.000Z",
+      stopReason: "user interruption during the Research Loop",
+    }));
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { missions: true, project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      resumeRunner: async () => { throw new Error("must not resume on a listing"); },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    const out = stdout.text();
+    expect(out).toContain("m-abc123def456");
+    expect(out).toMatch(/resumable/);
+    expect(out).toMatch(/0\.800000 remaining/);
+    await rm(project, { recursive: true, force: true });
+  });
+  test("--missions reopens offline even when model auth/config is unusable (no preflight needed)", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-abc123def456"), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", "m-abc123def456", "mission.json"), JSON.stringify({
+      schemaVersion: 1, id: "m-abc123def456", status: "interrupted", objective: "x",
+      contract: { objective: "x", expectedOutputs: [], evaluationMethod: "e", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 0.2, remaining: 0.8 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {}, stateVersion: 1, tasks: [], experiments: [], history: [],
+      createdAt: "2026-09-11T00:00:00.000Z", updatedAt: "2026-09-11T00:00:00.000Z",
+      stopReason: "user interruption",
+    }));
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { missions: true, project, tier: "default", timeoutMs: 600000 },
+      // resolver that would fail preflight: listing must never call it
+      createResolver: async () => { throw new Error("no model configuration"); },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(stdout.text()).toContain("m-abc123def456");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--missions surfaces a parseable-but-damaged mission record instead of hiding it", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-abc123def456"), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", "m-abc123def456", "mission.json"), JSON.stringify({
+      schemaVersion: 1, id: "m-abc123def456", status: "interrupted", objective: "x",
+      budget: { total: 1, units: "model-USD", consumed: 0.2, remaining: 0.9 },
+    }));
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { missions: true, project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => { throw new Error("no model configuration"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).not.toBe(0);
+    expect(stderr.text()).toMatch(/damaged/i);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
 class CollectStream {
   private chunks: string[] = [];
   write(chunk: string) {

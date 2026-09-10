@@ -50,6 +50,8 @@ bun run evok --intake "beat the NDCG baseline on this project"
 bun run evok --intake --mission m-ab12 "where were we?"   # reopen a draft
 bun run evok /start --mission m-ab12                     # start + continue autonomously
 bun run evok /start --mission m-ab12 --baseline-only     # baseline only, no continuation
+bun run evok --missions --project /path/to/project       # reopen: list unfinished Missions
+bun run evok /resume --mission m-ab12                    # explicit resume after interruption
 bun run evok --status --mission m-ab12                   # reopen durable result/usage
 ```
 
@@ -112,6 +114,39 @@ Autonomous continuation from measured evidence (#113):
   next dispatch truthfully even when the model would continue or a success
   report is missing (`budget-exhausted`, `director-stopped`, `decision-failed`,
   `iteration-limit`). No External Submission or Human Acceptance is produced.
+
+### Interruption and explicit recovery (#114, T6)
+
+- `Ctrl+C`/SIGINT keeps its normal meaning: cancel the in-flight Run or
+  decision and stop new dispatch; it is NOT rebound to a Mission-pause action.
+  Confirmed results persist; any execution whose result was not confirmed is
+  recorded `interrupted`, not guessed complete. After an uncatchable kill,
+  recovery is from disk, not from process memory.
+- Reopen a project with `--missions` (or start `evok` in it): every accepted
+  Mission is listed with measured baseline, experiment/negative-evidence
+  counts, stop/blocker reason, and consumed/remaining `model-USD` budget.
+  Listing never resumes anything, and unstarted drafts are shown separately.
+- Only an explicit `/resume` (or e.g. "resume mission m-ab12") resumes the
+  selected Mission. Questions, negations, and status chat never resume; intake
+  is not repeated and spent budget is never restored.
+- Recovery reconstructs ONLY from durable records and confirmed artifacts:
+  confirmed Runs are adopted with no duplicate execution, accounting,
+  evaluation, or promotion; a durable snapshot without a confirmed result is
+  independently RE-MEASURED (the model never asserts a completion); an
+  operation dispatched before the interruption with no durable evidence is
+  abandoned as Negative Evidence, and a permitted retry uses a FRESH
+  Run/session/attempt identity with the remaining budget. Damaged records,
+  digest mismatches, or broken budget arithmetic block recovery visibly
+  (`reconciliation-blocked`); a live second controller stays fenced, while a
+  stale lock left by a dead process is reclaimed.
+- A small offline, reproducible end-to-end example lives in
+  [`examples/lifecycle/`](examples/lifecycle/README.md)
+  (`bun run example:lifecycle`): intake → start → baseline → evidence
+  follow-up → persist → stop/reopen → continue, with an independent evaluator.
+  The full REAL-provider live acceptance is separate, opt-in, and blocked
+  without an explicit test budget + usable config
+  ([docs/live-acceptance-t6.md](docs/live-acceptance-t6.md)); missing
+  authorization fails the gate instead of passing. No External Submission.
 
 - Models and credentials come **only** from Pi's SDK-resolved stores
   (`~/.pi/agent/models.json`, `auth.json`; honors `PI_CODING_AGENT_DIR`). evoK
