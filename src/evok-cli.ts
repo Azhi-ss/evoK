@@ -21,12 +21,28 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createInterface } from "node:readline";
 import { PiAgentRuntime } from "./pi-agent-runtime";
+import { calculateCost } from "@earendil-works/pi-ai";
 import type { SessionModelResolver } from "./evok-model";
 import { discoverEvokResources, EvokResourceError, type EvokResources } from "./evok-resources";
 import { MissionDraftCorruptionError } from "./mission-draft";
 import { runIntakeTurn } from "./mission-intake";
+import {
+  isExplicitStartRequest,
+  loadMissionRecord,
+  startAuthorizedMission,
+  summarizeMission,
+  BudgetExhaustedError,
+  EvaluatorFailureError,
+  MissionControllerConflictError,
+  MissionRecordCorruptionError,
+  MissionStartRejectedError,
+  type BaselineEvaluator,
+  type StartMissionOutcome,
+} from "./mission-start";
+import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "./local-file-evaluator";
+import { loadMissionDraft, missionsDir } from "./mission-draft";
 
-export const EVOK_VERSION = "0.1.0-t3";
+export const EVOK_VERSION = "0.1.0-t4";
 
 /** Exit codes distinguish the visible failure classes the spec calls out. */
 export const EVOK_EXIT = Object.freeze({
@@ -39,6 +55,7 @@ export const EVOK_EXIT = Object.freeze({
 });
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_RESERVE_COST = 0.01;
 const TIERS = new Set(["default", "fast", "deep", "mid"]);
 
 function parseTimeout(raw: string | undefined): number | string {
@@ -56,6 +73,12 @@ export interface ParsedEvokArgs {
   readonly intake?: boolean;
   /** Reopen an existing Mission draft during intake. */
   readonly mission?: string;
+  /** #112: start the displayed (or --mission) Mission's bounded baseline. */
+  readonly start?: boolean;
+  /** #112: print the durable Mission/draft status and stop. */
+  readonly status?: boolean;
+  /** #112: cost reserved before the baseline Run is dispatched (model-USD). */
+  readonly reserveCost?: number;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -74,7 +97,15 @@ options:
   --intake          Mission intake: turn the request into a saved, reviewable
                     Mission draft + initial plan via the mission-intake skill.
                     Ends at draft review; it never starts or dispatches work.
-  --mission <id>    reopen an existing Mission draft during --intake
+  --mission <id>    reopen an existing Mission draft during --intake, or name
+                    the target Mission for --start/--status
+  --start           start the authorized baseline for the displayed Mission
+                    (in a REPL, an explicit \"/start\" line does the same).
+                    Requires a reviewed draft, explicit authorization, an
+                    enforceable model-USD budget, and an evaluator contract.
+  --reserve-cost <n>  cost (model-USD) reserved before baseline dispatch
+                    (default: ${DEFAULT_RESERVE_COST}); an unboundable Run is refused
+  --status          print the durable Mission/draft state and stop
   -h, --help        show this help
 
 ctrl+c cancels the in-flight request (second/interrupted idle press exits);
@@ -89,42 +120,61 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let orchestra: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let intake = false;
+  let start = false;
+  let status = false;
   let mission: string | undefined;
+  let reserveCost = DEFAULT_RESERVE_COST;
   const positionals: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "-h" || arg === "--help") return { tier, timeoutMs, help: true };
+    if (arg === "-h" || arg === "--help") return { tier, timeoutMs, reserveCost, help: true };
     if (arg === "--project") {
       project = argv[++i];
-      if (!project) return { tier, timeoutMs, error: "--project requires a directory" };
+      if (!project) return { tier, timeoutMs, reserveCost, error: "--project requires a directory" };
     } else if (arg === "--tier") {
       tier = argv[++i] ?? "";
-      if (!TIERS.has(tier)) return { tier, timeoutMs, error: `--tier must be one of ${[...TIERS].join(", ")} (got "${tier}")` };
+      if (!TIERS.has(tier)) return { tier, timeoutMs, reserveCost, error: `--tier must be one of ${[...TIERS].join(", ")} (got "${tier}")` };
     } else if (arg === "--orchestra") {
       orchestra = argv[++i];
-      if (!orchestra) return { tier, timeoutMs, error: "--orchestra requires a JSON file path" };
+      if (!orchestra) return { tier, timeoutMs, reserveCost, error: "--orchestra requires a JSON file path" };
     } else if (arg === "--timeout-ms") {
       const parsed = parseTimeout(argv[++i]);
-      if (typeof parsed === "string") return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, error: parsed };
+      if (typeof parsed === "string") return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, reserveCost, error: parsed };
       timeoutMs = parsed;
     } else if (arg.startsWith("--timeout-ms=")) {
       const parsed = parseTimeout(arg.slice("--timeout-ms=".length));
-      if (typeof parsed === "string") return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, error: parsed };
+      if (typeof parsed === "string") return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, reserveCost, error: parsed };
       timeoutMs = parsed;
     } else if (arg === "--intake") {
       intake = true;
+    } else if (arg === "--start") {
+      start = true;
+    } else if (arg === "--status") {
+      status = true;
+    } else if (arg === "--reserve-cost") {
+      const raw = argv[++i];
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 0) return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, reserveCost, error: `--reserve-cost must be a finite non-negative number (got "${raw}")` };
+      reserveCost = parsed;
     } else if (arg === "--mission") {
       mission = argv[++i];
-      if (!mission) return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, error: "--mission requires a mission id" };
+      if (!mission) return { tier, timeoutMs: DEFAULT_TIMEOUT_MS, reserveCost, error: "--mission requires a mission id" };
     } else if (arg.startsWith("--")) {
-      return { tier, timeoutMs, error: `unknown option "${arg}"` };
+      return { tier, timeoutMs, reserveCost, error: `unknown option "${arg}"` };
     } else {
       positionals.push(arg);
     }
   }
   if (positionals.length > 0) request = positionals.join(" ");
-  return { request, project, tier, orchestra, timeoutMs, ...(intake ? { intake: true } : {}), ...(mission ? { mission } : {}) };
+  return {
+    request, project, tier, orchestra, timeoutMs,
+    ...(intake ? { intake: true } : {}),
+    ...(start ? { start: true } : {}),
+    ...(status ? { status: true } : {}),
+    reserveCost,
+    ...(mission ? { mission } : {}),
+  };
 }
 
 export interface EvokRunOptions {
@@ -137,6 +187,12 @@ export interface EvokRunOptions {
   readonly retrieval?: import("./mission-intake").RetrievalCapability;
   /** Override the intake turn runner (tests); defaults to the skill-led runtime. */
   readonly intakeRunner?: typeof runIntakeTurn;
+  /** Independent evaluator contract for the declared Competition (#112). */
+  readonly evaluator?: BaselineEvaluator;
+  /** Override the start runner (tests); defaults to mission-start. */
+  readonly startRunner?: typeof startAuthorizedMission;
+  /** Cost reserved before the baseline Run (model-USD); defaults to parser value. */
+  readonly reserveCost?: number;
   readonly stdout?: { write(chunk: string): boolean };
   readonly stderr?: { write(chunk: string): boolean };
   readonly stdin?: NodeJS.ReadStream;
@@ -219,7 +275,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
     stdout.write(`tools:   ${args.intake
       ? "intake: read-only project inspection plus the trusted draft-record tool"
-      : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
+      : args.start || (args.request !== undefined && isExplicitStartRequest(args.request))
+        ? "baseline: read/grep/find/ls + write/edit in the approved isolated Run workspace (bash only when granted); the project .evok tree is controller-owned"
+        : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
     stdout.write(`         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
     writeResourceReport(stdout, resources);
   } catch (error) {
@@ -227,7 +285,14 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     return EVOK_EXIT.configError;
   }
 
+  if (args.status) {
+    return runMissionStatus(args, stdout, stderr, projectReal);
+  }
+
   if (args.request !== undefined) {
+    if (args.start || (!args.intake && isExplicitStartRequest(args.request))) {
+      return runMissionStart(resolver, args, options, stdout, stderr, projectReal, resources);
+    }
     return args.intake
       ? runIntake(resolver, args, args.request, options, stdout, stderr, projectReal, resources)
       : runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal, resources);
@@ -242,6 +307,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   if (!request) {
     stderr.write("evok: no request text provided\n");
     return EVOK_EXIT.usage;
+  }
+  if (args.start || (!args.intake && isExplicitStartRequest(request))) {
+    return runMissionStart(resolver, { ...args, request }, options, stdout, stderr, projectReal, resources);
   }
   return args.intake
     ? runIntake(resolver, args, request, options, stdout, stderr, projectReal, resources)
@@ -347,6 +415,180 @@ async function runIntake(
   } finally {
     bound.cleanup();
     await rm(workspaceRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** #112: display/reopen the durable Mission state from project-local records. */
+async function runMissionStatus(
+  args: ParsedEvokArgs,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+): Promise<number> {
+  if (!args.mission) {
+    stderr.write("evok: --status requires --mission <id>\n");
+    return EVOK_EXIT.usage;
+  }
+  const record = await loadMissionRecord(projectRoot, args.mission).catch(async (error: unknown) => {
+    if (error instanceof MissionStartRejectedError) {
+      // No accepted Mission yet: fall back to the durable draft for display.
+      return { draft: await loadMissionDraft(projectRoot, args.mission!) } as const;
+    }
+    if (error instanceof MissionRecordCorruptionError) {
+      stderr.write(`evok: ${error.message}; the damaged record was not overwritten\n`);
+      return { corrupted: true as const };
+    }
+    throw error;
+  });
+  if ("corrupted" in record) return EVOK_EXIT.runtimeError;
+  if ("draft" in record) {
+    const draft = record.draft;
+    stdout.write(`-- mission ${draft.id} · status draft (unstarted)\n`);
+    stdout.write(`   objective: ${draft.objective}\n`);
+    stdout.write(`   budget: ${draft.budget.total} ${draft.budget.units} (declared; nothing consumed by an Experiment)\n`);
+    stdout.write(`   intake usage: tokens ${draft.usage.tokens.total} · cost ${draft.usage.cost.total} ${draft.usage.cost.units}\n`);
+    return EVOK_EXIT.ok;
+  }
+  const view = summarizeMission(record);
+  stdout.write(`-- mission ${view.id} · status ${view.status}\n`);
+  if (view.stopReason) stdout.write(`   stop reason: ${view.stopReason}\n`);
+  stdout.write(`   budget: ${view.budget.consumed.toFixed(6)} / ${view.budget.total} ${view.budget.units} consumed · ${view.budget.remaining.toFixed(6)} remaining\n`);
+  if (record.baseline) {
+    const run = record.runs[record.baselineRunId!];
+    stdout.write(`   baseline run ${record.baselineRunId} · model ${view.model ?? run?.model?.id ?? "unknown"}\n`);
+    stdout.write(`   measurement: ok=${record.baseline.evaluation.ok}${typeof record.baseline.evaluation.score === "number" ? ` score=${record.baseline.evaluation.score}` : ""}\n`);
+    stdout.write(`   evidence: ${view.evidenceRefs.join(", ")}\n`);
+    const runUsage = run?.sessionId ? record.usage.runs.find((line) => line.sessionId === run.sessionId) : undefined;
+    if (runUsage) stdout.write(`   run usage: tokens ${runUsage.tokens.total} · cost ${runUsage.cost.total.toFixed(6)} ${record.budget.units}\n`);
+  }
+  // Intake/discussion usage stays a visible line item across execution (US31).
+  stdout.write(`   intake usage: tokens ${record.usage.intake.tokens.total} · cost ${record.usage.intake.cost.total.toFixed(6)} ${record.usage.intake.cost.units}\n`);
+  return EVOK_EXIT.ok;
+}
+
+/**
+ * #112: the single validated start action. Natural-language "/start" and
+ * --start share this path; it resolves the displayed Mission (--mission or
+ * the only draft under .evok/missions) and dispatches one bounded baseline
+ * through the existing Pi runtime with an independent evaluator.
+ */
+async function runMissionStart(
+  resolver: SessionModelResolver,
+  args: ParsedEvokArgs,
+  options: EvokRunOptions,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+  resources: EvokResources,
+): Promise<number> {
+  let evaluator: BaselineEvaluator | undefined = options.evaluator;
+  if (!evaluator) {
+    // Production default: the project's declared local evaluation contract
+    // (<project>/.evok/evaluation.json). No contract => no measurable baseline.
+    const contract = await loadEvaluationContract(projectRoot).catch((error: unknown) => {
+      if (error instanceof EvaluationContractError) {
+        stderr.write(`evok: ${error.message}\n`);
+        return undefined;
+      }
+      throw error;
+    });
+    if (!contract) return EVOK_EXIT.configError;
+    evaluator = createFileMetricEvaluator(contract);
+  }
+  let missionId: string | undefined = args.mission;
+  if (!missionId) {
+    // "Displayed Mission": the single saved draft under the project is the
+    // current display target; ambiguity (0 or >1 drafts) must stay a conversation.
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(missionsDir(projectRoot), { withFileTypes: true }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    });
+    const ids = entries.filter((entry) => entry.isDirectory()).map((entry) => String(entry.name));
+    if (ids.length === 0) {
+      stderr.write("evok: no reviewed Mission draft in this project; run --intake before /start\n");
+      return EVOK_EXIT.usage;
+    }
+    if (ids.length > 1) {
+      stderr.write(`evok: multiple saved Missions (${ids.join(", ")}); name one with --mission <id>\n`);
+      return EVOK_EXIT.usage;
+    }
+    missionId = ids[0]!;
+  }
+
+  const bound = boundSignal(args, options.signal);
+  // Trusted-side metering is needed ONLY on the real path; an injected
+  // startRunner (tests/adapters) brings its own accounting.
+  const resolved = options.startRunner ? undefined : await resolver.resolve(args.tier).catch(() => undefined);
+  const priceModelCost = resolved
+    ? () => (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
+        const rates = (resolved.modelId as unknown as { cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).cost;
+        if (!rates || typeof rates.input !== "number") return undefined; // unknown cost, never a verified zero
+        const cost = calculateCost(resolved.modelId, {
+          input: tokens.input,
+          output: tokens.output,
+          cacheRead: tokens.cacheRead,
+          cacheWrite: tokens.cacheWrite,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        } as Parameters<typeof calculateCost>[1]);
+        return Number.isFinite(cost?.total) ? cost!.total : undefined;
+      }
+    : undefined;
+  try {
+    const outcome: StartMissionOutcome = await (options.startRunner ?? startAuthorizedMission)({
+      projectRoot,
+      missionId,
+      authorization: { requested: true, token: args.request ?? "/start", missionSelector: "displayed" },
+      resolver,
+      resources,
+      evaluator,
+      tier: args.tier,
+      signal: bound.signal,
+      reserveCost: options.reserveCost ?? args.reserveCost ?? DEFAULT_RESERVE_COST,
+      ...(priceModelCost ? { priceModelCost } : {}),
+    });
+    stdout.write(`\n-- mission ${missionId} baseline run ${outcome.runId}\n`);
+    stdout.write(`   model: ${outcome.model.id} · stop: ${outcome.stopReason}\n`);
+    stdout.write(`   measurement: ok=${outcome.evaluation.ok}${typeof outcome.evaluation.score === "number" ? ` score=${outcome.evaluation.score}` : ""}\n`);
+    if (outcome.evaluation.ruleViolations?.length) stdout.write(`   rule violations: ${outcome.evaluation.ruleViolations.join("; ")}\n`);
+    stdout.write(`   evidence: .evok/missions/${missionId}/runs/${outcome.runId}/\n`);
+    stdout.write(`   budget: ${outcome.budget.consumed.toFixed(6)} / ${outcome.budget.total} ${outcome.budget.units} consumed · ${outcome.budget.remaining.toFixed(6)} remaining\n`);
+    const meteredRun = outcome.record?.usage?.runs?.[outcome.record.usage.runs.length - 1]?.cost.total;
+    stdout.write(`   usage: tokens ${outcome.usage.tokens.total} · metered cost ${(meteredRun ?? outcome.usage.cost.total).toFixed(6)} (intake usage stays visible via --status)\n`);
+    return EVOK_EXIT.ok;
+  } catch (error) {
+    if (bound.signal.aborted || (error as Error).name === "AbortError") {
+      stderr.write("\nevok: baseline interrupted; the Mission is recorded as interrupted and stays blocked until recovery\n");
+      return EVOK_EXIT.cancelled;
+    }
+    if (error instanceof MissionStartRejectedError) {
+      stderr.write(`evok: start refused: ${error.message}\n`);
+      return EVOK_EXIT.usage;
+    }
+    if (error instanceof MissionControllerConflictError) {
+      stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof BudgetExhaustedError) {
+      stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof EvaluatorFailureError) {
+      stderr.write(`evok: independent evaluator failed; no score was produced: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (error instanceof MissionRecordCorruptionError || error instanceof EvaluationContractError) {
+      stderr.write(`evok: mission storage or evaluation contract is corrupted and was not overwritten: ${error.message}\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if ((error as Error).name === "MissingAuthenticationError") {
+      stderr.write(`\nevok: ${(error as Error).message}\n`);
+      return EVOK_EXIT.authError;
+    }
+    stderr.write(`\nevok: baseline failed: ${(error as Error).message}\n`);
+    return EVOK_EXIT.runtimeError;
+  } finally {
+    bound.cleanup();
   }
 }
 
@@ -463,6 +705,15 @@ async function runRepl(
     const text = line.trim();
     if (!text) {
       stdout.write("> ");
+      continue;
+    }
+    if (isExplicitStartRequest(text)) {
+      const startArgs: ParsedEvokArgs = { ...args, request: text, ...(text.split(/\s+/)[1] ? { mission: text.split(/\s+/)[1] } : {}) };
+      busy = true;
+      lastCode = await runMissionStart(resolver, startArgs, options, stdout, stderr, projectRoot, resources);
+      busy = false;
+      if (closed) break;
+      stdout.write("\n> ");
       continue;
     }
     busy = true;

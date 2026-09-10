@@ -43,6 +43,46 @@ Options: `--project <dir>` (default cwd), `--tier default|fast|deep|mid`
 (default `default`), `--orchestra <file.json>` (tier bindings to Pi catalog
 refs), `--timeout-ms <n>` (per-Run bound, default 10 min), `-h/--help`.
 
+Mission intake and start (#111/#112):
+
+```text
+bun run evok --intake "beat the NDCG baseline on this project"
+bun run evok --intake --mission m-ab12 "where were we?"   # reopen a draft
+bun run evok /start --mission m-ab12                     # start the reviewed Mission
+bun run evok --status --mission m-ab12                   # reopen durable result/usage
+```
+
+- `--intake` runs the skill-led interview that saves an unstarted draft under
+  `<project>/.evok/missions/<id>/draft.json`; it never dispatches work.
+- The independent evaluator contract is declared in
+  `<project>/.evok/evaluation.json` (`id`, `version`, the required relative
+  `artifact`, optional `metric`/`min`/`max`); the baseline is measured from the
+  immutable artifact snapshot, never from a model-supplied score. A missing or
+  malformed contract refuses the start instead of running an unmeasurable
+  Experiment.
+- An explicit natural-language start ("start the mission baseline") or
+  `/start` invokes ONE validated start action for the displayed Mission. It
+  checks objective/data/evaluation inputs, supported permissions, an
+  enforceable `model-USD` budget, and an evaluator contract; ambiguous intent,
+  missing prerequisites, model-authored approval, unenforceable units, a
+  conflicting active controller, or an already-started Mission cannot dispatch.
+- The accepted Mission and execution intent are persisted atomically BEFORE
+  dispatch (`mission.json`, controller lock, history events); the bounded
+  baseline runs through the existing Pi runtime in an approved isolated
+  workspace with the resolved model. Writes are confined to that workspace;
+  controller records, evaluator inputs, credentials, and skill sources stay
+  outside candidate authority.
+- After the Run, the workspace is frozen into an immutable Candidate snapshot
+  (`runs/<runId>/snapshot/`) measured by the INDEPENDENT evaluator — a
+  model-supplied score or planted score file can never replace measurement.
+  Result, evidence links, model/usage, remaining budget, and stop reason are
+  durable and reopenable via `--status`. Unknown cost is never zero: positive
+  usage without metering stops the Mission rather than claiming a cap.
+- User interruption, budget exhaustion, evaluator failure, and rule failures
+  each record a truthful terminal/blocked stop reason. An interrupted in-flight
+  Run blocks a second controller until the recovery slice (#114). No External
+  Submission or implicit Human Acceptance exists on this path.
+
 - Models and credentials come **only** from Pi's SDK-resolved stores
   (`~/.pi/agent/models.json`, `auth.json`; honors `PI_CODING_AGENT_DIR`). evoK
   copies, displays, or stores no credentials and adds no login system.

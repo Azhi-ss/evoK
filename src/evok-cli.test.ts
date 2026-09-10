@@ -542,6 +542,167 @@ describe("runEvok Mission intake (#111)", () => {
   });
 });
 
+describe("runEvok Mission start (#112)", () => {
+  test("parseEvokArgs reads --start, --status, --reserve-cost and /start recognition", () => {
+    const parsed = parseEvokArgs(["/start", "--start", "--status", "--mission", "m-1", "--reserve-cost", "0.02"]);
+    expect(parsed.start).toBe(true);
+    expect(parsed.status).toBe(true);
+    expect(parsed.mission).toBe("m-1");
+    expect(parsed.reserveCost).toBe(0.02);
+    expect(parsed.request).toBe("/start");
+  });
+
+  test("an explicit natural-language start request routes to the validated start action", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-displayed"), { recursive: true });
+    const { modelRuntime } = await fauxRuntime("evok-cli-start", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-start-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const seen: Array<{ missionId?: string; reserve?: number }> = [];
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "please start the mission baseline now", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      startRunner: async (opts) => {
+        seen.push({ missionId: opts.missionId, reserve: opts.reserveCost });
+        return {
+          runId: `${opts.missionId}:baseline:1`,
+          status: "baseline-complete",
+          stopReason: "baseline-complete",
+          model: { provider: "p", model: "m", id: ref },
+          usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          budget: { total: 1, units: "model-USD", consumed: 0, remaining: 1 },
+          evaluation: { ok: true, score: 0.5 },
+          record: {} as never,
+        };
+      },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].reserve).toBeGreaterThan(0);
+    const out = stdout.text();
+    expect(out).toContain("baseline-complete");
+    expect(out).toContain("score=0.5");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("without an evaluator contract the start is refused before dispatch", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-noeval", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-noeval-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-x" },
+      createResolver: async () => resolver,
+      startRunner: async () => { throw new Error("must not be called"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.configError);
+    expect(stderr.text()).toMatch(/evaluator/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("a rejected (invalid/ambiguous) start reports usage exit and does not claim dispatch", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-reject", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-reject-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const { MissionStartRejectedError } = await import("./mission-start");
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-x" },
+      createResolver: async () => resolver,
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 1 }; } },
+      startRunner: async () => { throw new MissionStartRejectedError("start intent is ambiguous"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.usage);
+    expect(stderr.text()).toMatch(/start refused/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--status without --mission is a usage error", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-status", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-status-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { request: undefined, project, tier: "default", timeoutMs: 600000, status: true },
+      createResolver: async () => resolver,
+      stdin: { fd: 1 } as never,
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.usage);
+    expect(stderr.text()).toMatch(/--mission/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("the real start path loads the project evaluation contract; a missing contract refuses before dispatch", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-nocontract"), { recursive: true });
+    const { modelRuntime } = await fauxRuntime("evok-cli-nc", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-nc-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-nocontract" },
+      createResolver: async () => resolver,
+      startRunner: async () => { throw new Error("must not run"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.configError);
+    expect(stderr.text()).toMatch(/evaluation\.json|measured/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("a damaged mission record on --status fails visibly instead of being treated as a new Mission", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-bad"), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", "m-bad", "mission.json"), "{ not json");
+    const { modelRuntime } = await fauxRuntime("evok-cli-bad", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-bad-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000, mission: "m-bad", status: true },
+      createResolver: async () => resolver,
+      stdin: { fd: 1 } as never,
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.runtimeError);
+    expect(stderr.text()).toMatch(/damaged|corrupt/i);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
 class CollectStream {
   private chunks: string[] = [];
   write(chunk: string) {

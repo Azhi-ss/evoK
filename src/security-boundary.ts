@@ -1,7 +1,8 @@
 import { createHash, createPublicKey, generateKeyPairSync, sign as signDigest, verify as verifyDigest } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type SandboxViolationKind =
   | "path-traversal"
@@ -368,6 +369,19 @@ export class SandboxBoundary {
       }
       if (/(?:^|[\s/])(?:\.env|credentials?|secrets?|evaluator|ledger|policy)(?:$|[\s/])/i.test(command)) {
         throw new SandboxViolation("protected-path", "protected data is not accessible from commands");
+      }
+      // Trusted-side protected paths (e.g. the project .evok controller tree)
+      // apply to bash too: any absolute or ~-relative path token reaching one
+      // is blocked, regardless of redirection direction or command used.
+      const home = homedir();
+      for (const token of command.match(/(?:^|\s)(?:\/\S*|~[\/\S]*)/g) ?? []) {
+        const candidate = token.trim().replace(/[^\w./~-]+$/g, "");
+        if (!candidate) continue;
+        const expanded = candidate.startsWith("~/") ? join(home, candidate.slice(2)) : candidate;
+        const resolved = expanded.startsWith("~") ? expanded : resolve(this.root, expanded);
+        if (this.protectedPaths.some((path) => within(path, resolved))) {
+          throw new SandboxViolation("protected-path", "a controller-owned protected path is not accessible from commands");
+        }
       }
     }
   }
