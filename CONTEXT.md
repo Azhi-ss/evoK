@@ -71,8 +71,8 @@ The Task-level planner that proposes how Roles, topology, verification, and reso
 _Avoid_: Mission Director, final orchestrator
 
 **Execution Plan**:
-A proposed, bounded arrangement of Team Roles, stages, dependencies, branch groups, verification gates, and reconciliation rules for one Task.
-_Avoid_: Route, hard-coded mode
+A proposed, bounded arrangement of Team Roles, stages, dependencies, branch groups, verification gates, and reconciliation rules for one Task. It is a capability description, not Promotion or gate-pass proof.
+_Avoid_: Route, hard-coded mode, promotion key
 
 **Branch**:
 An isolated line of work derived from one Task Contract, either as an alternative strategy or as one independent dependency branch.
@@ -91,8 +91,18 @@ The rule that says which Branch outputs are required or optional, what quorum an
 _Avoid_: Barrier (when the completion rule is more than waiting)
 
 **Pattern**:
-A reusable declaration of an execution shape and its required stages or gates; a Pattern is a capability description, not a task-specific route or executable program.
-_Avoid_: Mode, hard-coded router
+A reusable declaration of an execution shape and its required stages or gates; a Pattern is a capability description, not a task-specific route, executable program, or Promotion proof.
+_Avoid_: Mode, hard-coded router, v1 must-have roster
+
+**Thin execution default**:
+The v1 product default for a Task is one Branch. Multi-branch Fan-Out and verification Roles (Falsifier, Critic, Challenger, and kin) are an on-demand capability library, not the gated default and not a standing roster.
+_Avoid_: Standing verification roster, multi-branch as v1 must-have, Execution Plan as Promotion proof
+
+- Default Branch width is 1. Multi-branch Fan-Out is raised on demand.
+- Falsifier, Critic, Challenger, and kin are raised on demand — not a standing roster.
+- Execution Plan, Pattern, and Role names describe capability; they are not Promotion or gate-pass proof. Elite or Team Fan-Out is not a Promotion key.
+- Code defaults stay reserved (B) for a later explicit order locked to execution planning. Thickening the Pattern library or a full standing roster as v1 must-haves is rejected (C).
+- True assets remain the Evidence ledger, hang/T48 gates, and explicit live authorization. The execution roster accelerates; it does not prove a gate.
 
 **Research Loop**:
 The evidence-driven cycle of selecting Tasks, proposing and executing Experiments, evaluating their results, updating beliefs, and choosing the next research action within an authorized Mission. It advances without a human prompt for every iteration, while the Research Objective and Mission Policy remain human-owned.
@@ -193,3 +203,4 @@ _Avoid_: Error message
 - Use **Evaluator** for objective measurement, **Promotion** for machine advancement, and **Human Acceptance** for the human decision.
 - Use **Team Coordinator** for Task-level team planning and **Mission Director** for Mission-level research direction.
 - Do not use “orchestrator” as an authority-bearing role without naming which of these two responsibilities is meant.
+- The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.
