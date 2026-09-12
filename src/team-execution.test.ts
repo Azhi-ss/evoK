@@ -11,19 +11,6 @@ import {
   type ExecutionPlan,
 } from "./toy-harness";
 
-const STANDING_VERIFICATION_ROSTER = [
-  "falsifier",
-  "critic",
-  "challenger",
-  "auditor",
-  "success-auditor",
-  "Falsifier",
-  "Critic",
-  "Challenger",
-  "Auditor",
-  "SuccessAuditor",
-] as const;
-
 const plan = (overrides: Partial<ExecutionPlan> = {}): ExecutionPlan => ({
   version: 1,
   branchWidth: 2,
@@ -387,9 +374,7 @@ describe("thin execution default", () => {
   });
 
   test("default plan does not pre-fill a standing verification-role roster", () => {
-    const proposed = createThinExecutionPlan();
-    expect(proposed.verificationGates).toEqual([]);
-    expect(proposed.verificationGates.some((gate) => STANDING_VERIFICATION_ROSTER.includes(gate as typeof STANDING_VERIFICATION_ROSTER[number]))).toBe(false);
+    expect(createThinExecutionPlan().verificationGates).toEqual([]);
   });
 
   test("policy guard defaults do not mandate the Falsifier roster and still honor explicit gates", () => {
@@ -471,8 +456,8 @@ describe("thin execution default", () => {
     expect(scheduled[0]?.status).toBe("COMPLETED");
 
     const fanIn = new ArtifactFanIn(
-      () => ({ score: 9, elite: true, teamFanOutWidth: scheduled[0]?.branch.budget.maxAttempts, roster: scheduled[0]?.verification }),
-      () => false,
+      () => ({ score: 1, elite: true, teamFanOutWidth: 8, roster: ["Falsifier", "Critic"] }),
+      (_artifact, evaluation) => evaluation.score > 5,
       ["a"],
     );
     const denied = await fanIn.reconcile([ref("a")]);

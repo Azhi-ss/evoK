@@ -43,8 +43,6 @@ export interface CoordinatorInput {
 /** Thin execution default (CONTEXT.md): one Branch; verification Roles raised on demand. */
 export const DEFAULT_BRANCH_WIDTH = 1;
 
-export const DEFAULT_VERIFICATION_GATES: readonly string[] = Object.freeze([]);
-
 export function createThinExecutionPlan(input: CoordinatorInput = {}): ExecutionPlan {
   return new Coordinator().propose(input);
 }
@@ -64,7 +62,7 @@ export class Coordinator {
       branchBudget: input.branchBudget ?? this.defaults.branchBudget ?? 1,
       permissions: [...(input.permissions ?? this.defaults.permissions ?? [])],
       resources: [...(input.resources ?? this.defaults.resources ?? [])],
-      verificationGates: [...(input.verificationGates ?? this.defaults.verificationGates ?? DEFAULT_VERIFICATION_GATES)],
+      verificationGates: [...(input.verificationGates ?? this.defaults.verificationGates ?? [])],
     };
   }
 }
