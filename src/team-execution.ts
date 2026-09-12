@@ -31,7 +31,7 @@ export interface ExecutionPlan {
 }
 
 export interface CoordinatorInput {
-  readonly requestedBranches: number;
+  readonly requestedBranches?: number;
   readonly competition?: string;
   readonly maxAttempts?: number;
   readonly branchBudget?: number;
@@ -40,16 +40,24 @@ export interface CoordinatorInput {
   readonly verificationGates?: readonly string[];
 }
 
+/** Thin execution default (CONTEXT.md): one Branch; verification Roles raised on demand. */
+export const DEFAULT_BRANCH_WIDTH = 1;
+
+export function createThinExecutionPlan(input: CoordinatorInput = {}): ExecutionPlan {
+  return new Coordinator().propose(input);
+}
+
 export class Coordinator {
   constructor(private readonly defaults: Partial<ExecutionPlan> = {}) {}
 
-  propose(input: CoordinatorInput): ExecutionPlan {
-    if (!Number.isInteger(input.requestedBranches) || input.requestedBranches < 1) {
+  propose(input: CoordinatorInput = {}): ExecutionPlan {
+    const requestedBranches = input.requestedBranches ?? this.defaults.branchWidth ?? DEFAULT_BRANCH_WIDTH;
+    if (!Number.isInteger(requestedBranches) || requestedBranches < 1) {
       throw new RangeError("requestedBranches must be an integer >= 1");
     }
     return {
       version: this.defaults.version ?? 1,
-      branchWidth: input.requestedBranches,
+      branchWidth: requestedBranches,
       maxAttempts: input.maxAttempts ?? this.defaults.maxAttempts ?? 1,
       branchBudget: input.branchBudget ?? this.defaults.branchBudget ?? 1,
       permissions: [...(input.permissions ?? this.defaults.permissions ?? [])],
@@ -65,7 +73,8 @@ export interface PolicyLimits {
   readonly maxBranchBudget: number;
   readonly permissions: readonly string[];
   readonly resources: readonly string[];
-  readonly mandatoryVerificationGates: readonly string[];
+  /** Absent or empty: no standing verification-role roster. Callers may still set an explicit list. */
+  readonly mandatoryVerificationGates?: readonly string[];
   /** Optional diversity policy applied to typed plans (plans carrying per-branch idea types). */
   readonly diversity?: DiversityPolicy;
 }
@@ -96,7 +105,7 @@ export class PolicyGuard {
     if (plan.branchBudget > this.limits.maxBranchBudget) throw new RangeError("execution plan exceeds branch budget");
     if (!includesAll(this.limits.permissions, plan.permissions)) throw new Error("execution plan requests unavailable permissions");
     if (!includesAll(this.limits.resources, plan.resources)) throw new Error("execution plan requests unavailable resources");
-    if (!includesAll(plan.verificationGates, this.limits.mandatoryVerificationGates)) {
+    if (!includesAll(plan.verificationGates, this.limits.mandatoryVerificationGates ?? [])) {
       throw new Error("execution plan omits a mandatory verification gate");
     }
     this.validateDiversity(plan);
@@ -195,7 +204,7 @@ export interface ScheduleOptions {
   readonly branchIds: readonly string[];
   readonly execute: (branch: Branch) => ArtifactReference | Promise<ArtifactReference>;
   readonly selfVerify?: (branch: Branch) => unknown | Promise<unknown>;
-  readonly falsifier: (branch: Branch) => FalsifierResult | Promise<FalsifierResult>;
+  readonly falsifier?: (branch: Branch) => FalsifierResult | Promise<FalsifierResult>;
   readonly critic?: BranchVerification;
   readonly challenger?: BranchVerification;
   readonly auditor?: BranchVerification;
@@ -333,11 +342,14 @@ export class DeterministicScheduler {
           branch.objections = [...result.objections];
           return result.ok;
         };
-        branch.falsifier = {
-          branchId: branch.branchId,
-          falsify: async () => normalizeVerificationResult(await options.falsifier(branch), "Falsifier"),
-        };
-        if (!(await runRole("Falsifier", async () => branch.falsifier.falsify(artifact)))) {
+        if (options.falsifier) {
+          const falsify = options.falsifier;
+          branch.falsifier = {
+            branchId: branch.branchId,
+            falsify: async () => normalizeVerificationResult(await falsify(branch), "Falsifier"),
+          };
+        }
+        if (!(await runRole("Falsifier", options.falsifier ? async () => branch.falsifier.falsify(artifact) : undefined))) {
           return { branch, artifact, objections: branch.objections, status: "REJECTED", verification };
         }
         if (!(await runRole("Critic", options.critic))
