@@ -2,12 +2,27 @@ import { describe, expect, test } from "bun:test";
 import {
   ArtifactFanIn,
   Coordinator,
+  DEFAULT_BRANCH_WIDTH,
   DeterministicScheduler,
   PolicyGuard,
+  createThinExecutionPlan,
   registerIdeaType,
   type ArtifactReference,
   type ExecutionPlan,
 } from "./toy-harness";
+
+const STANDING_VERIFICATION_ROSTER = [
+  "falsifier",
+  "critic",
+  "challenger",
+  "auditor",
+  "success-auditor",
+  "Falsifier",
+  "Critic",
+  "Challenger",
+  "Auditor",
+  "SuccessAuditor",
+] as const;
 
 const plan = (overrides: Partial<ExecutionPlan> = {}): ExecutionPlan => ({
   version: 1,
@@ -347,5 +362,128 @@ describe("adaptive team execution", () => {
       expect(branches[0].context).toEqual({ ideaType: "systems", focus: "micro-tweak" });
       expect(branches[1].context).toEqual({ ideaType: "algorithmic" });
     });
+  });
+});
+
+describe("thin execution default", () => {
+  const thinGuard = new PolicyGuard({
+    maxBranchWidth: 3,
+    maxAttempts: 1,
+    maxBranchBudget: 1,
+    permissions: [],
+    resources: [],
+  });
+
+  test("omitting requestedBranches yields default branchWidth of 1", () => {
+    expect(DEFAULT_BRANCH_WIDTH).toBe(1);
+    expect(createThinExecutionPlan().branchWidth).toBe(1);
+    expect(new Coordinator().propose({}).branchWidth).toBe(1);
+    expect(new Coordinator().propose({ competition: "alpha" }).branchWidth).toBe(1);
+  });
+
+  test("explicit requestedBranches greater than 1 still selects that width", () => {
+    expect(createThinExecutionPlan({ requestedBranches: 3 }).branchWidth).toBe(3);
+    expect(new Coordinator().propose({ requestedBranches: 2 }).branchWidth).toBe(2);
+  });
+
+  test("default plan does not pre-fill a standing verification-role roster", () => {
+    const proposed = createThinExecutionPlan();
+    expect(proposed.verificationGates).toEqual([]);
+    expect(proposed.verificationGates.some((gate) => STANDING_VERIFICATION_ROSTER.includes(gate as typeof STANDING_VERIFICATION_ROSTER[number]))).toBe(false);
+  });
+
+  test("policy guard defaults do not mandate the Falsifier roster and still honor explicit gates", () => {
+    expect(() => thinGuard.validate(createThinExecutionPlan())).not.toThrow();
+    const openGuard = new PolicyGuard({
+      maxBranchWidth: 3,
+      maxAttempts: 2,
+      maxBranchBudget: 10,
+      permissions: ["read"],
+      resources: ["cpu"],
+    });
+    expect(() => openGuard.validate(plan({ verificationGates: [] }))).not.toThrow();
+
+    const mandatory = new PolicyGuard({
+      maxBranchWidth: 3,
+      maxAttempts: 2,
+      maxBranchBudget: 10,
+      permissions: ["read"],
+      resources: ["cpu"],
+      mandatoryVerificationGates: ["self-check", "falsifier"],
+    });
+    expect(() => mandatory.validate(plan({ verificationGates: ["self-check"] }))).toThrow(/mandatory verification gate/);
+    expect(() => mandatory.validate(plan())).not.toThrow();
+  });
+
+  test("scheduler completes on execute alone when no verification callbacks are passed", async () => {
+    const invoked: string[] = [];
+    const scheduler = new DeterministicScheduler(thinGuard);
+    const result = await scheduler.run(createThinExecutionPlan(), {
+      branchIds: ["a"],
+      execute: (branch) => {
+        invoked.push("execute");
+        return ref(branch.branchId);
+      },
+    });
+
+    expect(invoked).toEqual(["execute"]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.status).toBe("COMPLETED");
+    expect(result[0]?.artifact?.artifactId).toBe("a-1");
+    expect(result[0]?.verification).toEqual({});
+  });
+
+  test("scheduler does not auto-pull Falsifier from plan gate names when the callback is omitted", async () => {
+    const scheduler = new DeterministicScheduler(guard);
+    const result = await scheduler.run(plan({ branchWidth: 1 }), {
+      branchIds: ["a"],
+      execute: (branch) => ref(branch.branchId),
+    });
+
+    expect(result[0]?.status).toBe("COMPLETED");
+    expect(result[0]?.verification?.Falsifier).toBeUndefined();
+    expect(result[0]?.verification?.Critic).toBeUndefined();
+    expect(result[0]?.verification?.Challenger).toBeUndefined();
+    expect(result[0]?.verification?.Auditor).toBeUndefined();
+    expect(result[0]?.verification?.SuccessAuditor).toBeUndefined();
+  });
+
+  test("explicit Falsifier failure still rejects the branch", async () => {
+    const scheduler = new DeterministicScheduler(thinGuard);
+    const result = await scheduler.run(createThinExecutionPlan(), {
+      branchIds: ["a"],
+      execute: (branch) => ref(branch.branchId),
+      falsifier: () => ({ ok: false, objections: ["counterexample"] }),
+    });
+
+    expect(result[0]?.status).toBe("REJECTED");
+    expect(result[0]?.artifact?.artifactId).toBe("a-1");
+    expect(result[0]?.objections).toEqual(["counterexample"]);
+    expect(result[0]?.verification?.Falsifier).toBe(false);
+  });
+
+  test("branch width and verification roster are not promotion keys", async () => {
+    const scheduler = new DeterministicScheduler(thinGuard);
+    const scheduled = await scheduler.run(createThinExecutionPlan(), {
+      branchIds: ["a"],
+      execute: (branch) => ref(branch.branchId),
+    });
+    expect(scheduled[0]?.status).toBe("COMPLETED");
+
+    const fanIn = new ArtifactFanIn(
+      () => ({ score: 9, elite: true, teamFanOutWidth: scheduled[0]?.branch.budget.maxAttempts, roster: scheduled[0]?.verification }),
+      () => false,
+      ["a"],
+    );
+    const denied = await fanIn.reconcile([ref("a")]);
+    expect(denied.promoted).toBeUndefined();
+
+    const byScore = new ArtifactFanIn(
+      () => ({ score: 2 }),
+      (_artifact, evaluation) => evaluation.score > 1,
+      ["a"],
+    );
+    const promoted = await byScore.reconcile([ref("a")]);
+    expect(promoted.promoted?.artifactId).toBe("a-1");
   });
 });
