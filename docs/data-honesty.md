@@ -7,7 +7,7 @@ G1); honesty cannot rely on an agent "feeling honest".
 
 Implementation: `src/data-honesty.ts`; wired into the mission seam in
 `src/toy-harness.ts` (audit runs after candidate proposal, before any snapshot
-or evaluation); ledger event classification in `src/ledger-kinds.ts`.
+or evaluation); ledger event classification in `src/evidence/ledger-kinds.ts`.
 
 ## Scope — what this gate is NOT
 
@@ -76,6 +76,6 @@ URLs escape it; the ceiling and AST/dataflow upgrade path are noted with a
 ## Ledger
 
 - `LEAKAGE_DISCLOSURE` — Evidence kind (an observation of leakage), replay-safe
-  and classified in `src/ledger-kinds.ts`.
+  and classified in `src/evidence/ledger-kinds.ts`.
 - `BRANCH_QUARANTINED` — Evaluation-kind verdict, unchanged kind; in forbid mode
   its payload additionally carries the leakage findings and fingerprint.

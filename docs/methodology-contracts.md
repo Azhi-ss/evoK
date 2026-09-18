@@ -4,7 +4,8 @@ Three Kaggle-methodology objects promoted from "the inner search does whatever"
 to first-class harness/adapter contracts. Table competitions are won or lost on
 **feature engineering, ensembling, and the split**; editing a whole file blindly
 and splitting randomly produces fake CV (research gaps G4/G5/G6, spec #1).
-Implementation: `src/methodology-contracts.ts`; wired into the mission seam in
+Implementation: `src/evidence/methodology-contracts.ts` (flat
+`src/methodology-contracts.ts` re-exports); wired into the mission seam in
 `src/toy-harness.ts`.
 
 The three objects:
@@ -74,7 +75,7 @@ holdout.
 
 ## Manifest evidence seam (T48)
 
-`src/methodology.ts` handles the plugin wire contract and manifest digest/OOF
+`src/evidence/methodology.ts` handles the plugin wire contract and manifest digest/OOF
 checks. It is not a replacement for this module's source audit or evaluator-fact
 OOF gate. Its camel-case contract (`splitRef`, `required`, etc.) differs from
 T44's component contracts; do not feed one resolver's output into the other.

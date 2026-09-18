@@ -3,9 +3,10 @@
 A three-level **data-split / leaderboard policy** contract that keeps any single
 val or Public score from deciding a champion. Overfitting one validation set or
 grinding the Public leaderboard is what causes a Private-LB shake-up (research
-gap G2, spec #1). Implementation: `src/validation-ladder.ts`; wired into the
+gap G2, spec #1). Implementation: `src/evidence/validation-ladder.ts` (flat
+`src/validation-ladder.ts` re-exports); wired into the
 mission seam in `src/toy-harness.ts`; ledger event classification in
-`src/ledger-kinds.ts`.
+`src/evidence/ledger-kinds.ts`.
 
 ## Scope — this is NOT the #11 evaluation noise protocol
 
@@ -89,7 +90,7 @@ The contract and the projected `publicProbesUsed` count are exposed on
 ## Ledger
 
 - `PUBLIC_PROBE_REFUSED` — **Evidence** kind (an observation that a probe was
-  denied by the cap), replay-safe and classified in `src/ledger-kinds.ts`.
+  denied by the cap), replay-safe and classified in `src/evidence/ledger-kinds.ts`.
 - The evaluation's validation level rides the existing `EVALUATOR_SUCCEEDED`
   Evidence payload; promotion refusals ride the existing Evaluation-kind
   `BRANCH_REJECTED` with an explicit reason. No verdict silently uses a
