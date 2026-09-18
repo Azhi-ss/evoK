@@ -38,3 +38,31 @@ metadata. Set `state:` in SKILL.md frontmatter to hold a skill out
 
 **writeback not opened — read-only shell.** Admission / one-slice
 writeback belongs to ET-M1-EXP. Do not treat chat as authority.
+
+## How to demo 「目录可见 / 三态可分」
+
+Offline, no model:
+
+```bash
+evok /skills --project <dir>
+```
+
+You should see eight category lines (empty is fine) and `mission-intake`
+in default context as **accepted**. Then:
+
+```bash
+mkdir -p <dir>/.evok/skills/try-search
+cat > <dir>/.evok/skills/try-search/SKILL.md <<'EOF'
+---
+name: try-search
+description: candidate search tip
+state: candidate
+category: search
+---
+body stays out of default context
+EOF
+evok /skills --project <dir>
+```
+
+`try-search` appears as **candidate** and is held out of default context.
+Skill bodies are not printed. `/research` stays Mission authority.

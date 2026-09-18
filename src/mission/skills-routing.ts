@@ -16,7 +16,7 @@
  * or demoted stay out. Writeback is not opened — read-only shell.
  */
 import { readFileSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DiscoveredSkill } from "../evok-resources";
 
@@ -232,6 +232,12 @@ export async function discloseSkill(
   const resources: string[] = [];
   for (const folder of ["references", "scripts"]) {
     const dir = join(root, folder);
+    try {
+      const stat = await lstat(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -239,8 +245,8 @@ export async function discloseSkill(
       continue;
     }
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      if (entry.isFile()) resources.push(join(dir, entry.name));
+      if (entry.name.startsWith(".") || entry.isSymbolicLink() || !entry.isFile()) continue;
+      resources.push(join(dir, entry.name));
     }
   }
   resources.sort();
@@ -251,7 +257,7 @@ export function skillWritebackStatus(): typeof SKILL_WRITEBACK_STATUS {
   return SKILL_WRITEBACK_STATUS;
 }
 
-export function proposeSkillWriteback(_request: { readonly names: readonly string[] }): never {
+export function proposeSkillWriteback(_request: { readonly name: string }): never {
   throw new SkillWritebackNotOpenedError(SKILL_WRITEBACK_STATUS);
 }
 

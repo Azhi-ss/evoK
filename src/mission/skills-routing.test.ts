@@ -6,7 +6,7 @@
  * Skills routing is not Mission authorize / continue / repair / stop.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bundledSkillRoot } from "../evok-resources";
@@ -143,14 +143,27 @@ describe("L0 → on-trigger read-full disclosure", () => {
     expect(JSON.stringify(l2)).not.toContain("L2-REF");
     await rm(dir, { recursive: true, force: true });
   });
+
+  test("L2 does not follow a symlinked references directory (ADR-0006)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "evok-skill-l2-"));
+    const outside = await mkdtemp(join(tmpdir(), "evok-skill-l2-out-"));
+    await writeFile(join(outside, "escaped.md"), "OUT-OF-TREE-L2");
+    await symlink(outside, join(dir, "references"), "dir");
+    await writeFile(join(dir, "SKILL.md"), "---\nname: method\ndescription: method skill\nstate: accepted\n---\nbody\n");
+    const routed = routeSkills([skill({ name: "method", filePath: join(dir, "SKILL.md"), baseDir: dir })])[0]!;
+    const l2 = await discloseSkill(routed, "l2-resources");
+    expect(l2.resources).toEqual([]);
+    await rm(dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
 });
 
 describe("writeback isolation — read-only shell", () => {
   test("writeback is explicitly not opened", () => {
     expect(skillWritebackStatus()).toBe("writeback not opened — read-only shell");
     expect(SKILL_WRITEBACK_STATUS).toBe("writeback not opened — read-only shell");
-    expect(() => proposeSkillWriteback({ names: ["keep"] })).toThrow(SkillWritebackNotOpenedError);
-    expect(() => proposeSkillWriteback({ names: ["keep", "try"] })).toThrow(/writeback not opened/);
+    expect(() => proposeSkillWriteback({ name: "keep" })).toThrow(SkillWritebackNotOpenedError);
+    expect(() => proposeSkillWriteback({ name: "keep" })).toThrow(/writeback not opened/);
   });
 });
 
