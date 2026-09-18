@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runEvok, parseEvokArgs, EVOK_EXIT, type EvokRunOptions } from "./evok-cli";
-import { createEvokModelResolver } from "./evok-model";
+import { createEvokModelResolver } from "../evok-model";
 
 async function tempProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "evok-cli-project-"));

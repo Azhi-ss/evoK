@@ -5,7 +5,7 @@ import {
   type ResearchTask,
   type TaskCompletion,
 } from "./research-loop";
-import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "../security-boundary";
 
 // Signed independent-evaluator proof bound to the registered "artifact-1" digest; missions register only
 // the evaluator's public key, so completions cannot forge the gate.

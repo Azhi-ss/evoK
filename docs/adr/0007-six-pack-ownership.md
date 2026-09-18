@@ -50,6 +50,12 @@ The physical `src/search/` cut is recorded in
 [ADR-0009](0009-search-physical-pack.md). This ADR's logical ownership
 map is unchanged.
 
+## Amendment (ET-A3 / #123)
+
+The physical `src/mission/` + `src/cli/` cut is recorded in
+[ADR-0010](0010-mission-cli-physical-pack.md). This ADR's logical ownership
+map is unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate, T48, hang, or #40 semantics.
@@ -58,6 +64,6 @@ map is unchanged.
 - No true contest External Submission.
 - No Elite-as-promotion.
 - No C thicken of the execution roster.
-- No P3 / P4 / P5 physical package moves.
+- No P4 / P5 physical package moves.
 
 Domain vocabulary for these terms lives in `CONTEXT.md`.

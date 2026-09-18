@@ -174,8 +174,8 @@ Autonomous continuation from measured evidence (#113):
   history (the SDK loader stays in `noSkills/noExtensions/noPromptTemplates/
   noContextFiles` mode). Approved evoK/project resources arrive in T2 (#110).
 
-Offline contract tests use the SDK faux provider (`src/evok-cli.test.ts`,
-`src/evok-model.test.ts`): response path, exact tier routing, usage display,
+Offline contract tests use the SDK faux provider (`src/cli/evok-cli.test.ts`,
+flat `src/evok-cli.ts` re-exports; `src/evok-model.test.ts`): response path, exact tier routing, usage display,
   missing-configuration/auth failure, and cancellation — no real credentials.
 Any live-model smoke check requires a separately authorized budget.
 
@@ -187,7 +187,7 @@ Steals the **orchestration clarity** of Google Co-Scientist — Generation → R
 - Reflection/Falsifier/Critic/Challenger/Auditor outputs are persisted as structured **objections** and written back onto the card, so the next expansion or Director step reads them — never discarded with the failed candidate.
 - **Ranking/promotion consumes gates + uncleared objections + evidence refs, never score alone**: a promotion verdict is refused when the card is missing, `violated`, ungated, or carries uncleared objections.
 
-Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/search/fixtures/toy-harness.ts` (branch `claimCard` + promotion gate; flat `src/toy-harness.ts` re-exports; fixtures/tests only), `src/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
+Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/search/fixtures/toy-harness.ts` (branch `claimCard` + promotion gate; flat `src/toy-harness.ts` re-exports; fixtures/tests only), `src/mission/research-loop.ts` (task `claimCard` / WORLD_MODEL admission; flat `src/research-loop.ts` re-exports).
 
 ## File Blueprint mission state (Ravi-style)
 
@@ -197,7 +197,7 @@ Long-running Missions keep GOAL, RULES, an experiments log, and SCOREBOARD as co
 - SCOREBOARD rows must cite evaluator Evidence. A `championRef` on the file is narrative only and cannot bypass the independent evaluator or promotion gate.
 - Checkpoint / restart rebuilds the blueprint from the ledger; file digests must stay aligned with their Evidence refs.
 
-Schema: `docs/file-blueprint.md`. Implementation: `src/file-blueprint.ts`, `MissionDirector.commitBlueprintFile` / `recordCrossReview`.
+Schema: `docs/file-blueprint.md`. Implementation: `src/mission/file-blueprint.ts` (flat `src/file-blueprint.ts` re-exports), `MissionDirector.commitBlueprintFile` / `recordCrossReview`.
 
 ### Non-goals
 

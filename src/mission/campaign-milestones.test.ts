@@ -6,7 +6,7 @@ import {
   type ResearchTask,
   type TaskCompletion,
 } from "./research-loop";
-import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "../security-boundary";
 
 const evaluatorKeys = generateEvaluationKeyPair("campaign-evaluator");
 const trusted = [{ evaluatorId: evaluatorKeys.evaluatorId, publicKey: evaluatorKeys.publicKey }];

@@ -9,7 +9,7 @@ import {
   type ScoreboardFile,
 } from "./file-blueprint";
 import { MissionDirector, type ResearchEvent, type ResearchTask, type TaskCompletion } from "./research-loop";
-import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "../security-boundary";
 
 const evaluatorKeys = generateEvaluationKeyPair("independent-evaluator");
 const trusted = [{ evaluatorId: evaluatorKeys.evaluatorId, publicKey: evaluatorKeys.publicKey }];
