@@ -207,7 +207,7 @@ Logical packages pin authority. Physical layout remains a flat `src/` tree today
 | Package | Owns | Does not own |
 |---|---|---|
 | **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop | Business/competition code; search-graph authority; Team blueprint details |
-| **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team orchestration |
+| **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
 | **competition** | Contest and local Evaluator adapters | True External Submission (still frozen) |
