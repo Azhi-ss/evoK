@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { runEvok, parseEvokArgs, EVOK_EXIT, type EvokRunOptions } from "./evok-cli";
+import { runEvok, parseEvokArgs, EVOK_EXIT, EVOK_USAGE, type EvokRunOptions } from "./evok-cli";
 import { createEvokModelResolver } from "../evok-model";
+import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission-start";
 
 async function tempProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "evok-cli-project-"));
@@ -890,6 +892,174 @@ describe("runEvok Mission resume and reopen (#114)", () => {
     });
     expect(code).not.toBe(0);
     expect(stderr.text()).toMatch(/damaged/i);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
+describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
+  test("tty without request launches Pi native TUI and does not start the evoK REPL", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-tui-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const launches: Array<Record<string, unknown>> = [];
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async (launch) => {
+        launches.push({ ...launch });
+      },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]!.projectRoot).toBe(await realpath(project));
+    expect(launches[0]!.tier).toBe("default");
+    expect(launches[0]).not.toHaveProperty("slashCommands");
+    expect(launches[0]).not.toHaveProperty("commandTable");
+    expect(stdout.text()).not.toMatch(/foreground REPL/);
+    expect(stdout.text()).toMatch(/native TUI/i);
+    expect(stdout.text()).not.toMatch(/personal Pi prompts\/skills\/extensions\/history and global shared skills are not loaded/);
+    expect(stdout.text()).toMatch(/credentials stay in ~\/\.pi\/agent/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("Pi native slash commands /model and /new are not an evoK intercept table", () => {
+    expect(EVOK_USAGE).toMatch(/native TUI/i);
+    expect(EVOK_USAGE).not.toMatch(/REPL/);
+    expect(EVOK_USAGE).not.toMatch(/in a REPL/);
+    expect(isExplicitStartRequest("/model")).toBe(false);
+    expect(isExplicitStartRequest("/new")).toBe(false);
+    expect(isExplicitResumeRequest("/model").resume).toBe(false);
+    expect(isExplicitResumeRequest("/new").resume).toBe(false);
+  });
+
+  test("one-shot request still uses the headless Run path, not TUI", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui-oneshot", [{ id: "deterministic", text: "one-shot body" }]);
+    const ref = "evok-cli-tui-oneshot-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    let tuiLaunched = false;
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { request: "summarize the project", project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(stdout.text()).toContain("one-shot body");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--start without request text dispatches Mission start, not TUI", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "missions", "m-tui-start"), { recursive: true });
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui-start", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-tui-start-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    let tuiLaunched = false;
+    const seen: string[] = [];
+    const stdout = new CollectStream();
+    const code = await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000, start: true, mission: "m-tui-start" },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      startRunner: async (opts) => {
+        seen.push(opts.missionId);
+        return {
+          runId: `${opts.missionId}:baseline:1`,
+          status: "baseline-complete",
+          stopReason: "baseline-complete",
+          model: { provider: "p", model: "m", id: ref },
+          usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          budget: { total: 1, units: "model-USD", consumed: 0, remaining: 1 },
+          evaluation: { ok: true, score: 0.5 },
+          record: {} as never,
+          experiments: [],
+        };
+      },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(seen).toEqual(["m-tui-start"]);
+    expect(stdout.text()).toContain("baseline-complete");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--resume without request text dispatches Mission resume, not TUI", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui-resume", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-tui-resume-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({ modelRuntime, catalog: catalogFrom(modelRuntime, [ref], ref) });
+    let tuiLaunched = false;
+    const seen: string[] = [];
+    const code = await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000, resume: true, mission: "m-abc123def456" },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 0.5 }; } },
+      resumeRunner: async (opts) => {
+        seen.push(opts.missionId);
+        return {
+          runId: "m-abc123def456:exp:3", status: "director-stopped", stopReason: "example complete",
+          model: { provider: "p", model: "m", id: ref },
+          usage: { tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          budget: { total: 1, units: "model-USD", consumed: 0.2, remaining: 0.8 },
+          evaluation: { ok: true, score: 0.9 }, record: {} as never, experiments: [],
+        } as never;
+      },
+      stdout: new CollectStream(),
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(seen).toEqual(["m-abc123def456"]);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("--intake without request on tty is a usage error, not TUI or REPL", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui-intake", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-tui-intake-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    let tuiLaunched = false;
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000, intake: true },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      intakeRunner: async () => { throw new Error("must not intake without request text"); },
+      stdout: new CollectStream(),
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.usage);
+    expect(tuiLaunched).toBe(false);
+    expect(stderr.text()).toMatch(/--intake requires request text/);
     await rm(project, { recursive: true, force: true });
   });
 });
