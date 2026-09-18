@@ -322,6 +322,33 @@ describe("Budget Gate hook — writeback refuse is orthogonal to Admission (ET-M
     expect(() => requireSkillAccepted(candidate!, admission, budget)).toThrow(/unreserved|no reserve/i);
   });
 
+  test("a continue BudgetDecision cannot write accepted", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "candidate" }),
+    ]);
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    ledger.reserve({
+      reservationId: "cont-only",
+      amount: 0.1,
+      kind: "research",
+      action: "continue",
+    });
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+          { kind: "protected_holdout", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+    });
+    const attempt = attemptSkillAccepted(candidate!, admission, ledger.authorize("continue"));
+    expect(attempt.admitted).toBe(false);
+    expect(attempt.skill.state).toBe("candidate");
+    expect(defaultContextPointers([attempt.skill])).toEqual([]);
+  });
+
   test("budget pass does not write accepted without Admission", () => {
     const [candidate] = routeSkills([
       skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),

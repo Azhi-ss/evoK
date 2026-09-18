@@ -14,7 +14,7 @@
  * pass is not an Admission pass.
  */
 import { deepFreeze } from "../security-boundary";
-import type { BudgetDecision } from "./budget-gate";
+import { budgetDecisionIsPass, type BudgetDecision } from "./budget-gate";
 import {
   experimentValidityIsPass,
   type ExperimentValidityDecision,
@@ -239,7 +239,7 @@ export class MethodWritebackSession {
     if (!this.open || this.open.phase !== "regression") {
       throw new MethodWritebackPhaseError("admit requires a regression-pass slice");
     }
-    if (budget !== undefined && (!budget.ok || budget.outcome !== "pass")) {
+    if (budget !== undefined && !budgetDecisionIsPass(budget, "writeback")) {
       return this.finishRollback(
         budget.objections[0] ?? "budget refused writeback",
         admission,

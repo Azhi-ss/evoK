@@ -15,7 +15,7 @@
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BudgetDecision } from "../evidence/budget-gate";
+import { budgetDecisionIsPass, type BudgetDecision } from "../evidence/budget-gate";
 import { isMissionId, missionsDir } from "./mission-draft";
 import {
   loadMissionRecord,
@@ -513,7 +513,7 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
     await writeEventLog(projectRoot, missionId, events);
   }
   assertContinueAuthorization(options.authorization, missionId);
-  if (options.budget !== undefined && (!options.budget.ok || options.budget.outcome !== "pass")) {
+  if (options.budget !== undefined && !budgetDecisionIsPass(options.budget, "continue")) {
     throw new ResearchContinueRejectedError(
       options.budget.objections[0] ?? `mission ${missionId} budget refused continue`,
     );

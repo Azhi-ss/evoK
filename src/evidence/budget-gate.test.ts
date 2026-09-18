@@ -2,7 +2,7 @@
  * ET-M1-BUD / #144 — Budget Gate reserve → settle skeleton.
  *
  * Seams: BudgetLedger.reserve / settle / authorize,
- * evaluateBudgetAuthorization.
+ * evaluateBudgetGate / budgetDecisionIsPass.
  * Over-budget or unreserved refuses continue / writeback.
  * Budget pass is not Admission pass.
  */
@@ -14,7 +14,8 @@ import {
 } from "./method-admission";
 import {
   BudgetLedger,
-  evaluateBudgetAuthorization,
+  budgetDecisionIsPass,
+  evaluateBudgetGate,
 } from "./budget-gate";
 import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search-selection-port";
 
@@ -92,7 +93,7 @@ describe("Budget Gate — over-cap or unreserved refuses continue / writeback", 
     expect(reserved.reason).toBe("over_budget");
     expect(reserved.objections.join(" ")).toMatch(/over.?budget|exceed/i);
     expect(ledger.snapshot().reserved).toBe(0);
-    expect(evaluateBudgetAuthorization({ action: "continue", snapshot: ledger.snapshot() }).reason).toBe("unreserved");
+    expect(evaluateBudgetGate({ action: "continue", snapshot: ledger.snapshot() }).reason).toBe("unreserved");
   });
 
   test("settle above the reservation refuses and does not consume", () => {
@@ -123,7 +124,7 @@ describe("Budget Gate — over-cap or unreserved refuses continue / writeback", 
 
   test("writeback without a reserve is refused", () => {
     const ledger = new BudgetLedger(caps(1));
-    const decision = evaluateBudgetAuthorization({
+    const decision = evaluateBudgetGate({
       action: "writeback",
       snapshot: ledger.snapshot(),
     });
@@ -147,10 +148,13 @@ describe("Budget Gate — over-cap or unreserved refuses continue / writeback", 
     expect(cont.action).toBe("continue");
     expect(ledger.authorize("writeback").ok).toBe(false);
     expect(ledger.authorize("writeback").reason).toBe("unreserved");
+    expect(budgetDecisionIsPass(cont)).toBe(true);
+    expect(budgetDecisionIsPass(cont, "continue")).toBe(true);
+    expect(budgetDecisionIsPass(cont, "writeback")).toBe(false);
   });
 
   test("Elite or score cannot substitute for a reserve", () => {
-    const decision = evaluateBudgetAuthorization({
+    const decision = evaluateBudgetGate({
       action: "continue",
       snapshot: new BudgetLedger(caps(10)).snapshot(),
       elite: true,
@@ -246,7 +250,7 @@ describe("Budget Gate is orthogonal to Admission", () => {
     const admission = admissionPass();
     expect(admission.admitted).toBe(true);
 
-    const unreserved = evaluateBudgetAuthorization({
+    const unreserved = evaluateBudgetGate({
       action: "writeback",
       snapshot: new BudgetLedger(caps(1)).snapshot(),
     });
@@ -273,6 +277,29 @@ describe("Budget Gate is orthogonal to Admission", () => {
     expect(overRefused.admitted).toBe(false);
     expect(overRefused.phase).toBe("rolled_back");
     expect(overRefused.objections.join(" ")).toMatch(/over.?budget|exceed/i);
+  });
+});
+
+describe("Budget Gate — action of a pass cannot be reused", () => {
+  test("a continue pass is not a writeback pass", () => {
+    const ledger = new BudgetLedger(caps(1));
+    ledger.reserve({
+      reservationId: "cont-only",
+      amount: 0.1,
+      kind: "research",
+      action: "continue",
+    });
+    const admission = admissionPass();
+    const continuePass = ledger.authorize("continue");
+    expect(continuePass.ok).toBe(true);
+
+    const session = new MethodWritebackSession();
+    session.propose({ sliceId: "skill:keep", kind: "skill", targetName: "keep" });
+    session.regress("pass");
+    const refused = session.admit(admission, continuePass);
+    expect(refused.admitted).toBe(false);
+    expect(refused.phase).toBe("rolled_back");
+    expect(refused.objections.join(" ")).toMatch(/writeback/i);
   });
 });
 

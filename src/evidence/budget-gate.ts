@@ -17,7 +17,7 @@ import { deepFreeze } from "../security-boundary";
 export type BudgetAction = "continue" | "writeback";
 export type BudgetSpendKind = "research" | "method_improvement";
 export type BudgetRefuseReason = "unreserved" | "over_budget" | "over_method_improvement_cap";
-export type BudgetReservationStatus = "open" | "settled" | "released";
+export type BudgetReservationStatus = "open" | "settled";
 
 export interface BudgetCaps {
   readonly total: number;
@@ -164,11 +164,18 @@ function snapshotOf(input: {
   });
 }
 
+/** True only when the decision is a pass for the intended action. */
+export function budgetDecisionIsPass(decision: BudgetDecision, action?: BudgetAction): boolean {
+  if (!decision.ok || decision.outcome !== "pass") return false;
+  if (action !== undefined && decision.action !== action) return false;
+  return true;
+}
+
 /**
  * Whether continue / writeback may proceed. An open reservation for that
  * action is required. Elite / score are ignored.
  */
-export function evaluateBudgetAuthorization(input: BudgetAuthorizationInput): BudgetDecision {
+export function evaluateBudgetGate(input: BudgetAuthorizationInput): BudgetDecision {
   const { action, snapshot } = input;
   const open = snapshot.openReservations.find((entry) => entry.action === action && entry.status === "open");
   if (!open) {
@@ -369,6 +376,6 @@ export class BudgetLedger {
   }
 
   authorize(action: BudgetAction): BudgetDecision {
-    return evaluateBudgetAuthorization({ action, snapshot: this.snapshot() });
+    return evaluateBudgetGate({ action, snapshot: this.snapshot() });
   }
 }

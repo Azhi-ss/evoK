@@ -106,7 +106,8 @@ export type {
 } from "./method-admission";
 export {
   BudgetLedger,
-  evaluateBudgetAuthorization,
+  budgetDecisionIsPass,
+  evaluateBudgetGate,
 } from "./budget-gate";
 export type {
   BudgetAction,

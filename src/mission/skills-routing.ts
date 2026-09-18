@@ -21,7 +21,7 @@
 import { readFileSync } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { BudgetDecision } from "../evidence/budget-gate";
+import { budgetDecisionIsPass, type BudgetDecision } from "../evidence/budget-gate";
 import type { MethodAdmissionDecision } from "../evidence/method-admission";
 import type { DiscoveredSkill } from "../evok-resources";
 
@@ -306,7 +306,7 @@ export function attemptSkillAccepted(
   admission: MethodAdmissionDecision,
   budget?: BudgetDecision,
 ): SkillAdmissionAttempt {
-  if (budget !== undefined && (!budget.ok || budget.outcome !== "pass")) {
+  if (budget !== undefined && !budgetDecisionIsPass(budget, "writeback")) {
     return {
       skill,
       admitted: false,
@@ -349,7 +349,7 @@ export function requireSkillAccepted(
   const attempt = attemptSkillAccepted(skill, admission, budget);
   if (!attempt.admitted) {
     const message = attempt.objections[0] ?? "Admission refused; skill cannot become accepted";
-    if (budget !== undefined && (!budget.ok || budget.outcome !== "pass")) {
+    if (budget !== undefined && !budgetDecisionIsPass(budget, "writeback")) {
       throw new SkillBudgetRefusedError(message);
     }
     throw new SkillAdmissionRefusedError(message);

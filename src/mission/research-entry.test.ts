@@ -469,6 +469,38 @@ describe("Budget Gate hook — over-budget or unreserved refuses continue (ET-M1
     }
   });
 
+  test("a writeback BudgetDecision cannot continue", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-action-"));
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    ledger.reserve({
+      reservationId: "wb-only",
+      amount: 0.1,
+      kind: "method_improvement",
+      action: "writeback",
+    });
+    try {
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "action must match" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: "run-b", ok: true }),
+        ],
+        budget: ledger.authorize("writeback"),
+      })).rejects.toThrow(ResearchContinueRejectedError);
+      const view = await readResearchStatus(projectRoot, MISSION_ID);
+      expect(view.experiments).toEqual([]);
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test("a reserved continue is still subject to user authorization", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-auth-"));
     const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
