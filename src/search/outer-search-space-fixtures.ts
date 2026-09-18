@@ -1,6 +1,7 @@
 /**
  * Shared outer-E2E search-space fixtures (E3 / #72).
- * Physical home: `src/search/` (ET-A2 / #122). Fixtures/tests only.
+ * Physical home: `src/search/` (ET-A2 / #122). Search-space fixtures, not
+ * ToyHarness and not a second control plane.
  *
  * Consumers take mapped `{kind,id}` refs only. Raw near-dup / MMD scores
  * must not be used as promotion / Broker / Kill-test keys.
