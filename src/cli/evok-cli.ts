@@ -54,6 +54,17 @@ import {
 import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission-director";
 import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "../local-file-evaluator";
 import { loadMissionDraft, missionsDir } from "../mission-draft";
+import {
+  continueResearch,
+  formatResearchStatus,
+  parseResearchCommand,
+  readResearchStatus,
+  resolveResearchMissionId,
+  ResearchAuthorityRejectedError,
+  ResearchContinueRejectedError,
+  ResearchStatusRejectedError,
+  type ResearchVerb,
+} from "../mission/research-entry";
 
 export const EVOK_VERSION = "0.1.0-t6";
 
@@ -100,6 +111,8 @@ export interface ParsedEvokArgs {
   readonly resume?: boolean;
   /** #114: list unfinished Missions (progress/stop/remaining budget) and stop. */
   readonly missions?: boolean;
+  /** #138: thin evoK `/research` product entry (not a Pi slash command). */
+  readonly research?: ResearchVerb;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -138,12 +151,20 @@ options:
                     pre-interrupt work is reconciled from evidence first.
                     Use \`evok --resume\` or \`evok /resume\`. Status questions
                     and negations never resume.
+  --research [verb] thin evoK product entry (\`evok /research status\` or
+                    \`evok /research continue\`). Status is readable from
+                    durable Mission events/records with no model. Continue is
+                    one authorized yellow-light path that records a visible
+                    experiment entry; it does not dispatch a Pi Run or open
+                    EXP gates. Not a Pi slash command: \`/model\` and \`/new\`
+                    stay on the native TUI.
   -h, --help        show this help
 
 On a tty with no request and no Mission flag, evok launches the Pi SDK native
 TUI. Native slash commands (\`/model\`, \`/new\`, …) are handled by Pi, not evoK.
-Mission entrypoints stay the thin flags above. Models and credentials come from
-Pi (~/.pi/agent); evok never copies or displays credentials.
+Mission entrypoints stay the thin flags above, including \`/research\`.
+Models and credentials come from Pi (~/.pi/agent); evok never copies or
+displays credentials.
 `;
 
 export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
@@ -158,6 +179,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let baselineOnly = false;
   let resume = false;
   let missions = false;
+  let research: ResearchVerb | undefined;
   let maxExperiments: number | undefined;
   let mission: string | undefined;
   let reserveCost = DEFAULT_RESERVE_COST;
@@ -191,6 +213,14 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
       resume = true;
     } else if (arg === "--missions") {
       missions = true;
+    } else if (arg === "--research") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-") && /^(status|continue|repair|stop)$/i.test(next)) {
+        research = next.toLowerCase() as ResearchVerb;
+        i += 1;
+      } else {
+        research = "status";
+      }
     } else if (arg === "--max-experiments") {
       const raw = argv[++i];
       const parsed = Number(raw);
@@ -215,6 +245,11 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     }
   }
   if (positionals.length > 0) request = positionals.join(" ");
+  const researchCommand = request ? parseResearchCommand(request) : undefined;
+  if (researchCommand) {
+    research = researchCommand.verb;
+    if (!mission && researchCommand.missionId) mission = researchCommand.missionId;
+  }
   return {
     request, project, tier, orchestra, timeoutMs,
     ...(intake ? { intake: true } : {}),
@@ -223,6 +258,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     ...(baselineOnly ? { baselineOnly: true } : {}),
     ...(resume ? { resume: true } : {}),
     ...(missions ? { missions: true } : {}),
+    ...(research ? { research } : {}),
     ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     reserveCost,
     ...(mission ? { mission } : {}),
@@ -304,6 +340,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   if (args.missions) {
     return runMissionsList(stdout, stderr, projectReal);
   }
+  if (args.research) {
+    return runResearchEntry(args, stdout, stderr, projectReal);
+  }
 
   let resolver: SessionModelResolver;
   try {
@@ -346,7 +385,7 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`evok ${EVOK_VERSION}\n`);
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
-    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status;
+    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status && !args.research;
     stdout.write(`tools:   ${args.intake
       ? "intake: read-only project inspection plus the trusted draft-record tool"
       : args.start || (args.request !== undefined && isExplicitStartRequest(args.request))
@@ -552,6 +591,70 @@ async function runIntake(
   } finally {
     bound.cleanup();
     await rm(workspaceRoot, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * #138: thin evoK `/research` product entry. Status and one authorized
+ * continue live in mission/; this shell only prints. Not a Pi slash table.
+ */
+async function runResearchEntry(
+  args: ParsedEvokArgs,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+): Promise<number> {
+  const verb = args.research ?? parseResearchCommand(args.request ?? "")?.verb;
+  if (!verb) {
+    stderr.write("evok: /research requires status or continue\n");
+    return EVOK_EXIT.usage;
+  }
+  if (verb === "repair" || verb === "stop") {
+    stderr.write(`evok: /research ${verb} is reserved on the Mission control plane; this slice exposes status and one authorized continue\n`);
+    return EVOK_EXIT.usage;
+  }
+  let missionId: string;
+  try {
+    missionId = await resolveResearchMissionId(projectRoot, args.mission);
+  } catch (error) {
+    if (error instanceof ResearchStatusRejectedError) {
+      stderr.write(`evok: ${error.message}\n`);
+      return EVOK_EXIT.usage;
+    }
+    throw error;
+  }
+  try {
+    if (verb === "status") {
+      const view = await readResearchStatus(projectRoot, missionId);
+      stdout.write(formatResearchStatus(view));
+      return EVOK_EXIT.ok;
+    }
+    const view = await continueResearch({
+      projectRoot,
+      missionId,
+      authorization: {
+        requested: true,
+        token: args.request ?? "/research continue",
+        missionSelector: args.mission ?? "displayed",
+        source: "user",
+      },
+    });
+    stdout.write(formatResearchStatus(view));
+    return EVOK_EXIT.ok;
+  } catch (error) {
+    if (error instanceof MissionRecordCorruptionError) {
+      stderr.write(`evok: ${error.message}; the damaged record was not overwritten\n`);
+      return EVOK_EXIT.runtimeError;
+    }
+    if (
+      error instanceof ResearchAuthorityRejectedError
+      || error instanceof ResearchContinueRejectedError
+      || error instanceof ResearchStatusRejectedError
+    ) {
+      stderr.write(`evok: ${error.message}\n`);
+      return error instanceof ResearchAuthorityRejectedError ? EVOK_EXIT.usage : EVOK_EXIT.runtimeError;
+    }
+    throw error;
   }
 }
 

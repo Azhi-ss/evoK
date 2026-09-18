@@ -157,6 +157,8 @@ describe("P6 six-pack physical closeout", () => {
   test("mission / cli / execution / competition barrels stay on their existing locks", () => {
     expect(typeof mission.startAuthorizedMission).toBe("function");
     expect(typeof mission.runGoldenPath).toBe("function");
+    expect(typeof mission.parseResearchCommand).toBe("function");
+    expect(typeof mission.continueResearch).toBe("function");
     expect(runtimeKeys(mission)).not.toContain("ToyCompetitionHarness");
 
     expect(typeof cli.parseEvokArgs).toBe("function");
@@ -164,6 +166,8 @@ describe("P6 six-pack physical closeout", () => {
     expect(runtimeKeys(cli)).not.toContain("startAuthorizedMission");
     expect(runtimeKeys(cli)).not.toContain("runGoldenPath");
     expect(runtimeKeys(cli)).not.toContain("MissionDirector");
+    expect(runtimeKeys(cli)).not.toContain("continueResearch");
+    expect(runtimeKeys(cli)).not.toContain("recoverResearchStatus");
 
     expect(execution.DEFAULT_BRANCH_WIDTH).toBe(1);
     expect(execution.createThinExecutionPlan().branchWidth).toBe(1);

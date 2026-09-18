@@ -235,7 +235,7 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 
 | Package | Owns | Does not own |
 |---|---|---|
-| **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop | Business/competition code; search-graph authority; Team blueprint details |
+| **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop, thin `/research` entry | Business/competition code; search-graph authority; Team blueprint details |
 | **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |

@@ -29,3 +29,11 @@ export {
 export { assembleLlmCompArmSetup } from "./llm-propose-outer-min";
 export { assembleOuterMinPath } from "./outer-min-path";
 export { assembleOuterE2eMinPath } from "./outer-e2e-min-path";
+export {
+  continueResearch,
+  formatResearchStatus,
+  parseResearchCommand,
+  readResearchStatus,
+  recoverResearchStatus,
+  resolveResearchMissionId,
+} from "./research-entry";

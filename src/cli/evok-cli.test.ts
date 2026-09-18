@@ -8,6 +8,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runEvok, parseEvokArgs, EVOK_EXIT, EVOK_USAGE, type EvokRunOptions } from "./evok-cli";
 import { createEvokModelResolver } from "../evok-model";
 import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission-start";
+import { parseResearchCommand } from "../mission/research-entry";
 
 async function tempProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "evok-cli-project-"));
@@ -938,6 +939,12 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(isExplicitStartRequest("/new")).toBe(false);
     expect(isExplicitResumeRequest("/model").resume).toBe(false);
     expect(isExplicitResumeRequest("/new").resume).toBe(false);
+    expect(parseResearchCommand("/model")).toBeUndefined();
+    expect(parseResearchCommand("/new")).toBeUndefined();
+    expect(parseEvokArgs(["/model"]).research).toBeUndefined();
+    expect(parseEvokArgs(["/new"]).research).toBeUndefined();
+    expect(parseEvokArgs(["/model"]).request).toBe("/model");
+    expect(parseEvokArgs(["/new"]).request).toBe("/new");
   });
 
   test("one-shot request still uses the headless Run path, not TUI", async () => {
@@ -1060,6 +1067,96 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(code).toBe(EVOK_EXIT.usage);
     expect(tuiLaunched).toBe(false);
     expect(stderr.text()).toMatch(/--intake requires request text/);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
+describe("thin /research product entry (ET-M1-EVT / #138)", () => {
+  test("parseEvokArgs reads /research and --research without treating them as TUI slashes", () => {
+    expect(parseEvokArgs(["/research", "status", "--mission", "m-evt138demo01"])).toMatchObject({
+      research: "status",
+      mission: "m-evt138demo01",
+      request: "/research status",
+    });
+    expect(parseEvokArgs(["--research", "continue", "--mission", "m-evt138demo01"])).toMatchObject({
+      research: "continue",
+      mission: "m-evt138demo01",
+    });
+    expect(parseEvokArgs(["/research"]).research).toBe("status");
+  });
+
+  test("/research status is readable offline and does not launch TUI or need a model", async () => {
+    const project = await tempProject();
+    const missionId = "m-evt138demo01";
+    await mkdir(join(project, ".evok", "missions", missionId), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", missionId, "mission.json"), JSON.stringify({
+      schemaVersion: 1, id: missionId, status: "baseline-complete", objective: "demo visible status",
+      contract: { objective: "demo visible status", expectedOutputs: [], evaluationMethod: "e", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 0.1, remaining: 0.9 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {},
+      baselineRunId: `${missionId}:baseline:1`,
+      baseline: {
+        runId: `${missionId}:baseline:1`,
+        evaluation: { ok: true, score: 0.41 },
+        evidenceRefs: ["snap:1"],
+        measuredAt: "2026-09-19T03:00:00.000Z",
+      },
+      experiments: [{
+        runId: `${missionId}:exp:2`, attempt: 1, action: "run-experiment", ok: true,
+        taskObjective: "one experiment entry visible", evidenceRefs: [], at: "2026-09-19T03:05:00.000Z",
+      }],
+      history: [], createdAt: "2026-09-19T03:00:00.000Z", updatedAt: "2026-09-19T03:05:00.000Z",
+    }));
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/research", "status", "--project", project, "--mission", missionId]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(stdout.text()).toMatch(/phase experimenting/);
+    expect(stdout.text()).toContain("demo visible status");
+    expect(stdout.text()).toContain(`${missionId}:baseline:1`);
+    expect(stdout.text()).toContain("one experiment entry visible");
+    expect(stdout.text()).toMatch(/chat transcript is not authority/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/research continue records one authorized experiment entry without a model", async () => {
+    const project = await tempProject();
+    const missionId = "m-evt138demo01";
+    await mkdir(join(project, ".evok", "missions", missionId), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", missionId, "control-events.jsonl"), [
+      JSON.stringify({
+        eventId: "evt-1", sequence: 1, type: "MISSION_AUTHORIZED", at: "2026-09-19T04:00:00.000Z",
+        missionId, action: "authorize", payload: { objective: "continue after baseline" },
+      }),
+      JSON.stringify({
+        eventId: "evt-2", sequence: 2, type: "BASELINE_RECORDED", at: "2026-09-19T04:00:01.000Z",
+        missionId, payload: { runId: `${missionId}:baseline:1`, ok: true, score: 0.2 },
+      }),
+    ].join("\n") + "\n");
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/research", "continue", "--project", project, "--mission", missionId]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(stdout.text()).toMatch(/phase experimenting/);
+    expect(stdout.text()).toMatch(/last action: continue/);
+    expect(stdout.text()).toMatch(/experiments: 1/);
     await rm(project, { recursive: true, force: true });
   });
 });

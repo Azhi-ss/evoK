@@ -6,9 +6,11 @@ Physical home of `evok-cli` and the `evok` executable wrapper.
 `bin/evok.ts` remains the installed entry and imports this pack.
 
 The shell parses argv, resolves Pi models / project resources, and calls
-the mission API (`startAuthorizedMission`, intake, resume, status).
-A tty with no request launches Pi native TUI (`InteractiveMode`, #134);
-`/model` and `/new` stay on Pi. The TUI is not Mission authority.
+the mission API (`startAuthorizedMission`, intake, resume, status,
+`/research` status/continue). A tty with no request launches Pi native TUI
+(`InteractiveMode`, #134); `/model` and `/new` stay on Pi. `/research` is
+an evoK product flag/request, not a TUI slash intercept. The TUI is not
+Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 stay in `src/evidence/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).

@@ -76,13 +76,24 @@ W1 (EVT / Skills / EXP / BUD / SEA) is not authorized by this ADR.
 - [ADR-0007](0007-six-pack-ownership.md): logical six-pack ownership is
   unchanged.
 
+## Amendment (ET-M1-EVT / #138)
+
+W1 first slice landed a Mission control-event / recovery skeleton and a
+thin evoK `/research` status/continue entry in
+`src/mission/research-entry.ts`. The CLI parses `/research` / `--research`
+and calls that mission API. Pi native TUI is unchanged; `/model` and
+`/new` stay on Pi. Chat transcript is not authority.
+
+This amendment does not open Skills, EXP validity gates, BUD, SEA, or
+Deploy Arena. Gate / `#40` / true-submit / Pattern C / default
+`fixed_uct` pins are unchanged.
+
 ## Out of scope / freezes
 
-- No runtime semantics change under `src/`.
 - No change to gate three-state, T48, hang, or Broker predicates.
 - No weld of `#40` / Progressive as product default.
 - No real contest External Submission; AtCoder true-submit stays frozen.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
-- No W1 EVT / Skills / EXP / BUD / SEA implementation.
+- No W1 Skills / EXP / BUD / SEA implementation.
