@@ -3,11 +3,11 @@ import {
   asKillTestPass,
   killTestOutcomeIsPass,
   type KillTestOutcome,
-} from "./hypothesis-ledger";
+} from "../hypothesis-ledger";
 import {
   createKillTestHangHook,
   killTestOutcomeBlocksBroker,
-} from "./kill-test-hang";
+} from "../kill-test-hang";
 import { runLlmCompArmBeforePromotion } from "./llm-comp-arm-before-promotion";
 import {
   MOCK_LLM_CANDIDATE_FILES,
@@ -17,27 +17,27 @@ import {
 import {
   assembleLlmCompArmSetup,
   mapLlmProposalArtifact,
-} from "./llm-propose-outer-min";
+} from "../llm-propose-outer-min";
 import {
   auditMethodology,
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "./methodology";
+} from "../methodology";
 import {
   NEWAPI_API_KEY_ENV,
   NEWAPI_LIVE_ENV,
-} from "./newapi-client";
-import { assembleOuterE2eMinPath } from "./outer-e2e-min-path";
-import { MissionDirector } from "./research-loop";
+} from "../newapi-client";
+import { assembleOuterE2eMinPath } from "../outer-e2e-min-path";
+import { MissionDirector } from "../research-loop";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "./search-space-profile";
-import type { ToyAgentRuntime } from "./toy-harness";
-import { verificationRoleContract } from "./verification-gates";
+} from "../search-space-profile";
+import type { ToyAgentRuntime } from "../toy-harness";
+import { verificationRoleContract } from "../verification-gates";
 
-import { RESEARCH_TASKS as TASKS } from "./fixtures/research";
+import { RESEARCH_TASKS as TASKS } from "../fixtures/research";
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];
