@@ -29,7 +29,7 @@ export interface NativeTuiLaunch {
  * Build the SDK runtime factory used by InteractiveMode (and `/new` / `/resume`
  * session replacement). No Mission decisions, no evoK command intercept.
  */
-export function createPiNativeTuiRuntimeFactory(launch: NativeTuiLaunch): CreateAgentSessionRuntimeFactory {
+function createPiNativeTuiRuntimeFactory(launch: NativeTuiLaunch): CreateAgentSessionRuntimeFactory {
   const agentDir = getAgentDir();
   return async ({ cwd, sessionManager, sessionStartEvent }) => {
     const services = await createAgentSessionServices({

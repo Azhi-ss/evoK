@@ -925,6 +925,8 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(launches[0]).not.toHaveProperty("commandTable");
     expect(stdout.text()).not.toMatch(/foreground REPL/);
     expect(stdout.text()).toMatch(/native TUI/i);
+    expect(stdout.text()).not.toMatch(/personal Pi prompts\/skills\/extensions\/history and global shared skills are not loaded/);
+    expect(stdout.text()).toMatch(/credentials stay in ~\/\.pi\/agent/);
     await rm(project, { recursive: true, force: true });
   });
 

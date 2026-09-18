@@ -346,12 +346,17 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`evok ${EVOK_VERSION}\n`);
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
+    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status;
     stdout.write(`tools:   ${args.intake
       ? "intake: read-only project inspection plus the trusted draft-record tool"
       : args.start || (args.request !== undefined && isExplicitStartRequest(args.request))
         ? "baseline: read/grep/find/ls + write/edit in the approved isolated Run workspace (bash only when granted); the project .evok tree is controller-owned"
-        : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
-    stdout.write(`         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
+        : nativeTuiCandidate
+          ? "Pi native TUI on a tty (SDK slash commands including /model /new); piped stdin is one headless request"
+          : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
+    stdout.write(nativeTuiCandidate
+      ? `         TUI uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n`
+      : `         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
     writeResourceReport(stdout, resources);
   } catch (error) {
     stderr.write(`evok: model configuration error: ${(error as Error).message}\n`);
