@@ -431,7 +431,7 @@ export type ToyCompetitionAdapter = {
     snapshot: Readonly<CandidateSnapshot>,
     contract: Readonly<NormalizedEvaluationContract>,
     context: EvaluationRunContext,
-    manifest?: Readonly<import("./security-boundary").SnapshotManifest>,
+    manifest?: Readonly<import("../../security-boundary").SnapshotManifest>,
   ) => EvaluationResult | Promise<EvaluationResult>;
   readonly evaluateRun?: (input: EvaluationRunInput) => EvaluationResult | Promise<EvaluationResult>;
 }
@@ -1871,7 +1871,7 @@ export class ToyCompetitionHarness {
     snapshot: Readonly<CandidateSnapshot>,
     contract: Readonly<NormalizedEvaluationContract>,
     context: EvaluationRunContext,
-    manifest: Readonly<import("./security-boundary").SnapshotManifest>,
+    manifest: Readonly<import("../../security-boundary").SnapshotManifest>,
   ): Promise<EvaluationResult> {
     const adapter = this.adapter;
     if (adapter.evaluateRun) {
@@ -2245,7 +2245,7 @@ export class ToyCompetitionHarness {
       append: (event: { readonly type: "SUBMISSION_REQUESTED" | "HUMAN_ACCEPTED" | "SUBMISSION_APPROVED" | "SUBMISSION_REJECTED" | "SUBMISSION_RESULT"; readonly payload: Record<string, unknown> }) => {
         this.append(event.type as MissionEventType, { ...event.payload });
       },
-      events: () => this.events() as unknown as import("./submission-broker").SubmissionEvent[],
+      events: () => this.events() as unknown as import("../../submission-broker").SubmissionEvent[],
     };
     return new SubmissionBroker({
       ...options,
