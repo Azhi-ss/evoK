@@ -26,5 +26,5 @@ Antigravity roster as a v1 must-have — is rejected.
 
 Hang / T48 stay in `src/evidence/`. Search structure stays in
 `src/search/`. Mission authorize / continue / repair / stop stay in
-`src/mission/`. Do not start `src/competition/` from this pack.
+`src/mission/`. Contest-arm runtime stays in `src/competition/`.
 `#40` SelectionPolicy stays off. True External Submission stays frozen.

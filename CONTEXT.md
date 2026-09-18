@@ -202,7 +202,7 @@ _Avoid_: Error message
 
 ## Six-pack ownership
 
-Logical packages pin authority. `evidence` is physically under `src/evidence/` ([ADR-0008](docs/adr/0008-evidence-physical-pack.md)); `search` is physically under `src/search/` with ToyHarness in `src/search/fixtures/` ([ADR-0009](docs/adr/0009-search-physical-pack.md)); `mission` is physically under `src/mission/` and `cli` under `src/cli/` ([ADR-0010](docs/adr/0010-mission-cli-physical-pack.md)); `execution` is physically under `src/execution/` ([ADR-0011](docs/adr/0011-execution-physical-pack.md)); those packs keep flat `src/*.ts` compatibility re-exports. `competition` remains a flat `src/` tree until its cut ticket. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+Logical packages pin authority. `evidence` is physically under `src/evidence/` ([ADR-0008](docs/adr/0008-evidence-physical-pack.md)); `search` is physically under `src/search/` with ToyHarness in `src/search/fixtures/` ([ADR-0009](docs/adr/0009-search-physical-pack.md)); `mission` is physically under `src/mission/` and `cli` under `src/cli/` ([ADR-0010](docs/adr/0010-mission-cli-physical-pack.md)); `execution` is physically under `src/execution/` ([ADR-0011](docs/adr/0011-execution-physical-pack.md)); `competition` is physically under `src/competition/` ([ADR-0012](docs/adr/0012-competition-physical-pack.md)); those packs keep flat `src/*.ts` compatibility re-exports. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
 
 | Package | Owns | Does not own |
 |---|---|---|

@@ -21,4 +21,5 @@ True contest External Submission stays frozen. Pattern C is not thickened
 here.
 
 Do not move hang / T48 into this pack. Do not grow a second control plane
-in `src/cli/`.
+in `src/cli/`. Contest-arm runtime stays in `src/competition/`; this pack
+keeps `llm-propose-outer-min` as the propose/assemble seam.

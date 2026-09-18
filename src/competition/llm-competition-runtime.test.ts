@@ -4,7 +4,7 @@ import {
   NEWAPI_API_KEY_ENV,
   NEWAPI_DEFAULT_MODEL_ENV,
   NEWAPI_LIVE_ENV,
-} from "./newapi-client";
+} from "../newapi-client";
 import {
   LiveLlmCompetitionRuntime,
   MOCK_LLM_CANDIDATE_FILES,
@@ -16,10 +16,10 @@ import {
 import {
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "./toy-harness";
-import { MissionDirector } from "./research-loop";
-import { RESEARCH_TASKS as tasks, RESEARCH_PREDICTION as prediction } from "./fixtures/research";
-import { SEARCH_SPACE_BINDING } from "./search-space-profile";
+} from "../toy-harness";
+import { MissionDirector } from "../research-loop";
+import { RESEARCH_TASKS as tasks, RESEARCH_PREDICTION as prediction } from "../fixtures/research";
+import { SEARCH_SPACE_BINDING } from "../search-space-profile";
 
 const contract = { objective: "maximize the score" };
 const proposeInput = {
