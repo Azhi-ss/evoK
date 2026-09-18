@@ -126,6 +126,10 @@ _Avoid_: Shared notes, prompt memory, scoreboard-as-verdict
 The fixture/test facade (`ToyCompetitionHarness` and kin) used to exercise contracts offline. It is not a product control plane and cannot authorize, continue, repair, or stop a Mission.
 _Avoid_: Second Mission loop, production harness, chat-driven controller
 
+**Search Plugin**:
+A removable strong-search / MCTS adapter (SEA) that a Mission may mount or unmount. The default parent-selection path is `fixed_uct` and does not depend on any plugin. Progressive / MCTS / StrongSearch remain explicit opt-in. The plugin is not Promotion authority and is not a second control plane.
+_Avoid_: Competition plugin, default MCTS, welded strong search
+
 **Skill**:
 A named, versioned instruction pack a Mission may load on demand.
 _Avoid_: System-prompt dump, hidden prompt
@@ -218,6 +222,10 @@ _Avoid_: Silent edit, batch skill rewrite
 The evidence-gated reserve → settle contract that refuses continue or writeback when spend is unreserved or over the Mission Policy cap. An optional Method Improvement sub-cap can account that spend separately. Budget pass is not Admission pass.
 _Avoid_: Admission, silent restore, score-as-budget
 
+**Method-version stats**:
+Visit/value statistics scoped to one method version. After a Method Improvement version switch, old-version stats remain historical and must not become the new version's search authority.
+_Avoid_: Shared UCT bank, silent stat carry-over
+
 **Reserve**:
 Holding units against the Budget Gate before continue or writeback. Settle without a Reserve fails closed.
 _Avoid_: Pre-pay, lock
@@ -262,7 +270,7 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 | **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop, thin `/research` entry, Skills routing shell | Business/competition code; search-graph authority; Team blueprint details; Admission / writeback (EXP); Budget Gate predicates (BUD) |
 | **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate (reserve → settle), authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
-| **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
+| **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing, SEA mount/unmount, method-version stats isolation | Promotion; gate override; Admission / Budget predicates |
 | **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
 | **cli** | Thin Mission CLI shell + Pi native TUI | A second control plane |
 
@@ -277,4 +285,5 @@ The product control plane is the Research Loop (authorize / continue / repair / 
 - Do not use “orchestrator” as an authority-bearing role without naming which of these two responsibilities is meant.
 - The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.
 - The six logical packages (mission, evidence, execution, search, competition, cli) own the rows in Six-pack ownership. The Research Loop is the product control plane; the chat transcript, Pi native TUI, and ToyHarness are not.
+- A Search Plugin is removable. Default parent selection stays `fixed_uct`. Method-version stats do not carry across a version switch and are not Promotion proof.
 - Real External Submission, expanding budget or permissions past Mission Policy, changing Human Acceptance, and unfreezing AtCoder true-submit / `#40` remain human-owned. Deploy Arena stays orthogonal standby.

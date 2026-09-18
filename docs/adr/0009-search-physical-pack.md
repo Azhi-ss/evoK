@@ -38,3 +38,13 @@ Broker keys. The port does not call ledger / hang / Broker.
   `llm-comp-arm*` runtime, or Team orchestra.
 - No C thicken of the execution roster.
 - No FAISS / Retrospective Memory / Procedural Graph implementation.
+
+## Amendment (ET-M1-SEA / #146)
+
+W1 SEA skeleton lives in this pack: `sea-plugin.ts` (mount /
+unmount) and `method-version-stats.ts` (version-scoped visit/value
+rows). Default parent selection remains `fixed_uct`. Progressive /
+MCTS / StrongSearch stay explicit opt-in. `#40` stays off. The
+default path does not depend on a plugin. Old-version stats are
+not new-version authority. Selection math, gate predicates, and
+ToyHarness-as-control-plane are unchanged.
