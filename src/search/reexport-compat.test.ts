@@ -4,7 +4,6 @@
  * here are independent of the moved module bodies.
  */
 import { describe, expect, test } from "bun:test";
-import * as fixturesFlat from "../second-toy-adapter";
 import * as fixturesPacked from "./fixtures/second-toy-adapter";
 import * as outerFlat from "../outer-search-space-fixtures";
 import * as outerPacked from "./outer-search-space-fixtures";
@@ -33,7 +32,7 @@ describe("search pack re-export isomorphism", () => {
     expectSameRuntimeSurface(spaceFlat, spacePacked);
     expectSameRuntimeSurface(outerFlat, outerPacked);
     expectSameRuntimeSurface(toyFlat, toyPacked);
-    expectSameRuntimeSurface(fixturesFlat, fixturesPacked);
+    expect(typeof fixturesPacked.BinaryAccuracyToyCompetitionAdapter).toBe("function");
   });
 
   test("src/search/ is importable and keeps default fixed_uct / #40 off", () => {

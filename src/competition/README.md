@@ -4,7 +4,9 @@ Contest and local Evaluator adapters. Does not own evidence gates or a
 true contest External Submission path.
 
 Physical home of `llm-competition-runtime` and `llm-comp-arm-before-promotion`.
-Flat `src/*.ts` files re-export these modules so existing imports stay green.
+P6: physical pack is in place. Remaining flat `src/*.ts` files are
+migration-period re-exports for one more release
+([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 Mission keeps `llm-propose-outer-min` (orchestration glue: propose → T48
 map → assemble). Competition provides the runtime; mission keeps the
@@ -22,5 +24,4 @@ are not Promotion keys. True External Submission stays frozen.
 
 `idea-types` stays at `src/` (research diversity vocabulary, not
 problem-facing). Methodology JSON fixtures stay at
-`src/fixtures/methodology/` (evidence-owned). Do not start P6 residue
-cleanup from this pack.
+`src/fixtures/methodology/` (evidence-owned).

@@ -8,7 +8,11 @@ Research Loop, File Blueprint, Branch recovery, baseline-track, and
 golden-path / outer-min orchestration glue (`v1-golden-path`,
 `outer-*-path`, `llm-propose-outer-min`).
 
-Flat `src/*.ts` files re-export these modules so existing imports stay green.
+P6: physical pack is in place. Remaining flat `src/*.ts` files are
+migration-period re-exports for one more release
+([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+The dead `src/file-blueprint.ts` shim is gone; import
+`src/mission/file-blueprint` instead.
 
 `runGoldenPath` / assemble stay **mock default**. Live opens only with
 explicit `{ live: true }` (plus key fail-closed). `EVOK_NEWAPI_LIVE` alone

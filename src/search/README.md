@@ -6,7 +6,11 @@ Mission 只读摘要。
 Physical home of `SearchSelectionPort`, SearchSpaceProfile / outer
 search-space fixtures, and **fixtures/tests-only** ToyHarness.
 
-Flat `src/*.ts` files re-export these modules so existing imports stay green.
+P6: physical pack is in place. Remaining flat `src/*.ts` files are
+migration-period re-exports for one more release
+([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+The dead `src/second-toy-adapter.ts` shim is gone; import
+`src/search/fixtures/second-toy-adapter` instead.
 
 Default parent selection remains `fixed_uct` (constant exploration √2).
 Progressive (`progressive_mcgs_optin` / `StrongSearchAdapter`) is constructed

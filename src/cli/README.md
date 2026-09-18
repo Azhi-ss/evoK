@@ -10,7 +10,10 @@ the mission API (`startAuthorizedMission`, intake, resume, status).
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 stay in `src/evidence/`.
 
-Flat `src/evok-cli.ts` re-exports this module so existing imports stay green.
+P6: physical pack is in place. The dead `src/evok-cli.ts` shim is gone;
+import `src/cli` / `src/cli/evok-cli` instead. Remaining Mission flat
+shims used by this shell stay migration-period re-exports
+([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 Secrets are read from the environment / Pi stores only; never copy or
 print credentials. Model/resource wiring (`evok-model`, `evok-resources`)
