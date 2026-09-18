@@ -30,7 +30,9 @@ same names as `methodology.ts`, different contract shape.
 
 `ToyHarness` stays fixtures/tests only under `src/search/fixtures/`.
 It is not re-exported from `src/search/` and is not a second control
-plane.
+plane. The fixture file still re-exports `research-loop` (and kin) as a
+test convenience barrel — that is not Mission authorize / continue /
+repair / stop authority. Do not route new product control through it.
 
 ## Residual flat `src/*.ts` shims
 

@@ -5,7 +5,8 @@ In-repo as-is pointer after ET-A0…A6. Authority for terms is
 [ADR-0007](adr/0007-six-pack-ownership.md). Physical closeout is
 [ADR-0013](adr/0013-six-pack-physical-closeout.md).
 
-Tip is `main` after P1–P5 cuts (`src/{mission,evidence,execution,search,competition,cli}/`).
+Tip is this P6 closeout on `main` after P1–P5 cuts
+(`src/{mission,evidence,execution,search,competition,cli}/`).
 
 ## Physical layout
 
@@ -23,8 +24,8 @@ Tip is `main` after P1–P5 cuts (`src/{mission,evidence,execution,search,compet
 ## Residual flat shims
 
 Dead shims deleted in P6: `src/file-blueprint.ts`, `src/evok-cli.ts`,
-`src/second-toy-adapter.ts`. Remaining flat `src/*.ts` re-exports are
-migration-period (one more release). Inventory: ADR-0013.
+`src/second-toy-adapter.ts`. Remaining pack-shim flat `src/*.ts`
+re-exports are migration-period (one more release). Inventory: ADR-0013.
 
 ## Frozen (unchanged)
 

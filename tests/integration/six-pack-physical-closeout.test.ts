@@ -146,9 +146,12 @@ describe("P6 six-pack physical closeout", () => {
 
     const fixture = readFileSync(join(SRC, "search", "fixtures", "toy-harness.ts"), "utf8");
     expect(fixture).toMatch(/Not a product control plane/);
+    // Fixture barrel may re-export research-loop for tests; it must not
+    // define Mission authorize / continue / repair / stop itself.
     expect(fixture).not.toMatch(/export function startAuthorizedMission/);
     expect(fixture).not.toMatch(/export function resumeAuthorizedMission/);
     expect(fixture).not.toMatch(/export async function startAuthorizedMission/);
+    expect(fixture).not.toMatch(/export async function resumeAuthorizedMission/);
   });
 
   test("mission / cli / execution / competition barrels stay on their existing locks", () => {

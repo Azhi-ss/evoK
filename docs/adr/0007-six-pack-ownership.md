@@ -72,8 +72,9 @@ map is unchanged.
 
 Physical six-pack layout is complete. Recorded in
 [ADR-0013](0013-six-pack-physical-closeout.md). This ADR's logical
-ownership map is unchanged. Remaining flat `src/*.ts` files are
-migration-period re-exports for one more release.
+ownership map is unchanged. Remaining pack-shim flat `src/*.ts` files
+(not shared wiring such as `evok-model`) are migration-period re-exports
+for one more release.
 
 ## Out of scope / freezes
 

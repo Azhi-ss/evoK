@@ -213,7 +213,7 @@ Logical packages pin authority. Physical packages are **in place** (P6 / [ADR-00
 | **competition** | `src/competition/` ([ADR-0012](docs/adr/0012-competition-physical-pack.md)) | 勾 |
 | **cli** | `src/cli/` ([ADR-0010](docs/adr/0010-mission-cli-physical-pack.md)) | 勾 |
 
-Remaining flat `src/*.ts` files are migration-period re-exports for one more release (ADR-0013). Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-model`) are migration-period re-exports for one more release (ADR-0013). Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
 
 | Package | Owns | Does not own |
 |---|---|---|
