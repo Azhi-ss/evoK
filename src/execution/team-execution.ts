@@ -1,5 +1,5 @@
 /**
- * Team execution: Coordinator, PolicyGuard, DeterministicScheduler, Fan-In.
+ * Team execution: Team Coordinator, PolicyGuard, DeterministicScheduler, Fan-In.
  * Physical home: `src/execution/` (ET-A4 / #124). Thin default B stays:
  * DEFAULT_BRANCH_WIDTH=1; verification Roles only when callbacks are provided.
  */

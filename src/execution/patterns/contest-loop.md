@@ -1,7 +1,7 @@
 # Pattern spec — contest-loop
 
 Read-only empty shell. Not a runtime track, not a Promotion key, not
-orchestration code. The Coordinator does not switch tracks because this
+orchestration code. The Team Coordinator does not switch tracks because this
 file exists.
 
 ## Who plays
