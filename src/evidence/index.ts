@@ -2,7 +2,7 @@
  * Physical evidence pack (ET-A1 / #121; P6 barrel).
  *
  * Owns ledger, T48, kill/hang, promotion gates, Admission / method writeback,
- * and Broker simulation.
+ * Budget Gate (reserve → settle), and Broker simulation.
  * Does not own search-tree structure or Team Coordinator / Role planning.
  * True External Submission stays frozen. Hang / T48 three-state is unchanged.
  *
@@ -104,3 +104,19 @@ export type {
   MethodWritebackSlice,
   MethodWritebackState,
 } from "./method-admission";
+export {
+  BudgetLedger,
+  evaluateBudgetAuthorization,
+} from "./budget-gate";
+export type {
+  BudgetAction,
+  BudgetAuthorizationInput,
+  BudgetCaps,
+  BudgetDecision,
+  BudgetRefuseReason,
+  BudgetReservation,
+  BudgetReservationStatus,
+  BudgetReserveRequest,
+  BudgetSnapshot,
+  BudgetSpendKind,
+} from "./budget-gate";

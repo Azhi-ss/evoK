@@ -4,7 +4,7 @@ evidence 独占门权威；search 持结构；mission 只读摘要 / 挂 hang。
 
 Physical home of the Hypothesis ledger, Kill-test hang / T48, methodology
 gates, verification-gates, validation-ladder, experiment-validity,
-method Admission / writeback, and Broker **simulation**.
+method Admission / writeback, Budget Gate (reserve → settle), and Broker **simulation**.
 P6: physical pack is in place (barrel `index.ts`). Remaining flat
 `src/*.ts` files are migration-period re-exports for one more release
 ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).

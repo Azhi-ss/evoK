@@ -41,6 +41,7 @@ export {
   SKILL_CATEGORIES,
   SKILL_WRITEBACK_STATUS,
   SkillAdmissionRefusedError,
+  SkillBudgetRefusedError,
   acceptedSkillFilesFromDiscovered,
   attemptSkillAccepted,
   defaultContextPointers,

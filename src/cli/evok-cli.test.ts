@@ -1206,6 +1206,7 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toContain("candidate");
     expect(text).toContain("writeback not opened — read-only shell");
     expect(text).toMatch(/protected holdout/i);
+    expect(text).toMatch(/Budget Gate/i);
     expect(text).toMatch(/not a second control plane/i);
     expect(text).not.toContain("CANDIDATE-BODY");
     await rm(project, { recursive: true, force: true });

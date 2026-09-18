@@ -10,6 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bundledSkillRoot } from "../evok-resources";
+import { BudgetLedger } from "../evidence/budget-gate";
 import { evaluateExperimentValidity } from "../evidence/experiment-validity";
 import { evaluateMethodAdmission } from "../evidence/method-admission";
 import {
@@ -205,6 +206,7 @@ describe("Skills routing is not a second control plane", () => {
     expect(text).toContain("candidate");
     expect(text).toContain(SKILL_WRITEBACK_STATUS);
     expect(text).toMatch(/protected holdout/i);
+    expect(text).toMatch(/Budget Gate/i);
     expect(text).toMatch(/not a second control plane/i);
     expect(text).toMatch(/chat transcript is not authority/i);
     await rm(project, { recursive: true, force: true });
@@ -292,5 +294,58 @@ describe("accepted requires Admission (ET-M1-EXP / #142)", () => {
   test("file-body writeback stays not opened; lifecycle admit is the opened slice", () => {
     expect(skillWritebackStatus()).toBe("writeback not opened — read-only shell");
     expect(() => proposeSkillWriteback({ name: "keep" })).toThrow(SkillWritebackNotOpenedError);
+  });
+});
+
+describe("Budget Gate hook — writeback refuse is orthogonal to Admission (ET-M1-BUD / #144)", () => {
+  test("Admission pass still cannot write accepted when budget is unreserved", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "candidate", description: "keep short" }),
+    ]);
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+          { kind: "protected_holdout", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+    });
+    expect(admission.admitted).toBe(true);
+    const budget = new BudgetLedger({ total: 1, units: "model-USD" }).authorize("writeback");
+    const attempt = attemptSkillAccepted(candidate!, admission, budget);
+    expect(attempt.admitted).toBe(false);
+    expect(attempt.skill.state).toBe("candidate");
+    expect(attempt.objections.join(" ")).toMatch(/unreserved|no reserve/i);
+    expect(defaultContextPointers([attempt.skill])).toEqual([]);
+    expect(() => requireSkillAccepted(candidate!, admission, budget)).toThrow(/unreserved|no reserve/i);
+  });
+
+  test("budget pass does not write accepted without Admission", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
+    ]);
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    ledger.reserve({
+      reservationId: "wb-ok",
+      amount: 0.1,
+      kind: "method_improvement",
+      action: "writeback",
+    });
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        claimed: "effective",
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: false },
+    });
+    const attempt = attemptSkillAccepted(candidate!, admission, ledger.authorize("writeback"));
+    expect(attempt.admitted).toBe(false);
+    expect(attempt.skill.state).toBe("candidate");
+    expect(attempt.objections.join(" ")).toMatch(/protected holdout/i);
   });
 });

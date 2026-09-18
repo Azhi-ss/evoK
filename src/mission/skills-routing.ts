@@ -14,11 +14,14 @@
  * Default context loads only accepted short descriptions. Unspecified state is
  * accepted so ADR-0006 discovery still injects L0 metadata; explicit candidate
  * or demoted stay out. File-body writeback is not opened — read-only shell.
- * Writing a candidate into accepted requires evidence Admission (ET-M1-EXP).
+ * Writing a candidate into accepted requires evidence Admission (ET-M1-EXP)
+ * and, when a BudgetDecision is supplied, a Budget Gate pass (ET-M1-BUD).
+ * Budget pass is not Admission pass.
  */
 import { readFileSync } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { BudgetDecision } from "../evidence/budget-gate";
 import type { MethodAdmissionDecision } from "../evidence/method-admission";
 import type { DiscoveredSkill } from "../evok-resources";
 
@@ -114,6 +117,14 @@ export class SkillAdmissionRefusedError extends Error {
   constructor(message = "Admission refused; skill cannot become accepted") {
     super(message);
     this.name = "SkillAdmissionRefusedError";
+  }
+}
+
+export class SkillBudgetRefusedError extends Error {
+  readonly kind = "skill-budget-refused" as const;
+  constructor(message = "budget refused writeback; skill cannot become accepted") {
+    super(message);
+    this.name = "SkillBudgetRefusedError";
   }
 }
 
@@ -293,7 +304,18 @@ export function proposeSkillWriteback(_request: { readonly name: string }): neve
 export function attemptSkillAccepted(
   skill: RoutedSkill,
   admission: MethodAdmissionDecision,
+  budget?: BudgetDecision,
 ): SkillAdmissionAttempt {
+  if (budget !== undefined && (!budget.ok || budget.outcome !== "pass")) {
+    return {
+      skill,
+      admitted: false,
+      hang: false,
+      objections: Object.freeze([
+        ...(budget.objections.length > 0 ? budget.objections : ["budget refused writeback"]),
+      ]),
+    };
+  }
   if (!admission.ok || !admission.admitted || admission.hang || admission.outcome !== "pass") {
     return {
       skill,
@@ -322,12 +344,15 @@ export function attemptSkillAccepted(
 export function requireSkillAccepted(
   skill: RoutedSkill,
   admission: MethodAdmissionDecision,
+  budget?: BudgetDecision,
 ): RoutedSkill {
-  const attempt = attemptSkillAccepted(skill, admission);
+  const attempt = attemptSkillAccepted(skill, admission, budget);
   if (!attempt.admitted) {
-    throw new SkillAdmissionRefusedError(
-      attempt.objections[0] ?? "Admission refused; skill cannot become accepted",
-    );
+    const message = attempt.objections[0] ?? "Admission refused; skill cannot become accepted";
+    if (budget !== undefined && (!budget.ok || budget.outcome !== "pass")) {
+      throw new SkillBudgetRefusedError(message);
+    }
+    throw new SkillAdmissionRefusedError(message);
   }
   return attempt.skill;
 }
@@ -380,6 +405,7 @@ export function formatSkillsDirectory(view: SkillsDirectoryView): string {
     "   disclosure: L0 pointer (default) → on-trigger L1 SKILL.md → L2 scripts/references",
     "   lifecycle (orthogonal): candidate | accepted | demoted",
     "   accepted requires Admission (official samples + adversarial-labeled + protected holdout); missing holdout refuses",
+    "   writeback also requires Budget Gate reserve; over-budget or unreserved refuses (budget pass is not Admission pass)",
     "   categories:",
   ];
   for (const category of view.categories) {

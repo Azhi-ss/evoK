@@ -16,7 +16,7 @@ transcript is not authority.
 | Package | Owns | Does not own |
 |---|---|---|
 | **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop | Business/competition code; search-graph authority; Team blueprint details |
-| **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
+| **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
 | **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
@@ -84,6 +84,15 @@ The Owns notes for **cli** (Pi native TUI) and **competition** (Deploy
 Arena standby) are extended in the table above. Interactive surface is
 Pi native TUI (#134 / PR #135). `ToyHarness` remains fixtures/tests only
 — not a second control plane.
+
+## Amendment (ET-M1-BUD / #144)
+
+Budget Gate predicates (reserve → settle; over-budget or unreserved
+refuses continue / writeback) are owned by **evidence**. Mission still
+owns operational Mission Policy budget and continue / repair / stop; it
+hooks a `BudgetDecision` and does not own the ledger. Recorded in
+[ADR-0008](0008-evidence-physical-pack.md) and
+[ADR-0014](0014-prd-rsi-baseline.md).
 
 ## Out of scope / freezes
 

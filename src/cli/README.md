@@ -14,7 +14,7 @@ same kind of thin product view (directory + three states; accepted
 requires Admission; file-body writeback not opened). The TUI
 is not Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
-Hang / T48 / Admission stay in `src/evidence/`.
+Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).
 
 P6: physical pack is in place. The dead `src/evok-cli.ts` shim is gone;

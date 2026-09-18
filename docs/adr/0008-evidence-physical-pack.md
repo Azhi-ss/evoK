@@ -22,6 +22,12 @@ Amendment (ET-M1-EXP / #142): experiment-validity and method Admission /
 writeback also live here (`experiment-validity`, `method-admission`).
 They do not change Kill-test / T48 / hang / Broker predicates.
 
+Amendment (ET-M1-BUD / #144): the Budget Gate reserve → settle
+contract also lives here (`budget-gate`). Over-budget or unreserved
+refuses continue / writeback. Budget pass is not Admission pass.
+It does not replace MissionRecord operational accounting and does
+not change Kill-test / T48 / hang / Broker predicates.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
