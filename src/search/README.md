@@ -18,6 +18,12 @@ only when explicitly selected — env must not silently override the default.
 `#40` SelectionPolicy stays off. Elite / MMD / near-dup / side-slot scores
 are not Promotion, hang, or Broker keys.
 
+W1 SEA (`sea-plugin.ts`): mount / unmount a removable MCTS / Progressive /
+StrongSearch plugin. The default path does not depend on the plugin. MCTS
+is a mount-only skeleton — selection math is not opened. Method-version
+stats (`method-version-stats.ts`) isolate visit/value rows after a version
+switch; old-version stats are history, not the new authority.
+
 `ToyHarness` (`ToyCompetitionHarness` and kin) lives under `fixtures/` and
 is not a product control plane. Do not route new Mission / orchestration
 authority through it. `ToyCompetitionAdapter.evaluate` (eval) is not

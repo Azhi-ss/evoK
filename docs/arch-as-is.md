@@ -50,4 +50,4 @@ re-exports are migration-period (one more release). Inventory: ADR-0013.
 - Elite ≠ Promotion keys
 - C thicken forbidden
 - Deploy Arena not advanced (orthogonal standby)
-- W1 EVT landed; Skills routing shell landed (#140); EXP Admission landed (#142); BUD skeleton landed (#144); SEA not started
+- W1 EVT landed; Skills routing shell landed (#140); EXP Admission landed (#142); BUD skeleton landed (#144); SEA plugin contract + method-version stats isolation landed (#146)

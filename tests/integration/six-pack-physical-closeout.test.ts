@@ -126,6 +126,9 @@ describe("P6 six-pack physical closeout", () => {
     expect(search.DEFAULT_SEARCH_SELECTION_ID).toBe("fixed_uct");
     expect(search.SELECTION_POLICY_40).toBe("off");
     expect(search.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
+    expect(typeof search.createSeaHost).toBe("function");
+    expect(typeof search.createMethodVersionStats).toBe("function");
+    expect(search.createSeaHost().defaultSelection().id).toBe("fixed_uct");
 
     const keys = runtimeKeys(search);
     expect(keys).not.toContain("ToyCompetitionHarness");

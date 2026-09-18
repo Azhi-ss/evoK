@@ -53,7 +53,7 @@ does not implement W1.
 | Mission lifecycle; authorize / continue / repair / stop; thin `/research` entry; Skills routing shell | **mission** | Sole product control plane; Skills routing ≠ second control plane |
 | Evidence, lineage, admission / promotion gates | **evidence** | Gates stay here |
 | Pi Run runtime, Team, Policy Guard | **execution** | Thin default B; no C thicken |
-| Pluggable selection; default `fixed_uct` | **search** | Strong search opt-in; ToyHarness = fixtures only |
+| Pluggable selection; default `fixed_uct` | **search** | Strong search / MCTS opt-in; SEA mount/unmount skeleton; ToyHarness = fixtures only |
 | Contest / local Evaluator adapters; Deploy Arena standby | **competition** | True submit frozen |
 | Thin argv / resource shell; Pi native TUI | **cli** | Not a second control plane |
 
@@ -135,6 +135,24 @@ Pattern C, default `fixed_uct`, and EXP Admission predicates are
 unchanged. Elite / Team Fan-Out remain not Promotion, Admission,
 or Budget Gate keys.
 
+## Amendment (ET-M1-SEA / #146)
+
+W1 SEA skeleton landed a removable Search Plugin mount/unmount
+contract in `src/search/sea-plugin.ts` and method-version stats
+isolation in `src/search/method-version-stats.ts`. The default
+parent-selection path stays `fixed_uct` and does not depend on a
+plugin. MCTS is mount-only; Progressive / StrongSearch remain
+explicit opt-in. `#40` stays off. Old-version visit/value stats
+are history and must not become the new version's authority.
+
+This amendment does not open Deploy Arena, fill Skills bodies,
+or weld Progressive / MCTS / `#40` as product default. Existing
+Kill-test / T48 / hang / Broker predicates, true-submit,
+Pattern C, EXP Admission predicates, and Budget Gate predicates
+are unchanged. Elite / MMD / near-dup / side-slot remain not
+Promotion, Admission, or Budget Gate keys. ToyHarness stays
+fixtures/tests only.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -143,4 +161,5 @@ or Budget Gate keys.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
-- No W1 SEA implementation (Skills routing, EXP Admission, and BUD skeleton landed).
+- SEA is a mount/unmount + stats-isolation skeleton only (MCTS
+  selection math, Skills bodies, and Deploy Arena stay unopened).

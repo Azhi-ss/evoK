@@ -42,6 +42,10 @@ describe("search pack re-export isomorphism", () => {
     expect(searchPacked.SEARCH_SPACE_BINDING).toBe("diagnostic_only");
     expect(searchPacked.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
     expect(searchPacked.createSearchSelectionPort().id).toBe("fixed_uct");
+    expect(typeof searchPacked.createSeaHost).toBe("function");
+    expect(typeof searchPacked.createMethodVersionStats).toBe("function");
+    expect(searchPacked.createSeaHost().defaultSelection().id).toBe("fixed_uct");
+    expect(searchPacked.createSeaHost().mounted()).toBeUndefined();
     expect(searchPacked.createDefaultSearchSelectionPort()).toBeInstanceOf(searchPacked.FixedUctSelectionAdapter);
     expect(searchPacked.createDefaultSearchSelectionPort()).not.toBeInstanceOf(searchPacked.ProgressiveMcgsOptInAdapter);
 
