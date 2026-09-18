@@ -88,15 +88,15 @@ describe("P6 six-pack physical closeout", () => {
   test("six physical pack directories exist under src/", () => {
     for (const pack of SIX_PACKS) {
       const dir = join(SRC, pack);
-      expect(existsSync(dir), dir).toBe(true);
-      expect(statSync(dir).isDirectory(), dir).toBe(true);
+      expect({ pack, exists: existsSync(dir) }).toEqual({ pack, exists: true });
+      expect({ pack, directory: statSync(dir).isDirectory() }).toEqual({ pack, directory: true });
     }
   });
 
   test("each pack exposes a barrel index.ts", () => {
     for (const pack of SIX_PACKS) {
       const barrel = join(SRC, pack, "index.ts");
-      expect(existsSync(barrel), barrel).toBe(true);
+      expect({ pack, barrel: existsSync(barrel) }).toEqual({ pack, barrel: true });
     }
   });
 
@@ -175,7 +175,7 @@ describe("P6 six-pack physical closeout", () => {
 
   test("dead flat shims are gone; remaining shims are re-export-only for one more release", () => {
     for (const name of DELETED_DEAD_SHIMS) {
-      expect(existsSync(join(SRC, name)), name).toBe(false);
+      expect({ name, exists: existsSync(join(SRC, name)) }).toEqual({ name, exists: false });
     }
 
     const expectedKept = Object.entries(KEPT_MIGRATION_SHIMS).flatMap(([pack, files]) =>
@@ -184,11 +184,11 @@ describe("P6 six-pack physical closeout", () => {
 
     for (const { pack, file } of expectedKept) {
       const path = join(SRC, file);
-      expect(existsSync(path), file).toBe(true);
+      expect({ file, exists: existsSync(path) }).toEqual({ file, exists: true });
       const body = readSrc(file);
-      expect(body, file).toMatch(/Compatibility re-export/);
-      expect(body, file).toContain(`export * from "./${pack}/`);
-      expect(body.trim().split("\n").length, file).toBeLessThanOrEqual(3);
+      expect({ file, reexport: /Compatibility re-export/.test(body) }).toEqual({ file, reexport: true });
+      expect({ file, target: body.includes(`export * from "./${pack}/`) }).toEqual({ file, target: true });
+      expect(body.trim().split("\n").length).toBeLessThanOrEqual(3);
     }
 
     const leftoverFlatShims = readdirSync(SRC)
