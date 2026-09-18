@@ -44,7 +44,7 @@ describe("cli pack re-export isomorphism", () => {
     expect(keys).not.toContain("runGoldenPath");
     expect(keys).not.toContain("MissionDirector");
     expect(keys).not.toContain("runKillTestHang");
-    expect(cliIndex.startAuthorizedMission).toBeUndefined();
-    expect(cliIndex.runGoldenPath).toBeUndefined();
+    expect("startAuthorizedMission" in cliIndex).toBe(false);
+    expect("runGoldenPath" in cliIndex).toBe(false);
   });
 });

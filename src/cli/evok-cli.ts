@@ -233,7 +233,7 @@ export interface EvokRunOptions {
   /** Workspace root for isolated per-Run workspaces (default: OS tmpdir). */
   readonly workspaceRoot?: string;
   /** #111: operator-configured retrieval capability for intake (default: none). */
-  readonly retrieval?: import("./mission-intake").RetrievalCapability;
+  readonly retrieval?: import("../mission-intake").RetrievalCapability;
   /** Override the intake turn runner (tests); defaults to the skill-led runtime. */
   readonly intakeRunner?: typeof runIntakeTurn;
   /** Independent evaluator contract for the declared Competition (#112). */

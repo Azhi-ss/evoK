@@ -632,7 +632,7 @@ describe("runEvok Mission start (#112)", () => {
       modelRuntime,
       catalog: catalogFrom(modelRuntime, [ref], ref),
     });
-    const { MissionStartRejectedError } = await import("./mission-start");
+    const { MissionStartRejectedError } = await import("../mission-start");
     const stderr = new CollectStream();
     const code = await runEvok({
       args: { request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-x" },
