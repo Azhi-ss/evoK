@@ -236,3 +236,52 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
     await rm(ws, { recursive: true, force: true });
   });
 });
+
+describe("evok resources through the Pi SDK execution boundary (ET-M1-SKILL / #140)", () => {
+  test("default context loads accepted L0 pointers only; candidate and demoted stay out", async () => {
+    const { home, project, workspaceRoot } = await layout();
+    await skillFile(join(project, ".evok", "skills", "keep", "SKILL.md"), "keep", "accepted short", "ACCEPTED-BODY");
+    await writeFile(
+      join(project, ".evok", "skills", "keep", "SKILL.md"),
+      "---\nname: keep\ndescription: accepted short\nstate: accepted\n---\nACCEPTED-BODY\n",
+    );
+    await mkdir(join(project, ".evok", "skills", "try"), { recursive: true });
+    await writeFile(
+      join(project, ".evok", "skills", "try", "SKILL.md"),
+      "---\nname: try\ndescription: candidate must stay out\nstate: candidate\n---\nCANDIDATE-BODY\n",
+    );
+    await mkdir(join(project, ".evok", "skills", "drop"), { recursive: true });
+    await writeFile(
+      join(project, ".evok", "skills", "drop", "SKILL.md"),
+      "---\nname: drop\ndescription: demoted must stay out\nstate: demoted\n---\nDEMOTED-BODY\n",
+    );
+    const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
+    const { faux, resolver } = await setupFaux("evok-res-states");
+    let capturedSystem = "";
+    faux.setResponses([
+      (ctx: unknown) => {
+        const system = ctx as { systemPrompt?: string; messages?: unknown[] };
+        capturedSystem = [system.systemPrompt ?? "", JSON.stringify(system.messages ?? [])].join("\n");
+        return fauxAssistantMessage("state filter complete");
+      },
+    ]);
+    const runtime = new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources });
+    const ws = await newWorkspace(workspaceRoot);
+    await runtime.execute({
+      task: { objective: "report readiness" },
+      role: { name: "evok-foreground", tools: ["read", "grep", "find", "ls"] },
+      workspace: { path: ws, isolated: true, approved: true, readRoots: [project, ...resources.readRoots] },
+    });
+    expect(capturedSystem).toContain("keep");
+    expect(capturedSystem).toContain("accepted short");
+    expect(capturedSystem).not.toContain("candidate must stay out");
+    expect(capturedSystem).not.toContain("demoted must stay out");
+    expect(capturedSystem).not.toContain("CANDIDATE-BODY");
+    expect(capturedSystem).not.toContain("DEMOTED-BODY");
+    expect(capturedSystem).not.toContain("ACCEPTED-BODY");
+    await rm(home, { recursive: true, force: true });
+    await rm(project, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(ws, { recursive: true, force: true });
+  });
+});

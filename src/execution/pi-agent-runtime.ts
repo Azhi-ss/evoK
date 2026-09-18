@@ -28,6 +28,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { MissingAuthenticationError, type SessionModelResolver } from "../evok-model";
 import type { EvokResources } from "../evok-resources";
+import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
 export { MissingAuthenticationError } from "../evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -901,7 +902,7 @@ export class PiAgentRuntime {
         ...(this.resources
           ? {
               evokResources: {
-                skillFiles: this.resources.skills.map((entry) => entry.skill.filePath),
+                skillFiles: acceptedSkillFilesFromDiscovered(this.resources.skills),
                 ...(this.resources.systemPrompt !== undefined ? { systemPrompt: this.resources.systemPrompt } : {}),
                 ...(this.resources.appendSystemPrompt !== undefined ? { appendSystemPrompt: this.resources.appendSystemPrompt } : {}),
                 userRoot: this.resources.userRoot,

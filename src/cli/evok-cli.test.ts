@@ -9,6 +9,7 @@ import { runEvok, parseEvokArgs, EVOK_EXIT, EVOK_USAGE, type EvokRunOptions } fr
 import { createEvokModelResolver } from "../evok-model";
 import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission-start";
 import { parseResearchCommand } from "../mission/research-entry";
+import { parseSkillsCommand } from "../mission/skills-routing";
 
 async function tempProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "evok-cli-project-"));
@@ -941,8 +942,12 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(isExplicitResumeRequest("/new").resume).toBe(false);
     expect(parseResearchCommand("/model")).toBeUndefined();
     expect(parseResearchCommand("/new")).toBeUndefined();
+    expect(parseSkillsCommand("/model")).toBeUndefined();
+    expect(parseSkillsCommand("/new")).toBeUndefined();
     expect(parseEvokArgs(["/model"]).research).toBeUndefined();
     expect(parseEvokArgs(["/new"]).research).toBeUndefined();
+    expect(parseEvokArgs(["/model"]).skills).toBeUndefined();
+    expect(parseEvokArgs(["/new"]).skills).toBeUndefined();
     expect(parseEvokArgs(["/model"]).request).toBe("/model");
     expect(parseEvokArgs(["/new"]).request).toBe("/new");
   });
@@ -1157,6 +1162,51 @@ describe("thin /research product entry (ET-M1-EVT / #138)", () => {
     expect(stdout.text()).toMatch(/phase experimenting/);
     expect(stdout.text()).toMatch(/last action: continue/);
     expect(stdout.text()).toMatch(/experiments: 1/);
+    await rm(project, { recursive: true, force: true });
+  });
+});
+
+describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
+  test("parseEvokArgs reads /skills and --skills without treating them as TUI slashes", () => {
+    expect(parseEvokArgs(["/skills"])).toMatchObject({
+      skills: "status",
+      request: "/skills",
+    });
+    expect(parseEvokArgs(["--skills"]).skills).toBe("status");
+    expect(parseEvokArgs(["/research"]).skills).toBeUndefined();
+    expect(parseEvokArgs(["/model"]).skills).toBeUndefined();
+    expect(parseEvokArgs(["/new"]).skills).toBeUndefined();
+  });
+
+  test("/skills is readable offline and does not launch TUI or need a model", async () => {
+    const project = await tempProject();
+    await mkdir(join(project, ".evok", "skills", "try-search"), { recursive: true });
+    await writeFile(
+      join(project, ".evok", "skills", "try-search", "SKILL.md"),
+      "---\nname: try-search\ndescription: candidate search tip\nstate: candidate\ncategory: search\n---\nCANDIDATE-BODY\n",
+    );
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skills", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/8 categor/);
+    expect(text).toContain("intake");
+    expect(text).toContain("mission-intake");
+    expect(text).toContain("accepted");
+    expect(text).toContain("try-search");
+    expect(text).toContain("candidate");
+    expect(text).toContain("writeback not opened — read-only shell");
+    expect(text).toMatch(/not a second control plane/i);
+    expect(text).not.toContain("CANDIDATE-BODY");
     await rm(project, { recursive: true, force: true });
   });
 });

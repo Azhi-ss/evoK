@@ -159,6 +159,8 @@ describe("P6 six-pack physical closeout", () => {
     expect(typeof mission.runGoldenPath).toBe("function");
     expect(typeof mission.parseResearchCommand).toBe("function");
     expect(typeof mission.continueResearch).toBe("function");
+    expect(typeof mission.parseSkillsCommand).toBe("function");
+    expect(typeof mission.listSkillsDirectory).toBe("function");
     expect(runtimeKeys(mission)).not.toContain("ToyCompetitionHarness");
 
     expect(typeof cli.parseEvokArgs).toBe("function");
@@ -168,6 +170,8 @@ describe("P6 six-pack physical closeout", () => {
     expect(runtimeKeys(cli)).not.toContain("MissionDirector");
     expect(runtimeKeys(cli)).not.toContain("continueResearch");
     expect(runtimeKeys(cli)).not.toContain("recoverResearchStatus");
+    expect(runtimeKeys(cli)).not.toContain("listSkillsDirectory");
+    expect(runtimeKeys(cli)).not.toContain("proposeSkillWriteback");
 
     expect(execution.DEFAULT_BRANCH_WIDTH).toBe(1);
     expect(execution.createThinExecutionPlan().branchWidth).toBe(1);

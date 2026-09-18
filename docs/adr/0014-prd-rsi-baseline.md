@@ -50,7 +50,7 @@ does not implement W1.
 
 | PRD / product concern | Package | Notes |
 |---|---|---|
-| Mission lifecycle; authorize / continue / repair / stop; thin `/research` entry | **mission** | Sole product control plane |
+| Mission lifecycle; authorize / continue / repair / stop; thin `/research` entry; Skills routing shell | **mission** | Sole product control plane; Skills routing ≠ second control plane |
 | Evidence, lineage, admission / promotion gates | **evidence** | Gates stay here |
 | Pi Run runtime, Team, Policy Guard | **execution** | Thin default B; no C thicken |
 | Pluggable selection; default `fixed_uct` | **search** | Strong search opt-in; ToyHarness = fixtures only |
@@ -88,6 +88,21 @@ This amendment does not open Skills, EXP validity gates, BUD, SEA, or
 Deploy Arena. Gate / `#40` / true-submit / Pattern C / default
 `fixed_uct` pins are unchanged.
 
+## Amendment (ET-M1-SKILL / #140)
+
+W1 Skills slice landed an eight-category directory scaffold and a
+progressive-disclosure routing shell in `src/mission/skills-routing.ts`.
+Lifecycle states are candidate / accepted / demoted and are orthogonal
+to L0 pointer / L1 body / L2 resources. Default context loads only
+accepted name+description (or the L0 pointer). Writeback is not opened
+— read-only shell. The thin evoK `/skills` entry is parse/print only.
+
+Skills routing is not a second control plane: `/research` stays Mission
+authority; chat is not the source of truth; `/model` and `/new` stay on
+Pi. This amendment does not open EXP Admission, BUD, SEA, or Deploy
+Arena. Gate / `#40` / true-submit / Pattern C / default `fixed_uct`
+pins are unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -96,4 +111,4 @@ Deploy Arena. Gate / `#40` / true-submit / Pattern C / default
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
-- No W1 Skills / EXP / BUD / SEA implementation.
+- No W1 EXP / BUD / SEA implementation (Skills routing shell landed; Admission stays EXP).
