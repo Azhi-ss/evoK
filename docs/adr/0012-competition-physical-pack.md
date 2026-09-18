@@ -35,7 +35,8 @@ problem-facing). Methodology JSON fixtures stay at
 `src/fixtures/methodology/` (evidence-owned). `local-file-evaluator`
 stays at `src/` (CLI / Mission start wiring; not this cut).
 `evok-model` / `evok-resources` / `newapi-client` stay at `src/`
-(shared wiring). P6 residue cleanup is a later ticket.
+(shared wiring). P6 residue cleanup is recorded in
+[ADR-0013](0013-six-pack-physical-closeout.md).
 
 ## Out of scope / freezes
 

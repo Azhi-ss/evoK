@@ -68,6 +68,14 @@ The physical `src/competition/` cut is recorded in
 [ADR-0012](0012-competition-physical-pack.md). This ADR's logical ownership
 map is unchanged.
 
+## Amendment (ET-A6 / #132)
+
+Physical six-pack layout is complete. Recorded in
+[ADR-0013](0013-six-pack-physical-closeout.md). This ADR's logical
+ownership map is unchanged. Remaining pack-shim flat `src/*.ts` files
+(not shared wiring such as `evok-model`) are migration-period re-exports
+for one more release.
+
 ## Out of scope / freezes
 
 - No change to gate, T48, hang, or #40 semantics.
@@ -76,6 +84,6 @@ map is unchanged.
 - No true contest External Submission.
 - No Elite-as-promotion.
 - No C thicken of the execution roster.
-- No P6 residue cleanup.
+- P6 residue cleanup is recorded in ADR-0013 (no second package move).
 
 Domain vocabulary for these terms lives in `CONTEXT.md`.

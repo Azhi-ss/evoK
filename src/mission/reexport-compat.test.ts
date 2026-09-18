@@ -12,8 +12,6 @@ import * as draftFlat from "../mission-draft";
 import * as draftPacked from "./mission-draft";
 import * as directorFlat from "../mission-director";
 import * as directorPacked from "./mission-director";
-import * as fileFlat from "../file-blueprint";
-import * as filePacked from "./file-blueprint";
 import * as goldenFlat from "../v1-golden-path";
 import * as goldenPacked from "./v1-golden-path";
 import * as intakeFlat from "../mission-intake";
@@ -58,7 +56,6 @@ describe("mission pack re-export isomorphism", () => {
     expectSameRuntimeSurface(intakeFlat, intakePacked);
     expectSameRuntimeSurface(resumeFlat, resumePacked);
     expectSameRuntimeSurface(baselineFlat, baselinePacked);
-    expectSameRuntimeSurface(fileFlat, filePacked);
     expectSameRuntimeSurface(branchFlat, branchPacked);
     expectSameRuntimeSurface(goldenFlat, goldenPacked);
     expectSameRuntimeSurface(outerMinFlat, outerMinPacked);

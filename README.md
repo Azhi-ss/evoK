@@ -175,7 +175,7 @@ Autonomous continuation from measured evidence (#113):
   noContextFiles` mode). Approved evoK/project resources arrive in T2 (#110).
 
 Offline contract tests use the SDK faux provider (`src/cli/evok-cli.test.ts`,
-flat `src/evok-cli.ts` re-exports; `src/evok-model.test.ts`): response path, exact tier routing, usage display,
+`src/evok-model.test.ts`): response path, exact tier routing, usage display,
   missing-configuration/auth failure, and cancellation — no real credentials.
 Any live-model smoke check requires a separately authorized budget.
 
@@ -197,7 +197,7 @@ Long-running Missions keep GOAL, RULES, an experiments log, and SCOREBOARD as co
 - SCOREBOARD rows must cite evaluator Evidence. A `championRef` on the file is narrative only and cannot bypass the independent evaluator or promotion gate.
 - Checkpoint / restart rebuilds the blueprint from the ledger; file digests must stay aligned with their Evidence refs.
 
-Schema: `docs/file-blueprint.md`. Implementation: `src/mission/file-blueprint.ts` (flat `src/file-blueprint.ts` re-exports), `MissionDirector.commitBlueprintFile` / `recordCrossReview`.
+Schema: `docs/file-blueprint.md`. Implementation: `src/mission/file-blueprint.ts`, `MissionDirector.commitBlueprintFile` / `recordCrossReview`.
 
 ### Non-goals
 

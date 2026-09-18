@@ -2,9 +2,9 @@
 
 Source: spec #1 契约增补（2026-09-04）Graph Engineering 对照, ticket #39 [T46].
 Implementations: `src/evidence/ledger-kinds.ts` (kind classifier; flat
-`src/ledger-kinds.ts` re-exports), `src/search/fixtures/toy-harness.ts`
+`src/ledger-kinds.ts` is a migration-period re-export), `src/search/fixtures/toy-harness.ts`
 (authoritative mission ledger `MissionEvent`; flat `src/toy-harness.ts`
-re-exports; fixtures/tests only).
+is a migration-period re-export; fixtures/tests only).
 
 The authoritative mission ledger is append-only; `MissionState` projects refs only.
 「图上定义了边」≠「这次 run 实际选了哪条边」——边定义在 plan，traversal 记在 ledger。

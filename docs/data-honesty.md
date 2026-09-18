@@ -6,16 +6,17 @@ a public score). Kaggle/MLE-bench agents routinely cheat this way (research gap
 G1); honesty cannot rely on an agent "feeling honest".
 
 Implementation: `src/data-honesty.ts`; wired into the mission seam in
-`src/search/fixtures/toy-harness.ts` (flat `src/toy-harness.ts` re-exports;
-fixtures/tests only; audit runs after candidate proposal, before any snapshot
-or evaluation); ledger event classification in `src/evidence/ledger-kinds.ts`.
+`src/search/fixtures/toy-harness.ts` (flat `src/toy-harness.ts` is a
+migration-period re-export; fixtures/tests only; audit runs after candidate
+proposal, before any snapshot or evaluation); ledger event classification
+in `src/evidence/ledger-kinds.ts`.
 
 ## Scope — what this gate is NOT
 
 This ticket governs **data honesty only**. It explicitly does **not** replace:
 
 - **#7 — sandbox / evaluator trust boundary** (`src/execution/security-boundary.ts`;
-  flat `src/security-boundary.ts` re-exports):
+  flat `src/security-boundary.ts` is a migration-period re-export):
   filesystem/network/tool isolation, protected paths, secret redaction, trusted
   snapshot integrity. Data honesty *adds* a semantic layer (what counts as
   leakage) on top of the sandbox; a `LeakageViolation` is a `TrustViolation`.
