@@ -1,7 +1,8 @@
 # Ledger event schema — EdgeTraversal + Approval / Evidence / Evaluation
 
 Source: spec #1 契约增补（2026-09-04）Graph Engineering 对照, ticket #39 [T46].
-Implementations: `src/ledger-kinds.ts` (kind classifier), `src/toy-harness.ts`
+Implementations: `src/evidence/ledger-kinds.ts` (kind classifier; flat
+`src/ledger-kinds.ts` re-exports), `src/toy-harness.ts`
 (authoritative mission ledger `MissionEvent`).
 
 The authoritative mission ledger is append-only; `MissionState` projects refs only.

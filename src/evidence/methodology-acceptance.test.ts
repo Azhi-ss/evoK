@@ -13,11 +13,11 @@ import {
   fakeInnerCandidate,
   runMethodologyAcceptance,
 } from "./methodology-acceptance";
-import oofManifest from "./fixtures/methodology/manifest-oof.json";
-import noOofManifest from "./fixtures/methodology/manifest-no-oof.json";
-import splitMismatchManifest from "./fixtures/methodology/manifest-split-mismatch.json";
-import declaredEquivalentManifest from "./fixtures/methodology/manifest-declared-equivalent.json";
-import contractFixture from "./fixtures/methodology/plugin-task.contract.json";
+import oofManifest from "../fixtures/methodology/manifest-oof.json";
+import noOofManifest from "../fixtures/methodology/manifest-no-oof.json";
+import splitMismatchManifest from "../fixtures/methodology/manifest-split-mismatch.json";
+import declaredEquivalentManifest from "../fixtures/methodology/manifest-declared-equivalent.json";
+import contractFixture from "../fixtures/methodology/plugin-task.contract.json";
 
 const contracts = resolveMethodologyContracts(contractFixture)!;
 

@@ -15,7 +15,7 @@ import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "./toy-harness";
+} from "../toy-harness";
 
 /** A provider exposing all three contracts via the snake_case accessor (adapter face). */
 function providerWith(decl: MethodologyDeclaration): Record<string, unknown> {

@@ -35,8 +35,14 @@ force: default Branch width is 1; verification Roles are on-demand;
 thickening the Pattern library or a full standing roster as v1 must-haves
 is rejected (C). This ADR does not reopen that pin.
 
-Physical layout remains a flat `src/` tree. Package directory moves are
-later tickets (not this decision).
+Physical layout remains a flat `src/` tree in this decision. Package
+directory moves are later tickets.
+
+## Amendment (ET-A1 / #121)
+
+The physical `src/evidence/` cut is recorded in
+[ADR-0008](0008-evidence-physical-pack.md). This ADR's logical ownership
+map is unchanged.
 
 ## Out of scope / freezes
 

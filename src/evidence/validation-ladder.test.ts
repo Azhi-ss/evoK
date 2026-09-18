@@ -13,7 +13,7 @@ import {
   ToyCompetitionHarness,
   levelCanChampion,
   type ToyAgentRuntime,
-} from "./toy-harness";
+} from "../toy-harness";
 
 /**
  * Adapter that declares a validation ladder. A candidate may also pin the
