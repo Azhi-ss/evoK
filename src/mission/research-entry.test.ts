@@ -218,6 +218,110 @@ describe("thin /research continue path", () => {
     }
   });
 
+  test("continue after a MissionRecord baseline persists a visible skeleton experiment", async () => {
+    const projectRoot = await projectDir();
+    const missionDir = join(projectRoot, ".evok", "missions", MISSION_ID);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: MISSION_ID,
+      status: "baseline-complete",
+      objective: "record-only baseline then continue",
+      contract: { objective: "record-only baseline then continue", expectedOutputs: [], evaluationMethod: "file", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 0.1, remaining: 0.9 },
+      reserved: 0,
+      usage: { intake: { tokens: { total: 0 }, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {},
+      baselineRunId: `${MISSION_ID}:baseline:1`,
+      baseline: {
+        runId: `${MISSION_ID}:baseline:1`,
+        evaluation: { ok: true, score: 0.44 },
+        evidenceRefs: ["snap:rec"],
+        measuredAt: "2026-09-19T05:00:00.000Z",
+      },
+      experiments: [],
+      history: [],
+      createdAt: "2026-09-19T05:00:00.000Z",
+      updatedAt: "2026-09-19T05:00:00.000Z",
+    }));
+    try {
+      const view = await continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        clock: () => "2026-09-19T05:10:00.000Z",
+        nextId: () => "exp-from-record",
+      });
+      expect(view.phase).toBe("experimenting");
+      expect(view.baseline?.runId).toBe(`${MISSION_ID}:baseline:1`);
+      expect(view.experiments).toEqual([
+        {
+          experimentId: "exp-from-record",
+          objective: "record-only baseline then continue",
+          source: "skeleton",
+          at: "2026-09-19T05:10:00.000Z",
+        },
+      ]);
+      const recovered = await readResearchStatus(projectRoot, MISSION_ID);
+      expect(recovered.phase).toBe("experimenting");
+      expect(recovered.experiments).toHaveLength(1);
+      expect(recovered.experiments[0]?.experimentId).toBe("exp-from-record");
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-resumable MissionRecord stop refuses continue", async () => {
+    const projectRoot = await projectDir();
+    const missionDir = join(projectRoot, ".evok", "missions", MISSION_ID);
+    await mkdir(missionDir, { recursive: true });
+    await writeFile(join(missionDir, "mission.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: MISSION_ID,
+      status: "budget-exhausted",
+      objective: "stop is authority",
+      contract: { objective: "stop is authority", expectedOutputs: [], evaluationMethod: "file", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 1, remaining: 0 },
+      reserved: 0,
+      usage: { intake: { tokens: { total: 0 }, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {},
+      baselineRunId: `${MISSION_ID}:baseline:1`,
+      baseline: {
+        runId: `${MISSION_ID}:baseline:1`,
+        evaluation: { ok: true, score: 0.1 },
+        evidenceRefs: [],
+        measuredAt: "2026-09-19T06:00:00.000Z",
+      },
+      experiments: [],
+      history: [],
+      stopReason: "budget exhausted",
+      createdAt: "2026-09-19T06:00:00.000Z",
+      updatedAt: "2026-09-19T06:00:00.000Z",
+    }));
+    try {
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+      })).rejects.toBeInstanceOf(ResearchContinueRejectedError);
+      const view = await readResearchStatus(projectRoot, MISSION_ID);
+      expect(view.phase).toBe("stopped");
+      expect(view.stopReason).toBe("budget exhausted");
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test("hydrates baseline and one experiment from the durable MissionRecord, not chat files", async () => {
     const projectRoot = await projectDir();
     const missionDir = join(projectRoot, ".evok", "missions", MISSION_ID);

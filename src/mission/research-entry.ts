@@ -18,6 +18,7 @@ import {
   loadMissionRecord,
   MissionRecordCorruptionError,
   MissionStartRejectedError,
+  RESUMABLE_STATUSES,
   type ExperimentTrailEntry,
   type MissionRecord,
 } from "./mission-start";
@@ -30,9 +31,7 @@ export type MissionControlEventType =
   | "EXPERIMENT_ENTERED"
   | "MISSION_CONTINUED"
   | "MISSION_REPAIRED"
-  | "MISSION_STOPPED"
-  | "RECOVERY_REPLAYED"
-  | "EVENT_REJECTED";
+  | "MISSION_STOPPED";
 
 export interface MissionControlEvent {
   readonly eventId: string;
@@ -131,11 +130,8 @@ const KNOWN_EVENT_TYPES = new Set<string>([
   "MISSION_CONTINUED",
   "MISSION_REPAIRED",
   "MISSION_STOPPED",
-  "RECOVERY_REPLAYED",
-  "EVENT_REJECTED",
 ]);
 const RESEARCH_VERBS = new Set<ResearchVerb>(["status", "continue", "repair", "stop"]);
-const MISSION_ID_IN_TEXT = /\bm-[a-z0-9][a-z0-9._-]{0,63}\b/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -307,6 +303,7 @@ function hydrateExperiments(record: MissionRecord): readonly ResearchExperimentE
 function mergeRecord(view: ResearchStatusView, record: MissionRecord | undefined): ResearchStatusView {
   if (!record) return view;
   const eventsProjected = view.authorized || view.baseline !== undefined || view.experiments.length > 0;
+  const recordStopped = !RESUMABLE_STATUSES.has(record.status);
   const authorized = true;
   const objective = view.objective ?? record.objective;
   const baseline = view.baseline ?? hydrateBaseline(record);
@@ -317,7 +314,8 @@ function mergeRecord(view: ResearchStatusView, record: MissionRecord | undefined
   const recoveredFrom: ResearchRecoverySource = eventsProjected
     ? (filledFromRecord ? "events+mission-record" : "events")
     : "mission-record";
-  const stopped = view.phase === "stopped";
+  const stopped = view.phase === "stopped" || recordStopped;
+  const stopReason = view.stopReason ?? record.stopReason;
   return frozenCopy({
     missionId: view.missionId || record.id,
     phase: phaseOf({ authorized, stopped, baseline, experiments }),
@@ -325,8 +323,8 @@ function mergeRecord(view: ResearchStatusView, record: MissionRecord | undefined
     ...(objective ? { objective } : {}),
     ...(baseline ? { baseline } : {}),
     experiments: Object.freeze([...experiments]),
-    ...(view.lastAction ? { lastAction: view.lastAction } : {}),
-    ...(view.stopReason ? { stopReason: view.stopReason } : {}),
+    ...(stopped ? { lastAction: view.lastAction ?? "stop" } : view.lastAction ? { lastAction: view.lastAction } : {}),
+    ...(stopReason ? { stopReason } : {}),
     recoveredFrom,
   });
 }
@@ -346,8 +344,7 @@ export function parseResearchCommand(text: string): ResearchCommand | undefined 
     if (!isMissionId(rawId)) return undefined;
     return { verb, missionId: rawId };
   }
-  const embedded = trimmed.match(MISSION_ID_IN_TEXT)?.[0];
-  return embedded ? { verb, missionId: embedded } : { verb };
+  return { verb };
 }
 
 export function isExplicitResearchContinue(text: string): boolean {
@@ -411,6 +408,58 @@ function appendUnique(existing: MissionControlEvent[], incoming: readonly Missio
   return next;
 }
 
+function projectView(
+  events: readonly MissionControlEvent[],
+  record: MissionRecord | undefined,
+  missionId: string,
+): ResearchStatusView {
+  const fromEvents = recoverResearchStatus(events, missionId);
+  return record ? mergeRecord(fromEvents, record) : fromEvents;
+}
+
+function nextSequence(events: readonly MissionControlEvent[]): number {
+  return events.reduce((max, event) => Math.max(max, event.sequence), 0);
+}
+
+/** Persist implied authorize/baseline so a later replay does not need the record. */
+function authorityEventsFromView(
+  events: readonly MissionControlEvent[],
+  view: ResearchStatusView,
+  missionId: string,
+  at: string,
+): MissionControlEvent[] {
+  const types = new Set(events.map((event) => event.type));
+  const extra: MissionControlEvent[] = [];
+  let sequence = nextSequence(events);
+  if (!types.has("MISSION_AUTHORIZED")) {
+    extra.push({
+      eventId: `authorize-${missionId}`,
+      sequence: ++sequence,
+      type: "MISSION_AUTHORIZED",
+      at: view.baseline?.at ?? at,
+      missionId,
+      action: "authorize",
+      payload: { ...(view.objective ? { objective: view.objective } : {}), source: "mission-record" },
+    });
+  }
+  if (!types.has("BASELINE_RECORDED") && view.baseline) {
+    extra.push({
+      eventId: `baseline-${view.baseline.runId}`,
+      sequence: ++sequence,
+      type: "BASELINE_RECORDED",
+      at: view.baseline.at,
+      missionId,
+      payload: {
+        runId: view.baseline.runId,
+        ok: view.baseline.ok,
+        ...(view.baseline.score !== undefined ? { score: view.baseline.score } : {}),
+        source: "mission-record",
+      },
+    });
+  }
+  return extra;
+}
+
 async function projectFromDisk(projectRoot: string, missionId: string): Promise<{
   view: ResearchStatusView;
   events: MissionControlEvent[];
@@ -421,8 +470,7 @@ async function projectFromDisk(projectRoot: string, missionId: string): Promise<
   }
   const events = await readEventLog(projectRoot, missionId);
   const record = await loadOptionalRecord(projectRoot, missionId);
-  const fromEvents = recoverResearchStatus(events, missionId);
-  const view = record ? mergeRecord(fromEvents, record) : fromEvents;
+  const view = projectView(events, record, missionId);
   if (!record && events.length === 0) {
     throw new ResearchStatusRejectedError(`mission ${missionId} has no research events or accepted Mission record`);
   }
@@ -457,7 +505,7 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
   }
   assertContinueAuthorization(options.authorization, missionId);
   const record = await loadOptionalRecord(projectRoot, missionId);
-  const view = record ? mergeRecord(recoverResearchStatus(events, missionId), record) : recoverResearchStatus(events, missionId);
+  const view = projectView(events, record, missionId);
   if (!view.authorized) {
     throw new ResearchContinueRejectedError(`mission ${missionId} is not authorized; /research continue cannot originate authority`);
   }
@@ -470,7 +518,8 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
 
   const at = (options.clock ?? (() => new Date().toISOString()))();
   const experimentId = (options.nextId ?? (() => `exp-${events.length + 1}`))();
-  const sequence = events.reduce((max, event) => Math.max(max, event.sequence), 0);
+  events = appendUnique(events, authorityEventsFromView(events, view, missionId, at));
+  const sequence = nextSequence(events);
   const continued: MissionControlEvent = {
     eventId: `continue-${at}`,
     sequence: sequence + 1,
@@ -494,8 +543,7 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
   };
   events = appendUnique(events, [continued, entered]);
   await writeEventLog(projectRoot, missionId, events);
-  const next = record ? mergeRecord(recoverResearchStatus(events, missionId), record) : recoverResearchStatus(events, missionId);
-  return next;
+  return projectView(events, record, missionId);
 }
 
 export function formatResearchStatus(view: ResearchStatusView): string {
