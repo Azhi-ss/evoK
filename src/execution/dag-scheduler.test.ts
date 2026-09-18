@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DAGScheduler, DeterministicScheduler, MissionQueue, PolicyGuard, type DagTask, type DagTaskResult } from "./toy-harness";
+import { DAGScheduler, DeterministicScheduler, MissionQueue, PolicyGuard, type DagTask, type DagTaskResult } from "../toy-harness";
 
 const guard = new PolicyGuard({
   maxBranchWidth: 1,

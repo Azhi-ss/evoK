@@ -9,7 +9,7 @@ import {
   registerIdeaType,
   type ArtifactReference,
   type ExecutionPlan,
-} from "./toy-harness";
+} from "../toy-harness";
 
 const plan = (overrides: Partial<ExecutionPlan> = {}): ExecutionPlan => ({
   version: 1,

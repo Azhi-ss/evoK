@@ -14,7 +14,8 @@ or evaluation); ledger event classification in `src/evidence/ledger-kinds.ts`.
 
 This ticket governs **data honesty only**. It explicitly does **not** replace:
 
-- **#7 — sandbox / evaluator trust boundary** (`src/security-boundary.ts`):
+- **#7 — sandbox / evaluator trust boundary** (`src/execution/security-boundary.ts`;
+  flat `src/security-boundary.ts` re-exports):
   filesystem/network/tool isolation, protected paths, secret redaction, trusted
   snapshot integrity. Data honesty *adds* a semantic layer (what counts as
   leakage) on top of the sandbox; a `LeakageViolation` is a `TrustViolation`.
