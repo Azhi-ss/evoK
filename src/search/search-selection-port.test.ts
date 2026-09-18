@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { HypothesisLedger, T48MappedCatalog } from "./hypothesis-ledger";
-import { runKillTestHang } from "./kill-test-hang";
-import { EvidenceMemory } from "./research-loop";
+import { HypothesisLedger, T48MappedCatalog } from "../hypothesis-ledger";
+import { runKillTestHang } from "../kill-test-hang";
+import { EvidenceMemory } from "../research-loop";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
   DEFAULT_UCT_EXPLORATION,
@@ -15,7 +15,7 @@ import {
   type SearchParentCandidate,
   type SearchSelectionContext,
 } from "./search-selection-port";
-import type { ToyCompetitionAdapter } from "./toy-harness";
+import type { ToyCompetitionAdapter } from "../toy-harness";
 
 /**
  * Independent ranking at constant c = √2, parent visits N = 20:

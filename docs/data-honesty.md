@@ -6,7 +6,8 @@ a public score). Kaggle/MLE-bench agents routinely cheat this way (research gap
 G1); honesty cannot rely on an agent "feeling honest".
 
 Implementation: `src/data-honesty.ts`; wired into the mission seam in
-`src/toy-harness.ts` (audit runs after candidate proposal, before any snapshot
+`src/search/fixtures/toy-harness.ts` (flat `src/toy-harness.ts` re-exports;
+fixtures/tests only; audit runs after candidate proposal, before any snapshot
 or evaluation); ledger event classification in `src/evidence/ledger-kinds.ts`.
 
 ## Scope — what this gate is NOT

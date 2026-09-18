@@ -44,6 +44,12 @@ The physical `src/evidence/` cut is recorded in
 [ADR-0008](0008-evidence-physical-pack.md). This ADR's logical ownership
 map is unchanged.
 
+## Amendment (ET-A2 / #122)
+
+The physical `src/search/` cut is recorded in
+[ADR-0009](0009-search-physical-pack.md). This ADR's logical ownership
+map is unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate, T48, hang, or #40 semantics.

@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { HypothesisLedger } from "./hypothesis-ledger";
-import { RESEARCH_TASKS as tasks } from "./fixtures/research";
+import { HypothesisLedger } from "../hypothesis-ledger";
+import { RESEARCH_TASKS as tasks } from "../fixtures/research";
 import {
   MissionDirector,
   type ResearchTask,
-} from "./research-loop";
-import { runKillTestHang } from "./kill-test-hang";
+} from "../research-loop";
+import { runKillTestHang } from "../kill-test-hang";
 import {
   OUTER_COLLAPSE_WINDOW,
   OUTER_DIVERSE_WINDOW,
