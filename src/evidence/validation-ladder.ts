@@ -1,4 +1,4 @@
-import { deepFreeze } from "./security-boundary";
+import { deepFreeze } from "../security-boundary";
 
 /**
  * Validation ladder (T41, spec #1 research gap G2): a three-level *data-split /

@@ -6,7 +6,7 @@ import {
   type MethodologyContracts,
   type PluginMethodologyBlock,
 } from "./methodology";
-import { deepFreeze, digestValue, TrustViolation } from "./security-boundary";
+import { deepFreeze, digestValue, TrustViolation } from "../security-boundary";
 import {
   ToyCompetitionHarness,
   type CandidateSnapshot,
@@ -18,11 +18,11 @@ import {
   type MissionState,
   type ToyAgentRuntime,
   type ToyCompetitionAdapter,
-} from "./toy-harness";
-import declaredEquivalentManifest from "./fixtures/methodology/manifest-declared-equivalent.json";
-import noOofManifest from "./fixtures/methodology/manifest-no-oof.json";
-import oofManifest from "./fixtures/methodology/manifest-oof.json";
-import splitMismatchManifest from "./fixtures/methodology/manifest-split-mismatch.json";
+} from "../toy-harness";
+import declaredEquivalentManifest from "../fixtures/methodology/manifest-declared-equivalent.json";
+import noOofManifest from "../fixtures/methodology/manifest-no-oof.json";
+import oofManifest from "../fixtures/methodology/manifest-oof.json";
+import splitMismatchManifest from "../fixtures/methodology/manifest-split-mismatch.json";
 
 const METHODOLOGY_MANIFEST_FILE = "methodology.json";
 

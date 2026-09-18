@@ -9,12 +9,12 @@
  * may auto-`killed`; `pass` / `inconclusive` never auto-kill.
  * Durable sqlite, K2 hang points, and S* param-space/MMD are out of scope.
  */
-import { deepFreeze } from "./security-boundary";
+import { deepFreeze } from "../security-boundary";
 import {
   EvidenceMemory,
   type MissionDirector,
   type ResearchTask,
-} from "./research-loop";
+} from "../research-loop";
 
 export type HypothesisStatus = "open" | "supported" | "killed" | "superseded";
 export type KillTestOutcome = "pass" | "fail" | "inconclusive";

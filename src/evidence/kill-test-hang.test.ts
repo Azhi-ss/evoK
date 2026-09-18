@@ -21,11 +21,11 @@ import {
   MethodologyToyCompetitionAdapter,
   fakeInnerCandidate,
 } from "./methodology-acceptance";
-import { EvidenceMemory } from "./research-loop";
-import { ToyCompetitionHarness, type ToyAgentRuntime } from "./toy-harness";
+import { EvidenceMemory } from "../research-loop";
+import { ToyCompetitionHarness, type ToyAgentRuntime } from "../toy-harness";
 import { verificationRoleContract } from "./verification-gates";
-import { RESEARCH_PREDICTION as prediction } from "./fixtures/research";
-import contractFixture from "./fixtures/methodology/plugin-task.contract.json";
+import { RESEARCH_PREDICTION as prediction } from "../fixtures/research";
+import contractFixture from "../fixtures/methodology/plugin-task.contract.json";
 
 const contracts = resolveMethodologyContracts(contractFixture)!;
 

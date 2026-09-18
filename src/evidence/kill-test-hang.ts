@@ -10,7 +10,7 @@
  * writes `KillTestResult` through H2. It does not invent a second store,
  * skip the hang, or relax T48 / Broker.
  */
-import { deepFreeze } from "./security-boundary";
+import { deepFreeze } from "../security-boundary";
 import {
   T48MappedCatalog,
   asKillTestPass,

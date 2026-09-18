@@ -1,4 +1,4 @@
-import { TrustViolation, deepFreeze, digestValue } from "./security-boundary";
+import { TrustViolation, deepFreeze, digestValue } from "../security-boundary";
 
 /**
  * First-class methodology contracts (T44, spec #1 research gaps G4/G5/G6):

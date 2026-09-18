@@ -4,8 +4,8 @@ import {
   SecretRedactor,
   assertSnapshotIntegrity,
   deepFreeze,
-} from "./security-boundary";
-import type { CandidateSnapshot } from "./toy-harness";
+} from "../security-boundary";
+import type { CandidateSnapshot } from "../toy-harness";
 
 export type SubmissionMode = "dry-run" | "external";
 export type SubmissionStatus = "PENDING" | "APPROVED" | "DRY_RUN" | "SUCCEEDED" | "FAILED" | "REJECTED";

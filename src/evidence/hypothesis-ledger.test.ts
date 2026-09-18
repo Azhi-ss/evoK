@@ -9,8 +9,8 @@ import {
 import {
   EvidenceMemory,
   MissionDirector,
-} from "./research-loop";
-import { RESEARCH_TASKS } from "./fixtures/research";
+} from "../research-loop";
+import { RESEARCH_TASKS } from "../fixtures/research";
 
 const TASKS = RESEARCH_TASKS.slice(0, 1);
 

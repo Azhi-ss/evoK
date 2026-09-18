@@ -6,23 +6,23 @@
  * OOF source semantics stay unchanged. Default mock stays zero-network.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import oofManifest from "./fixtures/methodology/manifest-oof.json";
+import oofManifest from "../fixtures/methodology/manifest-oof.json";
 import {
   LiveLlmKeyMissingError,
   NEWAPI_API_KEY_ENV,
   NEWAPI_LIVE_ENV,
   type FetchLike,
-} from "./newapi-client";
+} from "../newapi-client";
 import {
   MOCK_LLM_CANDIDATE_FILES,
   MOCK_LLM_METHODOLOGY_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
-} from "./llm-competition-runtime";
+} from "../llm-competition-runtime";
 import {
   assembleLlmCompArmSetup,
   readProposalMethodologyEvidence,
-} from "./llm-propose-outer-min";
+} from "../llm-propose-outer-min";
 import {
   auditMethodology,
   oofEnsembleGate,
@@ -32,10 +32,10 @@ import {
   type MethodologyEvidence,
 } from "./methodology";
 import { runKillTestHang } from "./kill-test-hang";
-import { OUTER_MIN_KILL_EVIDENCE_ID } from "./outer-min-path";
-import type { ToyAgentRuntime } from "./toy-harness";
+import { OUTER_MIN_KILL_EVIDENCE_ID } from "../outer-min-path";
+import type { ToyAgentRuntime } from "../toy-harness";
 import { verificationRoleContract } from "./verification-gates";
-import { runGoldenPath } from "./v1-golden-path";
+import { runGoldenPath } from "../v1-golden-path";
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];

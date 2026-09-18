@@ -1,4 +1,4 @@
-import type { MissionEventType } from "./toy-harness";
+import type { MissionEventType } from "../toy-harness";
 
 /**
  * The three-way ledger accounting mandated by spec #1 (Graph Engineering

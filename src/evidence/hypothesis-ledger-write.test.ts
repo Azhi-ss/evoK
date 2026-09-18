@@ -9,7 +9,7 @@ import {
   EvidenceMemory,
   MissionDirector,
   type ResearchTask,
-} from "./research-loop";
+} from "../research-loop";
 
 const TASKS: readonly ResearchTask[] = [
   { taskId: "baseline", objective: "measure the baseline", estimatedCost: 2, priority: 3 },
