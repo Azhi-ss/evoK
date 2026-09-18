@@ -3,18 +3,18 @@ import {
   asKillTestPass,
   killTestOutcomeIsPass,
   type KillTestOutcome,
-} from "./hypothesis-ledger";
+} from "../hypothesis-ledger";
 import {
   createKillTestHangHook,
   killTestOutcomeBlocksBroker,
   runKillTestHang,
-} from "./kill-test-hang";
+} from "../kill-test-hang";
 import {
   auditMethodology,
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "./methodology";
+} from "../methodology";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
   OUTER_MIN_KILL_EVIDENCE_ID,
@@ -23,20 +23,20 @@ import {
 import {
   assembleOuterE2eMinPath,
 } from "./outer-e2e-min-path";
-import { buildOuterSearchSpaceFixtures } from "./outer-search-space-fixtures";
+import { buildOuterSearchSpaceFixtures } from "../outer-search-space-fixtures";
 import { MissionDirector } from "./research-loop";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "./search-space-profile";
+} from "../search-space-profile";
 import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "./toy-harness";
-import { verificationRoleContract } from "./verification-gates";
+} from "../toy-harness";
+import { verificationRoleContract } from "../verification-gates";
 
-import { RESEARCH_TASKS as TASKS, RESEARCH_PREDICTION as prediction } from "./fixtures/research";
+import { RESEARCH_TASKS as TASKS, RESEARCH_PREDICTION as prediction } from "../fixtures/research";
 
 function smuggledSearchPorts() {
   const calls = { select: 0, uct: 0, write: 0 };

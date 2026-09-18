@@ -4,8 +4,10 @@ Source: ticket #22 [T16], parent spec #1. Reference practice:
 [ravi03071991/cholesky-gpu-mode](https://github.com/ravi03071991/cholesky-gpu-mode)
 (GOAL / RULES / experiments / SCOREBOARD as workspace-auditable files).
 
-Implementation: `src/file-blueprint.ts` (schema), `src/research-loop.ts`
-(`MissionDirector.commitBlueprintFile`, `recordCrossReview`, Stop gate).
+Implementation: `src/mission/file-blueprint.ts` (schema; flat
+`src/file-blueprint.ts` re-exports), `src/mission/research-loop.ts`
+(`MissionDirector.commitBlueprintFile`, `recordCrossReview`, Stop gate;
+flat `src/research-loop.ts` re-exports).
 
 File-blueprint state is **Evidence**, not Evaluation and not Approval. Committing
 a SCOREBOARD row, naming a `championRef`, or finishing a Cross-review never

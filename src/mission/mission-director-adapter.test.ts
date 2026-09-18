@@ -11,13 +11,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PiAgentRuntime, type AgentRuntimeSession } from "./pi-agent-runtime";
+import { PiAgentRuntime, type AgentRuntimeSession } from "../pi-agent-runtime";
 import {
   DirectorProposalRejectedError,
   createPiMissionDirector,
   type DirectorInput,
 } from "./mission-director";
-import type { EvokResources } from "./evok-resources";
+import type { EvokResources } from "../evok-resources";
 
 const stats = {
   tokens: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 },

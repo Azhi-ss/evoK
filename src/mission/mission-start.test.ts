@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { isExplicitStartRequest } from "./mission-start";
-import { EvaluationContractError, normalizeFileMetricContract } from "./local-file-evaluator";
+import { EvaluationContractError, normalizeFileMetricContract } from "../local-file-evaluator";
 
 describe("isExplicitStartRequest (#112 AC1)", () => {
   const starts = [

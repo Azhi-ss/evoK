@@ -6,7 +6,7 @@ import {
   type BaselineTrackResult,
   type ToyAgentRuntime,
   type ToyCompetitionAdapter,
-} from "./toy-harness";
+} from "../toy-harness";
 
 const prediction = {
   predictionId: "baseline-prediction",

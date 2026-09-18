@@ -9,16 +9,16 @@ import {
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "./methodology";
+} from "../methodology";
 import { MissionDirector } from "./research-loop";
-import { runKillTestHang } from "./kill-test-hang";
-import { verificationRoleContract } from "./verification-gates";
+import { runKillTestHang } from "../kill-test-hang";
+import { verificationRoleContract } from "../verification-gates";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "./search-space-profile";
+} from "../search-space-profile";
 
-import { RESEARCH_TASKS as TASKS } from "./fixtures/research";
+import { RESEARCH_TASKS as TASKS } from "../fixtures/research";
 
 function smuggledSearchPorts() {
   const calls = { select: 0, uct: 0, write: 0 };

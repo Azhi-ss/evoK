@@ -7,13 +7,13 @@ import {
   NEWAPI_LIVE_ENV,
   resolveDefaultNewapiModel,
   type FetchLike,
-} from "./newapi-client";
+} from "../newapi-client";
 import {
   LiveLlmCompetitionRuntime,
   MOCK_LLM_CANDIDATE_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
-} from "./llm-competition-runtime";
+} from "../llm-competition-runtime";
 import {
   assembleLlmCompArmSetup,
   mapLlmProposalArtifact,
@@ -22,30 +22,30 @@ import {
 import {
   HypothesisLedger,
   T48MappedCatalog,
-} from "./hypothesis-ledger";
+} from "../hypothesis-ledger";
 import {
   auditMethodology,
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "./methodology";
+} from "../methodology";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
   OUTER_MIN_KILL_EVIDENCE_ID,
   runOuterMinPathSetup,
 } from "./outer-min-path";
 import { assembleOuterE2eMinPath } from "./outer-e2e-min-path";
-import { buildOuterSearchSpaceFixtures } from "./outer-search-space-fixtures";
-import { runKillTestHang } from "./kill-test-hang";
+import { buildOuterSearchSpaceFixtures } from "../outer-search-space-fixtures";
+import { runKillTestHang } from "../kill-test-hang";
 import { MissionDirector } from "./research-loop";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "./search-space-profile";
-import type { ToyAgentRuntime } from "./toy-harness";
-import { verificationRoleContract } from "./verification-gates";
+} from "../search-space-profile";
+import type { ToyAgentRuntime } from "../toy-harness";
+import { verificationRoleContract } from "../verification-gates";
 
-import { RESEARCH_TASKS as TASKS } from "./fixtures/research";
+import { RESEARCH_TASKS as TASKS } from "../fixtures/research";
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];
