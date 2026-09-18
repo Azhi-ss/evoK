@@ -8,6 +8,8 @@ status / continue（evoK 产品入口，不是 Pi slash 表）。
 （candidate / accepted / demoted）；默认上下文只进 accepted 短描述。
 文件体写回未开（read-only shell）。candidate 升 accepted 必须过
 evidence Admission（无保护 holdout 拒绝；有效性 hang 不是 pass）。
+传入 BudgetDecision 时，超预算或未预留拒绝 continue / writeback；
+预算过不是 Admission 过。Budget Gate 谓词在 evidence。
 Skills 路由不是第二控制面。
 
 Physical home of Mission Director, Mission draft/intake/start/resume,

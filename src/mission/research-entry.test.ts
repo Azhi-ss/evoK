@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BudgetLedger } from "../evidence/budget-gate";
 import {
   ResearchAuthorityRejectedError,
   ResearchContinueRejectedError,
@@ -380,6 +381,152 @@ describe("thin /research continue path", () => {
       expect(view.recoveredFrom).toBe("mission-record");
       const transcript = await readFile(join(missionDir, "transcript.md"), "utf8");
       expect(transcript).toContain("three experiments");
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Budget Gate hook — over-budget or unreserved refuses continue (ET-M1-BUD / #144)", () => {
+  test("over-budget or unreserved BudgetDecision refuses continue without writing an experiment", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-"));
+    const seed = [
+      event(1, "MISSION_AUTHORIZED", { objective: "budget refuses continue" }, { action: "authorize" }),
+      event(2, "BASELINE_RECORDED", { runId: "run-b", ok: true }),
+    ];
+    const ledger = new BudgetLedger({ total: 0.2, units: "model-USD" });
+    const over = ledger.reserve({
+      reservationId: "too-big",
+      amount: 1,
+      kind: "research",
+      action: "continue",
+    });
+    expect(over.ok).toBe(false);
+    try {
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        seedEvents: seed,
+        budget: over,
+      })).rejects.toThrow(ResearchContinueRejectedError);
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        budget: ledger.authorize("continue"),
+      })).rejects.toThrow(/over.?budget|unreserved|no reserve/i);
+
+      const view = await readResearchStatus(projectRoot, MISSION_ID);
+      expect(view.phase).toBe("baseline");
+      expect(view.experiments).toEqual([]);
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a reserved BudgetDecision does not replace user authorization and still continues", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-ok-"));
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    ledger.reserve({
+      reservationId: "cont-ok",
+      amount: 0.1,
+      kind: "research",
+      action: "continue",
+    });
+    try {
+      const view = await continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "budget pass is not admission" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: "run-b", ok: true }),
+        ],
+        budget: ledger.authorize("continue"),
+        clock: () => "2026-09-19T03:00:00.000Z",
+        nextId: () => "exp-budget-ok",
+      });
+      expect(view.phase).toBe("experimenting");
+      expect(view.experiments[0]?.experimentId).toBe("exp-budget-ok");
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a writeback BudgetDecision cannot continue", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-action-"));
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    ledger.reserve({
+      reservationId: "wb-only",
+      amount: 0.1,
+      kind: "method_improvement",
+      action: "writeback",
+    });
+    try {
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "user",
+        },
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "action must match" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: "run-b", ok: true }),
+        ],
+        budget: ledger.authorize("writeback"),
+      })).rejects.toThrow(ResearchContinueRejectedError);
+      const view = await readResearchStatus(projectRoot, MISSION_ID);
+      expect(view.experiments).toEqual([]);
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a reserved continue is still subject to user authorization", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "evok-research-bud-auth-"));
+    const ledger = new BudgetLedger({ total: 1, units: "model-USD" });
+    const reserved = ledger.reserve({
+      reservationId: "cont-ok",
+      amount: 0.1,
+      kind: "research",
+      action: "continue",
+    });
+    expect(reserved.ok).toBe(true);
+    try {
+      await expect(continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: {
+          requested: true,
+          token: "/research continue",
+          missionSelector: MISSION_ID,
+          source: "model",
+        },
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "budget is not authority" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: "run-b", ok: true }),
+        ],
+        budget: ledger.authorize("continue"),
+      })).rejects.toBeInstanceOf(ResearchAuthorityRejectedError);
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }

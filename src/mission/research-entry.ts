@@ -6,13 +6,16 @@
  * transcript is not authority. This module is a yellow-light skeleton — it
  * records a readable baseline → one experiment path and recovers that view
  * from durable events (plus the existing MissionRecord). It does not dispatch
- * a Pi Run, open EXP validity gates, or register Pi slash commands.
+ * a Pi Run or register Pi slash commands. When a BudgetDecision is passed
+ * in, over-budget or unreserved refuses continue (ET-M1-BUD). Budget pass
+ * is not Admission pass and is not Mission authorization.
  *
  * `/research` is an evoK product interface parsed by the thin CLI shell. It
  * must not intercept Pi `/model` / `/new`.
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { budgetDecisionIsPass, type BudgetDecision } from "../evidence/budget-gate";
 import { isMissionId, missionsDir } from "./mission-draft";
 import {
   loadMissionRecord,
@@ -94,6 +97,12 @@ export interface ContinueResearchOptions {
   readonly authorization: ResearchAuthorization;
   /** Optional in-memory bootstrap written before the continue (tests / skeleton). */
   readonly seedEvents?: readonly MissionControlEvent[];
+  /**
+   * Optional Budget Gate decision. When present, over-budget or unreserved
+   * refuses continue. Budget pass is not Admission pass and is not Mission
+   * authorization.
+   */
+  readonly budget?: BudgetDecision;
   readonly clock?: () => string;
   readonly nextId?: () => string;
 }
@@ -504,6 +513,11 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
     await writeEventLog(projectRoot, missionId, events);
   }
   assertContinueAuthorization(options.authorization, missionId);
+  if (options.budget !== undefined && !budgetDecisionIsPass(options.budget, "continue")) {
+    throw new ResearchContinueRejectedError(
+      options.budget.objections[0] ?? `mission ${missionId} budget refused continue`,
+    );
+  }
   const record = await loadOptionalRecord(projectRoot, missionId);
   const view = projectView(events, record, missionId);
   if (!view.authorized) {

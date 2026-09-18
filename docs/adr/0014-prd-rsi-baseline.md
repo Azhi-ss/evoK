@@ -119,6 +119,22 @@ Kill-test / T48 / hang / Broker predicates, `#40`, true-submit,
 Pattern C, and default `fixed_uct` are unchanged. Elite / Team
 Fan-Out remain not Promotion or Admission keys.
 
+## Amendment (ET-M1-BUD / #144)
+
+W1 Budget Gate skeleton landed reserve → settle in
+`src/evidence/budget-gate.ts`. Over-budget or unreserved refuses
+continue and writeback. A thin Method Improvement sub-cap is
+optional. Budget pass is not Admission pass. Mission
+`/research continue` and Skills accepted writeback hook the
+decision; they do not own the ledger. MissionRecord operational
+accounting is unchanged.
+
+This amendment does not open SEA or Deploy Arena. Existing
+Kill-test / T48 / hang / Broker predicates, `#40`, true-submit,
+Pattern C, default `fixed_uct`, and EXP Admission predicates are
+unchanged. Elite / Team Fan-Out remain not Promotion, Admission,
+or Budget Gate keys.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -127,4 +143,4 @@ Fan-Out remain not Promotion or Admission keys.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
-- No W1 BUD / SEA implementation (Skills routing shell and EXP Admission landed).
+- No W1 SEA implementation (Skills routing, EXP Admission, and BUD skeleton landed).
