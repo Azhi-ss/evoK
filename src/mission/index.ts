@@ -37,3 +37,15 @@ export {
   recoverResearchStatus,
   resolveResearchMissionId,
 } from "./research-entry";
+export {
+  SKILL_CATEGORIES,
+  SKILL_WRITEBACK_STATUS,
+  acceptedSkillFilesFromDiscovered,
+  defaultContextPointers,
+  discloseSkill,
+  formatSkillsDirectory,
+  listSkillsDirectory,
+  parseSkillsCommand,
+  routeSkills,
+  skillWritebackStatus,
+} from "./skills-routing";

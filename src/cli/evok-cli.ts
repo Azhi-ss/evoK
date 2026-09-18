@@ -65,6 +65,12 @@ import {
   ResearchStatusRejectedError,
   type ResearchVerb,
 } from "../mission/research-entry";
+import {
+  formatSkillsDirectory,
+  listSkillsDirectory,
+  parseSkillsCommand,
+  type SkillsVerb,
+} from "../mission/skills-routing";
 
 export const EVOK_VERSION = "0.1.0-t6";
 
@@ -113,6 +119,8 @@ export interface ParsedEvokArgs {
   readonly missions?: boolean;
   /** #138: thin evoK `/research` product entry (not a Pi slash command). */
   readonly research?: ResearchVerb;
+  /** #140: thin evoK `/skills` directory view (not a Pi slash command). */
+  readonly skills?: SkillsVerb;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -158,6 +166,12 @@ options:
                     experiment entry; it does not dispatch a Pi Run or open
                     EXP gates. Not a Pi slash command: \`/model\` and \`/new\`
                     stay on the native TUI.
+  --skills          thin evoK Skills directory view (\`evok /skills\`).
+                    Lists the eight-category scaffold and lifecycle states
+                    (candidate / accepted / demoted). Default context is
+                    accepted L0 pointers only. Writeback is not opened.
+                    Not a second control plane; \`/research\` stays Mission
+                    authority. \`/model\` and \`/new\` stay on the native TUI.
   -h, --help        show this help
 
 On a tty with no request and no Mission flag, evok launches the Pi SDK native
@@ -180,6 +194,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let resume = false;
   let missions = false;
   let research: ResearchVerb | undefined;
+  let skills: SkillsVerb | undefined;
   let maxExperiments: number | undefined;
   let mission: string | undefined;
   let reserveCost = DEFAULT_RESERVE_COST;
@@ -213,6 +228,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
       resume = true;
     } else if (arg === "--missions") {
       missions = true;
+    } else if (arg === "--skills") {
+      skills = "status";
     } else if (arg === "--research") {
       const next = argv[i + 1];
       if (next && !next.startsWith("-") && /^(status|continue|repair|stop)$/i.test(next)) {
@@ -250,6 +267,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     research = researchCommand.verb;
     if (!mission && researchCommand.missionId) mission = researchCommand.missionId;
   }
+  const skillsCommand = request ? parseSkillsCommand(request) : undefined;
+  if (skillsCommand) skills = skillsCommand.verb;
   return {
     request, project, tier, orchestra, timeoutMs,
     ...(intake ? { intake: true } : {}),
@@ -259,6 +278,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     ...(resume ? { resume: true } : {}),
     ...(missions ? { missions: true } : {}),
     ...(research ? { research } : {}),
+    ...(skills ? { skills } : {}),
     ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     reserveCost,
     ...(mission ? { mission } : {}),
@@ -343,6 +363,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   if (args.research) {
     return runResearchEntry(args, stdout, stderr, projectReal);
   }
+  if (args.skills) {
+    return runSkillsEntry(stdout, stderr, projectReal);
+  }
 
   let resolver: SessionModelResolver;
   try {
@@ -385,7 +408,7 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`evok ${EVOK_VERSION}\n`);
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
-    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status && !args.research;
+    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status && !args.research && !args.skills;
     stdout.write(`tools:   ${args.intake
       ? "intake: read-only project inspection plus the trusted draft-record tool"
       : args.start || (args.request !== undefined && isExplicitStartRequest(args.request))
@@ -656,6 +679,30 @@ async function runResearchEntry(
     }
     throw error;
   }
+}
+
+/**
+ * #140: thin evoK `/skills` directory view. Read-only; not Mission authority
+ * and not a Pi slash table. Writeback is not opened.
+ */
+async function runSkillsEntry(
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+): Promise<number> {
+  let resources: EvokResources;
+  try {
+    resources = await discoverEvokResources({ projectRoot });
+  } catch (error) {
+    if (error instanceof EvokResourceError) {
+      stderr.write(`evok: resource configuration error: ${error.message}\n`);
+      return EVOK_EXIT.configError;
+    }
+    throw error;
+  }
+  const view = await listSkillsDirectory({ projectRoot, discovered: resources.skills });
+  stdout.write(formatSkillsDirectory(view));
+  return EVOK_EXIT.ok;
 }
 
 /** #112: display/reopen the durable Mission state from project-local records. */

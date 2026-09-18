@@ -16,6 +16,7 @@ Mission control-plane modules live under `src/mission/`:
 - intake / draft: `mission-draft`, `mission-intake`
 - research loop: `research-loop`, `baseline-track`, `file-blueprint`, `branch-recovery`
 - W1 research entry / control events: `research-entry` (ET-M1-EVT / #138)
+- W1 Skills directory / progressive-disclosure routing: `skills-routing` (ET-M1-SKILL / #140)
 - golden-path glue: `v1-golden-path`, `outer-min-path`, `outer-e2e-min-path`,
   `llm-propose-outer-min` (orchestration seam, not competition fixtures)
 

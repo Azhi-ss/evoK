@@ -7,10 +7,11 @@ Physical home of `evok-cli` and the `evok` executable wrapper.
 
 The shell parses argv, resolves Pi models / project resources, and calls
 the mission API (`startAuthorizedMission`, intake, resume, status,
-`/research` status/continue). A tty with no request launches Pi native TUI
+`/research` status/continue, `/skills` directory view). A tty with no request launches Pi native TUI
 (`InteractiveMode`, #134); `/model` and `/new` stay on Pi. `/research` is
-an evoK product flag/request, not a TUI slash intercept. The TUI is not
-Mission authority.
+an evoK product flag/request, not a TUI slash intercept. `/skills` is the
+same kind of thin product view (directory + three states; writeback not
+opened). The TUI is not Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 stay in `src/evidence/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).
