@@ -103,6 +103,22 @@ Pi. This amendment does not open EXP Admission, BUD, SEA, or Deploy
 Arena. Gate / `#40` / true-submit / Pattern C / default `fixed_uct`
 pins are unchanged.
 
+## Amendment (ET-M1-EXP / #142)
+
+W1 Admission slice landed experiment-validity and method Admission /
+rollback in `src/evidence/experiment-validity.ts` and
+`src/evidence/method-admission.ts`. Skills routing hooks accepted
+Skill State through that gate: a candidate is never default-injected;
+missing protected holdout refuses accepted; a validity hang is an
+explicit hang point, not pass. Method Writeback shape is propose →
+regression → admit / rollback, one slice at a time. File-body Skills
+writeback stays not opened.
+
+This amendment does not open BUD, SEA, or Deploy Arena. Existing
+Kill-test / T48 / hang / Broker predicates, `#40`, true-submit,
+Pattern C, and default `fixed_uct` are unchanged. Elite / Team
+Fan-Out remain not Promotion or Admission keys.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -111,4 +127,4 @@ pins are unchanged.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
-- No W1 EXP / BUD / SEA implementation (Skills routing shell landed; Admission stays EXP).
+- No W1 BUD / SEA implementation (Skills routing shell and EXP Admission landed).

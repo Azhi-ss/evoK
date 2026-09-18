@@ -2,8 +2,8 @@
  * W1 Skills directory + progressive-disclosure routing shell (ET-M1-SKILL / #140).
  *
  * Routing belongs to mission/. It is not Mission authorize / continue / repair /
- * stop, not a second control plane, and not an Admission / regression gate
- * (those stay ET-M1-EXP on the broker). Chat is not authority.
+ * stop and not a second control plane. Admission / regression predicates live
+ * in evidence/; this module only hooks Skill State. Chat is not authority.
  *
  * Disclosure layers (orthogonal to lifecycle):
  *   L0 pointer  — name + description + location (default context)
@@ -13,11 +13,13 @@
  * Lifecycle states (orthogonal to disclosure): candidate / accepted / demoted.
  * Default context loads only accepted short descriptions. Unspecified state is
  * accepted so ADR-0006 discovery still injects L0 metadata; explicit candidate
- * or demoted stay out. Writeback is not opened — read-only shell.
+ * or demoted stay out. File-body writeback is not opened — read-only shell.
+ * Writing a candidate into accepted requires evidence Admission (ET-M1-EXP).
  */
 import { readFileSync } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { MethodAdmissionDecision } from "../evidence/method-admission";
 import type { DiscoveredSkill } from "../evok-resources";
 
 export const SKILL_CATEGORIES = [
@@ -38,6 +40,12 @@ export type SkillLifecycleState = "candidate" | "accepted" | "demoted";
 export type SkillDisclosureLayer = "l0-pointer" | "l1-body" | "l2-resources";
 
 export const SKILL_WRITEBACK_STATUS = "writeback not opened — read-only shell" as const;
+
+export interface SkillAdmissionRecord {
+  readonly outcome: "pass";
+  readonly evidenceDigest?: string;
+  readonly protocolVersion?: string;
+}
 
 const CATEGORY_SET = new Set<string>(SKILL_CATEGORIES);
 const STATE_SET = new Set<string>(["candidate", "accepted", "demoted"]);
@@ -62,6 +70,7 @@ export interface RoutedSkill {
   readonly state: SkillLifecycleState;
   readonly category?: SkillCategory;
   readonly disclosure: SkillDisclosureLayer;
+  readonly admission?: SkillAdmissionRecord;
 }
 
 export interface SkillPointer extends RoutedSkill {
@@ -98,6 +107,21 @@ export class SkillWritebackNotOpenedError extends Error {
     super(message);
     this.name = "SkillWritebackNotOpenedError";
   }
+}
+
+export class SkillAdmissionRefusedError extends Error {
+  readonly kind = "skill-admission-refused" as const;
+  constructor(message = "Admission refused; skill cannot become accepted") {
+    super(message);
+    this.name = "SkillAdmissionRefusedError";
+  }
+}
+
+export interface SkillAdmissionAttempt {
+  readonly skill: RoutedSkill;
+  readonly admitted: boolean;
+  readonly hang: boolean;
+  readonly objections: readonly string[];
 }
 
 function isCategory(value: unknown): value is SkillCategory {
@@ -262,6 +286,59 @@ export function proposeSkillWriteback(_request: { readonly name: string }): neve
 }
 
 /**
+ * Promote a Skill to accepted only when evidence Admission passed.
+ * Missing holdout, validity hang, or any non-pass stays out of default context.
+ * File-body writeback remains not opened; this is the lifecycle slice.
+ */
+export function attemptSkillAccepted(
+  skill: RoutedSkill,
+  admission: MethodAdmissionDecision,
+): SkillAdmissionAttempt {
+  if (!admission.ok || !admission.admitted || admission.hang || admission.outcome !== "pass") {
+    return {
+      skill,
+      admitted: false,
+      hang: admission.hang,
+      objections: Object.freeze([...admission.objections]),
+    };
+  }
+  return {
+    skill: {
+      ...skill,
+      state: "accepted",
+      admission: {
+        outcome: "pass",
+        ...(admission.evidenceDigest === undefined ? {} : { evidenceDigest: admission.evidenceDigest }),
+        ...(admission.protocolVersion === undefined ? {} : { protocolVersion: admission.protocolVersion }),
+      },
+    },
+    admitted: true,
+    hang: false,
+    objections: Object.freeze([]),
+  };
+}
+
+/** Throws when Admission did not pass. Use for the accepted writeback path. */
+export function requireSkillAccepted(
+  skill: RoutedSkill,
+  admission: MethodAdmissionDecision,
+): RoutedSkill {
+  const attempt = attemptSkillAccepted(skill, admission);
+  if (!attempt.admitted) {
+    throw new SkillAdmissionRefusedError(
+      attempt.objections[0] ?? "Admission refused; skill cannot become accepted",
+    );
+  }
+  return attempt.skill;
+}
+
+/** Rollback path: accepted → demoted leaves default context. */
+export function demoteSkill(skill: RoutedSkill): RoutedSkill {
+  const { admission: _admission, ...rest } = skill;
+  return { ...rest, state: "demoted" };
+}
+
+/**
  * `/skills` is an evoK product command. Pi native slashes (`/model`, `/new`)
  * and Mission `/research` `/start` `/resume` stay on their own seams.
  */
@@ -302,6 +379,7 @@ export function formatSkillsDirectory(view: SkillsDirectoryView): string {
     "   chat transcript is not authority",
     "   disclosure: L0 pointer (default) → on-trigger L1 SKILL.md → L2 scripts/references",
     "   lifecycle (orthogonal): candidate | accepted | demoted",
+    "   accepted requires Admission (official samples + adversarial-labeled + protected holdout); missing holdout refuses",
     "   categories:",
   ];
   for (const category of view.categories) {

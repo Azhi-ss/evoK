@@ -18,6 +18,10 @@ Gate-authority modules live under `src/evidence/`:
 - gates: `verification-gates`, `validation-ladder`
 - Broker simulation: `submission-broker`
 
+Amendment (ET-M1-EXP / #142): experiment-validity and method Admission /
+writeback also live here (`experiment-validity`, `method-admission`).
+They do not change Kill-test / T48 / hang / Broker predicates.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

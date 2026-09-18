@@ -10,11 +10,17 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bundledSkillRoot } from "../evok-resources";
+import { evaluateExperimentValidity } from "../evidence/experiment-validity";
+import { evaluateMethodAdmission } from "../evidence/method-admission";
 import {
   SKILL_CATEGORIES,
   SKILL_WRITEBACK_STATUS,
+  SkillAdmissionRefusedError,
   SkillWritebackNotOpenedError,
+  attemptSkillAccepted,
   defaultContextPointers,
+  demoteSkill,
+  requireSkillAccepted,
   discloseSkill,
   formatSkillsDirectory,
   listSkillsDirectory,
@@ -198,8 +204,93 @@ describe("Skills routing is not a second control plane", () => {
     expect(text).toContain("try-search");
     expect(text).toContain("candidate");
     expect(text).toContain(SKILL_WRITEBACK_STATUS);
+    expect(text).toMatch(/protected holdout/i);
     expect(text).toMatch(/not a second control plane/i);
     expect(text).toMatch(/chat transcript is not authority/i);
     await rm(project, { recursive: true, force: true });
+  });
+});
+
+describe("accepted requires Admission (ET-M1-EXP / #142)", () => {
+  test("candidate without gate evidence is never default-injected", () => {
+    const routed = routeSkills([
+      skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
+    ]);
+    expect(defaultContextPointers(routed)).toEqual([]);
+    expect(routed[0]?.state).toBe("candidate");
+  });
+
+  test("missing holdout cannot write a candidate into accepted", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
+    ]);
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        claimed: "effective",
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: false },
+    });
+    const attempt = attemptSkillAccepted(candidate!, admission);
+    expect(attempt.admitted).toBe(false);
+    expect(attempt.skill.state).toBe("candidate");
+    expect(attempt.hang).toBe(false);
+    expect(attempt.objections.join(" ")).toMatch(/protected holdout/i);
+    expect(defaultContextPointers([attempt.skill])).toEqual([]);
+    expect(() => requireSkillAccepted(candidate!, admission)).toThrow(SkillAdmissionRefusedError);
+    expect(() => requireSkillAccepted(candidate!, admission)).toThrow(/protected holdout/i);
+  });
+
+  test("Admission pass is required before accepted enters default context", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "candidate", description: "keep short" }),
+    ]);
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+          { kind: "protected_holdout", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+      evidenceDigest: "sha256:keep-accepted",
+    });
+    const attempt = attemptSkillAccepted(candidate!, admission);
+    expect(attempt.admitted).toBe(true);
+    expect(attempt.skill.state).toBe("accepted");
+    expect(attempt.skill.admission?.evidenceDigest).toBe("sha256:keep-accepted");
+    expect(defaultContextPointers([attempt.skill]).map((entry) => entry.name)).toEqual(["keep"]);
+  });
+
+  test("demote is the rollback path out of default context", () => {
+    const [accepted] = routeSkills([
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "accepted" }),
+    ]);
+    const demoted = demoteSkill(accepted!);
+    expect(demoted.state).toBe("demoted");
+    expect(defaultContextPointers([demoted])).toEqual([]);
+  });
+
+  test("validity hang is an explicit hang point and does not write accepted", () => {
+    const [candidate] = routeSkills([
+      skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
+    ]);
+    const attempt = attemptSkillAccepted(candidate!, evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({ hang: true, slices: [] }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+    }));
+    expect(attempt.admitted).toBe(false);
+    expect(attempt.hang).toBe(true);
+    expect(attempt.skill.state).toBe("candidate");
+    expect(defaultContextPointers([attempt.skill])).toEqual([]);
+  });
+
+  test("file-body writeback stays not opened; lifecycle admit is the opened slice", () => {
+    expect(skillWritebackStatus()).toBe("writeback not opened — read-only shell");
+    expect(() => proposeSkillWriteback({ name: "keep" })).toThrow(SkillWritebackNotOpenedError);
   });
 });

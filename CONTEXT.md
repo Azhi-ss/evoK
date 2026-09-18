@@ -131,7 +131,7 @@ A named, versioned instruction pack a Mission may load on demand.
 _Avoid_: System-prompt dump, hidden prompt
 
 **Skill State**:
-Whether a Skill is a candidate, accepted, or demoted relative to a Mission or method. Disclosure level is not acceptance.
+Whether a Skill is a candidate, accepted, or demoted relative to a Mission or method. Disclosure level is not acceptance. A candidate is never default-injected; accepted requires Admission; demoted is the rollback path.
 _Avoid_: Installed, enabled (when lifecycle is intended)
 
 **Cross-review**:
@@ -192,6 +192,10 @@ _Avoid_: Error log
 A reusable, answer-agnostic failure pattern that can warn future Tasks without asserting that a particular Candidate is always wrong.
 _Avoid_: Rejected answer
 
+**Experiment Validity**:
+Whether an Experiment produced usable gate evidence. Effectiveness on official samples is not optimality; inconclusive is not pass.
+_Avoid_: Score-up, success (when the question is whether the Experiment is usable evidence)
+
 ## Decisions and Outcomes
 
 **Mission Policy**:
@@ -200,7 +204,15 @@ _Avoid_: Suggestion, preference
 
 **Promotion**:
 The decision to advance a Candidate to a stronger status after the required evidence and policy checks succeed.
-_Avoid_: Evaluation, acceptance
+_Avoid_: Evaluation, acceptance, Admission (Admission is the method/Skill writeback gate)
+
+**Admission**:
+The evidence-gated decision to write a Method Improvement or Skill into accepted Skill State. The minimal set is official samples + an adversarial-labeled subset + a protected holdout; a missing holdout refuses Admission. Elite or Team Fan-Out is not an Admission key.
+_Avoid_: Promotion, install, score-up
+
+**Method Writeback**:
+The one-slice lifecycle that proposes a method or Skill change, runs regression, then admits or rolls back. File-body Skill mutation may remain unopened while this lifecycle slice is open.
+_Avoid_: Silent edit, batch skill rewrite
 
 **Local Champion**:
 The best Candidate currently promoted within evoK's internal scope; it is not automatically a human-approved conclusion or an external submission.
@@ -236,7 +248,7 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 | Package | Owns | Does not own |
 |---|---|---|
 | **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop, thin `/research` entry, Skills routing shell | Business/competition code; search-graph authority; Team blueprint details; Admission / writeback (EXP) |
-| **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
+| **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
 | **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
@@ -248,7 +260,7 @@ The product control plane is the Research Loop (authorize / continue / repair / 
 
 - Use **Mission** for the long-lived research effort and **Task** for a scoped unit within it. Method Improvement is an action inside that Mission, not a second RSI project.
 - Use **Branch** for an isolated alternative or dependency path, and **Run** for one attempt.
-- Use **Evaluator** for objective measurement, **Promotion** for machine advancement, and **Human Acceptance** for the human decision.
+- Use **Evaluator** for objective measurement, **Promotion** for Candidate advancement, **Admission** for method/Skill accepted writeback, and **Human Acceptance** for the human decision.
 - Use **Team Coordinator** for Task-level team planning and **Mission Director** for Mission-level research direction.
 - Do not use “orchestrator” as an authority-bearing role without naming which of these two responsibilities is meant.
 - The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.

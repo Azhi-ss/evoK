@@ -40,8 +40,12 @@ export {
 export {
   SKILL_CATEGORIES,
   SKILL_WRITEBACK_STATUS,
+  SkillAdmissionRefusedError,
   acceptedSkillFilesFromDiscovered,
+  attemptSkillAccepted,
   defaultContextPointers,
+  demoteSkill,
+  requireSkillAccepted,
   discloseSkill,
   formatSkillsDirectory,
   listSkillsDirectory,

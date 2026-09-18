@@ -1,7 +1,8 @@
 /**
  * Physical evidence pack (ET-A1 / #121; P6 barrel).
  *
- * Owns ledger, T48, kill/hang, promotion gates, and Broker simulation.
+ * Owns ledger, T48, kill/hang, promotion gates, Admission / method writeback,
+ * and Broker simulation.
  * Does not own search-tree structure or Team Coordinator / Role planning.
  * True External Submission stays frozen. Hang / T48 three-state is unchanged.
  *
@@ -74,3 +75,32 @@ export {
   externalSubmissionsFromEvents,
 } from "./submission-broker";
 export { LEDGER_EVENT_KINDS, ledgerEventKind } from "./ledger-kinds";
+export {
+  evaluateExperimentValidity,
+  experimentValidityIsPass,
+} from "./experiment-validity";
+export type {
+  ExperimentClaim,
+  ExperimentSliceKind,
+  ExperimentSliceObservation,
+  ExperimentSlicePresence,
+  ExperimentValidityDecision,
+  ExperimentValidityInput,
+  ExperimentValidityOutcome,
+} from "./experiment-validity";
+export {
+  MethodWritebackIsolationError,
+  MethodWritebackPhaseError,
+  MethodWritebackSession,
+  evaluateMethodAdmission,
+} from "./method-admission";
+export type {
+  AdmissionMinimalSet,
+  MethodAdmissionDecision,
+  MethodAdmissionInput,
+  MethodAssetState,
+  MethodWritebackKind,
+  MethodWritebackPhase,
+  MethodWritebackSlice,
+  MethodWritebackState,
+} from "./method-admission";
