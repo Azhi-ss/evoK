@@ -83,6 +83,7 @@ export type {
   ExperimentClaim,
   ExperimentSliceKind,
   ExperimentSliceObservation,
+  ExperimentSlicePresence,
   ExperimentValidityDecision,
   ExperimentValidityInput,
   ExperimentValidityOutcome,

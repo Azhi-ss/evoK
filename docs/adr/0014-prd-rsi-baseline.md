@@ -108,7 +108,7 @@ pins are unchanged.
 W1 Admission slice landed experiment-validity and method Admission /
 rollback in `src/evidence/experiment-validity.ts` and
 `src/evidence/method-admission.ts`. Skills routing hooks accepted
-promotion through that gate: a candidate is never default-injected;
+Skill State through that gate: a candidate is never default-injected;
 missing protected holdout refuses accepted; a validity hang is an
 explicit hang point, not pass. Method Writeback shape is propose →
 regression → admit / rollback, one slice at a time. File-body Skills

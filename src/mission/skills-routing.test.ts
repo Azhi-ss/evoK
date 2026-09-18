@@ -20,6 +20,7 @@ import {
   attemptSkillAccepted,
   defaultContextPointers,
   demoteSkill,
+  requireSkillAccepted,
   discloseSkill,
   formatSkillsDirectory,
   listSkillsDirectory,
@@ -210,7 +211,7 @@ describe("Skills routing is not a second control plane", () => {
   });
 });
 
-describe("accepted promotion requires Admission (ET-M1-EXP / #142)", () => {
+describe("accepted requires Admission (ET-M1-EXP / #142)", () => {
   test("candidate without gate evidence is never default-injected", () => {
     const routed = routeSkills([
       skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
@@ -219,7 +220,7 @@ describe("accepted promotion requires Admission (ET-M1-EXP / #142)", () => {
     expect(routed[0]?.state).toBe("candidate");
   });
 
-  test("missing holdout cannot promote a candidate to accepted", () => {
+  test("missing holdout cannot write a candidate into accepted", () => {
     const [candidate] = routeSkills([
       skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
     ]);
@@ -239,9 +240,8 @@ describe("accepted promotion requires Admission (ET-M1-EXP / #142)", () => {
     expect(attempt.hang).toBe(false);
     expect(attempt.objections.join(" ")).toMatch(/protected holdout/i);
     expect(defaultContextPointers([attempt.skill])).toEqual([]);
-    expect(() => {
-      if (!attempt.admitted) throw new SkillAdmissionRefusedError(attempt.objections.join("; "));
-    }).toThrow(SkillAdmissionRefusedError);
+    expect(() => requireSkillAccepted(candidate!, admission)).toThrow(SkillAdmissionRefusedError);
+    expect(() => requireSkillAccepted(candidate!, admission)).toThrow(/protected holdout/i);
   });
 
   test("Admission pass is required before accepted enters default context", () => {
@@ -275,7 +275,7 @@ describe("accepted promotion requires Admission (ET-M1-EXP / #142)", () => {
     expect(defaultContextPointers([demoted])).toEqual([]);
   });
 
-  test("validity hang is an explicit hang point and does not promote", () => {
+  test("validity hang is an explicit hang point and does not write accepted", () => {
     const [candidate] = routeSkills([
       skill({ name: "try-search", filePath: "/tmp/try/SKILL.md", state: "candidate" }),
     ]);

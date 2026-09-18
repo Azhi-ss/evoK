@@ -32,7 +32,8 @@ describe("experiment validity — effective ≠ optimal, inconclusive ≠ pass",
     expect(decision.optimal).toBe(false);
     expect(decision.outcome).toBe("pass");
     expect(decision.ok).toBe(true);
-    expect(decision.blocksAdmission).toBe(false);
+    expect(decision.blocksAdmission).toBe(true);
+    expect(decision.slices.protectedHoldout).toBe(false);
   });
 
   test("claiming optimal from official samples alone fails closed", () => {
@@ -61,6 +62,23 @@ describe("experiment validity — effective ≠ optimal, inconclusive ≠ pass",
     expect(decision.ok).toBe(false);
     expect(decision.blocksAdmission).toBe(true);
     expect(decision.objections.join(" ")).toMatch(/hang/i);
+  });
+
+  test("a complete measured set is validity pass and does not by itself block Admission", () => {
+    const decision = evaluateExperimentValidity({
+      slices: [
+        { kind: "official_samples", present: true, outcome: "pass" },
+        { kind: "adversarial_labeled", present: true, outcome: "pass" },
+        { kind: "protected_holdout", present: true, outcome: "pass" },
+      ],
+    });
+    expect(decision.ok).toBe(true);
+    expect(decision.blocksAdmission).toBe(false);
+    expect(decision.slices).toEqual({
+      officialSamples: true,
+      adversarialLabeled: true,
+      protectedHoldout: true,
+    });
   });
 
   test("no measured slices is inconclusive, not a free pass", () => {

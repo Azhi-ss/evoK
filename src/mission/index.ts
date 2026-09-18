@@ -45,6 +45,7 @@ export {
   attemptSkillAccepted,
   defaultContextPointers,
   demoteSkill,
+  requireSkillAccepted,
   discloseSkill,
   formatSkillsDirectory,
   listSkillsDirectory,

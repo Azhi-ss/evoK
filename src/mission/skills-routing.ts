@@ -2,8 +2,8 @@
  * W1 Skills directory + progressive-disclosure routing shell (ET-M1-SKILL / #140).
  *
  * Routing belongs to mission/. It is not Mission authorize / continue / repair /
- * stop, not a second control plane, and not an Admission / regression gate
- * (those stay ET-M1-EXP on the broker). Chat is not authority.
+ * stop and not a second control plane. Admission / regression predicates live
+ * in evidence/; this module only hooks Skill State. Chat is not authority.
  *
  * Disclosure layers (orthogonal to lifecycle):
  *   L0 pointer  — name + description + location (default context)
@@ -14,7 +14,7 @@
  * Default context loads only accepted short descriptions. Unspecified state is
  * accepted so ADR-0006 discovery still injects L0 metadata; explicit candidate
  * or demoted stay out. File-body writeback is not opened — read-only shell.
- * Promoting a candidate to accepted requires evidence Admission (ET-M1-EXP).
+ * Writing a candidate into accepted requires evidence Admission (ET-M1-EXP).
  */
 import { readFileSync } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
@@ -318,6 +318,20 @@ export function attemptSkillAccepted(
   };
 }
 
+/** Throws when Admission did not pass. Use for the accepted writeback path. */
+export function requireSkillAccepted(
+  skill: RoutedSkill,
+  admission: MethodAdmissionDecision,
+): RoutedSkill {
+  const attempt = attemptSkillAccepted(skill, admission);
+  if (!attempt.admitted) {
+    throw new SkillAdmissionRefusedError(
+      attempt.objections[0] ?? "Admission refused; skill cannot become accepted",
+    );
+  }
+  return attempt.skill;
+}
+
 /** Rollback path: accepted → demoted leaves default context. */
 export function demoteSkill(skill: RoutedSkill): RoutedSkill {
   const { admission: _admission, ...rest } = skill;
@@ -365,7 +379,7 @@ export function formatSkillsDirectory(view: SkillsDirectoryView): string {
     "   chat transcript is not authority",
     "   disclosure: L0 pointer (default) → on-trigger L1 SKILL.md → L2 scripts/references",
     "   lifecycle (orthogonal): candidate | accepted | demoted",
-    "   accepted promotion requires Admission (official samples + adversarial-labeled + protected holdout); missing holdout refuses",
+    "   accepted requires Admission (official samples + adversarial-labeled + protected holdout); missing holdout refuses",
     "   categories:",
   ];
   for (const category of view.categories) {

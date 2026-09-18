@@ -11,7 +11,7 @@ the mission API (`startAuthorizedMission`, intake, resume, status,
 (`InteractiveMode`, #134); `/model` and `/new` stay on Pi. `/research` is
 an evoK product flag/request, not a TUI slash intercept. `/skills` is the
 same kind of thin product view (directory + three states; accepted
-promotion requires Admission; file-body writeback not opened). The TUI
+requires Admission; file-body writeback not opened). The TUI
 is not Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 / Admission stay in `src/evidence/`.

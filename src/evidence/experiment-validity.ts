@@ -30,6 +30,12 @@ export interface ExperimentValidityInput {
   readonly hang?: boolean;
 }
 
+export interface ExperimentSlicePresence {
+  readonly officialSamples: boolean;
+  readonly adversarialLabeled: boolean;
+  readonly protectedHoldout: boolean;
+}
+
 export interface ExperimentValidityDecision {
   readonly ok: boolean;
   readonly outcome: ExperimentValidityOutcome;
@@ -37,6 +43,7 @@ export interface ExperimentValidityDecision {
   readonly optimal: boolean;
   readonly hang: boolean;
   readonly blocksAdmission: boolean;
+  readonly slices: ExperimentSlicePresence;
   readonly objections: readonly string[];
 }
 
@@ -50,21 +57,38 @@ function isOutcome(value: unknown): value is ExperimentValidityOutcome {
   return typeof value === "string" && OUTCOMES.has(value as ExperimentValidityOutcome);
 }
 
+function presenceOf(slices: readonly ExperimentSliceObservation[]): ExperimentSlicePresence {
+  const present = (kind: ExperimentSliceKind): boolean =>
+    slices.some((slice) => slice.kind === kind && slice.present);
+  return {
+    officialSamples: present("official_samples"),
+    adversarialLabeled: present("adversarial_labeled"),
+    protectedHoldout: present("protected_holdout"),
+  };
+}
+
+function emptyPresence(): ExperimentSlicePresence {
+  return { officialSamples: false, adversarialLabeled: false, protectedHoldout: false };
+}
+
 function decision(input: {
   readonly outcome: ExperimentValidityOutcome;
   readonly effective?: boolean;
   readonly hang?: boolean;
+  readonly slices?: ExperimentSlicePresence;
   readonly objections?: readonly string[];
 }): ExperimentValidityDecision {
   const objections = Object.freeze([...(input.objections ?? [])]);
   const ok = objections.length === 0 && experimentValidityIsPass(input.outcome);
+  const slices = input.slices ?? emptyPresence();
   return deepFreeze({
     ok,
     outcome: input.outcome,
     effective: input.effective === true,
     optimal: false,
     hang: input.hang === true,
-    blocksAdmission: !ok,
+    blocksAdmission: !ok || !slices.protectedHoldout,
+    slices,
     objections,
   });
 }
@@ -80,10 +104,12 @@ function sliceOutcome(slice: ExperimentSliceObservation): ExperimentValidityOutc
  * becomes optimal.
  */
 export function evaluateExperimentValidity(input: ExperimentValidityInput): ExperimentValidityDecision {
+  const slices = presenceOf(input.slices);
   if (input.hang === true) {
     return decision({
       outcome: "inconclusive",
       hang: true,
+      slices,
       objections: ["explicit hang point: experiment validity is inconclusive, not pass"],
     });
   }
@@ -92,6 +118,7 @@ export function evaluateExperimentValidity(input: ExperimentValidityInput): Expe
   if (present.length === 0) {
     return decision({
       outcome: "inconclusive",
+      slices,
       objections: ["no measured experiment slices; inconclusive is not pass"],
     });
   }
@@ -105,6 +132,7 @@ export function evaluateExperimentValidity(input: ExperimentValidityInput): Expe
     return decision({
       outcome: "fail",
       effective,
+      slices,
       objections: ["effective is not optimal; official samples alone cannot claim optimality"],
     });
   }
@@ -114,6 +142,7 @@ export function evaluateExperimentValidity(input: ExperimentValidityInput): Expe
     return decision({
       outcome: "fail",
       effective,
+      slices,
       objections: [`experiment slice ${failed.kind} failed; fail is not pass`],
     });
   }
@@ -123,9 +152,10 @@ export function evaluateExperimentValidity(input: ExperimentValidityInput): Expe
     return decision({
       outcome: "inconclusive",
       effective,
+      slices,
       objections: ["inconclusive experiment slice is not pass"],
     });
   }
 
-  return decision({ outcome: "pass", effective });
+  return decision({ outcome: "pass", effective, slices });
 }

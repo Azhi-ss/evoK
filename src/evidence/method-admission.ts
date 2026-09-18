@@ -1,7 +1,7 @@
 /**
  * W1 method Admission + writeback shape (ET-M1-EXP / #142).
  *
- * Gate authority lives here. Skills routing may hook accepted promotion
+ * Gate authority lives here. Skills routing may hook accepted Skill State
  * through evaluateMethodAdmission; it does not own the predicate.
  *
  * Minimal set: official samples + adversarial-labeled subset + protected
@@ -119,13 +119,24 @@ export function evaluateMethodAdmission(input: MethodAdmissionInput): MethodAdmi
       ...(input.evidenceDigest === undefined ? {} : { evidenceDigest: input.evidenceDigest }),
     };
 
-  if (input.validity.hang || input.validity.outcome === "inconclusive") {
+  if (input.validity.hang) {
     return admissionDecision({
       outcome: "inconclusive",
       hang: true,
       objections: input.validity.objections.length > 0
         ? input.validity.objections
-        : ["experiment validity hang: Admission is inconclusive, not pass"],
+        : ["explicit hang point: Admission is inconclusive, not pass"],
+      ...extra,
+    });
+  }
+
+  if (input.validity.outcome === "inconclusive") {
+    return admissionDecision({
+      outcome: "inconclusive",
+      hang: false,
+      objections: input.validity.objections.length > 0
+        ? input.validity.objections
+        : ["inconclusive experiment validity is not Admission pass"],
       ...extra,
     });
   }
@@ -140,21 +151,25 @@ export function evaluateMethodAdmission(input: MethodAdmissionInput): MethodAdmi
     });
   }
 
-  if (!input.slices.protectedHoldout) {
+  const officialSamples = input.slices.officialSamples && input.validity.slices.officialSamples;
+  const adversarialLabeled = input.slices.adversarialLabeled && input.validity.slices.adversarialLabeled;
+  const protectedHoldout = input.slices.protectedHoldout && input.validity.slices.protectedHoldout;
+
+  if (!protectedHoldout) {
     return admissionDecision({
       outcome: "fail",
       objections: ["protected holdout is required; missing holdout refuses Admission"],
       ...extra,
     });
   }
-  if (!input.slices.officialSamples) {
+  if (!officialSamples) {
     return admissionDecision({
       outcome: "fail",
       objections: ["official samples are required for the Admission minimal set"],
       ...extra,
     });
   }
-  if (!input.slices.adversarialLabeled) {
+  if (!adversarialLabeled) {
     return admissionDecision({
       outcome: "fail",
       objections: ["adversarial-labeled subset is required for the Admission minimal set"],
@@ -261,9 +276,7 @@ export class MethodWritebackSession {
 
   private finishRollback(reason: string, admission?: MethodAdmissionDecision): MethodWritebackState {
     const previous = this.open?.previousState ?? "candidate";
-    const current: MethodAssetState = this.open?.phase === "admitted" || previous === "accepted"
-      ? "demoted"
-      : previous;
+    const current: MethodAssetState = this.open?.phase === "admitted" ? "demoted" : previous;
     this.open = snapshot({
       phase: "rolled_back",
       slice: this.open!.slice,

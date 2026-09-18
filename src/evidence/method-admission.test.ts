@@ -90,6 +90,32 @@ describe("Admission minimal set — official + adversarial + protected holdout",
     expect(admission.ok).toBe(false);
   });
 
+  test("a caller cannot invent a holdout the Experiment did not measure", () => {
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({
+        claimed: "effective",
+        slices: [
+          { kind: "official_samples", present: true, outcome: "pass" },
+          { kind: "adversarial_labeled", present: true, outcome: "pass" },
+        ],
+      }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+    });
+    expect(admission.admitted).toBe(false);
+    expect(admission.outcome).toBe("fail");
+    expect(admission.objections.join(" ")).toMatch(/protected holdout/i);
+  });
+
+  test("incomplete validity without hang is inconclusive, not an explicit hang", () => {
+    const admission = evaluateMethodAdmission({
+      validity: evaluateExperimentValidity({ slices: [] }),
+      slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+    });
+    expect(admission.outcome).toBe("inconclusive");
+    expect(admission.hang).toBe(false);
+    expect(admission.admitted).toBe(false);
+  });
+
   test("Elite, score, or Team Fan-Out cannot substitute for the holdout", () => {
     const admission = evaluateMethodAdmission({
       validity: evaluateExperimentValidity({
@@ -152,6 +178,15 @@ describe("method writeback — propose → regression → admit / rollback", () 
       .toThrow(MethodWritebackIsolationError);
     expect(() => session.propose({ sliceId: "skill:two", kind: "skill", targetName: "two" }))
       .toThrow(/one slice/i);
+  });
+
+  test("failed regression on an accepted slice restores accepted instead of demoting", () => {
+    const session = new MethodWritebackSession();
+    session.propose({ sliceId: "skill:keep", kind: "skill", targetName: "keep" }, "accepted");
+    const failed = session.regress("fail");
+    expect(failed.phase).toBe("rolled_back");
+    expect(failed.currentState).toBe("accepted");
+    expect(failed.admitted).toBe(false);
   });
 
   test("admit after regression pass + Admission pass; rollback demotes an accepted slice", () => {
