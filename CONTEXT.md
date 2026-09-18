@@ -127,7 +127,7 @@ The fixture/test facade (`ToyCompetitionHarness` and kin) used to exercise contr
 _Avoid_: Second Mission loop, production harness, chat-driven controller
 
 **Search Plugin**:
-A removable strong-search / MCTS adapter (SEA) that a Mission may mount or unmount. The default parent-selection path is `fixed_uct` and does not depend on any plugin. Progressive / MCTS / StrongSearch remain explicit opt-in. The plugin is not Promotion authority and is not a second control plane.
+A removable strong-search / MCTS adapter (SEA) a search host may mount or unmount. The default parent-selection path is `fixed_uct` and does not depend on any plugin. Progressive / MCTS / StrongSearch remain explicit opt-in. The plugin is not Promotion authority and is not a second control plane.
 _Avoid_: Competition plugin, default MCTS, welded strong search
 
 **Skill**:

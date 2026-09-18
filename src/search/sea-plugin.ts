@@ -143,8 +143,8 @@ export class SeaHost {
     if (this.plugin !== undefined) {
       throw new RangeError("SEA plugin already mounted; unmount before mounting another");
     }
-    this.plugin = normalized;
-    return freezeMount(normalized);
+    this.plugin = deepFreeze(normalized) as SeaPlugin;
+    return freezeMount(this.plugin);
   }
 
   unmount(): void {
