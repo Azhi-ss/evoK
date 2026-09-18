@@ -76,6 +76,13 @@ ownership map is unchanged. Remaining pack-shim flat `src/*.ts` files
 (not shared wiring such as `evok-model`) are migration-period re-exports
 for one more release.
 
+## Amendment (ET-ADR-PRD / #136)
+
+Product baseline is the task-internal RSI PRD v1.0. Recorded in
+[ADR-0014](0014-prd-rsi-baseline.md). This ADR's logical ownership map is
+unchanged. Interactive surface is Pi native TUI (#134 / PR #135).
+`ToyHarness` remains fixtures/tests only — not a second control plane.
+
 ## Out of scope / freezes
 
 - No change to gate, T48, hang, or #40 semantics.

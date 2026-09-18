@@ -41,3 +41,12 @@ The model reasons about the evidence and chooses useful next actions, including 
 No new Mission interruption shortcut is selected here. In pinned Pi 0.83.0 interactive mode, `Ctrl+C` clears the editor and a rapid second press exits, while `Escape` is the default interrupt action. The earlier proposal to bind `Ctrl+C` directly to Mission pause is not adopted; UI key handling and Mission pause must not be conflated. Using the SDK alone does not automatically install Pi's interactive key handlers.
 
 Remaining CLI commands, the concrete interruption UI, and the exact persisted file format remain separate design questions. SDK and resource decisions are recorded in ADR-0005/0006; this decision does not relax ADR-0001's separation of a Run's session from durable Mission state.
+
+## Amendment (ET-TUI1 / #134, ET-ADR-PRD / #136)
+
+The interactive surface is Pi native TUI via SDK `InteractiveMode`
+(#134 / PR #135 @`f148960`), not a custom readline REPL. Foreground
+`evok` still hosts the process; the TUI supports setup, observation, and
+intervention and is not the driver of each research iteration. Product
+baseline and six-pack mapping are recorded in
+[ADR-0014](0014-prd-rsi-baseline.md).

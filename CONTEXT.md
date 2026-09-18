@@ -1,12 +1,14 @@
 # evoK Domain Context
 
-This context defines the vocabulary for evoK: a long-running system that conducts bounded autonomous research for competitions while preserving evidence, human objectives, and safe external actions.
+This context defines the vocabulary for evoK: a long-running system that conducts bounded autonomous research — including verifiable Method Improvement (task-internal RSI) — inside one Mission, while remaining compatible with existing competition arms and preserving evidence, human objectives, and safe external actions.
+
+The product baseline is the task-internal RSI PRD v1.0 ([ADR-0014](docs/adr/0014-prd-rsi-baseline.md)). Mission is the only mainline.
 
 ## Mission and Research
 
 **Mission**:
-A bounded autonomous research effort for one competition, with a human-owned objective, constraints, and an intended outcome.
-_Avoid_: Job, campaign, session
+A bounded autonomous research effort with a human-owned objective, constraints, and an intended outcome. A Mission may target a Competition; Method Improvement happens inside the same Mission.
+_Avoid_: Job, campaign, session, RSI project
 
 **Competition**:
 A rule-bound environment in which candidates are prepared, evaluated, compared, and possibly submitted.
@@ -15,6 +17,14 @@ _Avoid_: Benchmark (unless the environment is explicitly only a benchmark)
 **Competition Adapter**:
 The competition-specific boundary that explains the rules, inputs, preparation requirements, evaluation facts, and submission format without deciding whether a result should be promoted.
 _Avoid_: Competition plugin, competition agent
+
+**Deploy Arena**:
+An orthogonal competition-serving arm kept on standby. It is not part of the Mission research / Method Improvement mainline and is not a second control plane.
+_Avoid_: RSI deploy path, mainline serving
+
+**Method Improvement**:
+A Mission-internal action that proposes, verifies, enables, and inherits a change to the working method (task-internal RSI). It is not a separate project or a second mainline.
+_Avoid_: RSI project, reflection-only improvement, research-equals-improvement
 
 **Research Objective**:
 The outcome the human wants the Mission to pursue; it defines what counts as relevant progress and cannot be changed implicitly by an agent.
@@ -116,6 +126,14 @@ _Avoid_: Shared notes, prompt memory, scoreboard-as-verdict
 The fixture/test facade (`ToyCompetitionHarness` and kin) used to exercise contracts offline. It is not a product control plane and cannot authorize, continue, repair, or stop a Mission.
 _Avoid_: Second Mission loop, production harness, chat-driven controller
 
+**Skill**:
+A named, versioned instruction pack a Mission may load on demand. The product enables eight categories and progressive disclosure; pack contents are not this glossary.
+_Avoid_: System-prompt dump, hidden prompt
+
+**Skill State**:
+Whether a Skill is a candidate, accepted, or demoted relative to a Mission or method. Disclosure level is not acceptance.
+_Avoid_: Installed, enabled (when lifecycle is intended)
+
 **Cross-review**:
 A two-phase (author then reviewer) critique whose output is a content-addressed Artifact and ledger Evidence ref that later Tasks can read. Cross-review is advisory and never authoritative for evaluation or promotion.
 _Avoid_: Cross-model check (that is model-tier agreement at the promotion gate), judge, promotion review
@@ -202,7 +220,7 @@ _Avoid_: Error message
 
 ## Six-pack ownership
 
-Logical packages pin authority. Physical packages are **in place** (P6 / [ADR-0013](docs/adr/0013-six-pack-physical-closeout.md); as-is [docs/arch-as-is.md](docs/arch-as-is.md)):
+Logical packages pin authority. Physical packages are **in place** (P6 / [ADR-0013](docs/adr/0013-six-pack-physical-closeout.md); product baseline [ADR-0014](docs/adr/0014-prd-rsi-baseline.md); as-is [docs/arch-as-is.md](docs/arch-as-is.md)):
 
 | Package | Directory | 物理就位 |
 |---|---|---|
@@ -221,17 +239,18 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 | **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
-| **competition** | Contest and local Evaluator adapters | True External Submission (still frozen) |
-| **cli** | Thin Mission CLI shell | A second control plane |
+| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
+| **cli** | Thin Mission CLI shell + Pi native TUI (#134) | A second control plane |
 
-The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. ToyHarness is fixtures and tests only — not a second control plane.
+The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. The interactive surface is Pi native TUI (ADR-0014 / #134). ToyHarness is fixtures and tests only — not a second control plane.
 
 ## Vocabulary Rules
 
-- Use **Mission** for the long-lived competition effort and **Task** for a scoped unit within it.
+- Use **Mission** for the long-lived research effort and **Task** for a scoped unit within it. Method Improvement is an action inside that Mission, not a second RSI project.
 - Use **Branch** for an isolated alternative or dependency path, and **Run** for one attempt.
 - Use **Evaluator** for objective measurement, **Promotion** for machine advancement, and **Human Acceptance** for the human decision.
 - Use **Team Coordinator** for Task-level team planning and **Mission Director** for Mission-level research direction.
 - Do not use “orchestrator” as an authority-bearing role without naming which of these two responsibilities is meant.
 - The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.
-- The six logical packages (mission, evidence, execution, search, competition, cli) own the rows in Six-pack ownership. The Research Loop is the product control plane; the chat transcript and ToyHarness are not.
+- The six logical packages (mission, evidence, execution, search, competition, cli) own the rows in Six-pack ownership. The Research Loop is the product control plane; the chat transcript, Pi native TUI, and ToyHarness are not.
+- Real External Submission, expanding budget or permissions past Mission Policy, changing Human Acceptance, and unfreezing AtCoder true-submit / `#40` remain human-owned. Deploy Arena stays orthogonal standby.
