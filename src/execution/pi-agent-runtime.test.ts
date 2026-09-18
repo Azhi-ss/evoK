@@ -18,9 +18,9 @@ import {
   type PiAgentRuntimeRequest,
   type SessionModelResolver,
 } from "./pi-agent-runtime";
-import { createEvokModelResolver } from "./evok-model";
+import { createEvokModelResolver } from "../evok-model";
 import { OrchestraValidationError } from "./model-orchestra";
-import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "./toy-harness";
+import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "../toy-harness";
 
 const prediction = {
   predictionId: "toy-prediction",

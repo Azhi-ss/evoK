@@ -151,7 +151,7 @@ PI_OFFLINE=1 PI_TELEMETRY=0 bun /tmp/evok-pi-loading-probe-uqbqe6sg/probe.mjs
 
 全部断言通过，覆盖：默认 SDK 无信任记录加载、SYSTEM/APPEND 项目优先、context 顺序、项目 settings/自动来源去重、嵌套 SKILL 发现、缺 description 跳过、正文未进入启动提示词、显式专用 skill 隐藏、无 read 不注入索引、noSkills+显式路径、修改 agentDir 后项目仍取 `.pi` 与全局 `.agents` 仍被发现。
 
-这验证 SDK 的资源行为，不是 evok CLI/skills 功能已上线的证明。当前 evoK `src/pi-agent-runtime.ts:580–589` 仍关闭默认 skills/context/templates 加载。[S12]
+这验证 SDK 的资源行为，不是 evok CLI/skills 功能已上线的证明。当前 evoK `src/execution/pi-agent-runtime.ts:645–658` 仍关闭默认 skills/context/templates 加载。[S12]
 
 ## 源码索引
 
@@ -168,6 +168,6 @@ PI_OFFLINE=1 PI_TELEMETRY=0 bun /tmp/evok-pi-loading-probe-uqbqe6sg/probe.mjs
 - **[S9]** `dist/config.js:390–420`；`dist/core/settings-manager.js:43–50`：`.pi` 常量和 agentDir 的不同职责。
 - **[S10]** `dist/core/resource-loader.js:275–280,424–445`；`dist/core/package-manager.js:977–1027`；`dist/core/agent-session.js:1940–2015`：package/extension 加载与独立工具过滤。
 - **[S11]** `dist/core/resource-loader.js:31–109,370–379`：AGENTS/CLAUDE 候选、祖先顺序、context 开关。
-- **[S12]** evoK 自身 `src/pi-agent-runtime.ts:556–598,765–783`；`src/security-boundary.ts:207–224`：当前默认 loader、安全扩展和路径限制。
+- **[S12]** evoK 自身 `src/execution/pi-agent-runtime.ts:645–658,775–790`；`src/execution/security-boundary.ts:168–225`：当前默认 loader、安全扩展和路径限制。
 
 参考文档（同一安装版本，已完整阅读）：`docs/sdk.md`、`docs/skills.md`、`docs/settings.md`、`docs/packages.md`、`docs/prompt-templates.md`。实际规则以以上源码和探针为准。
