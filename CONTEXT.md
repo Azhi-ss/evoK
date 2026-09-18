@@ -105,12 +105,16 @@ _Avoid_: Standing verification roster, multi-branch as v1 must-have, Execution P
 - True assets remain the Evidence ledger, hang/T48 gates, and explicit live authorization. The execution roster accelerates; it does not prove a gate.
 
 **Research Loop**:
-The evidence-driven cycle of selecting Tasks, proposing and executing Experiments, evaluating their results, updating beliefs, and choosing the next research action within an authorized Mission. It advances without a human prompt for every iteration, while the Research Objective and Mission Policy remain human-owned.
-_Avoid_: Chat loop, fixed execution script
+The evidence-driven cycle of selecting Tasks, proposing and executing Experiments, evaluating their results, updating beliefs, and choosing the next research action within an authorized Mission. It advances without a human prompt for every iteration, while the Research Objective and Mission Policy remain human-owned. It is the product control plane: authorize, continue, repair, and stop. A chat transcript is not Mission authority.
+_Avoid_: Chat loop, fixed execution script, chat-as-authority
 
 **File Blueprint**:
 The durable, content-addressed workspace files that make a Mission's GOAL, RULES, experiment log, and SCOREBOARD auditable outside the chat transcript. The files are Evidence; they do not score, promote, or authorize Stop by themselves.
 _Avoid_: Shared notes, prompt memory, scoreboard-as-verdict
+
+**ToyHarness**:
+The fixture/test facade (`ToyCompetitionHarness` and kin) used to exercise contracts offline. It is not a product control plane and cannot authorize, continue, repair, or stop a Mission.
+_Avoid_: Second Mission loop, production harness, chat-driven controller
 
 **Cross-review**:
 A two-phase (author then reviewer) critique whose output is a content-addressed Artifact and ledger Evidence ref that later Tasks can read. Cross-review is advisory and never authoritative for evaluation or promotion.
@@ -196,6 +200,21 @@ _Avoid_: Promotion, publish
 The recorded explanation for ending or pausing a Mission, such as budget exhaustion, insufficient evidence, rule risk, infrastructure failure, or human decision.
 _Avoid_: Error message
 
+## Six-pack ownership
+
+Logical packages pin authority. Physical layout remains a flat `src/` tree today; directory moves are later tickets and are not authorized by this pin. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+
+| Package | Owns | Does not own |
+|---|---|---|
+| **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop | Business/competition code; search-graph authority; Team blueprint details |
+| **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team orchestration |
+| **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
+| **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
+| **competition** | Contest and local Evaluator adapters | True External Submission (still frozen) |
+| **cli** | Thin Mission CLI shell | A second control plane |
+
+The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. ToyHarness is fixtures and tests only — not a second control plane.
+
 ## Vocabulary Rules
 
 - Use **Mission** for the long-lived competition effort and **Task** for a scoped unit within it.
@@ -204,3 +223,4 @@ _Avoid_: Error message
 - Use **Team Coordinator** for Task-level team planning and **Mission Director** for Mission-level research direction.
 - Do not use “orchestrator” as an authority-bearing role without naming which of these two responsibilities is meant.
 - The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.
+- The six logical packages (mission, evidence, execution, search, competition, cli) own the rows in Six-pack ownership. The Research Loop is the product control plane; the chat transcript and ToyHarness are not.
