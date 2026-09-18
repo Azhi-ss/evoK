@@ -6,7 +6,9 @@ W1 骨架：`research-entry` 持久化 control-events 并提供薄 `/research`
 status / continue（evoK 产品入口，不是 Pi slash 表）。
 `skills-routing` 提供八类目录 + L0→L1 渐进披露 + 三态
 （candidate / accepted / demoted）；默认上下文只进 accepted 短描述。
-写回未开（read-only shell）。Skills 路由不是第二控制面。
+文件体写回未开（read-only shell）。candidate 升 accepted 必须过
+evidence Admission（无保护 holdout 拒绝；有效性 hang 不是 pass）。
+Skills 路由不是第二控制面。
 
 Physical home of Mission Director, Mission draft/intake/start/resume,
 Research Loop, File Blueprint, Branch recovery, baseline-track, and

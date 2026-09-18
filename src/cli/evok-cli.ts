@@ -169,7 +169,8 @@ options:
   --skills          thin evoK Skills directory view (\`evok /skills\`).
                     Lists the eight-category scaffold and lifecycle states
                     (candidate / accepted / demoted). Default context is
-                    accepted L0 pointers only. Writeback is not opened.
+                    accepted L0 pointers only. Accepted promotion requires
+                    Admission; file-body writeback is not opened.
                     Not a second control plane; \`/research\` stays Mission
                     authority. \`/model\` and \`/new\` stay on the native TUI.
   -h, --help        show this help
