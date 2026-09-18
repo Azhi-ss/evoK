@@ -11,20 +11,21 @@
  *     no second login system);
  *   - the resolved default/tier model is the model that actually executes;
  *   - missing model/auth configuration fails clearly before dispatch;
- *   - each request is a fresh Run (fresh session/attempt identity, runtime
- *     policy keeps hidden SDK retry/compaction disabled);
- *   - Ctrl+C / SIGINT cancels the in-flight request; idle Ctrl+C and Ctrl+D
- *     exit. No Mission-pause meaning is bound to Ctrl+C.
+ *   - each one-shot request is a fresh Run (fresh session/attempt identity,
+ *     runtime policy keeps hidden SDK retry/compaction disabled);
+ *   - a tty with no request and no Mission flag launches Pi native TUI
+ *     (`InteractiveMode`); evoK does not intercept `/model` / `/new`.
+ *   - one-shot Ctrl+C / SIGINT cancels the in-flight request. No Mission-pause
+ *     meaning is bound to Ctrl+C. TUI keybindings stay on Pi.
  *
- * Later slices add approved evoK prompts/skills, Mission intake, persistence,
- * and the autonomous loop. This slice performs none of those.
+ * Mission authorize / continue / repair / stop live in `src/mission/`.
  */
 import { realpath, rm } from "node:fs/promises";
 import { isatty } from "node:tty";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { createInterface } from "node:readline";
 import { PiAgentRuntime } from "../pi-agent-runtime";
+import { launchPiNativeTui, type NativeTuiLaunch } from "./pi-native-tui";
 import { calculateCost } from "@earendil-works/pi-ai";
 import type { SessionModelResolver } from "../evok-model";
 import { discoverEvokResources, EvokResourceError, type EvokResources } from "../evok-resources";
@@ -107,7 +108,7 @@ export const EVOK_USAGE = `evok — bounded foreground research requests on the 
 
 usage:
   evok [request text] [options]     one-shot request
-  evok [options]                    read one request from stdin (piped) or REPL (tty)
+  evok [options]                    Pi native TUI on a tty; one request from stdin when piped
 
 options:
   --project <dir>   research project directory (default: current directory)
@@ -117,12 +118,13 @@ options:
   --intake          Mission intake: turn the request into a saved, reviewable
                     Mission draft + initial plan via the mission-intake skill.
                     Ends at draft review; it never starts or dispatches work.
+                    Requires request text (one-shot or piped); not a TUI command.
   --mission <id>    reopen an existing Mission draft during --intake, or name
                     the target Mission for --start/--status
   --start           start the authorized baseline for the displayed Mission
-                    (in a REPL, an explicit \"/start\" line does the same).
-                    Requires a reviewed draft, explicit authorization, an
-                    enforceable model-USD budget, and an evaluator contract.
+                    (\`evok --start\` or \`evok /start\`). Requires a reviewed draft,
+                    explicit authorization, an enforceable model-USD budget,
+                    and an evaluator contract.
   --reserve-cost <n>  cost (model-USD) reserved before baseline dispatch
                     (default: ${DEFAULT_RESERVE_COST}); an unboundable Run is refused
   --baseline-only   run only the measured baseline; do not continue autonomously
@@ -133,14 +135,15 @@ options:
   --resume          explicitly RESUME the named (or displayed) unfinished
                     Mission from durable records and remaining budget. No intake
                     is repeated, no spent budget is restored; unconfirmed
-                    pre-interrupt work is reconciled from evidence first. In a
-                    REPL an explicit "/resume" or "resume mission <id>" line
-                    does the same. Status questions and negations never resume.
+                    pre-interrupt work is reconciled from evidence first.
+                    Use \`evok --resume\` or \`evok /resume\`. Status questions
+                    and negations never resume.
   -h, --help        show this help
 
-ctrl+c cancels the in-flight request (second/interrupted idle press exits);
-ctrl+d or "exit" ends the REPL. Models and credentials come from Pi (~/.pi/agent);
-evok never copies or displays credentials.
+On a tty with no request and no Mission flag, evok launches the Pi SDK native
+TUI. Native slash commands (\`/model\`, \`/new\`, …) are handled by Pi, not evoK.
+Mission entrypoints stay the thin flags above. Models and credentials come from
+Pi (~/.pi/agent); evok never copies or displays credentials.
 `;
 
 export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
@@ -254,6 +257,13 @@ export interface EvokRunOptions {
   readonly stderr?: { write(chunk: string): boolean };
   readonly stdin?: NodeJS.ReadStream;
   readonly signal?: AbortSignal;
+  /** Override tty detection (tests). Production uses `isatty` on stdin. */
+  readonly isTty?: (stdin: NodeJS.ReadStream) => boolean;
+  /**
+   * Override the Pi native TUI launcher (tests). Production starts SDK
+   * `InteractiveMode` — not an evoK command table.
+   */
+  readonly launchNativeTui?: (launch: NativeTuiLaunch) => Promise<void>;
 }
 
 type Out = { write(chunk: string): boolean };
@@ -305,9 +315,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
 
   // Preflight the requested tier before any Run is constructed: missing
   // model/auth configuration must fail before work is dispatched.
-  // A fresh runtime per request keeps every REPL line a fresh Run with its
-  // own session, attempt identity, workspace, and intent store (ADR-0001) —
-  // identical requests never replay a stored Run result.
+  // A fresh runtime per one-shot request keeps every Run with its own session,
+  // attempt identity, workspace, and intent store (ADR-0001) — identical
+  // requests never replay a stored Run result.
   // Approved evoK prompts/skills are discovered ONCE here against the research
   // project (#110); they are read in place, never copied into Run workspaces.
   let resources: EvokResources;
@@ -364,9 +374,21 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
       : runOne(createRuntime, args, args.request, options, stdout, stderr, projectReal, resources);
   }
 
+  // Mission flags are thin-shell entrypoints, not TUI / Pi slash commands.
+  if (args.resume) {
+    return runMissionResume(resolver, { ...args, request: "/resume" }, options, stdout, stderr, projectReal, resources);
+  }
+  if (args.start) {
+    return runMissionStart(resolver, { ...args, request: "/start" }, options, stdout, stderr, projectReal, resources);
+  }
+
   const stdin = (options.stdin ?? process.stdin) as NodeJS.ReadStream;
-  if (isatty((stdin as { fd?: number }).fd ?? 0)) {
-    return runRepl(resolver, createRuntime, args, options, stdin, stdout, stderr, projectReal, resources);
+  if ((options.isTty ?? defaultIsTty)(stdin)) {
+    if (args.intake) {
+      stderr.write("evok: --intake requires request text (one-shot; the native TUI is not a Mission control plane)\n");
+      return EVOK_EXIT.usage;
+    }
+    return runNativeTui(resolver, args, options, stdout, stderr, projectReal);
   }
   const piped = await readAll(stdin);
   const request = piped.trim();
@@ -383,6 +405,47 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   return args.intake
     ? runIntake(resolver, args, request, options, stdout, stderr, projectReal, resources)
     : runOne(createRuntime, args, request, options, stdout, stderr, projectReal, resources);
+}
+
+function defaultIsTty(stdin: NodeJS.ReadStream): boolean {
+  return isatty((stdin as { fd?: number }).fd ?? 0);
+}
+
+/**
+ * Tty foreground: Pi SDK native TUI. No evoK slash-command table — `/model`
+ * and `/new` stay on InteractiveMode.
+ */
+async function runNativeTui(
+  resolver: SessionModelResolver,
+  args: ParsedEvokArgs,
+  options: EvokRunOptions,
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+): Promise<number> {
+  if (options.signal?.aborted) {
+    stderr.write("evok: interactive session cancelled before the native TUI started\n");
+    return EVOK_EXIT.cancelled;
+  }
+  try {
+    const resolved = await resolver.resolve(args.tier);
+    stdout.write("interactive: Pi native TUI (SDK slash commands including /model /new; no evoK intercept)\n");
+    stdout.write("         session uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n");
+    await (options.launchNativeTui ?? launchPiNativeTui)({
+      projectRoot,
+      tier: args.tier,
+      modelRuntime: resolved.modelRuntime,
+      model: resolved.modelId,
+    });
+    return EVOK_EXIT.ok;
+  } catch (error) {
+    if (options.signal?.aborted || (error as Error).name === "AbortError") {
+      stderr.write("\nevok: native TUI cancelled\n");
+      return EVOK_EXIT.cancelled;
+    }
+    stderr.write(`evok: native TUI failed: ${(error as Error).message}\n`);
+    return EVOK_EXIT.runtimeError;
+  }
 }
 
 /**
@@ -940,86 +1003,6 @@ async function runOne(
     // Run workspaces are disposable per ADR-0001; remove the empty parent too.
     await rm(workspaceParent, { recursive: true, force: true }).catch(() => {});
   }
-}
-
-async function runRepl(
-  resolver: SessionModelResolver,
-  createRuntime: () => PiAgentRuntime,
-  args: ParsedEvokArgs,
-  options: EvokRunOptions,
-  stdin: NodeJS.ReadStream,
-  stdout: Out,
-  stderr: Out,
-  projectRoot: string,
-  resources: EvokResources,
-): Promise<number> {
-  const rl = createInterface({ input: stdin, terminal: Boolean(stdin.isTTY) });
-
-  stdout.write("\nforeground REPL — type a request; ctrl+c cancels the in-flight Run (idle press exits), ctrl+d exits\n\n> ");
-
-  let lastCode: number = EVOK_EXIT.ok;
-  let busy = false;
-  let closed = false;
-  rl.on("close", () => { closed = true; });
-
-  // Readline owns raw-mode key handling in a real tty; its SIGINT event is
-  // the only ctrl+c path. It never gains a Mission-pause meaning (#109).
-  rl.on("SIGINT", () => {
-    if (busy) {
-      process.emit("SIGINT" as NodeJS.Signals);
-    } else {
-      stdout.write("\n");
-      rl.close();
-    }
-  });
-
-  const ask = (): Promise<string | null> =>
-    new Promise((resolveLine) => {
-      let settled = false;
-      const finish = (value: string | null) => {
-        if (!settled) { settled = true; resolveLine(value); }
-      };
-      rl.question("", (answer) => finish(answer));
-      rl.once("close", () => finish(null));
-    });
-
-  while (true) {
-    const line = await ask();
-    if (line === null) break;
-    if (line.trim() === "exit" || line.trim() === "quit") break;
-    const text = line.trim();
-    if (!text) {
-      stdout.write("> ");
-      continue;
-    }
-    if (isExplicitResumeRequest(text).resume) {
-      const resumeArgs: ParsedEvokArgs = { ...args, request: text, ...(isExplicitResumeRequest(text).missionId ? { mission: isExplicitResumeRequest(text).missionId } : {}) };
-      busy = true;
-      lastCode = await runMissionResume(resolver, resumeArgs, options, stdout, stderr, projectRoot, resources);
-      busy = false;
-      if (closed) break;
-      stdout.write("\n> ");
-      continue;
-    }
-    if (isExplicitStartRequest(text)) {
-      const startArgs: ParsedEvokArgs = { ...args, request: text, ...(text.split(/\s+/)[1] ? { mission: text.split(/\s+/)[1] } : {}) };
-      busy = true;
-      lastCode = await runMissionStart(resolver, startArgs, options, stdout, stderr, projectRoot, resources);
-      busy = false;
-      if (closed) break;
-      stdout.write("\n> ");
-      continue;
-    }
-    busy = true;
-    lastCode = await (args.intake
-      ? runIntake(resolver, args, text, options, stdout, stderr, projectRoot, resources)
-      : runOne(createRuntime, args, text, options, stdout, stderr, projectRoot, resources));
-    busy = false;
-    if (closed) break;
-    stdout.write("\n> ");
-  }
-  if (!closed) rl.close();
-  return lastCode;
 }
 
 const SCOPE_LABEL: Readonly<Record<string, string>> = Object.freeze({
