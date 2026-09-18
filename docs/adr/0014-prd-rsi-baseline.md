@@ -6,7 +6,8 @@ status: accepted
 
 Docs-only pin after ET-TUI1 (#134 / PR #135 @`f148960`). The v1 product
 baseline is the task-internal RSI PRD v1.0 (2026-09-18), compatible with
-the existing six-pack and competition arms. No runtime semantics change.
+the existing six-pack, Graph Engineering, and competition arms. No
+runtime semantics change.
 
 ## Decision
 

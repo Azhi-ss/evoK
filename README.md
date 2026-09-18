@@ -1,6 +1,6 @@
 # evoK — Competition Research Harness
 
-Standalone harness for unattended, multi-competition autonomous research: mission control, task DAG, isolated experiments (Pi SDK AgentSession as replaceable agent runtime), independent evaluation, evidence-gated promotion, and a submission broker.
+Standalone harness for unattended autonomous research and verifiable Method Improvement (task-internal RSI) inside one Mission: mission control, task DAG, isolated experiments (Pi SDK AgentSession as replaceable agent runtime), independent evaluation, evidence-gated promotion, and a submission broker. Compatible with existing competition arms. Product baseline: [ADR-0014](docs/adr/0014-prd-rsi-baseline.md).
 
 - Spec: https://github.com/Azhi-ss/evoK/issues/1
 - Status: spec phase (阶段 0 契约固化)
@@ -36,7 +36,7 @@ foreground entry over the existing `PiAgentRuntime` Pi SDK execution path:
 bun run evok "inspect this research project and summarize what you see"
 bun run evok --tier deep "compare these two approaches" --project /path/to/project
 echo "request text" | bun run evok        # piped stdin; no tty
-bun run evok                             # tty: line-oriented REPL; ctrl+c cancels a Run, ctrl+d exits
+bun run evok                             # tty: Pi native TUI (SDK InteractiveMode, #134); /model /new stay on Pi
 ```
 
 Options: `--project <dir>` (default cwd), `--tier default|fast|deep|mid`
@@ -166,10 +166,10 @@ Autonomous continuation from measured evidence (#113):
   model **read-only**; writes stay in the request's isolated temp workspace.
   Each request is a fresh Run: fresh SDK session/attempt identity, disposed
   session, existing read-only tool authority, and the runtime policy that keeps
-  hidden SDK retry/compaction disabled. A one-shot invocation and a REPL line
-  each create a fresh runtime + intent store, so identical requests never
-  replay a stored result. `Ctrl+C` cancels the in-flight Run only — no
-  Mission-pause meaning is bound to it.
+  hidden SDK retry/compaction disabled. A one-shot invocation and a TUI
+  turn each create a fresh runtime + intent store, so identical requests never
+  replay a stored result. One-shot `Ctrl+C` cancels the in-flight Run only —
+  no Mission-pause meaning is bound to it; TUI keybindings stay on Pi.
 - The process loads no personal Pi prompts, skills, extensions, packages, or
   history (the SDK loader stays in `noSkills/noExtensions/noPromptTemplates/
   noContextFiles` mode). Approved evoK/project resources arrive in T2 (#110).

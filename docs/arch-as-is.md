@@ -6,7 +6,7 @@ In-repo as-is pointer after ET-A0…A6 and ET-TUI1. Authority for terms is
 [ADR-0013](adr/0013-six-pack-physical-closeout.md). Product baseline is
 [ADR-0014](adr/0014-prd-rsi-baseline.md) (task-internal RSI PRD v1.0).
 
-Tip is this W0 docs pin on `main` after P6 closeout and #134 / PR #135
+Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 (`f148960`: Pi native TUI via SDK `InteractiveMode`).
 
 ## Product baseline

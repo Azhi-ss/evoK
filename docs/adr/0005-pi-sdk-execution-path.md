@@ -15,8 +15,11 @@ System-prompt and skill loading reuse SDK mechanisms rather than a new parser; t
 The no-second-Agent-Loop pin extends to the interactive path. Headless
 `PiAgentRuntime` and Pi native TUI (`InteractiveMode`, #134) share Pi;
 evoK does not add a forwarding-only Agent layer or keep a custom
-readline REPL. Product baseline is recorded in
-[ADR-0014](0014-prd-rsi-baseline.md).
+readline REPL. Run-time resource isolation (this ADR + ADR-0006) still
+does not automatically inherit personal Pi prompts, skills, or
+conversation history. The TUI reuses Pi's interactive / extension
+surface without making that surface Mission authority. Product baseline
+is recorded in [ADR-0014](0014-prd-rsi-baseline.md).
 
 ## Shared model and authentication configuration
 

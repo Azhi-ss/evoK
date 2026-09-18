@@ -19,8 +19,8 @@ transcript is not authority.
 | **evidence** | Ledger, T48, kill/hang, promotion gates, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
-| **competition** | Contest and local Evaluator adapters | True External Submission (still frozen) |
-| **cli** | Thin Mission CLI shell | A second control plane |
+| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
+| **cli** | Thin Mission CLI shell + Pi native TUI | A second control plane |
 
 The product control plane is the Research Loop: authorize, continue,
 repair, and stop. Human-owned Research Objective and Mission Policy bound
@@ -79,9 +79,11 @@ for one more release.
 ## Amendment (ET-ADR-PRD / #136)
 
 Product baseline is the task-internal RSI PRD v1.0. Recorded in
-[ADR-0014](0014-prd-rsi-baseline.md). This ADR's logical ownership map is
-unchanged. Interactive surface is Pi native TUI (#134 / PR #135).
-`ToyHarness` remains fixtures/tests only — not a second control plane.
+[ADR-0014](0014-prd-rsi-baseline.md). The six-package list is unchanged.
+The Owns notes for **cli** (Pi native TUI) and **competition** (Deploy
+Arena standby) are extended in the table above. Interactive surface is
+Pi native TUI (#134 / PR #135). `ToyHarness` remains fixtures/tests only
+— not a second control plane.
 
 ## Out of scope / freezes
 

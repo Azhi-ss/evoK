@@ -127,7 +127,7 @@ The fixture/test facade (`ToyCompetitionHarness` and kin) used to exercise contr
 _Avoid_: Second Mission loop, production harness, chat-driven controller
 
 **Skill**:
-A named, versioned instruction pack a Mission may load on demand. The product enables eight categories and progressive disclosure; pack contents are not this glossary.
+A named, versioned instruction pack a Mission may load on demand.
 _Avoid_: System-prompt dump, hidden prompt
 
 **Skill State**:
@@ -240,9 +240,9 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing | Promotion; gate override |
 | **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
-| **cli** | Thin Mission CLI shell + Pi native TUI (#134) | A second control plane |
+| **cli** | Thin Mission CLI shell + Pi native TUI | A second control plane |
 
-The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. The interactive surface is Pi native TUI (ADR-0014 / #134). ToyHarness is fixtures and tests only — not a second control plane.
+The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. The interactive surface is Pi native TUI (ADR-0014). ToyHarness is fixtures and tests only — not a second control plane.
 
 ## Vocabulary Rules
 
