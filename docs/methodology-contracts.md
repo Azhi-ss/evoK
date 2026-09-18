@@ -6,7 +6,8 @@ to first-class harness/adapter contracts. Table competitions are won or lost on
 and splitting randomly produces fake CV (research gaps G4/G5/G6, spec #1).
 Implementation: `src/evidence/methodology-contracts.ts` (flat
 `src/methodology-contracts.ts` re-exports); wired into the mission seam in
-`src/toy-harness.ts`.
+`src/search/fixtures/toy-harness.ts` (flat `src/toy-harness.ts` re-exports;
+fixtures/tests only).
 
 The three objects:
 
@@ -80,7 +81,8 @@ checks. It is not a replacement for this module's source audit or evaluator-fact
 OOF gate. Its camel-case contract (`splitRef`, `required`, etc.) differs from
 T44's component contracts; do not feed one resolver's output into the other.
 
-The `src/toy-harness.ts` barrel retains the T44 names (`MethodologyContracts`,
+The `src/search/fixtures/toy-harness.ts` barrel (flat `src/toy-harness.ts`
+re-export) retains the T44 names (`MethodologyContracts`,
 `resolveMethodologyContracts`, `auditMethodology`). Manifest APIs are available
 under `methodologyManifest` and their contract types have `Manifest*` aliases.
 Direct imports from either module remain supported. A unified schema/converter

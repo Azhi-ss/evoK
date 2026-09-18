@@ -187,7 +187,7 @@ Steals the **orchestration clarity** of Google Co-Scientist — Generation → R
 - Reflection/Falsifier/Critic/Challenger/Auditor outputs are persisted as structured **objections** and written back onto the card, so the next expansion or Director step reads them — never discarded with the failed candidate.
 - **Ranking/promotion consumes gates + uncleared objections + evidence refs, never score alone**: a promotion verdict is refused when the card is missing, `violated`, ungated, or carries uncleared objections.
 
-Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/toy-harness.ts` (branch `claimCard` + promotion gate), `src/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
+Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/search/fixtures/toy-harness.ts` (branch `claimCard` + promotion gate; flat `src/toy-harness.ts` re-exports; fixtures/tests only), `src/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
 
 ## File Blueprint mission state (Ravi-style)
 

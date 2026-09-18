@@ -5,8 +5,9 @@ val or Public score from deciding a champion. Overfitting one validation set or
 grinding the Public leaderboard is what causes a Private-LB shake-up (research
 gap G2, spec #1). Implementation: `src/evidence/validation-ladder.ts` (flat
 `src/validation-ladder.ts` re-exports); wired into the
-mission seam in `src/toy-harness.ts`; ledger event classification in
-`src/evidence/ledger-kinds.ts`.
+mission seam in `src/search/fixtures/toy-harness.ts` (flat
+`src/toy-harness.ts` re-exports; fixtures/tests only); ledger event
+classification in `src/evidence/ledger-kinds.ts`.
 
 ## Scope — this is NOT the #11 evaluation noise protocol
 

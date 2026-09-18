@@ -2,17 +2,17 @@ import { describe, expect, test } from "bun:test";
 import {
   HypothesisLedger,
   T48MappedCatalog,
-} from "./hypothesis-ledger";
+} from "../hypothesis-ledger";
 import {
   auditMethodology,
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "./methodology";
-import { MissionDirector } from "./research-loop";
-import { RESEARCH_TASKS as tasks } from "./fixtures/research";
-import { runKillTestHang } from "./kill-test-hang";
-import { verificationRoleContract } from "./verification-gates";
+} from "../methodology";
+import { MissionDirector } from "../research-loop";
+import { RESEARCH_TASKS as tasks } from "../fixtures/research";
+import { runKillTestHang } from "../kill-test-hang";
+import { verificationRoleContract } from "../verification-gates";
 import {
   OUTER_COLLAPSE_WINDOW,
   OUTER_MMD_PROFILE,
