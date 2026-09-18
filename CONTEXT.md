@@ -202,7 +202,7 @@ _Avoid_: Error message
 
 ## Six-pack ownership
 
-Logical packages pin authority. Physical layout remains a flat `src/` tree today; directory moves are later tickets and are not authorized by this pin. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+Logical packages pin authority. `evidence` is physically under `src/evidence/` with flat `src/*.ts` compatibility re-exports ([ADR-0008](docs/adr/0008-evidence-physical-pack.md)); other packages remain a flat `src/` tree until their cut tickets. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
 
 | Package | Owns | Does not own |
 |---|---|---|
