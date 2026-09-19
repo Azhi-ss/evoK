@@ -213,6 +213,21 @@ This amendment does not fill `evidence` / `policy` bodies, change
 EXP Admission or Budget predicates, unfreeze `#40`, implement
 Deploy Arena, or thaw true-submit.
 
+## Amendment (ET-SKILL-EVID / #156)
+
+The bundled packaging source ships a thin accepted `evidence`
+skill (`owner`/`namespace: evok`, `category: evidence`). It is
+discoverable on the same Pi root after sync, visible as L0 on
+`/skills` and the Mission overlay, and loadable as L1 via
+`/skill evidence`. The body frames Experiment Validity and
+evidence lineage (effective ≠ optimal; inconclusive ≠ pass;
+protected holdout; ledger refs). It is not authorization to
+start, continue, or submit, and it does not relax gates.
+
+This amendment does not fill the `policy` body, change EXP
+Admission or Budget predicates, change hang / T48 predicates,
+unfreeze `#40`, implement Deploy Arena, or thaw true-submit.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
