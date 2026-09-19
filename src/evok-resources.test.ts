@@ -5,8 +5,15 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { discoverEvokResources, EvokResourceError } from "./evok-resources";
 
-function nonIntake(resources: Awaited<ReturnType<typeof discoverEvokResources>>) {
-  return resources.skills.filter((entry) => entry.skill.name !== "mission-intake");
+const BUNDLED_SKILL_NAMES = new Set(["mission-intake", "experiment"]);
+
+function nonBundled(resources: Awaited<ReturnType<typeof discoverEvokResources>>) {
+  return resources.skills.filter((entry) => !BUNDLED_SKILL_NAMES.has(entry.skill.name));
+}
+
+function isBundledReadRoot(path: string): boolean {
+  return path.includes(join("evok", "intake", "mission-intake"))
+    || path.includes(join("evok", "experiment", "experiment"));
 }
 
 interface Layout {
@@ -50,25 +57,32 @@ describe("discoverEvokResources (ET-SKILL-NS / #152) — same Pi root", () => {
     await writeSkill(join(home, ".agents", "skills", "g", "SKILL.md"), skill("global shared skills are excluded", "g"));
 
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    const names = nonIntake(resources).map((s) => s.skill.name).sort();
+    const names = nonBundled(resources).map((s) => s.skill.name).sort();
     expect(names).toEqual(["p", "s", "u"]);
     expect(resources.skills.some((s) => s.skill.name === "mission-intake")).toBe(true);
+    expect(resources.skills.some((s) => s.skill.name === "experiment")).toBe(true);
     expect(names).not.toContain("ghost");
     expect(names).not.toContain("plain");
     await cleanup(home, project);
   });
 
-  test("missing directories still sync bundled mission-intake into the Pi root", async () => {
+  test("missing directories still sync bundled skills into the Pi root", async () => {
     const home = await mkdtemp(join(tmpdir(), "evok-home-"));
     const project = await mkdtemp(join(tmpdir(), "evok-project-"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    expect(resources.skills.map((s) => s.skill.name)).toEqual(["mission-intake"]);
+    expect(resources.skills.map((s) => s.skill.name).sort()).toEqual(["experiment", "mission-intake"]);
     expect(resources.systemPrompt).toBeUndefined();
     expect(resources.appendSystemPrompt).toBeUndefined();
-    expect(resources.skills[0]?.skill.filePath).toBe(
+    expect(resources.skills.find((s) => s.skill.name === "mission-intake")?.skill.filePath).toBe(
       join(project, ".pi", "skills", "evok", "intake", "mission-intake", "SKILL.md"),
     );
-    expect(resources.readRoots).toEqual([join(project, ".pi", "skills", "evok", "intake", "mission-intake")]);
+    expect(resources.skills.find((s) => s.skill.name === "experiment")?.skill.filePath).toBe(
+      join(project, ".pi", "skills", "evok", "experiment", "experiment", "SKILL.md"),
+    );
+    expect([...resources.readRoots].sort()).toEqual([
+      join(project, ".pi", "skills", "evok", "experiment", "experiment"),
+      join(project, ".pi", "skills", "evok", "intake", "mission-intake"),
+    ].sort());
     await cleanup(home, project);
   });
 });
@@ -116,8 +130,8 @@ describe("discoverEvokResources (#110) — collisions and invalid skills", () =>
     await writeSkill(join(project, ".pi", "skills", "dup", "SKILL.md"), skill("project duplicate", "dup"));
 
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    expect(nonIntake(resources)).toHaveLength(1);
-    expect(nonIntake(resources)[0].skill.filePath).toBe(join(project, ".pi", "skills", "dup", "SKILL.md"));
+    expect(nonBundled(resources)).toHaveLength(1);
+    expect(nonBundled(resources)[0].skill.filePath).toBe(join(project, ".pi", "skills", "dup", "SKILL.md"));
     const collisions = resources.diagnostics.filter((d) => d.type === "collision");
     expect(collisions).toHaveLength(2);
     expect(collisions[0].collision?.winnerPath).toContain(join(".pi", "skills"));
@@ -129,7 +143,7 @@ describe("discoverEvokResources (#110) — collisions and invalid skills", () =>
     await writeSkill(join(home, ".pi", "skills", "dup", "SKILL.md"), skill("user duplicate", "dup"));
     await writeSkill(join(project, ".agents", "skills", "dup", "SKILL.md"), skill("shared duplicate", "dup"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    expect(nonIntake(resources)[0].skill.filePath).toBe(join(project, ".agents", "skills", "dup", "SKILL.md"));
+    expect(nonBundled(resources)[0].skill.filePath).toBe(join(project, ".agents", "skills", "dup", "SKILL.md"));
     expect(resources.diagnostics.some((d) => d.type === "collision")).toBe(true);
     await cleanup(home, project);
   });
@@ -139,7 +153,7 @@ describe("discoverEvokResources (#110) — collisions and invalid skills", () =>
     await writeSkill(join(project, ".pi", "skills", "bad", "SKILL.md"), "---\nname: bad\n---\nno description\n");
     await writeSkill(join(project, ".pi", "skills", "good", "SKILL.md"), skill("good skill", "good"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    expect(nonIntake(resources).map((s) => s.skill.name)).toEqual(["good"]);
+    expect(nonBundled(resources).map((s) => s.skill.name)).toEqual(["good"]);
     expect(resources.diagnostics.some((d) => /description/i.test(d.message))).toBe(true);
     expect(resources.diagnostics.some((d) => d.path?.includes(join("bad", "SKILL.md")))).toBe(true);
     await cleanup(home, project);
@@ -161,7 +175,7 @@ describe("discoverEvokResources (#110) — scope, read roots, and symlinks", () 
     await writeSkill(join(project, ".pi", "skills", "p", "SKILL.md"), skill("p", "p"));
     await writeSkill(join(project, ".agents", "skills", "s", "SKILL.md"), skill("s", "s"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    const scopeByName = Object.fromEntries(nonIntake(resources).map((entry) => [entry.skill.name, entry.scope]));
+    const scopeByName = Object.fromEntries(nonBundled(resources).map((entry) => [entry.skill.name, entry.scope]));
     expect(scopeByName).toEqual({ u: "user", p: "project", s: "project-shared" });
     await cleanup(home, project);
   });
@@ -171,7 +185,7 @@ describe("discoverEvokResources (#110) — scope, read roots, and symlinks", () 
     await writeSkill(join(home, ".pi", "skills", "u", "SKILL.md"), skill("u", "u"));
     await writeSkill(join(project, ".pi", "skills", "p", "SKILL.md"), skill("p", "p"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    const extra = resources.readRoots.filter((r) => !r.includes("mission-intake")).sort();
+    const extra = resources.readRoots.filter((r) => !isBundledReadRoot(r)).sort();
     expect(extra).toEqual(
       [join(home, ".pi", "skills", "u"), join(project, ".pi", "skills", "p")].sort(),
     );

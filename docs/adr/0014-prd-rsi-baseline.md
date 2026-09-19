@@ -200,6 +200,19 @@ This amendment does not fill experiment / evidence / policy skill
 bodies, unfreeze `#40`, implement Deploy Arena, or change gate /
 Admission / Budget predicates.
 
+## Amendment (ET-SKILL-EXP / #154)
+
+The bundled packaging source ships a thin accepted `experiment`
+skill (`owner`/`namespace: evok`, `category: experiment`). It is
+discoverable on the same Pi root after sync, visible as L0 on
+`/skills` and the Mission overlay, and loadable as L1 via
+`/skill experiment`. The body is not authorization to start,
+continue, or submit.
+
+This amendment does not fill `evidence` / `policy` bodies, change
+EXP Admission or Budget predicates, unfreeze `#40`, implement
+Deploy Arena, or thaw true-submit.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
