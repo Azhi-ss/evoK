@@ -1270,6 +1270,28 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toMatch(/Budget Gate/i);
     expect(text).toMatch(/not a second control plane/i);
     expect(text).not.toContain("CANDIDATE-BODY");
+    expect(text).toMatch(/- experiment \[experiment\]/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/skill experiment loads L1 and is not start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "experiment", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toContain("Task Contract");
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
     await rm(project, { recursive: true, force: true });
   });
 });

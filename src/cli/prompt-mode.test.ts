@@ -152,6 +152,7 @@ describe("overlay assembly (ET-PROMPT-MODE / #150)", () => {
       expect(overlay).toContain("m-abc123def456:baseline:1");
       expect(overlay).toMatch(/L0 evoK skills/i);
       expect(overlay).toMatch(/mission-intake/);
+      expect(overlay).toMatch(/experiment/);
     } finally {
       await rm(project, { recursive: true, force: true });
     }
