@@ -156,6 +156,7 @@ describe("overlay assembly (ET-PROMPT-MODE / #150)", () => {
       expect(overlay).toMatch(/evidence \[evidence\]/);
       expect(overlay).toMatch(/policy \[policy\]/);
       expect(overlay).toMatch(/search \[search\]/);
+      expect(overlay).toMatch(/method-improvement \[method-improvement\]/);
     } finally {
       await rm(project, { recursive: true, force: true });
     }

@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { discoverEvokResources, EvokResourceError } from "./evok-resources";
 
-const BUNDLED_SKILL_NAMES = new Set(["mission-intake", "experiment", "evidence", "policy", "search"]);
+const BUNDLED_SKILL_NAMES = new Set(["mission-intake", "experiment", "evidence", "method-improvement", "policy", "search"]);
 
 function nonBundled(resources: Awaited<ReturnType<typeof discoverEvokResources>>) {
   return resources.skills.filter((entry) => !BUNDLED_SKILL_NAMES.has(entry.skill.name));
@@ -16,7 +16,8 @@ function isBundledReadRoot(path: string): boolean {
     || path.includes(join("evok", "experiment", "experiment"))
     || path.includes(join("evok", "evidence", "evidence"))
     || path.includes(join("evok", "policy", "policy"))
-    || path.includes(join("evok", "search", "search"));
+    || path.includes(join("evok", "search", "search"))
+    || path.includes(join("evok", "method-improvement", "method-improvement"));
 }
 
 interface Layout {
@@ -67,6 +68,7 @@ describe("discoverEvokResources (ET-SKILL-NS / #152) — same Pi root", () => {
     expect(resources.skills.some((s) => s.skill.name === "evidence")).toBe(true);
     expect(resources.skills.some((s) => s.skill.name === "policy")).toBe(true);
     expect(resources.skills.some((s) => s.skill.name === "search")).toBe(true);
+    expect(resources.skills.some((s) => s.skill.name === "method-improvement")).toBe(true);
     expect(names).not.toContain("ghost");
     expect(names).not.toContain("plain");
     await cleanup(home, project);
@@ -76,7 +78,7 @@ describe("discoverEvokResources (ET-SKILL-NS / #152) — same Pi root", () => {
     const home = await mkdtemp(join(tmpdir(), "evok-home-"));
     const project = await mkdtemp(join(tmpdir(), "evok-project-"));
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
-    expect(resources.skills.map((s) => s.skill.name).sort()).toEqual(["evidence", "experiment", "mission-intake", "policy", "search"]);
+    expect(resources.skills.map((s) => s.skill.name).sort()).toEqual(["evidence", "experiment", "method-improvement", "mission-intake", "policy", "search"]);
     expect(resources.systemPrompt).toBeUndefined();
     expect(resources.appendSystemPrompt).toBeUndefined();
     expect(resources.skills.find((s) => s.skill.name === "mission-intake")?.skill.filePath).toBe(
@@ -94,10 +96,14 @@ describe("discoverEvokResources (ET-SKILL-NS / #152) — same Pi root", () => {
     expect(resources.skills.find((s) => s.skill.name === "search")?.skill.filePath).toBe(
       join(project, ".pi", "skills", "evok", "search", "search", "SKILL.md"),
     );
+    expect(resources.skills.find((s) => s.skill.name === "method-improvement")?.skill.filePath).toBe(
+      join(project, ".pi", "skills", "evok", "method-improvement", "method-improvement", "SKILL.md"),
+    );
     expect([...resources.readRoots].sort()).toEqual([
       join(project, ".pi", "skills", "evok", "evidence", "evidence"),
       join(project, ".pi", "skills", "evok", "experiment", "experiment"),
       join(project, ".pi", "skills", "evok", "intake", "mission-intake"),
+      join(project, ".pi", "skills", "evok", "method-improvement", "method-improvement"),
       join(project, ".pi", "skills", "evok", "policy", "policy"),
       join(project, ".pi", "skills", "evok", "search", "search"),
     ].sort());
