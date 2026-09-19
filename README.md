@@ -170,9 +170,11 @@ Autonomous continuation from measured evidence (#113):
   turn each create a fresh runtime + intent store, so identical requests never
   replay a stored result. One-shot `Ctrl+C` cancels the in-flight Run only —
   no Mission-pause meaning is bound to it; TUI keybindings stay on Pi.
-- The process loads no personal Pi prompts, skills, extensions, packages, or
-  history (the SDK loader stays in `noSkills/noExtensions/noPromptTemplates/
-  noContextFiles` mode). Approved evoK/project resources arrive in T2 (#110).
+- The process does not inherit personal Pi prompts, extensions, packages, or
+  conversation history (the SDK loader stays in `noSkills/noExtensions/
+  noPromptTemplates/noContextFiles` mode). Skills are discovered from the
+  Pi native skills root and tag-filtered for Mission/Intake inject and
+  `/skills` (ET-SKILL-NS / #152). Approved prompts still come from `.evok`.
 
 Offline contract tests use the SDK faux provider (`src/cli/evok-cli.test.ts`,
 `src/evok-model.test.ts`): response path, exact tier routing, usage display,

@@ -37,6 +37,7 @@ function skill(partial: Partial<SkillRoutingInput> & Pick<SkillRoutingInput, "na
   return {
     description: partial.description ?? `${partial.name} skill`,
     baseDir: partial.baseDir ?? join("/tmp", partial.name),
+    owner: "evok",
     ...partial,
   };
 }
@@ -91,7 +92,7 @@ describe("three lifecycle states — orthogonal to disclosure", () => {
     expect(JSON.stringify(pointers)).not.toContain("demoted must stay out");
   });
 
-  test("unspecified state is accepted so ADR-0006 discovery still loads L0 metadata", () => {
+  test("unspecified state is accepted for an evoK-tagged skill so L0 metadata still loads", () => {
     const routed = routeSkills([skill({ name: "legacy", filePath: "/tmp/legacy/SKILL.md" })]);
     expect(routed[0]?.state).toBe("accepted");
     expect(defaultContextPointers(routed)).toHaveLength(1);
@@ -123,6 +124,7 @@ describe("L0 → on-trigger read-full disclosure", () => {
       filePath,
       baseDir: dir,
       state: "accepted",
+      owner: "evok",
       disclosure: "l0-pointer",
     });
     expect(JSON.stringify(pointer)).not.toContain("SECRET-SKILL-BODY-L1");

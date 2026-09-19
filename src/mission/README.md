@@ -5,7 +5,8 @@
 W1 骨架：`research-entry` 持久化 control-events 并提供薄 `/research`
 status / continue（evoK 产品入口；TUI 镜像同一语义，不抢 Pi `/resume`）。
 `skills-routing` 提供八类目录 + L0→L1 渐进披露 + 三态
-（candidate / accepted / demoted）；默认上下文只进 accepted 短描述。
+（candidate / accepted / demoted）；默认上下文只进 **accepted + evoK-tagged**
+短描述。发现走同一 Pi skills 根，再按 `owner`/`namespace: evok` 过滤。
 文件体写回未开（read-only shell）。candidate 升 accepted 必须过
 evidence Admission（无保护 holdout 拒绝；有效性 hang 不是 pass）。
 传入 BudgetDecision 时，超预算或未预留拒绝 continue / writeback；

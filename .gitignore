@@ -6,6 +6,9 @@ pi-session-*.html
 # A real project also gets .evok/missions/.gitignore written by the store;
 # project .evok config and skills remain versionable.
 .evok/missions/
+# Pi native project skills root (ET-SKILL-NS). Bundled source stays in
+# resources/skills/; evok syncs into .pi/skills at runtime.
+.pi/
 node_modules/
 dist/
 *.log

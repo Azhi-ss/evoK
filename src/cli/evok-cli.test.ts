@@ -350,13 +350,16 @@ describe("runEvok research resources (#110)", () => {
     await rm(project, { recursive: true, force: true });
   });
 
-  test("plain agents/ and .pi/ never enter discovery (global ~/.agents exclusion is covered in evok-resources.test)", async () => {
+  test("plain agents/ and .evok/skills are not a parallel root; .pi/skills is the Pi scan", async () => {
     const project = await evokProject();
     await mkdir(join(project, "agents", "skills", "plain"), { recursive: true });
     await writeFile(join(project, "agents", "skills", "plain", "SKILL.md"), "---\nname: plain\ndescription: plain agents\n---\n");
+    await mkdir(join(project, ".evok", "skills", "ghost"), { recursive: true });
+    await writeFile(join(project, ".evok", "skills", "ghost", "SKILL.md"), "---\nname: ghost\ndescription: PARALLEL-EVOK-ROOT-MARKER\n---\n");
+    await mkdir(join(project, ".pi", "skills", "keep"), { recursive: true });
+    await writeFile(join(project, ".pi", "skills", "keep", "SKILL.md"), "---\nname: keep\ndescription: kept skill\nowner: evok\ncategory: search\nstate: accepted\n---\n");
     await mkdir(join(project, ".pi", "skills", "pi"), { recursive: true });
     await writeFile(join(project, ".pi", "skills", "pi", "SKILL.md"), "---\nname: pi\ndescription: pi skill\n---\n");
-    await skillFile(join(project, ".evok", "skills", "keep", "SKILL.md"), "keep", "kept skill");
 
     const faux = fauxProvider({ provider: "evok-cli-res2", models: [{ id: "deterministic" }] });
     faux.setResponses([fauxAssistantMessage("done")]);
@@ -378,15 +381,16 @@ describe("runEvok research resources (#110)", () => {
     expect(code).toBe(0);
     const report = stdout.text();
     expect(report).toContain("keep");
-    expect(report).not.toContain("plain");
-    expect(report).not.toContain("pi skill");
+    expect(report).toContain("pi skill");
+    expect(report).not.toContain("plain agents");
+    expect(report).not.toContain("PARALLEL-EVOK-ROOT-MARKER");
     await rm(project, { recursive: true, force: true });
   });
 
   test("a name collision is resolved project-first and surfaced as a visible diagnostic", async () => {
     const project = await evokProject();
     await skillFile(join(project, ".agents", "skills", "dup", "SKILL.md"), "dup", "shared dup");
-    await skillFile(join(project, ".evok", "skills", "dup", "SKILL.md"), "dup", "project dup");
+    await skillFile(join(project, ".pi", "skills", "dup", "SKILL.md"), "dup", "project dup");
     const faux = fauxProvider({ provider: "evok-cli-res3", models: [{ id: "deterministic" }] });
     faux.setResponses([fauxAssistantMessage("done")]);
     const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
@@ -407,14 +411,14 @@ describe("runEvok research resources (#110)", () => {
     expect(code).toBe(0);
     const report = stdout.text();
     expect(report).toMatch(/resource collision/);
-    expect(report).toContain(join(project, ".evok", "skills", "dup", "SKILL.md"));
+    expect(report).toContain(join(project, ".pi", "skills", "dup", "SKILL.md"));
     expect(report).toContain("wins over");
     await rm(project, { recursive: true, force: true });
   });
 
   test("a real SDK tool call reads an in-place skill reference even though the Run workspace differs", async () => {
     const project = await evokProject();
-    const skillDir = join(project, ".evok", "skills", "method");
+    const skillDir = join(project, ".pi", "skills", "method");
     await mkdir(join(skillDir, "references"), { recursive: true });
     await writeFile(join(skillDir, "references", "guide.md"), "CLI-RELATIVE-REF-9");
     await skillFile(join(skillDir, "SKILL.md"), "method", "method skill");
@@ -1237,10 +1241,10 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
 
   test("/skills is readable offline and does not launch TUI or need a model", async () => {
     const project = await tempProject();
-    await mkdir(join(project, ".evok", "skills", "try-search"), { recursive: true });
+    await mkdir(join(project, ".pi", "skills", "evok", "search", "try-search"), { recursive: true });
     await writeFile(
-      join(project, ".evok", "skills", "try-search", "SKILL.md"),
-      "---\nname: try-search\ndescription: candidate search tip\nstate: candidate\ncategory: search\n---\nCANDIDATE-BODY\n",
+      join(project, ".pi", "skills", "evok", "search", "try-search", "SKILL.md"),
+      "---\nname: try-search\ndescription: candidate search tip\nowner: evok\nstate: candidate\ncategory: search\n---\nCANDIDATE-BODY\n",
     );
     const stdout = new CollectStream();
     let tuiLaunched = false;
