@@ -23,7 +23,7 @@ bun test src/cli/prompt-mode.test.ts -t "Mission overlay carries"
 3. `/skills` 与 Mission overlay 的 accepted L0 可见 `recovery`（只有 name+description）。
 4. `/skill recovery` 灌 L1，正文写明 **不是** start / continue / 交卷授权，且 **不放宽门**。
 5. L1 含四行模板：何时用 / 禁止做什么 / ≠授权 / 与 Admission·Budget 关系。
-6. 正文只指向既有路径：`continueResearch` / `/research continue`；`MISSION_REPAIRED` + `/research repair` reserved；`resumeAuthorizedMission` / `/mission-resume`；`runKillTestHang`。**不是**第二控制面；**不**新造 hang 谓词。
+6. 正文只指向既有路径：`continueResearch` / `/research continue`；`MISSION_REPAIRED` + `/research repair` reserved；`resumeAuthorizedMission`（`mission-start.ts`）/ `reconcileInterruptedMission`（`mission-resume.ts`）/ `/mission-resume`；`runKillTestHang`。**不是**第二控制面；**不**新造 hang 谓词。
 7. 缺 protected holdout 仍拒 Admission；未预留 Budget 仍拒 writeback；hang inconclusive 不是 pass；未映射 T48 artifact 仍挡。
 
 tty 上手：

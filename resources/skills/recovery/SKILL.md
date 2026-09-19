@@ -20,8 +20,8 @@ Authoring language of this skill is English. **Respond in the user's language** 
 Use this skill when a Mission already has an authorized envelope and someone is asking how to:
 
 - continue an authorized Mission after a recorded baseline (`/research continue` → `continueResearch` in `src/mission/research-entry.ts`)
-- recover a readable research view from durable events (`recoverResearchStatus` over `control-events.jsonl` plus the MissionRecord)
-- resume an interrupted Mission from disk (`resumeAuthorizedMission` / `reconcileInterruptedMission` in `src/mission/mission-resume.ts`; CLI/TUI `/mission-resume` or `evok --resume`)
+- recover a readable research view from durable events (`recoverResearchStatus` over `control-events.jsonl`; disk merge with the MissionRecord is `readResearchStatus`)
+- resume an interrupted Mission from disk (`resumeAuthorizedMission` in `src/mission/mission-start.ts` calls `reconcileInterruptedMission` in `src/mission/mission-resume.ts`; CLI/TUI `/mission-resume` or `evok --resume`)
 - locate the existing hang gate (`runKillTestHang` in `src/evidence/kill-test-hang.ts`)
 
 ## When forbidden
@@ -57,7 +57,7 @@ Do not treat this skill as Admission, Promotion, Budget pass, or a relaxation of
 Pointers — not a second control plane:
 
 - **Continue:** `/research continue` → `continueResearch` in `src/mission/research-entry.ts`. Records `MISSION_CONTINUED` / `EXPERIMENT_ENTERED`. Model-authored approval cannot continue.
-- **Repair / interrupt recovery:** `MISSION_REPAIRED` is already a control-event type projected by `recoverResearchStatus`. `/research repair` is reserved on the CLI (status + one authorized continue this slice). Interrupted-Mission recovery is `reconcileInterruptedMission` then `resumeAuthorizedMission` in `src/mission/mission-resume.ts` via `/mission-resume`. Branch accounting stays in `src/mission/branch-recovery.ts`.
+- **Repair / interrupt recovery:** `MISSION_REPAIRED` is already a control-event type projected by `recoverResearchStatus`. `/research repair` is reserved on the CLI (status + one authorized continue this slice). Interrupted-Mission recovery is `resumeAuthorizedMission` in `src/mission/mission-start.ts` after `reconcileInterruptedMission` in `src/mission/mission-resume.ts`, via `/mission-resume`. Branch accounting stays in `src/mission/branch-recovery.ts`.
 - **Hang:** `runKillTestHang` in `src/evidence/kill-test-hang.ts`. Docs pin: `docs/adr/0008-evidence-physical-pack.md`. No new hang predicate.
 
 ## Handoff
