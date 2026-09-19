@@ -44,14 +44,14 @@ Pi owns Pi shorts (`/model`, `/new`, `/resume`, `/settings`, …). evoK does
 
 | Want | CLI (one-shot) | TUI slash |
 | --- | --- | --- |
-| Explore / chat at project root | `evok` (tty, empty project) or `evok "inspect …" --project <abs>` | just type; `mode=explore` |
+| Explore / chat at project root | `evok --project <abs>` (tty, **empty** project) or `evok "inspect …" --project <abs>` | just type; `mode=explore` only when there is no draft and no accepted Mission |
 | List unfinished Missions | `evok --missions --project <abs>` | `/missions` or `/evok-missions` |
-| Intake (draft only) | `evok --intake "…" --project <abs>` or `evok /intake "…"` | `/intake …` or `/mission-intake …` or `/evok-intake …` |
+| Intake (draft only) | `evok --intake "…" --project <abs>` or `evok /intake "…" --project <abs>` | `/intake …` or `/mission-intake …` or `/evok-intake …` |
 | Review a draft | `evok --status --mission <id> --project <abs>` + read `draft.json` | no `/review` command — same `--status` / files |
-| Start baseline | `evok --start` or `evok /start` (add `--baseline-only`) | `/start` or `/evok-start` |
-| Mission resume after interrupt | `evok --resume` or `evok /resume` (one-shot) | **`/mission-resume`** or `/evok-resume` — **not** Pi `/resume` |
-| Research status | `evok /research status --project <abs>` | `/research status` |
-| One authorized continue | `evok /research continue --project <abs>` | `/research continue` |
+| Start baseline | `evok --start --baseline-only --project <abs> --mission <id>` or `evok /start --baseline-only --project <abs> --mission <id>` | `/start` or `/evok-start` (same flags) |
+| Mission resume after interrupt | `evok --resume --project <abs> --mission <id>` or one-shot `evok /resume --project <abs> --mission <id>` | **`/mission-resume`** or `/evok-resume` — **not** Pi `/resume` |
+| Research status | `evok /research status --project <abs> --mission <id>` | `/research status` |
+| One authorized continue | `evok /research continue --project <abs> --mission <id>` | `/research continue` |
 | Skills L0 directory | `evok /skills --project <abs>` | `/skills` or `/evok-skills` |
 | Skill L1 body | `evok /skill <name> --project <abs>` | `/skill <name>` or `/evok-skill <name>` |
 
@@ -82,16 +82,18 @@ authorize start, continue, or External Submission.
 Inspect a research project without writing a Mission.
 
 ```bash
-PROJECT="$(pwd)/examples/demo-start"
+# empty directory → mode=explore (a saved draft flips the TUI to intake)
+PROJECT="$(pwd)/tmp-explore"
+mkdir -p "$PROJECT"
 
-# tty: Pi native TUI, mode=explore on an empty project
+# tty: Pi native TUI, mode=explore
 bun run evok --project "$PROJECT"
 
 # one-shot inspect (fresh Run; project is read-only to the model)
 bun run evok --project "$PROJECT" "inspect this research project and summarize what you see"
 
-# Skills directory — offline, no model
-bun run evok /skills --project "$PROJECT"
+# Skills directory — offline, no model (works on any abs project, including the demo)
+bun run evok /skills --project "$(pwd)/examples/demo-start"
 ```
 
 Explore can still see ordinary Pi skills in the TUI. `evok /skills` lists
@@ -179,18 +181,24 @@ bun run evok /start --baseline-only --project "$DEMO" --mission demo-start
 ```
 
 `--baseline-only` runs only the measured baseline (no autonomous
-continuation). Omit it only when you intend the Director to propose further
-Experiments after the baseline (`--max-experiments`, default 3).
+continuation). Omit it only when you intend the **Mission Director** to
+propose further Experiments after the baseline (`--max-experiments`,
+default 3).
 
 Without an injected test runner, `--start` first runs
 `inspectStartHardGates`. If any **blocking** start-path gate is closed it
-prints **remaining hard gates**, dispatches **nothing**, and exits `3`. That
-listing is **not** a product-green and not Admission / submit.
+prints **remaining hard gates**, dispatches **nothing**, and exits `3`
+(`configError`). That listing is **not** a product-green and not Admission /
+submit.
 
-Typical blocking gates on a new machine:
+Typical **blocking** start-path checks on a new machine (these can later
+pass; they are not the in-force block):
 
 - **Pi model/auth** — `~/.pi/agent` must resolve and preflight the requested
-  tier. Missing configuration is not a pass (exit `3` config / `4` auth).
+  tier. Missing configuration **blocks** this start. On the `--start`
+  inventory path that is still exit `3`. Exit `4` (`authError`) is the later
+  general preflight when a live Run is about to be constructed — not a
+  claimed pass.
 - **evaluation contract** — `<abs-project>/.evok/evaluation.json`
 - **reviewed Mission draft** — ready-for-review `draft.json`; name `--mission`
   when more than one exists
@@ -244,10 +252,9 @@ bun run evok --resume --mission <id> --project "$PROJECT"
 Resume reconstructs from durable records only. Intake is not repeated. Spent
 budget is never restored.
 
-Offline, reproducible lifecycle (faux model, no paid calls):
-[`examples/lifecycle/`](../examples/lifecycle/README.md)
-(`bun run example:lifecycle`). Live-provider acceptance is a separate,
-opt-in runbook: [live-acceptance-t6.md](live-acceptance-t6.md).
+A separate offline faux-model lifecycle already lives under
+[`examples/lifecycle/`](../examples/lifecycle/README.md); it is **not** this
+start path and is **not** a live-model pass.
 
 ---
 
@@ -269,6 +276,7 @@ authority is that Pi root, not `resources/skills/` as a parallel root.
 | `policy` | `policy` | Mission Policy red lights; skill ≠ privilege |
 
 ```bash
+PROJECT="$(pwd)/examples/demo-start"
 bun run evok /skills --project "$PROJECT"
 bun run evok /skill experiment --project "$PROJECT"
 bun run evok /skill evidence --project "$PROJECT"
@@ -312,8 +320,9 @@ Catalog and packaging notes: [`resources/skills/README.md`](../resources/skills/
 
 ## Hard gates that stay in force
 
-These are listed on every start-path inventory as **Still in force (not
-downgraded; not a pass; does not invent green)**:
+Every start-path inventory ends with **Still in force (not downgraded; not
+a pass; does not invent green)**. Those five never count as a product pass,
+even when every blocking start-path check is clear:
 
 | Gate | Honest status |
 | --- | --- |
@@ -322,7 +331,11 @@ downgraded; not a pass; does not invent green)**:
 | **hang** | Inconclusive hang is not pass. Predicates unchanged. |
 | **T48** | Unmapped T48 artifacts still block. Predicates unchanged. |
 | **External Submission / Broker** | True submit stays frozen. Start is not submit authorization. Broker predicates unchanged. |
-| **Pi model/auth** | A live baseline still requires configured model and credentials. Missing auth is a **block**, not a pass. |
+
+**Pi model/auth** is a **blocking start-path check**, not one of those
+in-force lines. It can pass once `~/.pi/agent` resolves and preflights the
+requested tier. Until then it blocks the live baseline. Missing auth is
+never treated as a pass.
 
 Also still true, and **not** claimed by this guide:
 
