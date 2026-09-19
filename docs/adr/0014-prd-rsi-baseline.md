@@ -244,6 +244,25 @@ This amendment does not change EXP Admission or Budget
 predicates, change hang / T48 predicates, unfreeze `#40`,
 implement Deploy Arena, or thaw true-submit.
 
+## Amendment (ET-SKILL-SEA / #160)
+
+The bundled packaging source ships a thin accepted `search`
+skill (`owner`/`namespace: evok`, `category: search`). It is
+discoverable on the same Pi root after sync, visible as L0 on
+`/skills` and the Mission overlay, and loadable as L1 via
+`/skill search`. The body states default parent selection
+remains `fixed_uct`, strong search / Progressive is explicit
+opt-in only, and `#40` stays off. Programmable exploration
+heuristics may be recorded as docs or guidance; they do not
+change default selection math. The body is not authorization
+to start, continue, or submit, and it does not relax
+Admission, Budget, hang, or T48 predicates.
+
+This amendment does not change EXP Admission or Budget
+predicates, change hang / T48 predicates, unfreeze `#40`,
+weld Progressive as product default, implement Deploy Arena,
+or thaw true-submit.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -253,4 +272,6 @@ implement Deploy Arena, or thaw true-submit.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
-  selection math, Skills bodies, and Deploy Arena stay unopened).
+  selection math and Deploy Arena stay unopened). Remaining skill
+  bodies (`method-improvement` / `recovery` / `pitfalls`) stay
+  unopened; `search` is the ET-SKILL-SEA accepted body.
