@@ -36,7 +36,7 @@ foreground entry over the existing `PiAgentRuntime` Pi SDK execution path:
 bun run evok "inspect this research project and summarize what you see"
 bun run evok --tier deep "compare these two approaches" --project /path/to/project
 echo "request text" | bun run evok        # piped stdin; no tty
-bun run evok                             # tty: Pi native TUI (SDK InteractiveMode); Pi /model /new /resume stay on Pi; Mission resume is /mission-resume
+bun run evok                             # tty: Pi native TUI (SDK InteractiveMode); mode=explore|intake|mission; Pi /model /new /resume stay on Pi; Mission resume is /mission-resume
 ```
 
 Options: `--project <dir>` (default cwd), `--tier default|fast|deep|mid`

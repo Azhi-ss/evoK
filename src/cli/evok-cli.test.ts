@@ -931,6 +931,57 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(stdout.text()).toMatch(/Pi owns Pi shorts/);
     expect(stdout.text()).not.toMatch(/personal Pi prompts\/skills\/extensions\/history and global shared skills are not loaded/);
     expect(stdout.text()).toMatch(/credentials stay in ~\/\.pi\/agent/);
+    expect(stdout.text()).toMatch(/mode=explore/);
+    expect(launches[0]!.promptMode).toBe("explore");
+    expect(launches[0]!.modeBanner).toBe("mode=explore");
+    expect(launches[0]).toHaveProperty("promptModeExtension");
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("TUI launch banner shows mode=intake when writing a draft and mode=mission when a Mission is active", async () => {
+    const project = await tempProject();
+    const { modelRuntime } = await fauxRuntime("evok-cli-tui-mode", [{ id: "deterministic", text: "unused" }]);
+    const ref = "evok-cli-tui-mode-deterministic/deterministic";
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      catalog: catalogFrom(modelRuntime, [ref], ref),
+    });
+    const { saveMissionDraft } = await import("../mission/mission-draft");
+    await saveMissionDraft(project, { id: "m-deadbeef0002", objective: "write a draft" });
+    const intakeLaunch: Array<Record<string, unknown>> = [];
+    const intakeOut = new CollectStream();
+    await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async (launch) => { intakeLaunch.push({ ...launch }); },
+      stdout: intakeOut,
+      stderr: new CollectStream(),
+    });
+    expect(intakeOut.text()).toMatch(/mode=intake/);
+    expect(intakeLaunch[0]!.promptMode).toBe("intake");
+
+    await mkdir(join(project, ".evok", "missions", "m-abc123def456"), { recursive: true });
+    await writeFile(join(project, ".evok", "missions", "m-abc123def456", "mission.json"), JSON.stringify({
+      schemaVersion: 1, id: "m-abc123def456", status: "running", objective: "active research",
+      contract: { objective: "active research", expectedOutputs: [], evaluationMethod: "e", hardRules: [] },
+      budget: { total: 1, units: "model-USD", consumed: 0.1, remaining: 0.9 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0, units: "model-USD" } }, runs: [] },
+      runs: {}, history: [],
+      createdAt: "2026-09-19T03:00:00.000Z", updatedAt: "2026-09-19T03:05:00.000Z",
+    }));
+    const missionLaunch: Array<Record<string, unknown>> = [];
+    const missionOut = new CollectStream();
+    await runEvok({
+      args: { project, tier: "default", timeoutMs: 600000 },
+      createResolver: async () => resolver,
+      isTty: () => true,
+      launchNativeTui: async (launch) => { missionLaunch.push({ ...launch }); },
+      stdout: missionOut,
+      stderr: new CollectStream(),
+    });
+    expect(missionOut.text()).toMatch(/mode=mission/);
+    expect(missionLaunch[0]!.promptMode).toBe("mission");
     await rm(project, { recursive: true, force: true });
   });
 

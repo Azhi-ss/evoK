@@ -3,9 +3,9 @@
  *
  * Interactive tty foreground starts the SDK `InteractiveMode` so native slash
  * commands (`/model`, `/new`, `/resume`, …) stay on Pi. evoK mirror commands
- * are registered via an inline extension factory; they dispatch through the
- * same CLI `runEvok` path. This module is session assembly, not a second
- * Mission control plane.
+ * and the Explore/Intake/Mission prompt overlay are registered via inline
+ * extension factories; mirror dispatch reuses the CLI `runEvok` path. This
+ * module is session assembly, not a second Mission control plane.
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
@@ -19,6 +19,7 @@ import {
   type InlineExtension,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
+import type { PromptMode } from "./prompt-mode";
 
 export interface NativeTuiLaunch {
   readonly projectRoot: string;
@@ -27,6 +28,10 @@ export interface NativeTuiLaunch {
   readonly model?: Model<Api>;
   /** Inline evoK mirror extension (Pi shorts are never registered). */
   readonly mirrorExtension?: InlineExtension;
+  /** ET-PROMPT-MODE: Explore / Intake / Mission overlay + visible `mode=` status. */
+  readonly promptModeExtension?: InlineExtension;
+  readonly promptMode?: PromptMode;
+  readonly modeBanner?: string;
 }
 
 /**
@@ -36,12 +41,15 @@ export interface NativeTuiLaunch {
 function createPiNativeTuiRuntimeFactory(launch: NativeTuiLaunch): CreateAgentSessionRuntimeFactory {
   const agentDir = getAgentDir();
   return async ({ cwd, sessionManager, sessionStartEvent }) => {
+    const extensionFactories = [launch.mirrorExtension, launch.promptModeExtension].filter(
+      (entry): entry is InlineExtension => entry !== undefined,
+    );
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
       ...(launch.modelRuntime ? { modelRuntime: launch.modelRuntime } : {}),
-      ...(launch.mirrorExtension
-        ? { resourceLoaderOptions: { extensionFactories: [launch.mirrorExtension] } }
+      ...(extensionFactories.length > 0
+        ? { resourceLoaderOptions: { extensionFactories } }
         : {}),
     });
     return {
