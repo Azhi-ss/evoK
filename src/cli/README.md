@@ -8,7 +8,12 @@ Physical home of `evok-cli` and the `evok` executable wrapper.
 The shell parses argv, resolves Pi models / project resources, and calls
 the mission API (`startAuthorizedMission`, intake, resume, status,
 `/research` status/continue, `/skills` directory view, `/skill <name>` L1).
-A tty with no request launches Pi native TUI (`InteractiveMode`, #134 / #148).
+A tty with no request launches Pi native TUI (`InteractiveMode`, #134 / #148 / #150).
+The status bar and launch banner show `mode=explore|intake|mission`.
+Explore keeps the Pi default prompt (optional footnote). Intake overlays
+mission-intake L1 + draft constraints (draft ≠ authorization). Mission
+overlays objective / constraints / budget / stop / no-submit / baseline +
+L0 evoK skills. Casual chat is not hijacked by Mission wording.
 Pi owns Pi shorts (`/model`, `/new`, `/resume`, …). evoK mirror slashes
 (`/skills` or `/evok-skills`, `/skill`, `/research`, `/missions`,
 `/intake`, `/start`, `/mission-resume`) have the same semantics and gates

@@ -16,6 +16,7 @@
  *   - a tty with no request and no Mission flag launches Pi native TUI
  *     (`InteractiveMode`); Pi shorts (`/model` `/new` `/resume`) stay on Pi.
  *     evoK mirror slashes dispatch through this same shell (ET-TUI-MIRROR).
+ *     Explore / Intake / Mission overlays + visible `mode=` (ET-PROMPT-MODE).
  *   - one-shot Ctrl+C / SIGINT cancels the in-flight request. No Mission-pause
  *     meaning is bound to Ctrl+C. TUI keybindings stay on Pi.
  *
@@ -75,6 +76,11 @@ import {
   parseSkillsCommand,
   type SkillsVerb,
 } from "../mission/skills-routing";
+import {
+  createEvokPromptModeExtension,
+  formatPromptModeBanner,
+  resolvePromptMode,
+} from "./prompt-mode";
 import { createEvokTuiMirrorExtension, executeTuiMirrorCommand, formatTuiConflictTable } from "./tui-mirror";
 
 export const EVOK_VERSION = "0.1.0-t6";
@@ -183,7 +189,10 @@ options:
   -h, --help        show this help
 
 On a tty with no request and no Mission flag, evok launches the Pi SDK native
-TUI. Pi owns Pi shorts (\`/model\`, \`/new\`, \`/resume\`, …). evoK mirror
+TUI. The status bar / launch banner shows \`mode=explore|intake|mission\`.
+Explore keeps the Pi default prompt (optional evoK footnote). Intake and
+Mission append an evoK overlay. Casual chat is not Mission wording.
+Pi owns Pi shorts (\`/model\`, \`/new\`, \`/resume\`, …). evoK mirror
 slashes have the same semantics and gates as this CLI (no dilution).
 
 ${formatTuiConflictTable()}
@@ -534,8 +543,11 @@ async function runNativeTui(
   }
   try {
     const resolved = await resolver.resolve(args.tier);
+    const promptMode = await resolvePromptMode({ projectRoot });
+    const modeBanner = formatPromptModeBanner(promptMode);
     stdout.write("interactive: Pi native TUI (Pi shorts /model /new /resume stay on Pi; evoK mirror /skills /research /start /mission-resume)\n");
     stdout.write("         session uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n");
+    stdout.write(`         ${modeBanner}\n`);
     for (const line of formatTuiConflictTable().split("\n")) {
       stdout.write(`         ${line}\n`);
     }
@@ -544,6 +556,9 @@ async function runNativeTui(
       tier: args.tier,
       modelRuntime: resolved.modelRuntime,
       model: resolved.modelId,
+      promptMode,
+      modeBanner,
+      promptModeExtension: createEvokPromptModeExtension({ projectRoot }),
       mirrorExtension: createEvokTuiMirrorExtension({
         projectRoot,
         tier: args.tier,
