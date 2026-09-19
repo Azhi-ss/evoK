@@ -272,4 +272,6 @@ or thaw true-submit.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
-  selection math, Skills bodies, and Deploy Arena stay unopened).
+  selection math and Deploy Arena stay unopened). Remaining skill
+  bodies (`method-improvement` / `recovery` / `pitfalls`) stay
+  unopened; `search` is the ET-SKILL-SEA accepted body.
