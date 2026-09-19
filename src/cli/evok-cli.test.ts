@@ -1320,6 +1320,33 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     await rm(project, { recursive: true, force: true });
   });
 
+  test("/skill method-improvement loads L1 and is not start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "method-improvement", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toMatch(/version id/i);
+    expect(text).toMatch(/verify command/i);
+    expect(text).toMatch(/enable record/i);
+    expect(text).toMatch(/rollback/i);
+    expect(text).toMatch(/not automatic promotion|≠ automatic promotion|not auto-promote|≠ auto-promote/i);
+    expect(text).toMatch(/Elite.{0,40}not.{0,20}Admission|Elite.{0,20}≠.{0,20}Admission/i);
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
+    expect(text).toMatch(/does not relax/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
   test("/skill search loads L1 and is not start/continue/submit authorization", async () => {
     const project = await tempProject();
     const stdout = new CollectStream();

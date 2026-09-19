@@ -263,6 +263,27 @@ predicates, change hang / T48 predicates, unfreeze `#40`,
 weld Progressive as product default, implement Deploy Arena,
 or thaw true-submit.
 
+## Amendment (ET-SKILL-RSI / #162)
+
+The bundled packaging source ships a thin accepted
+`method-improvement` skill (`owner`/`namespace: evok`,
+`category: method-improvement`). It is discoverable on the
+same Pi root after sync, visible as L0 on `/skills` and the
+Mission overlay, and loadable as L1 via
+`/skill method-improvement`. The body is the in-Mission RSI
+entry: validation-gated versioning is version id → verify
+command / adversarial tags → enable record → rollbackable.
+It is not automatic Promotion, and Elite is not an Admission
+key. The body is not authorization to start, continue, or
+submit, and it does not relax Admission, Budget, hang, or
+T48 predicates.
+
+This amendment does not open Continual Harness CRUD, weight
+co-training, change EXP Admission or Budget predicates,
+change hang / T48 predicates, unfreeze `#40`, implement
+Deploy Arena, thaw true-submit, or fill `recovery` /
+`pitfalls` skill bodies.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -273,5 +294,5 @@ or thaw true-submit.
 - No Deploy Arena implementation.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
   selection math and Deploy Arena stay unopened). Remaining skill
-  bodies (`method-improvement` / `recovery` / `pitfalls`) stay
-  unopened; `search` is the ET-SKILL-SEA accepted body.
+  bodies (`recovery` / `pitfalls`) stay unopened;
+  `method-improvement` is the ET-SKILL-RSI accepted body.
