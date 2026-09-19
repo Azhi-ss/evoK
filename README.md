@@ -2,6 +2,7 @@
 
 Standalone harness for unattended autonomous research and verifiable Method Improvement (task-internal RSI) inside one Mission: mission control, task DAG, isolated experiments (Pi SDK AgentSession as replaceable agent runtime), independent evaluation, evidence-gated promotion, and a submission broker. Compatible with existing competition arms. Product baseline: [ADR-0014](docs/adr/0014-prd-rsi-baseline.md).
 
+- How to use: [docs/how-to-use.md](docs/how-to-use.md) — Explore → intake → review → start → research
 - Spec: https://github.com/Azhi-ss/evoK/issues/1
 - Status: spec phase (阶段 0 契约固化)
 
