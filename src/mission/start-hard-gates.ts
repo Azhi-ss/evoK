@@ -14,6 +14,7 @@ import {
 } from "../local-file-evaluator";
 import {
   draftReadyForReview,
+  listDraftStartGaps,
 } from "./mission-intake";
 import {
   isMissionId,
@@ -23,6 +24,8 @@ import {
 } from "./mission-draft";
 import {
   ENFORCEABLE_BUDGET_UNITS,
+  START_FORBIDDEN_PERMISSION,
+  START_SUPPORTED_PERMISSIONS,
   isExplicitStartRequest,
   loadMissionRecord,
   MissionRecordCorruptionError,
@@ -32,16 +35,6 @@ import {
 
 export const EVALUATION_TEMPLATE_RELATIVE_PATH = "templates/evaluation.json";
 export const DEMO_START_RELATIVE_PATH = "examples/demo-start";
-
-/** Permissions the baseline start path actually grants (same set as mission-start). */
-const SUPPORTED_PERMISSIONS = new Set([
-  "read-project",
-  "isolated-workspace-write",
-  "local-shell-in-workspace",
-]);
-
-/** Declared permissions that can never be granted by start (later authority). */
-const FORBIDDEN_PERMISSION = /submi|external|network|internet|credential|deploy|publish/i;
 
 export type StartHardGateId =
   | "project-absolute"
@@ -179,18 +172,8 @@ async function inspectDraft(
   try {
     const draft = await loadMissionDraft(projectRoot, missionId);
     if (!draftReadyForReview(draft)) {
-      const missing: string[] = [];
-      if (draft.objective.trim() === "") missing.push("objective");
-      if (draft.successCriteria.length === 0) missing.push("success criteria");
-      if (draft.data.description.trim() === "") missing.push("data description");
-      if (draft.evaluation.method.trim() === "") missing.push("evaluation method");
-      if (draft.budget.total <= 0) missing.push("a positive enforceable budget");
-      if (draft.outputs.length === 0) missing.push("declared outputs");
-      if (draft.stopConditions.length === 0) missing.push("stop conditions");
-      if (draft.plan.tasks.length === 0) missing.push("the initial baseline task");
-      const extra = draft.unresolvedPrerequisites.length > 0
-        ? ` unresolved prerequisites: ${draft.unresolvedPrerequisites.join("; ")}`
-        : "";
+      const { missing, unresolved } = listDraftStartGaps(draft);
+      const extra = unresolved.length > 0 ? ` unresolved prerequisites: ${unresolved.join("; ")}` : "";
       return {
         missionId,
         draft,
@@ -255,7 +238,7 @@ function inspectBudget(draft: MissionDraft | undefined, units: string): StartHar
     return gate(
       "enforceable-budget",
       "block",
-      "enforceable model-USD budget",
+      "declared model-USD envelope",
       "no reviewed draft to read a budget from",
     );
   }
@@ -263,7 +246,7 @@ function inspectBudget(draft: MissionDraft | undefined, units: string): StartHar
     return gate(
       "enforceable-budget",
       "block",
-      "enforceable model-USD budget",
+      "declared model-USD envelope",
       `declared budget unit "${draft.budget.units}" is not enforceable on this path (only "${units}" is metered)`,
     );
   }
@@ -271,15 +254,15 @@ function inspectBudget(draft: MissionDraft | undefined, units: string): StartHar
     return gate(
       "enforceable-budget",
       "block",
-      "enforceable model-USD budget",
+      "declared model-USD envelope",
       "declared budget total must be a positive enforceable amount",
     );
   }
   return gate(
     "enforceable-budget",
     "pass",
-    "enforceable model-USD budget",
-    `${draft.budget.total} ${draft.budget.units} declared (spend still meters real provider usage)`,
+    "declared model-USD envelope",
+    `${draft.budget.total} ${draft.budget.units} declared (not a Budget Gate pass; spend still meters real provider usage)`,
   );
 }
 
@@ -294,7 +277,7 @@ function inspectPermissions(draft: MissionDraft | undefined): StartHardGate {
   }
   const permissions = draft.constraints.permissions ?? [];
   for (const permission of permissions) {
-    if (FORBIDDEN_PERMISSION.test(permission)) {
+    if (START_FORBIDDEN_PERMISSION.test(permission)) {
       return gate(
         "supported-permissions",
         "block",
@@ -302,7 +285,7 @@ function inspectPermissions(draft: MissionDraft | undefined): StartHardGate {
         `declared permission "${permission}" cannot be granted at start (external/irreversible authority is never implicit)`,
       );
     }
-    if (!SUPPORTED_PERMISSIONS.has(permission)) {
+    if (!START_SUPPORTED_PERMISSIONS.has(permission)) {
       return gate(
         "supported-permissions",
         "block",
@@ -326,7 +309,7 @@ async function inspectAlreadyStarted(projectRoot: string, missionId: string | un
     return gate(
       "already-started",
       "pass",
-      "unstarted Mission",
+      "no prior start record",
       "no Mission id to check for a prior start record",
     );
   }
@@ -335,15 +318,15 @@ async function inspectAlreadyStarted(projectRoot: string, missionId: string | un
     return gate(
       "already-started",
       "block",
-      "unstarted Mission",
+      "no prior start record",
       `mission ${missionId} was already started (status ${previous.status}); start is not idempotent`,
     );
   } catch (error) {
     if (error instanceof MissionStartRejectedError) {
-      return gate("already-started", "pass", "unstarted Mission", `no accepted start record for ${missionId}`);
+      return gate("already-started", "pass", "no prior start record", `no accepted start record for ${missionId}`);
     }
     if (error instanceof MissionRecordCorruptionError) {
-      return gate("already-started", "block", "unstarted Mission", error.message);
+      return gate("already-started", "block", "no prior start record", error.message);
     }
     throw error;
   }

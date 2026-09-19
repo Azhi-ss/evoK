@@ -434,21 +434,6 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     return EVOK_EXIT.usage;
   }
 
-  const wantsStart = Boolean(args.start)
-    || (args.request !== undefined && !args.intake && !args.resume && isExplicitStartRequest(args.request));
-  if (wantsStart && !options.startRunner) {
-    const report = await inspectStartHardGates({
-      projectRoot: projectReal,
-      missionId: args.mission,
-      authorization: { requested: true, token: args.request ?? "/start", missionSelector: "displayed" },
-      modelProbe: async () => probeStartModel(options, args),
-    });
-    if (!report.ready) {
-      stderr.write(formatStartHardGateReport(report));
-      return EVOK_EXIT.configError;
-    }
-  }
-
   // Reopening a project reads durable records only and must work with no model
   // or auth configuration (AC2): handle --missions before resolver/preflight.
   if (args.missions) {
@@ -462,6 +447,19 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   }
   if (args.skill) {
     return runSkillDisclose(stdout, stderr, projectReal, args.skill);
+  }
+
+  const wantsStart = Boolean(args.start)
+    || (args.request !== undefined && !args.intake && !args.resume && isExplicitStartRequest(args.request));
+  if (wantsStart && !options.startRunner) {
+    const report = await inspectStartHardGates({
+      projectRoot: projectReal,
+      missionId: args.mission,
+      authorization: { requested: true, token: args.request ?? "/start", missionSelector: "displayed" },
+      modelProbe: async () => probeStartModel(options, args),
+    });
+    stderr.write(formatStartHardGateReport(report));
+    if (!report.ready) return EVOK_EXIT.configError;
   }
 
   let resolver: SessionModelResolver;
