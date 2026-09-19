@@ -7,12 +7,15 @@ Physical home of `evok-cli` and the `evok` executable wrapper.
 
 The shell parses argv, resolves Pi models / project resources, and calls
 the mission API (`startAuthorizedMission`, intake, resume, status,
-`/research` status/continue, `/skills` directory view). A tty with no request launches Pi native TUI
-(`InteractiveMode`, #134); `/model` and `/new` stay on Pi. `/research` is
-an evoK product flag/request, not a TUI slash intercept. `/skills` is the
-same kind of thin product view (directory + three states; accepted
+`/research` status/continue, `/skills` directory view, `/skill <name>` L1).
+A tty with no request launches Pi native TUI (`InteractiveMode`, #134 / #148).
+Pi owns Pi shorts (`/model`, `/new`, `/resume`, …). evoK mirror slashes
+(`/skills` or `/evok-skills`, `/skill`, `/research`, `/missions`,
+`/intake`, `/start`, `/mission-resume`) have the same semantics and gates
+as this CLI. Mission resume is `/mission-resume`, not Pi `/resume`.
+`/skills` is a thin product view (directory + three states; accepted
 requires Admission; file-body writeback not opened). The TUI
-is not Mission authority.
+is an entry mirror, not Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).

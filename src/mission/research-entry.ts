@@ -10,8 +10,8 @@
  * in, over-budget or unreserved refuses continue (ET-M1-BUD). Budget pass
  * is not Admission pass and is not Mission authorization.
  *
- * `/research` is an evoK product interface parsed by the thin CLI shell. It
- * must not intercept Pi `/model` / `/new`.
+ * `/research` is an evoK product interface parsed by the thin CLI shell and
+ * mirrored in TUI (#148). It must not intercept Pi `/model` / `/new` / `/resume`.
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";

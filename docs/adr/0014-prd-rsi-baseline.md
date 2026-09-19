@@ -153,6 +153,21 @@ are unchanged. Elite / MMD / near-dup / side-slot remain not
 Promotion, Admission, or Budget Gate keys. ToyHarness stays
 fixtures/tests only.
 
+## Amendment (ET-TUI-MIRROR / #148)
+
+TUI registers evoK mirror slashes with CLI semantics. Pi keeps native
+shorts (`/model`, `/new`, `/resume`, …). Mission resume is
+`/mission-resume` or `/evok-resume`. Missing evaluation, unauthorized
+continue, and over-budget start refuse through the same `runEvok` path
+as CLI — gates are not diluted. `/skill <name>` discloses L1 from the
+existing catalog; it is not a second skills root (ET-SKILL-NS) and not
+authorization.
+
+This amendment does not open ET-PROMPT-MODE, ET-SKILL-NS, Deploy Arena,
+or weld Progressive / `#40`. Existing Kill-test / T48 / hang / Broker
+predicates, true-submit, Pattern C, EXP Admission predicates, and
+Budget Gate predicates are unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

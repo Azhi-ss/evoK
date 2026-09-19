@@ -369,9 +369,23 @@ export function demoteSkill(skill: RoutedSkill): RoutedSkill {
  */
 export function parseSkillsCommand(text: string): SkillsCommand | undefined {
   const trimmed = text.trim();
-  const match = /^(?:\/skills|--skills)(?:\s+(status))?\s*$/i.exec(trimmed);
+  const match = /^(?:\/skills|\/evok-skills|--skills)(?:\s+(status))?\s*$/i.exec(trimmed);
   if (!match) return undefined;
   return { verb: "status" };
+}
+
+/**
+ * `/skill <name>` discloses L1 from the existing catalog. `/skills` is the
+ * directory view and must not match. Name must already be discoverable —
+ * this is not a second skills root (ET-SKILL-NS owns tagging later).
+ * Disclosure is not Skill State acceptance and not Mission authorization.
+ */
+export function parseSkillDiscloseCommand(text: string): { readonly name: string } | undefined {
+  const trimmed = text.trim();
+  if (/^\/skills\b/i.test(trimmed)) return undefined;
+  const match = /^(?:\/skill|\/evok-skill)(?:\s+(\S+))\s*$/i.exec(trimmed);
+  if (!match?.[1]) return undefined;
+  return { name: match[1] };
 }
 
 export async function listSkillsDirectory(options: {
@@ -431,6 +445,20 @@ export function formatSkillsDirectory(view: SkillsDirectoryView): string {
     }
   }
   lines.push(`   writeback: ${view.writeback}`);
+  return `${lines.join("\n")}\n`;
+}
+
+export function formatDisclosedSkill(skill: DisclosedSkill): string {
+  const cat = skill.category ? ` [${skill.category}]` : "";
+  const lines = [
+    `-- skill ${skill.name}${cat} · disclosure ${skill.disclosure} · ${SKILL_WRITEBACK_STATUS}`,
+    "   /skill discloses L1 from the existing catalog; it is not authorization to start, continue, or submit",
+    `   state: ${skill.state}`,
+  ];
+  if (skill.body !== undefined) {
+    lines.push("   ---");
+    lines.push(skill.body.replace(/\s+$/, ""));
+  }
   return `${lines.join("\n")}\n`;
 }
 
