@@ -927,19 +927,24 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(launches[0]).not.toHaveProperty("commandTable");
     expect(stdout.text()).not.toMatch(/foreground REPL/);
     expect(stdout.text()).toMatch(/native TUI/i);
+    expect(stdout.text()).toMatch(/mission-resume/);
+    expect(stdout.text()).toMatch(/Pi owns Pi shorts/);
     expect(stdout.text()).not.toMatch(/personal Pi prompts\/skills\/extensions\/history and global shared skills are not loaded/);
     expect(stdout.text()).toMatch(/credentials stay in ~\/\.pi\/agent/);
     await rm(project, { recursive: true, force: true });
   });
 
-  test("Pi native slash commands /model and /new are not an evoK intercept table", () => {
+  test("Pi native slash commands /model /new /resume are not stolen by evoK; Mission resume is /mission-resume", () => {
     expect(EVOK_USAGE).toMatch(/native TUI/i);
+    expect(EVOK_USAGE).toMatch(/\/mission-resume/);
+    expect(EVOK_USAGE).toMatch(/Pi owns/i);
     expect(EVOK_USAGE).not.toMatch(/REPL/);
     expect(EVOK_USAGE).not.toMatch(/in a REPL/);
     expect(isExplicitStartRequest("/model")).toBe(false);
     expect(isExplicitStartRequest("/new")).toBe(false);
     expect(isExplicitResumeRequest("/model").resume).toBe(false);
     expect(isExplicitResumeRequest("/new").resume).toBe(false);
+    expect(isExplicitResumeRequest("/mission-resume").resume).toBe(true);
     expect(parseResearchCommand("/model")).toBeUndefined();
     expect(parseResearchCommand("/new")).toBeUndefined();
     expect(parseSkillsCommand("/model")).toBeUndefined();
@@ -950,6 +955,7 @@ describe("runEvok tty path uses Pi native TUI (ET-TUI1)", () => {
     expect(parseEvokArgs(["/new"]).skills).toBeUndefined();
     expect(parseEvokArgs(["/model"]).request).toBe("/model");
     expect(parseEvokArgs(["/new"]).request).toBe("/new");
+    expect(parseEvokArgs(["/mission-resume"]).resume).toBe(true);
   });
 
   test("one-shot request still uses the headless Run path, not TUI", async () => {

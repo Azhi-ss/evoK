@@ -99,7 +99,9 @@ export function isExplicitResumeRequest(text: string): { resume: boolean; missio
   const t = text.trim();
   const lower = t.toLowerCase();
   const id = t.match(MISSION_ID_RE)?.[0];
-  if (/^\/resume(?:\s|$)/.test(lower)) return { resume: true, ...(id ? { missionId: id } : {}) };
+  if (/^\/(?:resume|mission-resume|evok-resume)(?:\s|$)/.test(lower)) {
+    return { resume: true, ...(id ? { missionId: id } : {}) };
+  }
   if (lower.includes("?")) return { resume: false, ...(id ? { missionId: id } : {}) };
   if (/\b(?:don'?t|do not|never|shouldn'?t|won'?t|cannot|can'?t|not|maybe|later)\b[^.!?]*\b(?:resume|continue|pick\s?up|go\s?on|carry\s?on)\b/i.test(t)) {
     return { resume: false, ...(id ? { missionId: id } : {}) };

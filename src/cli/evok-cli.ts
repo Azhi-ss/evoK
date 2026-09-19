@@ -14,7 +14,8 @@
  *   - each one-shot request is a fresh Run (fresh session/attempt identity,
  *     runtime policy keeps hidden SDK retry/compaction disabled);
  *   - a tty with no request and no Mission flag launches Pi native TUI
- *     (`InteractiveMode`); evoK does not intercept `/model` / `/new`.
+ *     (`InteractiveMode`); Pi shorts (`/model` `/new` `/resume`) stay on Pi.
+ *     evoK mirror slashes dispatch through this same shell (ET-TUI-MIRROR).
  *   - one-shot Ctrl+C / SIGINT cancels the in-flight request. No Mission-pause
  *     meaning is bound to Ctrl+C. TUI keybindings stay on Pi.
  *
@@ -66,11 +67,15 @@ import {
   type ResearchVerb,
 } from "../mission/research-entry";
 import {
+  discloseSkill,
+  formatDisclosedSkill,
   formatSkillsDirectory,
   listSkillsDirectory,
+  parseSkillDiscloseCommand,
   parseSkillsCommand,
   type SkillsVerb,
 } from "../mission/skills-routing";
+import { createEvokTuiMirrorExtension, executeTuiMirrorCommand, formatTuiConflictTable } from "./tui-mirror";
 
 export const EVOK_VERSION = "0.1.0-t6";
 
@@ -119,8 +124,10 @@ export interface ParsedEvokArgs {
   readonly missions?: boolean;
   /** #138: thin evoK `/research` product entry (not a Pi slash command). */
   readonly research?: ResearchVerb;
-  /** #140: thin evoK `/skills` directory view (not a Pi slash command). */
+  /** #140: thin evoK `/skills` directory view. */
   readonly skills?: SkillsVerb;
+  /** #148: `/skill <name>` L1 disclose from the existing catalog. */
+  readonly skill?: string;
   readonly help?: boolean;
   readonly error?: string;
 }
@@ -157,27 +164,30 @@ options:
                     Mission from durable records and remaining budget. No intake
                     is repeated, no spent budget is restored; unconfirmed
                     pre-interrupt work is reconciled from evidence first.
-                    Use \`evok --resume\` or \`evok /resume\`. Status questions
-                    and negations never resume.
+                    Use \`evok --resume\` or \`evok /resume\`. In the native TUI,
+                    Mission resume is \`/mission-resume\` (Pi owns \`/resume\`).
+                    Status questions and negations never resume.
   --research [verb] thin evoK product entry (\`evok /research status\` or
                     \`evok /research continue\`). Status is readable from
                     durable Mission events/records with no model. Continue is
                     one authorized yellow-light path that records a visible
                     experiment entry; it does not dispatch a Pi Run or open
-                    EXP gates. Not a Pi slash command: \`/model\` and \`/new\`
-                    stay on the native TUI.
-  --skills          thin evoK Skills directory view (\`evok /skills\`).
-                    Lists the eight-category scaffold and lifecycle states
-                    (candidate / accepted / demoted). Default context is
-                    accepted L0 pointers only. Accepted requires Admission;
-                    file-body writeback is not opened.
-                    Not a second control plane; \`/research\` stays Mission
-                    authority. \`/model\` and \`/new\` stay on the native TUI.
+                    EXP gates. Same verb is reachable in TUI as \`/research\`.
+  --skills          thin evoK Skills directory view (\`evok /skills\` or
+                    \`evok /evok-skills\`). Lists the eight-category scaffold
+                    and lifecycle states (candidate / accepted / demoted).
+                    Default context is accepted L0 pointers only. Accepted
+                    requires Admission; file-body writeback is not opened.
+                    TUI: \`/skills\` or \`/evok-skills\`. \`/skill <name>\`
+                    discloses L1 from the existing catalog (not authorization).
   -h, --help        show this help
 
 On a tty with no request and no Mission flag, evok launches the Pi SDK native
-TUI. Native slash commands (\`/model\`, \`/new\`, …) are handled by Pi, not evoK.
-Mission entrypoints stay the thin flags above, including \`/research\`.
+TUI. Pi owns Pi shorts (\`/model\`, \`/new\`, \`/resume\`, …). evoK mirror
+slashes have the same semantics and gates as this CLI (no dilution).
+
+${formatTuiConflictTable()}
+
 Models and credentials come from Pi (~/.pi/agent); evok never copies or
 displays credentials.
 `;
@@ -196,6 +206,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let missions = false;
   let research: ResearchVerb | undefined;
   let skills: SkillsVerb | undefined;
+  let skill: string | undefined;
   let maxExperiments: number | undefined;
   let mission: string | undefined;
   let reserveCost = DEFAULT_RESERVE_COST;
@@ -263,6 +274,19 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     }
   }
   if (positionals.length > 0) request = positionals.join(" ");
+  const joined = request ?? "";
+  const intakeSlash = /^(?:\/(?:mission-)?intake|\/evok-intake)(?:\s+([\s\S]+))?$/i.exec(joined);
+  if (intakeSlash) {
+    intake = true;
+    request = intakeSlash[1]?.trim() || undefined;
+  }
+  if (/^\/(?:evok-)?missions\s*$/i.test(joined)) {
+    missions = true;
+    request = undefined;
+  }
+  if (/^\/(?:evok-)?skill\s*$/i.test(joined)) {
+    return { tier, timeoutMs, reserveCost, error: "/skill requires a skill name from the evoK catalog" };
+  }
   const researchCommand = request ? parseResearchCommand(request) : undefined;
   if (researchCommand) {
     research = researchCommand.verb;
@@ -270,6 +294,15 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   }
   const skillsCommand = request ? parseSkillsCommand(request) : undefined;
   if (skillsCommand) skills = skillsCommand.verb;
+  const skillCommand = request ? parseSkillDiscloseCommand(request) : undefined;
+  if (skillCommand) skill = skillCommand.name;
+  if (request && /^(?:\/mission-resume|\/evok-resume)(?:\s|$)/i.test(request)) {
+    resume = true;
+  }
+  if (request && /^\/evok-start(?:\s|$)/i.test(request)) {
+    start = true;
+    request = request.replace(/^\/evok-start/i, "/start");
+  }
   return {
     request, project, tier, orchestra, timeoutMs,
     ...(intake ? { intake: true } : {}),
@@ -280,6 +313,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     ...(missions ? { missions: true } : {}),
     ...(research ? { research } : {}),
     ...(skills ? { skills } : {}),
+    ...(skill ? { skill } : {}),
     ...(typeof maxExperiments === "number" ? { maxExperiments } : {}),
     reserveCost,
     ...(mission ? { mission } : {}),
@@ -318,7 +352,7 @@ export interface EvokRunOptions {
   readonly isTty?: (stdin: NodeJS.ReadStream) => boolean;
   /**
    * Override the Pi native TUI launcher (tests). Production starts SDK
-   * `InteractiveMode` — not an evoK command table.
+   * `InteractiveMode` and registers the evoK mirror extension.
    */
   readonly launchNativeTui?: (launch: NativeTuiLaunch) => Promise<void>;
 }
@@ -367,6 +401,9 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   if (args.skills) {
     return runSkillsEntry(stdout, stderr, projectReal);
   }
+  if (args.skill) {
+    return runSkillDisclose(stdout, stderr, projectReal, args.skill);
+  }
 
   let resolver: SessionModelResolver;
   try {
@@ -409,13 +446,13 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
     stdout.write(`evok ${EVOK_VERSION}\n`);
     stdout.write(`project: ${projectReal}\n`);
     stdout.write(`model:   ${probe.model.id} (tier ${probe.tier})\n`);
-    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status && !args.research && !args.skills;
+    const nativeTuiCandidate = args.request === undefined && !args.start && !args.resume && !args.intake && !args.status && !args.research && !args.skills && !args.skill;
     stdout.write(`tools:   ${args.intake
       ? "intake: read-only project inspection plus the trusted draft-record tool"
       : args.start || (args.request !== undefined && isExplicitStartRequest(args.request))
         ? "baseline: read/grep/find/ls + write/edit in the approved isolated Run workspace (bash only when granted); the project .evok tree is controller-owned"
         : nativeTuiCandidate
-          ? "Pi native TUI on a tty (SDK slash commands including /model /new); piped stdin is one headless request"
+          ? "Pi native TUI on a tty (Pi shorts /model /new /resume; evoK mirror /skills /research /start /mission-resume); piped stdin is one headless request"
           : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
     stdout.write(nativeTuiCandidate
       ? `         TUI uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n`
@@ -480,8 +517,8 @@ function defaultIsTty(stdin: NodeJS.ReadStream): boolean {
 }
 
 /**
- * Tty foreground: Pi SDK native TUI. No evoK slash-command table — `/model`
- * and `/new` stay on InteractiveMode.
+ * Tty foreground: Pi SDK native TUI. Pi shorts stay on InteractiveMode;
+ * evoK mirror slashes dispatch through runEvok (same gates as CLI).
  */
 async function runNativeTui(
   resolver: SessionModelResolver,
@@ -497,13 +534,32 @@ async function runNativeTui(
   }
   try {
     const resolved = await resolver.resolve(args.tier);
-    stdout.write("interactive: Pi native TUI (SDK slash commands including /model /new; no evoK intercept)\n");
+    stdout.write("interactive: Pi native TUI (Pi shorts /model /new /resume stay on Pi; evoK mirror /skills /research /start /mission-resume)\n");
     stdout.write("         session uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n");
+    for (const line of formatTuiConflictTable().split("\n")) {
+      stdout.write(`         ${line}\n`);
+    }
     await (options.launchNativeTui ?? launchPiNativeTui)({
       projectRoot,
       tier: args.tier,
       modelRuntime: resolved.modelRuntime,
       model: resolved.modelId,
+      mirrorExtension: createEvokTuiMirrorExtension({
+        projectRoot,
+        tier: args.tier,
+        dispatch: (input) => executeTuiMirrorCommand({
+          input,
+          projectRoot,
+          tier: args.tier,
+          createResolver: async () => resolver,
+          startRunner: options.startRunner,
+          resumeRunner: options.resumeRunner,
+          intakeRunner: options.intakeRunner,
+          evaluator: options.evaluator,
+          director: options.director,
+          signal: options.signal,
+        }),
+      }),
     });
     return EVOK_EXIT.ok;
   } catch (error) {
@@ -680,6 +736,37 @@ async function runResearchEntry(
     }
     throw error;
   }
+}
+
+/**
+ * #148: `/skill <name>` L1 disclose from the existing catalog. Read-only;
+ * not authorization. Does not invent a second skills root.
+ */
+async function runSkillDisclose(
+  stdout: Out,
+  stderr: Out,
+  projectRoot: string,
+  name: string,
+): Promise<number> {
+  let resources: EvokResources;
+  try {
+    resources = await discoverEvokResources({ projectRoot });
+  } catch (error) {
+    if (error instanceof EvokResourceError) {
+      stderr.write(`evok: resource configuration error: ${error.message}\n`);
+      return EVOK_EXIT.configError;
+    }
+    throw error;
+  }
+  const view = await listSkillsDirectory({ projectRoot, discovered: resources.skills });
+  const routed = view.skills.find((entry) => entry.name === name);
+  if (!routed) {
+    stderr.write(`evok: skill "${name}" is not in the evoK catalog; /skill does not invent a skill\n`);
+    return EVOK_EXIT.usage;
+  }
+  const disclosed = await discloseSkill(routed, "l1-body");
+  stdout.write(formatDisclosedSkill(disclosed));
+  return EVOK_EXIT.ok;
 }
 
 /**

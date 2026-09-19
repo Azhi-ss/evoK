@@ -32,7 +32,7 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 | **execution** | `src/execution/` | 勾 | Thin default B; C thicken still rejected |
 | **search** | `src/search/` | 勾 | Default `fixed_uct`; `#40` off |
 | **competition** | `src/competition/` | 勾 | Live explicit; no true submit; Deploy Arena standby |
-| **cli** | `src/cli/` | 勾 | Thin shell + Pi native TUI (#134); not a second control plane |
+| **cli** | `src/cli/` | 勾 | Thin shell + Pi native TUI (#134 / #148 mirror); not a second control plane |
 
 `ToyHarness` lives under `src/search/fixtures/` (fixtures/tests only).
 

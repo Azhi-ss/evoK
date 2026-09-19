@@ -25,6 +25,7 @@ import {
   discloseSkill,
   formatSkillsDirectory,
   listSkillsDirectory,
+  parseSkillDiscloseCommand,
   parseSkillsCommand,
   proposeSkillWriteback,
   routeSkills,
@@ -177,6 +178,7 @@ describe("writeback isolation — read-only shell", () => {
 describe("Skills routing is not a second control plane", () => {
   test("parseSkillsCommand recognizes /skills and does not intercept Pi or Mission slashes", () => {
     expect(parseSkillsCommand("/skills")).toEqual({ verb: "status" });
+    expect(parseSkillsCommand("/evok-skills")).toEqual({ verb: "status" });
     expect(parseSkillsCommand("/skills status")).toEqual({ verb: "status" });
     expect(parseSkillsCommand("--skills")).toEqual({ verb: "status" });
     expect(parseSkillsCommand("/model")).toBeUndefined();
@@ -185,7 +187,12 @@ describe("Skills routing is not a second control plane", () => {
     expect(parseSkillsCommand("/research continue")).toBeUndefined();
     expect(parseSkillsCommand("/start")).toBeUndefined();
     expect(parseSkillsCommand("/resume")).toBeUndefined();
+    expect(parseSkillsCommand("/skill try-search")).toBeUndefined();
     expect(parseSkillsCommand("please list skills in chat")).toBeUndefined();
+    expect(parseSkillDiscloseCommand("/skill try-search")).toEqual({ name: "try-search" });
+    expect(parseSkillDiscloseCommand("/evok-skill mission-intake")).toEqual({ name: "mission-intake" });
+    expect(parseSkillDiscloseCommand("/skills")).toBeUndefined();
+    expect(parseSkillDiscloseCommand("/skill")).toBeUndefined();
   });
 
   test("directory format is operator-readable and denies chat-as-authority", async () => {

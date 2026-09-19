@@ -157,6 +157,8 @@ const m04: BaselineMeasurement = { ok: true, score: 0.4, facts: [{ name: "answer
 describe("isExplicitResumeRequest (#114 AC2)", () => {
   const resumes = [
     "/resume m-ab12cdef3456",
+    "/mission-resume m-ab12cdef3456",
+    "/evok-resume m-ab12cdef3456",
     "resume the mission m-ab12cdef3456",
     "please continue mission m-ab12cdef3456 where it stopped",
     "continue the mission",

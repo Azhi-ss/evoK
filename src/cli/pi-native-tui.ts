@@ -1,10 +1,11 @@
 /**
- * Thin Pi native TUI launcher (ET-TUI1).
+ * Thin Pi native TUI launcher (ET-TUI1 + ET-TUI-MIRROR).
  *
  * Interactive tty foreground starts the SDK `InteractiveMode` so native slash
- * commands (`/model`, `/new`, …) stay on Pi. This module is session assembly
- * only: project cwd + Pi `~/.pi/agent` credentials. It is not a Mission
- * control plane and must not grow an evoK slash-command table.
+ * commands (`/model`, `/new`, `/resume`, …) stay on Pi. evoK mirror commands
+ * are registered via an inline extension factory; they dispatch through the
+ * same CLI `runEvok` path. This module is session assembly, not a second
+ * Mission control plane.
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
@@ -15,6 +16,7 @@ import {
   getAgentDir,
   InteractiveMode,
   SessionManager,
+  type InlineExtension,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 
@@ -23,6 +25,8 @@ export interface NativeTuiLaunch {
   readonly tier: string;
   readonly modelRuntime?: ModelRuntime;
   readonly model?: Model<Api>;
+  /** Inline evoK mirror extension (Pi shorts are never registered). */
+  readonly mirrorExtension?: InlineExtension;
 }
 
 /**
@@ -36,6 +40,9 @@ function createPiNativeTuiRuntimeFactory(launch: NativeTuiLaunch): CreateAgentSe
       cwd,
       agentDir,
       ...(launch.modelRuntime ? { modelRuntime: launch.modelRuntime } : {}),
+      ...(launch.mirrorExtension
+        ? { resourceLoaderOptions: { extensionFactories: [launch.mirrorExtension] } }
+        : {}),
     });
     return {
       ...(await createAgentSessionFromServices({

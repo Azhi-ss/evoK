@@ -3,7 +3,7 @@
 产品控制面 = Research Loop：授权、预算、continue / repair / stop。
 聊天 transcript 不是权威。Hang / T48 属 evidence，不进本包。
 W1 骨架：`research-entry` 持久化 control-events 并提供薄 `/research`
-status / continue（evoK 产品入口，不是 Pi slash 表）。
+status / continue（evoK 产品入口；TUI 镜像同一语义，不抢 Pi `/resume`）。
 `skills-routing` 提供八类目录 + L0→L1 渐进披露 + 三态
 （candidate / accepted / demoted）；默认上下文只进 accepted 短描述。
 文件体写回未开（read-only shell）。candidate 升 accepted 必须过
