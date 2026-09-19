@@ -19,7 +19,8 @@ discovery authority is that Pi root, not this tree as a parallel root.
 | `policy` | Mission Policy / red lights / permissions |
 
 Shipped accepted skills: `mission-intake` (`intake`), `experiment`
-(`experiment`), `evidence` (`evidence`), and `policy` (`policy`).
+(`experiment`), `evidence` (`evidence`), `policy` (`policy`), and
+`search` (`search`).
 
 ## Tags (same Pi root)
 
@@ -62,9 +63,9 @@ evok /skills --project <dir>
 ```
 
 You should see eight category lines and `mission-intake`, `experiment`,
-`evidence`, and `policy` in default context as **accepted** (synced into
-`<dir>/.pi/skills/evok/<category>/`). Ordinary untagged Pi skills are
-omitted from this list. Then:
+`evidence`, `policy`, and `search` in default context as **accepted**
+(synced into `<dir>/.pi/skills/evok/<category>/`). Ordinary untagged Pi
+skills are omitted from this list. Then:
 
 ```bash
 mkdir -p <dir>/.pi/skills/evok/search/try-search
@@ -84,8 +85,10 @@ evok /skill try-search --project <dir>
 
 `try-search` appears as **candidate** (held out of default context).
 `/skill try-search` prints the L1 body and states it is not
-authorization. `/skill experiment`, `/skill evidence`, and
-`/skill policy` load the shipped L1 bodies the same way and do not
+authorization. `/skill experiment`, `/skill evidence`, `/skill policy`,
+and `/skill search` load the shipped L1 bodies the same way and do not
 authorize start, continue, or submit. `/skill policy` also states it
 is not privilege expansion and that red lights still ask a human.
-`/research` stays Mission authority.
+`/skill search` states default parent selection is `fixed_uct`,
+strong search / Progressive is explicit opt-in only, and `#40` stays
+off. `/research` stays Mission authority.
