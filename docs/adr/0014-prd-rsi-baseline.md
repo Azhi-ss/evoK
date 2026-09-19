@@ -228,6 +228,22 @@ This amendment does not fill the `policy` body, change EXP
 Admission or Budget predicates, change hang / T48 predicates,
 unfreeze `#40`, implement Deploy Arena, or thaw true-submit.
 
+## Amendment (ET-SKILL-POL / #158)
+
+The bundled packaging source ships a thin accepted `policy`
+skill (`owner`/`namespace: evok`, `category: policy`). It is
+discoverable on the same Pi root after sync, visible as L0 on
+`/skills` and the Mission overlay, and loadable as L1 via
+`/skill policy`. The body frames human-owned red lights
+(AtCoder true-submit freeze, `#40` off, Elite ≠ Promotion,
+budget overage asks a human). A Skill is not privilege
+expansion and is not authorization to start, continue, or
+submit. Red lights still ask a human.
+
+This amendment does not change EXP Admission or Budget
+predicates, change hang / T48 predicates, unfreeze `#40`,
+implement Deploy Arena, or thaw true-submit.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

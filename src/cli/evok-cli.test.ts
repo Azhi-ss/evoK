@@ -1272,6 +1272,7 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).not.toContain("CANDIDATE-BODY");
     expect(text).toMatch(/- experiment \[experiment\]/);
     expect(text).toMatch(/- evidence \[evidence\]/);
+    expect(text).toMatch(/- policy \[policy\]/);
     await rm(project, { recursive: true, force: true });
   });
 
@@ -1313,6 +1314,29 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     const text = stdout.text();
     expect(text).toMatch(/disclosure l1-body/i);
     expect(text).toMatch(/lineage/i);
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
+    expect(text).toMatch(/does not relax/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/skill policy loads L1 and is not privilege expansion or start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "policy", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toMatch(/privilege expansion/i);
+    expect(text).toMatch(/red lights? still ask/i);
     expect(text).toMatch(/not authorization to start, continue, or submit/i);
     expect(text).toMatch(/does not relax/i);
     await rm(project, { recursive: true, force: true });
