@@ -18,7 +18,7 @@ import { evaluateExperimentValidity } from "../evidence/experiment-validity";
 import { T48MappedCatalog } from "../evidence/hypothesis-ledger";
 import { runKillTestHang } from "../evidence/kill-test-hang";
 import { evaluateMethodAdmission } from "../evidence/method-admission";
-import { EvidenceMemory } from "../research-loop";
+import { EvidenceMemory } from "./research-loop";
 import { bundledSkillRoot, discoverEvokResources, syncBundledSkillsIntoPiRoot } from "../evok-resources";
 import {
   attemptSkillAccepted,

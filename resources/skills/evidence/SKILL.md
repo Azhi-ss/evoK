@@ -31,7 +31,7 @@ The **File Blueprint** (GOAL, RULES, experiment log, SCOREBOARD) is Evidence. Th
 
 **Experiment Validity** asks whether the Experiment produced usable gate evidence.
 
-- Effectiveness on official samples is not optimality.
+- Effective is not optimal: effectiveness on official samples is not optimality.
 - Inconclusive is not pass.
 - A missing **protected holdout** still refuses **Admission**. Official samples plus an adversarial-labeled subset are not enough.
 - Hang is an explicit hang point, not a silent pass. T48 mapping still applies. This skill does not change those predicates.
