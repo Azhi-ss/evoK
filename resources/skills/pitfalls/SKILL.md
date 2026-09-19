@@ -58,7 +58,7 @@ Named anti-patterns. Instructional. Not gate hooks. Not a rejection library and 
 - **Goodhart on train** — optimizing the visible / train metric until it stops being evidence of the Research Objective.
 - **Missing holdout** — official samples plus an adversarial-labeled subset without a protected holdout is not Admission.
 - **Inconclusive as pass** — hang or inconclusive is not pass. T48 mapping still applies.
-- **Elite-as-Promotion** — Elite or Team Fan-Out is not Promotion, Admission, or a Budget key.
+- **Elite-as-Promotion** — Elite or Team Fan-Out is not Promotion, Admission, or a Budget Gate key.
 
 Recording a Pitfall in the ledger still requires `answerAgnostic: true`. A Pitfall warns later Tasks; it does not assert that a particular Candidate is always wrong.
 
