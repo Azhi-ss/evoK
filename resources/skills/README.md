@@ -18,8 +18,9 @@ discovery authority is that Pi root, not this tree as a parallel root.
 | `pitfalls` | reusable failure patterns (not a rejected answer) |
 | `policy` | Mission Policy / red lights / permissions |
 
-Shipped accepted skills: `mission-intake` (`intake`) and `experiment`
-(`experiment`). `evidence` / `policy` bodies are later tickets.
+Shipped accepted skills: `mission-intake` (`intake`), `experiment`
+(`experiment`), and `evidence` (`evidence`). `policy` body is a later
+ticket.
 
 ## Tags (same Pi root)
 
@@ -61,8 +62,8 @@ Offline, no model:
 evok /skills --project <dir>
 ```
 
-You should see eight category lines and `mission-intake` plus
-`experiment` in default context as **accepted** (synced into
+You should see eight category lines and `mission-intake`, `experiment`,
+and `evidence` in default context as **accepted** (synced into
 `<dir>/.pi/skills/evok/<category>/`). Ordinary untagged Pi skills are
 omitted from this list. Then:
 
@@ -84,6 +85,6 @@ evok /skill try-search --project <dir>
 
 `try-search` appears as **candidate** (held out of default context).
 `/skill try-search` prints the L1 body and states it is not
-authorization. `/skill experiment` loads the shipped experiment L1
-the same way and does not authorize start, continue, or submit.
-`/research` stays Mission authority.
+authorization. `/skill experiment` and `/skill evidence` load the
+shipped L1 bodies the same way and do not authorize start, continue,
+or submit. `/research` stays Mission authority.
