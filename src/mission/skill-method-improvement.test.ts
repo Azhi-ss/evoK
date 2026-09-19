@@ -107,6 +107,7 @@ describe("same-root discovery + L0 (ET-SKILL-RSI / #162)", () => {
       expect(directory).toContain("method-improvement");
       expect(directory).toMatch(/\[method-improvement\]/);
       expect(directory).not.toMatch(/does not authorize start, continue, or External Submission/i);
+      expect(directory).not.toMatch(/not authorization to start, continue, or submit/i);
       expect(directory).not.toMatch(/verify command/i);
       expect(directory).not.toMatch(/enable record/i);
       expect(directory).not.toMatch(/auto-promote|automatic promotion/i);

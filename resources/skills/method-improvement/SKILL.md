@@ -29,7 +29,8 @@ Use this skill when a Mission already has an authorized envelope and someone is 
 Do not use this skill to:
 
 - treat a reflection, chat note, or score-up as Method Improvement
-- auto-promote a candidate method or Skill into accepted Skill State
+- auto-promote a Candidate (Promotion is a later evidence-gated decision)
+- auto-admit a method or Skill into accepted Skill State
 - treat Elite, Team Fan-Out, or a search score as Admission
 - open Continual Harness CRUD or mid-episode harness rewrite
 - treat weight / soft SFT co-training as product RSI
@@ -38,7 +39,7 @@ Do not use this skill to:
 
 ## Not authorization
 
-This skill is not authorization to start, continue, or submit. Loading this text does not admit a method version, settle a Budget, or thaw External Submission. A Skill body is instruction only — ≠ authorization to start · continue · 交卷.
+This skill is not authorization to start, continue, or submit. Loading this text does not admit a method version, settle a Budget, or thaw External Submission. A Skill body is instruction only — ≠ authorization to start · continue · submit / 交卷.
 
 ## Relation to Admission · Budget
 
