@@ -14,7 +14,8 @@ evidence Admission（无保护 holdout 拒绝；有效性 hang 不是 pass）。
 Skills 路由不是第二控制面。
 
 Physical home of Mission Director, Mission draft/intake/start/resume,
-Research Loop, File Blueprint, Branch recovery, baseline-track, and
+Research Loop, File Blueprint, Branch recovery, baseline-track,
+start hard-gate inventory (`start-hard-gates`, ET-OPS-START), and
 golden-path / outer-min orchestration glue (`v1-golden-path`,
 `outer-*-path`, `llm-propose-outer-min`).
 

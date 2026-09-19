@@ -6,6 +6,10 @@ pi-session-*.html
 # A real project also gets .evok/missions/.gitignore written by the store;
 # project .evok config and skills remain versionable.
 .evok/missions/
+# ET-OPS-START: keep the reviewed demo draft committable.
+!examples/demo-start/.evok/missions/
+!examples/demo-start/.evok/missions/demo-start/
+!examples/demo-start/.evok/missions/demo-start/draft.json
 # Pi native project skills root (ET-SKILL-NS). Bundled source stays in
 # resources/skills/; evok syncs into .pi/skills at runtime.
 .pi/

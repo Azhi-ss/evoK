@@ -3,7 +3,8 @@
  * (#112, T4; spec #108 US25/30/34).
  *
  * The declared evaluation contract lives in the research project at
- * `<project>/.evok/evaluation.json`:
+ * `<project>/.evok/evaluation.json`. A copyable template is
+ * `templates/evaluation.json` (ET-OPS-START):
  *
  * ```json
  * {

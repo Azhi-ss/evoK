@@ -1,0 +1,8 @@
+{
+  "id": "file-metric",
+  "version": "1",
+  "artifact": "answer.txt",
+  "metric": "answer",
+  "min": 0,
+  "max": 1
+}

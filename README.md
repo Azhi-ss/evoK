@@ -62,7 +62,12 @@ bun run evok --status --mission m-ab12                   # reopen durable result
   `artifact`, optional `metric`/`min`/`max`); the baseline is measured from the
   immutable artifact snapshot, never from a model-supplied score. A missing or
   malformed contract refuses the start instead of running an unmeasurable
-  Experiment.
+  Experiment. A copyable template lives at
+  [`templates/evaluation.json`](templates/evaluation.json); a minimal demo
+  scaffold is [`examples/demo-start/`](examples/demo-start/README.md). Prefer
+  an absolute `--project`. `evok --start --baseline-only` on the demo either
+  runs the measured baseline or lists remaining hard gates — it does not
+  invent a green pass or authorize true submit.
 - An explicit natural-language start ("start the mission baseline") or
   `/start` invokes ONE validated start action for the displayed Mission. It
   checks objective/data/evaluation inputs, supported permissions, an
