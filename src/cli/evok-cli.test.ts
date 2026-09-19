@@ -1274,6 +1274,8 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toMatch(/- evidence \[evidence\]/);
     expect(text).toMatch(/- policy \[policy\]/);
     expect(text).toMatch(/- search \[search\]/);
+    expect(text).toMatch(/- method-improvement \[method-improvement\]/);
+    expect(text).toMatch(/- recovery \[recovery\]/);
     await rm(project, { recursive: true, force: true });
   });
 
@@ -1342,6 +1344,36 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toMatch(/rollback/i);
     expect(text).toMatch(/not automatic promotion|≠ automatic promotion|not auto-promote|≠ auto-promote/i);
     expect(text).toMatch(/Elite.{0,40}not.{0,20}Admission|Elite.{0,20}≠.{0,20}Admission/i);
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
+    expect(text).toMatch(/does not relax/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/skill recovery loads L1 and is not start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "recovery", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toMatch(/continueResearch/);
+    expect(text).toMatch(/\/research continue/);
+    expect(text).toMatch(/MISSION_REPAIRED/);
+    expect(text).toMatch(/\/research repair/);
+    expect(text).toMatch(/reserved/i);
+    expect(text).toMatch(/resumeAuthorizedMission|reconcileInterruptedMission/);
+    expect(text).toMatch(/\/mission-resume/);
+    expect(text).toMatch(/runKillTestHang/);
+    expect(text).toMatch(/not a second control plane|≠ second control plane/i);
     expect(text).toMatch(/not authorization to start, continue, or submit/i);
     expect(text).toMatch(/does not relax/i);
     await rm(project, { recursive: true, force: true });
