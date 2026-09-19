@@ -49,6 +49,7 @@ export {
   requireSkillAccepted,
   discloseSkill,
   formatSkillsDirectory,
+  isEvokCatalogSkill,
   isEvokTagged,
   listSkillsDirectory,
   parseSkillDiscloseCommand,

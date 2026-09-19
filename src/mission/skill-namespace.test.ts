@@ -17,6 +17,7 @@ import {
   discloseSkill,
   formatDisclosedSkill,
   formatSkillsDirectory,
+  isEvokCatalogSkill,
   isEvokTagged,
   listSkillsDirectory,
   overlayFrontmatter,
@@ -58,6 +59,8 @@ describe("evoK skill tags (ET-SKILL-NS / #152)", () => {
     expect(isEvokTagged({})).toBe(false);
     expect(isEvokTagged({ owner: "pi" })).toBe(false);
     expect(isEvokTagged({ namespace: "personal" })).toBe(false);
+    expect(isEvokCatalogSkill({ owner: "evok" })).toBe(false);
+    expect(isEvokCatalogSkill({ owner: "evok", category: "policy" })).toBe(true);
   });
 
   test("overlayFrontmatter reads owner / namespace / category / state", () => {
@@ -85,7 +88,7 @@ describe("evoK skill tags (ET-SKILL-NS / #152)", () => {
 });
 
 describe("default context and /skills list only evoK-tagged (ET-SKILL-NS / #152)", () => {
-  test("Mission/Intake default inject is accepted + evoK-tagged L0 only", () => {
+  test("default context (Mission overlay / catalog L0) is accepted + evoK-catalog only", () => {
     const routed = routeSkills([
       skill({
         name: "keep",
@@ -135,6 +138,19 @@ describe("default context and /skills list only evoK-tagged (ET-SKILL-NS / #152)
       ],
     });
     expect(view.skills.map((entry) => entry.name)).toEqual(["mission-intake"]);
+    const uncategorized = await listSkillsDirectory({
+      projectRoot: "/tmp/proj",
+      skills: [
+        skill({
+          name: "no-cat",
+          description: "tagged but no category",
+          filePath: "/pi/skills/no-cat/SKILL.md",
+          owner: "evok",
+          state: "accepted",
+        }),
+      ],
+    });
+    expect(uncategorized.skills).toEqual([]);
     const text = formatSkillsDirectory(view);
     expect(text).toContain("mission-intake");
     expect(text).not.toContain("PERSONAL-PI-SKILL");

@@ -76,9 +76,9 @@ describe("eight-category Skills directory scaffold", () => {
 describe("three lifecycle states — orthogonal to disclosure", () => {
   test("candidate / accepted / demoted are expressible; default context is accepted L0 only", () => {
     const routed = routeSkills([
-      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "accepted", description: "accepted short" }),
-      skill({ name: "try", filePath: "/tmp/try/SKILL.md", state: "candidate", description: "candidate must stay out" }),
-      skill({ name: "drop", filePath: "/tmp/drop/SKILL.md", state: "demoted", description: "demoted must stay out" }),
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "accepted", description: "accepted short", category: "search" }),
+      skill({ name: "try", filePath: "/tmp/try/SKILL.md", state: "candidate", description: "candidate must stay out", category: "search" }),
+      skill({ name: "drop", filePath: "/tmp/drop/SKILL.md", state: "demoted", description: "demoted must stay out", category: "search" }),
     ]);
     expect(routed.map((entry) => [entry.name, entry.state, entry.disclosure])).toEqual([
       ["keep", "accepted", "l0-pointer"],
@@ -93,7 +93,7 @@ describe("three lifecycle states — orthogonal to disclosure", () => {
   });
 
   test("unspecified state is accepted for an evoK-tagged skill so L0 metadata still loads", () => {
-    const routed = routeSkills([skill({ name: "legacy", filePath: "/tmp/legacy/SKILL.md" })]);
+    const routed = routeSkills([skill({ name: "legacy", filePath: "/tmp/legacy/SKILL.md", category: "search" })]);
     expect(routed[0]?.state).toBe("accepted");
     expect(defaultContextPointers(routed)).toHaveLength(1);
   });
@@ -116,7 +116,7 @@ describe("L0 → on-trigger read-full disclosure", () => {
     const dir = await mkdtemp(join(tmpdir(), "evok-skill-l0-"));
     const filePath = join(dir, "SKILL.md");
     await writeFile(filePath, "---\nname: body-probe\ndescription: short pointer\nstate: accepted\n---\nSECRET-SKILL-BODY-L1\n");
-    const routed = routeSkills([skill({ name: "body-probe", description: "short pointer", filePath, baseDir: dir })]);
+    const routed = routeSkills([skill({ name: "body-probe", description: "short pointer", filePath, baseDir: dir, category: "search" })]);
     const pointer = defaultContextPointers(routed)[0];
     expect(pointer).toEqual({
       name: "body-probe",
@@ -125,6 +125,7 @@ describe("L0 → on-trigger read-full disclosure", () => {
       baseDir: dir,
       state: "accepted",
       owner: "evok",
+      category: "search",
       disclosure: "l0-pointer",
     });
     expect(JSON.stringify(pointer)).not.toContain("SECRET-SKILL-BODY-L1");
@@ -257,7 +258,7 @@ describe("accepted requires Admission (ET-M1-EXP / #142)", () => {
 
   test("Admission pass is required before accepted enters default context", () => {
     const [candidate] = routeSkills([
-      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "candidate", description: "keep short" }),
+      skill({ name: "keep", filePath: "/tmp/keep/SKILL.md", state: "candidate", description: "keep short", category: "search" }),
     ]);
     const admission = evaluateMethodAdmission({
       validity: evaluateExperimentValidity({

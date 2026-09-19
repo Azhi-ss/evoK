@@ -163,6 +163,15 @@ export function isEvokTagged(entry: { readonly owner?: string; readonly namespac
   return entry.owner === "evok" || entry.namespace === "evok";
 }
 
+/** `/skills` / default inject: tagged + one of the eight categories. */
+export function isEvokCatalogSkill(entry: {
+  readonly owner?: string;
+  readonly namespace?: string;
+  readonly category?: SkillCategory;
+}): boolean {
+  return isEvokTagged(entry) && entry.category !== undefined;
+}
+
 /**
  * Lifecycle + category for one skill. Explicit fields win; then path; then
  * the bundled pin for mission-intake; unspecified state stays accepted.
@@ -191,7 +200,7 @@ export function routeSkills(skills: readonly SkillRoutingInput[]): RoutedSkill[]
 
 export function defaultContextPointers(skills: readonly RoutedSkill[]): SkillPointer[] {
   return skills
-    .filter((entry) => entry.state === "accepted" && isEvokTagged(entry))
+    .filter((entry) => entry.state === "accepted" && isEvokCatalogSkill(entry))
     .map((entry) => ({
       name: entry.name,
       description: entry.description,
@@ -422,7 +431,7 @@ export async function listSkillsDirectory(options: {
     ? await routeDiscoveredSkills(options.discovered)
     : [];
   const routed = (fromInputs.length > 0 ? routeSkills(fromInputs) : fromDiscovered)
-    .filter((entry) => isEvokTagged(entry));
+    .filter((entry) => isEvokCatalogSkill(entry));
   const counts = new Map<SkillCategory, number>(SKILL_CATEGORIES.map((id) => [id, 0]));
   for (const entry of routed) {
     if (entry.category) counts.set(entry.category, (counts.get(entry.category) ?? 0) + 1);

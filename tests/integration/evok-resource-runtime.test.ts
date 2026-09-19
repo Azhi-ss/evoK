@@ -22,7 +22,7 @@ async function layout(): Promise<{ home: string; project: string; workspaceRoot:
 
 async function skillFile(path: string, name: string, description: string, body: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `---\nname: ${name}\ndescription: ${description}\nowner: evok\nstate: accepted\n---\n${body}`);
+  await writeFile(path, `---\nname: ${name}\ndescription: ${description}\nowner: evok\ncategory: search\nstate: accepted\n---\n${body}`);
 }
 
 function newWorkspace(workspaceRoot: string): Promise<string> {
@@ -245,17 +245,17 @@ describe("evok resources through the Pi SDK execution boundary (ET-M1-SKILL / #1
     await skillFile(join(project, ".pi", "skills", "keep", "SKILL.md"), "keep", "accepted short", "ACCEPTED-BODY");
     await writeFile(
       join(project, ".pi", "skills", "keep", "SKILL.md"),
-      "---\nname: keep\ndescription: accepted short\nowner: evok\nstate: accepted\n---\nACCEPTED-BODY\n",
+      "---\nname: keep\ndescription: accepted short\nowner: evok\ncategory: search\nstate: accepted\n---\nACCEPTED-BODY\n",
     );
     await mkdir(join(project, ".pi", "skills", "try"), { recursive: true });
     await writeFile(
       join(project, ".pi", "skills", "try", "SKILL.md"),
-      "---\nname: try\ndescription: candidate must stay out\nowner: evok\nstate: candidate\n---\nCANDIDATE-BODY\n",
+      "---\nname: try\ndescription: candidate must stay out\nowner: evok\ncategory: search\nstate: candidate\n---\nCANDIDATE-BODY\n",
     );
     await mkdir(join(project, ".pi", "skills", "drop"), { recursive: true });
     await writeFile(
       join(project, ".pi", "skills", "drop", "SKILL.md"),
-      "---\nname: drop\ndescription: demoted must stay out\nowner: evok\nstate: demoted\n---\nDEMOTED-BODY\n",
+      "---\nname: drop\ndescription: demoted must stay out\nowner: evok\ncategory: search\nstate: demoted\n---\nDEMOTED-BODY\n",
     );
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
     const { faux, resolver } = await setupFaux("evok-res-states");
