@@ -158,21 +158,23 @@ export function createEvokPromptModeExtension(
     projectRoot: options.projectRoot,
     ...(options.intakeActive ? { intakeActive: true } : {}),
   });
-  const paint = async (ctx: { ui: { setStatus(key: string, text: string | undefined): void } }, mode: PromptMode) => {
+  const setModeBanner = async (
+    ctx: { ui: { setStatus(key: string, text: string | undefined): void } },
+    mode: PromptMode,
+  ) => {
     ctx.ui.setStatus(PROMPT_MODE_STATUS_KEY, formatPromptModeBanner(mode));
   };
   return (pi) => {
     pi.on("session_start", async (_event, ctx) => {
-      await paint(ctx, await resolve());
+      await setModeBanner(ctx, await resolve());
     });
     pi.on("before_agent_start", async (event, ctx) => {
       const mode = await resolve();
-      await paint(ctx, mode);
+      await setModeBanner(ctx, mode);
       const overlay = await assemblePromptOverlay({
         mode,
         projectRoot: options.projectRoot,
       });
-      if (!overlay) return;
       return { systemPrompt: `${event.systemPrompt}\n\n${overlay}` };
     });
   };

@@ -168,6 +168,23 @@ or weld Progressive / `#40`. Existing Kill-test / T48 / hang / Broker
 predicates, true-submit, Pattern C, EXP Admission predicates, and
 Budget Gate predicates are unchanged.
 
+## Amendment (ET-PROMPT-MODE / #150)
+
+TUI / launch assembly switches Explore / Intake / Mission prompts.
+Explore keeps the Pi default system prompt (optional `--project`
+footnote). Intake appends mission-intake L1 plus draft field
+constraints and states that a draft is not authorization. Mission
+appends objective / constraints / budget / stop / no External
+Submission / baseline pointer and accepted L0 evoK skill names.
+The status bar and launch banner show `mode=explore|intake|mission`.
+Casual chat is not Mission wording. Overlay text is not start /
+continue / submit authority.
+
+This amendment does not open ET-SKILL-NS, fill Skills bodies,
+Deploy Arena, or weld Progressive / `#40`. Existing Kill-test /
+T48 / hang / Broker predicates, true-submit, Pattern C, EXP
+Admission predicates, and Budget Gate predicates are unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
