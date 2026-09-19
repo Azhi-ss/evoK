@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-start",
+  "status": "draft",
+  "objective": "Raise the independent answer metric toward 0.9 without self-reporting a score.",
+  "successCriteria": [
+    "answer.txt first line is a finite number in [0,1] measured by the independent evaluator"
+  ],
+  "data": {
+    "description": "local synthetic demo files shipped with examples/demo-start"
+  },
+  "evaluation": {
+    "method": "file-metric",
+    "metric": "answer"
+  },
+  "constraints": {
+    "permissions": [
+      "read-project",
+      "isolated-workspace-write"
+    ],
+    "hardRules": [
+      "no network",
+      "no external submission",
+      "never self-report a score"
+    ]
+  },
+  "budget": {
+    "total": 1,
+    "units": "model-USD",
+    "note": "demo envelope; live spend still requires Pi auth"
+  },
+  "outputs": [
+    "answer.txt"
+  ],
+  "stopConditions": [
+    "budget exhausted",
+    "user interruption",
+    "baseline measured"
+  ],
+  "unresolvedPrerequisites": [],
+  "decisions": [],
+  "sources": [],
+  "plan": {
+    "baselineHypothesis": "a deterministic file-producing baseline is independently measurable",
+    "tasks": [
+      {
+        "taskId": "baseline",
+        "objective": "materialize answer.txt with value 0.4"
+      }
+    ]
+  },
+  "usage": {
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0
+    },
+    "cost": {
+      "total": 0,
+      "units": "model-USD"
+    }
+  },
+  "createdAt": "2026-09-20T00:00:00.000Z",
+  "updatedAt": "2026-09-20T00:00:00.000Z"
+}

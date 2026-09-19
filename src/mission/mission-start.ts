@@ -52,7 +52,7 @@ import {
   type DraftPlanTask,
   type MissionDraft,
 } from "./mission-draft";
-import { draftReadyForReview } from "./mission-intake";
+import { draftReadyForReview, listDraftStartGaps } from "./mission-intake";
 import {
   PiAgentRuntime,
   READ_ONLY_TOOLS,
@@ -97,14 +97,14 @@ export const MAX_DECISION_ATTEMPTS = 3;
 export const DEFAULT_MAX_EXPERIMENTS = 3;
 
 /** Permissions the draft may declare that this path actually grants. */
-const SUPPORTED_PERMISSIONS = new Set([
+export const START_SUPPORTED_PERMISSIONS = new Set([
   "read-project",
   "isolated-workspace-write",
   "local-shell-in-workspace",
 ]);
 
 /** Declared permissions that can never be granted by start (later authority). */
-const FORBIDDEN_PERMISSION = /submi|external|network|internet|credential|deploy|publish/i;
+export const START_FORBIDDEN_PERMISSION = /submi|external|network|internet|credential|deploy|publish/i;
 
 const ZERO_USAGE: RuntimeUsage = {
   tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -601,17 +601,9 @@ function assertStartable(draft: MissionDraft, options: StartMissionOptions): voi
     throw new MissionStartRejectedError(`start targets mission ${selected} but the displayed mission is ${draft.id}; refusing to guess which work was authorized`);
   }
   if (!draftReadyForReview(draft)) {
-    const missing: string[] = [];
-    if (draft.objective.trim() === "") missing.push("objective");
-    if (draft.successCriteria.length === 0) missing.push("success criteria");
-    if (draft.data.description.trim() === "") missing.push("data description");
-    if (draft.evaluation.method.trim() === "") missing.push("evaluation method");
-    if (draft.budget.total <= 0) missing.push("a positive enforceable budget");
-    if (draft.outputs.length === 0) missing.push("declared outputs");
-    if (draft.stopConditions.length === 0) missing.push("stop conditions");
-    if (draft.plan.tasks.length === 0) missing.push("the initial baseline task");
-    if (draft.unresolvedPrerequisites.length > 0) {
-      throw new MissionStartRejectedError(`execution prerequisites remain unresolved: ${draft.unresolvedPrerequisites.join("; ")}`);
+    const { missing, unresolved } = listDraftStartGaps(draft);
+    if (unresolved.length > 0) {
+      throw new MissionStartRejectedError(`execution prerequisites remain unresolved: ${unresolved.join("; ")}`);
     }
     throw new MissionStartRejectedError(`mission ${draft.id} is not ready to start (missing: ${missing.join(", ") || "review requirements"})`);
   }
@@ -623,10 +615,10 @@ function assertStartable(draft: MissionDraft, options: StartMissionOptions): voi
   }
   const permissions = draft.constraints.permissions ?? [];
   for (const permission of permissions) {
-    if (FORBIDDEN_PERMISSION.test(permission)) {
+    if (START_FORBIDDEN_PERMISSION.test(permission)) {
       throw new MissionStartRejectedError(`declared permission "${permission}" cannot be granted at start (external/irreversible authority is never implicit)`);
     }
-    if (!SUPPORTED_PERMISSIONS.has(permission)) {
+    if (!START_SUPPORTED_PERMISSIONS.has(permission)) {
       throw new MissionStartRejectedError(`declared permission "${permission}" is not supported by the baseline path; remove it or start through a path that grants it`);
     }
   }

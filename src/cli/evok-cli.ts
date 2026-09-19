@@ -55,6 +55,12 @@ import {
 } from "../mission-start";
 import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission-director";
 import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "../local-file-evaluator";
+import {
+  DEMO_START_RELATIVE_PATH,
+  EVALUATION_TEMPLATE_RELATIVE_PATH,
+  formatStartHardGateReport,
+  inspectStartHardGates,
+} from "../mission/start-hard-gates";
 import { loadMissionDraft, missionsDir } from "../mission-draft";
 import {
   continueResearch,
@@ -145,7 +151,12 @@ usage:
   evok [options]                    Pi native TUI on a tty; one request from stdin when piped
 
 options:
-  --project <dir>   research project directory (default: current directory)
+  --project <dir>   research project directory (default: current directory).
+                    Prefer an absolute path. A relative --project is resolved
+                    from the current working directory (cwd footgun). The
+                    evaluation contract is <abs-project>/.evok/evaluation.json.
+                    Isolated Run workspaces are temp dirs — do not point
+                    --project at a workspace.
   --tier <tier>     model tier: default | fast | deep | mid (default: default)
   --orchestra <f>   JSON file binding {fast?, deep?, mid?} to Pi catalog refs
   --timeout-ms <n>  bound one Run to n milliseconds (default: ${DEFAULT_TIMEOUT_MS})
@@ -200,6 +211,14 @@ ${formatTuiConflictTable()}
 
 Models and credentials come from Pi (~/.pi/agent); evok never copies or
 displays credentials.
+
+Copyable evaluation contract: ${EVALUATION_TEMPLATE_RELATIVE_PATH}
+(fields: id, version, relative artifact, optional metric/min/max). Copy it to
+<abs-project>/.evok/evaluation.json. Minimal demo: ${DEMO_START_RELATIVE_PATH}
+(\`evok --start --baseline-only --project <abs-demo> --mission demo-start\`).
+If a live baseline cannot run, remaining hard gates are listed; Admission /
+Budget / hang / T48 / Broker are not downgraded and true submit is not
+authorized.
 `;
 
 export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
@@ -373,6 +392,21 @@ function asOut(stream: { write(chunk: string): boolean } | undefined): Out {
   return (stream ?? (process.stdout as unknown as { write(chunk: string): boolean })) as Out;
 }
 
+/** Probe model/auth for the start inventory without dispatching a Run. */
+async function probeStartModel(
+  options: EvokRunOptions,
+  args: ParsedEvokArgs,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const resolver = await options.createResolver(args);
+    const probe = await resolver.resolve(args.tier);
+    const preflight = await resolver.preflight(probe.model);
+    return preflight.ok ? { ok: true } : { ok: false, error: preflight.error };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
 /**
  * Runs one evok foreground session. Returns the process exit code; never
  * throws for user-visible configuration/auth/runtime failures.
@@ -413,6 +447,19 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
   }
   if (args.skill) {
     return runSkillDisclose(stdout, stderr, projectReal, args.skill);
+  }
+
+  const wantsStart = Boolean(args.start)
+    || (args.request !== undefined && !args.intake && !args.resume && isExplicitStartRequest(args.request));
+  if (wantsStart && !options.startRunner) {
+    const report = await inspectStartHardGates({
+      projectRoot: projectReal,
+      missionId: args.mission,
+      authorization: { requested: true, token: args.request ?? "/start", missionSelector: "displayed" },
+      modelProbe: async () => probeStartModel(options, args),
+    });
+    stderr.write(formatStartHardGateReport(report));
+    if (!report.ready) return EVOK_EXIT.configError;
   }
 
   let resolver: SessionModelResolver;

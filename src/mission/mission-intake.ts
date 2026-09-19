@@ -145,16 +145,25 @@ const RetrieveParams = Type.Object({
 type RetrieveParams = Static<typeof RetrieveParams>;
 
 /** Fields that mark a draft as ready for explicit-start review in a later slice. */
+export function listDraftStartGaps(draft: MissionDraft): {
+  readonly missing: readonly string[];
+  readonly unresolved: readonly string[];
+} {
+  const missing: string[] = [];
+  if (draft.objective.trim() === "") missing.push("objective");
+  if (draft.successCriteria.length === 0) missing.push("success criteria");
+  if (draft.data.description.trim() === "") missing.push("data description");
+  if (draft.evaluation.method.trim() === "") missing.push("evaluation method");
+  if (draft.budget.total <= 0) missing.push("a positive enforceable budget");
+  if (draft.outputs.length === 0) missing.push("declared outputs");
+  if (draft.stopConditions.length === 0) missing.push("stop conditions");
+  if (draft.plan.tasks.length === 0) missing.push("the initial baseline task");
+  return { missing, unresolved: draft.unresolvedPrerequisites };
+}
+
 export function draftReadyForReview(draft: MissionDraft): boolean {
-  return draft.objective.trim() !== ""
-    && draft.successCriteria.length > 0
-    && draft.data.description.trim() !== ""
-    && draft.evaluation.method.trim() !== ""
-    && draft.budget.total > 0
-    && draft.outputs.length > 0
-    && draft.stopConditions.length > 0
-    && draft.plan.tasks.length > 0
-    && draft.unresolvedPrerequisites.length === 0;
+  const gaps = listDraftStartGaps(draft);
+  return gaps.missing.length === 0 && gaps.unresolved.length === 0;
 }
 
 function textResult(text: string): { content: { type: "text"; text: string }[]; details: unknown } {

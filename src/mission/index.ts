@@ -19,6 +19,12 @@ export {
   loadMissionRecord,
 } from "./mission-start";
 export {
+  DEMO_START_RELATIVE_PATH,
+  EVALUATION_TEMPLATE_RELATIVE_PATH,
+  formatStartHardGateReport,
+  inspectStartHardGates,
+} from "./start-hard-gates";
+export {
   runGoldenPath,
   assembleV1GoldenPath,
   attachGoldenPathHang,
