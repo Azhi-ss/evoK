@@ -306,6 +306,27 @@ predicates, change hang / T48 predicates, unfreeze `#40`,
 implement Deploy Arena, thaw true-submit, auto-resume
 without Mission gates, or fill the `pitfalls` skill body.
 
+## Amendment (ET-SKILL-PIT / #166)
+
+The bundled packaging source ships a thin accepted
+`pitfalls` skill (`owner`/`namespace: evok`,
+`category: pitfalls`). It is discoverable on the
+same Pi root after sync, visible as L0 on `/skills` and the
+Mission overlay, and loadable as L1 via `/skill pitfalls`.
+The body is reusable, answer-agnostic failure signatures
+(docs only): Goodhart on train, missing holdout, treating
+inconclusive as pass, Elite-as-Promotion. It is not a
+rejection library, not an auto-refuse blacklist, and not
+authorization to start, continue, or submit. Named
+signatures are instructional, not gate hooks. The body
+does not relax Admission, Budget, hang, T48, or Broker
+predicates.
+
+This amendment does not change EXP Admission or Budget
+predicates, change hang / T48 predicates, unfreeze `#40`,
+implement Deploy Arena, thaw true-submit, or hard-code a
+rejection blacklist.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -315,6 +336,7 @@ without Mission gates, or fill the `pitfalls` skill body.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
-  selection math and Deploy Arena stay unopened). Remaining skill
-  bodies (`pitfalls`) stay unopened;
-  `recovery` is the ET-SKILL-REC accepted body.
+  selection math and Deploy Arena stay unopened). The eight
+  category accepted skill bodies are shipped; `pitfalls` is
+  the ET-SKILL-PIT accepted body (docs-only failure
+  signatures, not a rejection library).

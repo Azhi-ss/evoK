@@ -1276,6 +1276,7 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toMatch(/- search \[search\]/);
     expect(text).toMatch(/- method-improvement \[method-improvement\]/);
     expect(text).toMatch(/- recovery \[recovery\]/);
+    expect(text).toMatch(/- pitfalls \[pitfalls\]/);
     await rm(project, { recursive: true, force: true });
   });
 
@@ -1374,6 +1375,33 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     expect(text).toMatch(/\/mission-resume/);
     expect(text).toMatch(/runKillTestHang/);
     expect(text).toMatch(/not a second control plane|≠ second control plane/i);
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
+    expect(text).toMatch(/does not relax/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/skill pitfalls loads L1 and is not a rejection library or start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "pitfalls", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toMatch(/failure signature/i);
+    expect(text).toMatch(/Goodhart/i);
+    expect(text).toMatch(/holdout/i);
+    expect(text).toMatch(/inconclusive/i);
+    expect(text).toMatch(/Elite/i);
+    expect(text).toMatch(/not a rejection library|≠ rejection library|not an? auto-refuse|≠ auto-refuse/i);
     expect(text).toMatch(/not authorization to start, continue, or submit/i);
     expect(text).toMatch(/does not relax/i);
     await rm(project, { recursive: true, force: true });
