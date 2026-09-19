@@ -11,9 +11,9 @@
  *   L2 resources — on-demand scripts/ / references/ paths
  *
  * Lifecycle states (orthogonal to disclosure): candidate / accepted / demoted.
- * Default context loads only accepted short descriptions. Unspecified state is
- * accepted so ADR-0006 discovery still injects L0 metadata; explicit candidate
- * or demoted stay out. File-body writeback is not opened — read-only shell.
+ * Default context loads only accepted + evoK-tagged (owner|namespace: evok)
+ * L0 pointers. Unspecified state is accepted for tagged skills; untagged Pi
+ * skills stay out of Mission/Intake inject. File-body writeback is not opened.
  * Writing a candidate into accepted requires evidence Admission (ET-M1-EXP)
  * and, when a BudgetDecision is supplied, a Budget Gate pass (ET-M1-BUD).
  * Budget pass is not Admission pass.
@@ -63,6 +63,8 @@ export interface SkillRoutingInput {
   readonly baseDir?: string;
   readonly state?: SkillLifecycleState;
   readonly category?: SkillCategory;
+  readonly owner?: string;
+  readonly namespace?: string;
 }
 
 export interface RoutedSkill {
@@ -72,6 +74,8 @@ export interface RoutedSkill {
   readonly baseDir?: string;
   readonly state: SkillLifecycleState;
   readonly category?: SkillCategory;
+  readonly owner?: string;
+  readonly namespace?: string;
   readonly disclosure: SkillDisclosureLayer;
   readonly admission?: SkillAdmissionRecord;
 }
@@ -149,8 +153,23 @@ function categoryFromPath(filePath: string): SkillCategory | undefined {
   if (skillsAt >= 0) {
     const after = parts[skillsAt + 1];
     if (isCategory(after)) return after;
+    if (after === "evok" && isCategory(parts[skillsAt + 2])) return parts[skillsAt + 2] as SkillCategory;
   }
   return undefined;
+}
+
+/** evoK product skill: frontmatter `owner: evok` or `namespace: evok`. */
+export function isEvokTagged(entry: { readonly owner?: string; readonly namespace?: string }): boolean {
+  return entry.owner === "evok" || entry.namespace === "evok";
+}
+
+/** `/skills` / default inject: tagged + one of the eight categories. */
+export function isEvokCatalogSkill(entry: {
+  readonly owner?: string;
+  readonly namespace?: string;
+  readonly category?: SkillCategory;
+}): boolean {
+  return isEvokTagged(entry) && entry.category !== undefined;
 }
 
 /**
@@ -169,6 +188,8 @@ export function routeOne(input: SkillRoutingInput): RoutedSkill {
     ...(input.baseDir ? { baseDir: input.baseDir } : {}),
     state,
     ...(category ? { category } : {}),
+    ...(input.owner ? { owner: input.owner } : {}),
+    ...(input.namespace ? { namespace: input.namespace } : {}),
     disclosure: "l0-pointer",
   };
 }
@@ -179,7 +200,7 @@ export function routeSkills(skills: readonly SkillRoutingInput[]): RoutedSkill[]
 
 export function defaultContextPointers(skills: readonly RoutedSkill[]): SkillPointer[] {
   return skills
-    .filter((entry) => entry.state === "accepted")
+    .filter((entry) => entry.state === "accepted" && isEvokCatalogSkill(entry))
     .map((entry) => ({
       name: entry.name,
       description: entry.description,
@@ -187,6 +208,8 @@ export function defaultContextPointers(skills: readonly RoutedSkill[]): SkillPoi
       ...(entry.baseDir ? { baseDir: entry.baseDir } : {}),
       state: "accepted" as const,
       ...(entry.category ? { category: entry.category } : {}),
+      ...(entry.owner ? { owner: entry.owner } : {}),
+      ...(entry.namespace ? { namespace: entry.namespace } : {}),
       disclosure: "l0-pointer" as const,
     }));
 }
@@ -225,6 +248,8 @@ export function overlayFrontmatter(text: string, input: SkillRoutingInput): Skil
   if (!match) return input;
   let state = input.state;
   let category = input.category;
+  let owner = input.owner;
+  let namespace = input.namespace;
   for (const rawLine of match[1].split(/\r?\n/)) {
     const line = rawLine.trim();
     const keyed = /^([A-Za-z0-9_-]+)\s*:\s*(.+)$/.exec(line);
@@ -233,8 +258,16 @@ export function overlayFrontmatter(text: string, input: SkillRoutingInput): Skil
     const value = keyed[2].trim().replace(/^["']|["']$/g, "");
     if (key === "state" && isState(value)) state = value;
     if (key === "category" && isCategory(value)) category = value;
+    if (key === "owner") owner = value;
+    if (key === "namespace") namespace = value;
   }
-  return { ...input, ...(state ? { state } : {}), ...(category ? { category } : {}) };
+  return {
+    ...input,
+    ...(state ? { state } : {}),
+    ...(category ? { category } : {}),
+    ...(owner ? { owner } : {}),
+    ...(namespace ? { namespace } : {}),
+  };
 }
 
 async function overlayFromDisk(input: SkillRoutingInput): Promise<SkillRoutingInput> {
@@ -375,10 +408,10 @@ export function parseSkillsCommand(text: string): SkillsCommand | undefined {
 }
 
 /**
- * `/skill <name>` discloses L1 from the existing catalog. `/skills` is the
- * directory view and must not match. Name must already be discoverable —
- * this is not a second skills root (ET-SKILL-NS owns tagging later).
- * Disclosure is not Skill State acceptance and not Mission authorization.
+ * `/skill <name>` discloses L1 from the evoK-tagged catalog. `/skills` is
+ * the directory view and must not match. Name must already be discoverable
+ * on the Pi skills root and carry owner|namespace: evok. Disclosure is not
+ * Skill State acceptance and not Mission authorization.
  */
 export function parseSkillDiscloseCommand(text: string): { readonly name: string } | undefined {
   const trimmed = text.trim();
@@ -397,7 +430,8 @@ export async function listSkillsDirectory(options: {
   const fromDiscovered = options.discovered
     ? await routeDiscoveredSkills(options.discovered)
     : [];
-  const routed = fromInputs.length > 0 ? routeSkills(fromInputs) : fromDiscovered;
+  const routed = (fromInputs.length > 0 ? routeSkills(fromInputs) : fromDiscovered)
+    .filter((entry) => isEvokCatalogSkill(entry));
   const counts = new Map<SkillCategory, number>(SKILL_CATEGORIES.map((id) => [id, 0]));
   for (const entry of routed) {
     if (entry.category) counts.set(entry.category, (counts.get(entry.category) ?? 0) + 1);
@@ -416,6 +450,7 @@ export function formatSkillsDirectory(view: SkillsDirectoryView): string {
     `-- skills directory · 8 categories · ${view.writeback}`,
     "   Skills routing is not a second control plane; /research stays Mission authority",
     "   chat transcript is not authority",
+    "   discovery: same Pi skills root + evoK tag filter (owner|namespace: evok); not a parallel root",
     "   disclosure: L0 pointer (default) → on-trigger L1 SKILL.md → L2 scripts/references",
     "   lifecycle (orthogonal): candidate | accepted | demoted",
     "   accepted requires Admission (official samples + adversarial-labeled + protected holdout); missing holdout refuses",

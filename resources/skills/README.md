@@ -1,8 +1,9 @@
-# evoK Skills directory (ET-M1-SKILL)
+# evoK Skills directory (ET-M1-SKILL + ET-SKILL-NS)
 
 Eight-category scaffold. Pack contents are engineering-owned and may be
-empty. This directory is a **routing shell**, not a second control plane:
-Mission authorize / continue / repair / stop stay on `/research`.
+empty. This directory is the **packaging source**: `evok` startup syncs
+or links it into the Pi native skills root with evoK tags. Runtime
+discovery authority is that Pi root, not this tree as a parallel root.
 
 ## Categories
 
@@ -19,27 +20,39 @@ Mission authorize / continue / repair / stop stay on `/research`.
 
 `mission-intake` is the shipped accepted skill and maps to `intake`.
 
+## Tags (same Pi root)
+
+evoK product skills in the Pi tree carry:
+
+- `owner: evok` or `namespace: evok`
+- `category` ∈ the eight ids above
+- `state` ∈ `candidate` | `accepted` | `demoted`
+
+Optional subpath: `<project>/.pi/skills/evok/<category>/<name>/SKILL.md`.
+
+`/skills` lists only evoK-tagged skills. Explore can still see ordinary
+Pi skills. Mission/Intake default-inject accepted + evoK-tagged L0 only.
+
 ## Progressive disclosure (orthogonal to lifecycle)
 
 - **L0 pointer** — default context: `name` + `description` + location
-- **L1 body** — on trigger, read `SKILL.md` in place
+- **L1 body** — `/skill <name>` reads `SKILL.md` in place
 - **L2 resources** — on demand, `scripts/` and `references/`
+
+A Skill body is **not** authorization to start, continue, or submit.
 
 ## Lifecycle states (orthogonal to disclosure)
 
 `candidate` / `accepted` / `demoted`
 
-Default context loads **accepted** short descriptions only. Unspecified
-state is accepted so existing ADR-0006 discovery still injects L0
-metadata. Set `state:` in SKILL.md frontmatter to hold a skill out
-(`candidate` or `demoted`).
+Default context loads **accepted + evoK-tagged** short descriptions only.
 
 ## Writeback
 
-**writeback not opened — read-only shell.** Admission / one-slice
-writeback belongs to ET-M1-EXP. Do not treat chat as authority.
+**writeback not opened — read-only shell.** Admission + Budget Gate
+still gate accepted writeback. Do not treat chat as authority.
 
-## How to demo 「目录可见 / 三态可分」
+## How to demo 「标记过滤 / L0→L1」
 
 Offline, no model:
 
@@ -47,22 +60,26 @@ Offline, no model:
 evok /skills --project <dir>
 ```
 
-You should see eight category lines (empty is fine) and `mission-intake`
-in default context as **accepted**. Then:
+You should see eight category lines and `mission-intake` in default
+context as **accepted** (synced into `<dir>/.pi/skills/evok/intake/`).
+Ordinary untagged Pi skills are omitted from this list. Then:
 
 ```bash
-mkdir -p <dir>/.evok/skills/try-search
-cat > <dir>/.evok/skills/try-search/SKILL.md <<'EOF'
+mkdir -p <dir>/.pi/skills/evok/search/try-search
+cat > <dir>/.pi/skills/evok/search/try-search/SKILL.md <<'EOF'
 ---
 name: try-search
 description: candidate search tip
+owner: evok
 state: candidate
 category: search
 ---
 body stays out of default context
 EOF
 evok /skills --project <dir>
+evok /skill try-search --project <dir>
 ```
 
-`try-search` appears as **candidate** and is held out of default context.
-Skill bodies are not printed. `/research` stays Mission authority.
+`try-search` appears as **candidate** (held out of default context).
+`/skill try-search` prints the L1 body and states it is not
+authorization. `/research` stays Mission authority.

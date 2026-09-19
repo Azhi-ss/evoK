@@ -156,6 +156,30 @@ describe("overlay assembly (ET-PROMPT-MODE / #150)", () => {
       await rm(project, { recursive: true, force: true });
     }
   });
+
+  test("Mission overlay injects only accepted + evoK-tagged L0; ordinary Pi skills stay out", async () => {
+    const project = await tempProject();
+    try {
+      await writeActiveMission(project);
+      await mkdir(join(project, ".pi", "skills", "personal"), { recursive: true });
+      await writeFile(
+        join(project, ".pi", "skills", "personal", "SKILL.md"),
+        "---\nname: personal\ndescription: PERSONAL-PI-SKILL-MARKER\n---\nPI-BODY\n",
+      );
+      await mkdir(join(project, ".pi", "skills", "evok", "search", "try"), { recursive: true });
+      await writeFile(
+        join(project, ".pi", "skills", "evok", "search", "try", "SKILL.md"),
+        "---\nname: try\ndescription: candidate must stay out\nowner: evok\ncategory: search\nstate: candidate\n---\nCANDIDATE-BODY\n",
+      );
+      const overlay = await assemblePromptOverlay({ mode: "mission", projectRoot: project });
+      expect(overlay).toMatch(/mission-intake/);
+      expect(overlay).not.toContain("PERSONAL-PI-SKILL-MARKER");
+      expect(overlay).not.toContain("candidate must stay out");
+      expect(overlay).not.toContain("CANDIDATE-BODY");
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("prompt-mode extension (visible UI + overlay hook)", () => {

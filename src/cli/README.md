@@ -18,9 +18,11 @@ Pi owns Pi shorts (`/model`, `/new`, `/resume`, …). evoK mirror slashes
 (`/skills` or `/evok-skills`, `/skill`, `/research`, `/missions`,
 `/intake`, `/start`, `/mission-resume`) have the same semantics and gates
 as this CLI. Mission resume is `/mission-resume`, not Pi `/resume`.
-`/skills` is a thin product view (directory + three states; accepted
-requires Admission; file-body writeback not opened). The TUI
-is an entry mirror, not Mission authority.
+`/skills` lists evoK-tagged skills from the same Pi skills root
+(directory + three states; accepted requires Admission; file-body
+writeback not opened). `/skill <name>` loads L1 from that tagged
+catalog and is not authorization. The TUI is an entry mirror, not
+Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).

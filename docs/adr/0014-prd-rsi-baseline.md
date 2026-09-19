@@ -185,6 +185,21 @@ Deploy Arena, or weld Progressive / `#40`. Existing Kill-test /
 T48 / hang / Broker predicates, true-submit, Pattern C, EXP
 Admission predicates, and Budget Gate predicates are unchanged.
 
+## Amendment (ET-SKILL-NS / #152)
+
+Skills live in the same Pi native skills root. evoK lists filter by
+`owner`/`namespace: evok` plus `category` and `state`. Bundled
+`resources/skills/` syncs or links into that Pi root with tags; the
+bundled tree is packaging source, not a parallel runtime root.
+`/skills` lists evoK-tagged skills only. Default disclosure is L0
+(accepted + tagged name+description). `/skill <name>` loads L1 from
+the tagged catalog and does not authorize start, continue, or
+External Submission. Writeback remains Admission + Budget gated.
+
+This amendment does not fill experiment / evidence / policy skill
+bodies, unfreeze `#40`, implement Deploy Arena, or change gate /
+Admission / Budget predicates.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

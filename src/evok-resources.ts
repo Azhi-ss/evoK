@@ -1,30 +1,24 @@
 /**
- * evoK research resource discovery (#110, T2; ADR-0006, spec #108 decisions
- * 9–12).
+ * evoK research resource discovery (#110, T2; ADR-0006; ET-SKILL-NS / #152).
  *
- * Discovers ONLY the approved evoK resource namespace:
- *   ~/.evok/                     SYSTEM.md, APPEND_SYSTEM.md, skills/
- *   <project>/.evok/             SYSTEM.md, APPEND_SYSTEM.md, skills/
- *   <project>/.agents/skills/    explicitly shared skills (leading dot required)
- *   <pkg>/resources/skills/       evoK-owned bundled fallback skills (#111),
- *                                lowest precedence (project/user copies win)
+ * Skills discovery authority is the **Pi native skills root** (same tree Pi
+ * scans), then evoK lists filter by frontmatter tags. The parallel
+ * `.evok/skills` root is no longer a discovery authority.
  *
- * Plain `agents/`, ordinary Pi resources (`.pi/`), global shared skills
- * (`~/.agents/skills`), packages, and extensions never enter discovery. The
- * SDK does all YAML/Markdown skill parsing and emits its own diagnostics; this
- * module only selects approved directories and orders them. There is no
- * second parser, no snapshot copy, and no watcher.
+ *   <project>/.pi/skills/        project Pi skills root (optional evok/<category>/)
+ *   <project>/.agents/skills/    explicitly shared skills (Pi + evoK)
+ *   <piAgentDir>/skills/         user Pi skills (default sibling of ~/.evok → ~/.pi)
  *
- * Precedence is deterministic project-first, first-wins (spec decision 10):
- * project `.evok/skills` → project `.agents/skills` → user `~/.evok/skills`.
- * SYSTEM.md / APPEND_SYSTEM.md each select one file, project before user; the
- * two APPEND copies are never stacked.
+ * SYSTEM.md / APPEND_SYSTEM.md still live under `.evok/` (prompts, not skills).
+ * Bundled `<pkg>/resources/skills/` is the packaging source: startup syncs or
+ * links it into the project Pi root with evoK tags. Runtime authority is the
+ * Pi root, not a second parallel bundled root.
  *
- * Resources are read in place: skill files keep their original absolute
- * locations (the Run workspace is a different directory), and each winning
- * skill directory is returned as a read-only root.
+ * The SDK does all YAML/Markdown skill parsing. There is no second parser.
+ * Resource discovery does not grant additional tool, network, or filesystem
+ * authority. A Skill body is not authorization to start, continue, or submit.
  */
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, symlink, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,11 +80,23 @@ export interface EvokResources {
 export interface DiscoverEvokResourcesOptions {
   /** Selected research project (real path; NOT the Run workspace). */
   readonly projectRoot: string;
-  /** evoK user resource root (normally ~/.evok). */
+  /** evoK user resource root (normally ~/.evok). Used for SYSTEM/APPEND. */
   readonly userRoot?: string;
+  /**
+   * Pi user agent dir whose `skills/` is part of the same-root scan
+   * (normally ~/.pi). Defaults to the `.pi` sibling of `userRoot`.
+   */
+  readonly piAgentDir?: string;
+}
+
+export interface BundledSkillSyncResult {
+  readonly destinations: readonly string[];
 }
 
 const SKILL_FILE = "SKILL.md";
+const BUNDLED_CATEGORY: Readonly<Record<string, string>> = {
+  "mission-intake": "intake",
+};
 
 function within(root: string, target: string): boolean {
   const rel = relative(root, target);
@@ -136,6 +142,15 @@ async function enumerateSkillFiles(root: string, diagnostics: ResourceDiagnostic
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const full = join(dir, entry.name);
       if (entry.isSymbolicLink()) {
+        try {
+          const real = await realpath(full);
+          if (within(bundledSkillRoot(), real)) {
+            await walk(full);
+            continue;
+          }
+        } catch {
+          // broken symlink: same as an unapproved link
+        }
         diagnostics.push({ type: "warning", message: "symlink inside an approved skill source is not followed", path: full });
         continue;
       }
@@ -179,9 +194,67 @@ async function readPrompt(path: string | undefined): Promise<string | undefined>
   }
 }
 
+function frontmatterField(text: string, key: string): string | undefined {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!match) return undefined;
+  for (const rawLine of match[1].split(/\r?\n/)) {
+    const keyed = /^([A-Za-z0-9_-]+)\s*:\s*(.+)$/.exec(rawLine.trim());
+    if (!keyed) continue;
+    if (keyed[1] === key) return keyed[2].trim().replace(/^["']|["']$/g, "");
+  }
+  return undefined;
+}
+
 /**
- * Discover the approved evoK prompts and skills for one research project.
- * Pure read-only filesystem access; never executes or copies anything.
+ * Packaging source → Pi root. Runtime discovery then scans the Pi root.
+ * Existing dest SKILL.md wins (no overwrite). Prefers a symlink into the
+ * bundled tree; copies SKILL.md when a link cannot be created.
+ */
+export async function syncBundledSkillsIntoPiRoot(options: {
+  readonly projectRoot: string;
+}): Promise<BundledSkillSyncResult> {
+  if (!isAbsolute(options.projectRoot)) {
+    throw new EvokResourceError(`research project root must be an absolute path: ${options.projectRoot}`);
+  }
+  const projectRoot = resolve(options.projectRoot);
+  const destinations: string[] = [];
+  const diagnostics: ResourceDiagnostic[] = [];
+  const files = await enumerateSkillFiles(bundledSkillRoot(), diagnostics);
+  for (const file of files) {
+    let text: string;
+    try {
+      text = await readFile(file, "utf8");
+    } catch {
+      continue;
+    }
+    const name = frontmatterField(text, "name");
+    if (!name) continue;
+    const category = frontmatterField(text, "category") ?? BUNDLED_CATEGORY[name];
+    if (!category) continue;
+    const destDir = join(projectRoot, ".pi", "skills", "evok", category, name);
+    destinations.push(destDir);
+    const destFile = join(destDir, SKILL_FILE);
+    try {
+      const stat = await lstat(destFile);
+      if (stat.isFile() || stat.isSymbolicLink()) continue;
+    } catch {
+      // dest missing: place the bundled skill
+    }
+    const srcDir = dirname(file);
+    await mkdir(dirname(destDir), { recursive: true });
+    try {
+      await symlink(srcDir, destDir);
+    } catch {
+      await mkdir(destDir, { recursive: true });
+      await writeFile(destFile, text);
+    }
+  }
+  return { destinations: Object.freeze(destinations) };
+}
+
+/**
+ * Discover prompts from `.evok` and skills from the Pi native root.
+ * Syncs bundled packaging skills into the project Pi root first.
  */
 export async function discoverEvokResources(options: DiscoverEvokResourcesOptions): Promise<EvokResources> {
   if (!isAbsolute(options.projectRoot)) {
@@ -189,6 +262,7 @@ export async function discoverEvokResources(options: DiscoverEvokResourcesOption
   }
   const projectRoot = resolve(options.projectRoot);
   const userRoot = resolve(options.userRoot ?? join(homedir(), ".evok"));
+  const piAgentDir = resolve(options.piAgentDir ?? join(dirname(userRoot), ".pi"));
 
   // Trusted-side guard against accidentally pointing the user namespace at the
   // real home, which would discover the whole home as a skill root.
@@ -196,17 +270,13 @@ export async function discoverEvokResources(options: DiscoverEvokResourcesOption
     throw new EvokResourceError("evok user resource root must be a .evok directory, not the user home");
   }
 
-  const projectEvok = join(projectRoot, ".evok");
-  const projectShared = join(projectRoot, ".agents", "skills");
-  const userSkills = join(userRoot, "skills");
+  await syncBundledSkillsIntoPiRoot({ projectRoot });
 
+  const projectEvok = join(projectRoot, ".evok");
   const sources: EvokSkillSource[] = [
-    { dir: join(projectEvok, "skills"), scope: "project" },
-    { dir: projectShared, scope: "project-shared" },
-    { dir: userSkills, scope: "user" },
-    // Lowest precedence: evoK-owned fallback shipped with the package (#111).
-    // A project/user copy of the same name wins first-wins above.
-    { dir: join(bundledSkillRoot()), scope: "bundled" },
+    { dir: join(projectRoot, ".pi", "skills"), scope: "project" },
+    { dir: join(projectRoot, ".agents", "skills"), scope: "project-shared" },
+    { dir: join(piAgentDir, "skills"), scope: "user" },
   ];
 
   const diagnostics: ResourceDiagnostic[] = [];
@@ -226,18 +296,32 @@ export async function discoverEvokResources(options: DiscoverEvokResourcesOption
   const result = loadSkills({ cwd: projectRoot, agentDir: userRoot, skillPaths: orderedFiles, includeDefaults: false });
   diagnostics.push(...result.diagnostics);
 
+  const scopeByReal = new Map<string, EvokSkillScope>();
+  for (const file of orderedFiles) {
+    const scope = scopeByFile.get(file);
+    if (!scope) continue;
+    try {
+      scopeByReal.set(await realpath(file), scope);
+    } catch {
+      // keep the lexical mapping only
+    }
+  }
+
   const skills: DiscoveredSkill[] = result.skills.map((skill) => ({
     skill,
     // Every parsed file was enumerated from one of the approved sources; an
     // unknown one is discovery drift and fails closed rather than mislabeling.
-    scope: scopeByFile.get(skill.filePath) ?? (() => { throw new EvokResourceError(`skill parsed from an unapproved source: ${skill.filePath}`); })(),
+    // A bundled sync link may surface as the dest path or the real packaged file.
+    scope: scopeByFile.get(skill.filePath)
+      ?? scopeByReal.get(skill.filePath)
+      ?? (() => { throw new EvokResourceError(`skill parsed from an unapproved source: ${skill.filePath}`); })(),
   }));
 
   // Each winning skill's own directory is an in-place read-only root (its
   // SKILL.md and relative references). Dedupe by real lexical path; never grant
   // a parent such as the home directory.
   const readRoots = [...new Set(skills.map((entry) => entry.skill.baseDir))]
-    .filter((dir) => within(userRoot, dir) || within(projectRoot, dir) || within(bundledSkillRoot(), dir))
+    .filter((dir) => within(userRoot, dir) || within(projectRoot, dir) || within(piAgentDir, dir) || within(bundledSkillRoot(), dir))
     .sort();
 
   const [systemPromptPath, appendPath] = await Promise.all([

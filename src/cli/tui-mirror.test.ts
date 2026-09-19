@@ -183,10 +183,10 @@ describe("TUI mirror = CLI gates (no dilution)", () => {
   test("/skill <name> discloses L1 from the existing catalog and refuses unknown names", async () => {
     const project = await tempProject();
     try {
-      await mkdir(join(project, ".evok", "skills", "try-search"), { recursive: true });
+      await mkdir(join(project, ".pi", "skills", "evok", "search", "try-search"), { recursive: true });
       await writeFile(
-        join(project, ".evok", "skills", "try-search", "SKILL.md"),
-        "---\nname: try-search\ndescription: candidate search tip\nstate: candidate\ncategory: search\n---\nCANDIDATE-BODY\n",
+        join(project, ".pi", "skills", "evok", "search", "try-search", "SKILL.md"),
+        "---\nname: try-search\ndescription: candidate search tip\nowner: evok\nstate: candidate\ncategory: search\n---\nCANDIDATE-BODY\n",
       );
       const loaded = await executeTuiMirrorCommand({
         input: "/skill try-search",
@@ -205,6 +205,20 @@ describe("TUI mirror = CLI gates (no dilution)", () => {
       });
       expect(missing.exitCode).toBe(EVOK_EXIT.usage);
       expect(missing.stderr).toMatch(/not in the evoK catalog/);
+
+      await mkdir(join(project, ".pi", "skills", "personal"), { recursive: true });
+      await writeFile(
+        join(project, ".pi", "skills", "personal", "SKILL.md"),
+        "---\nname: personal\ndescription: ordinary Pi skill\n---\nPI-ONLY-BODY\n",
+      );
+      const untagged = await executeTuiMirrorCommand({
+        input: "/skill personal",
+        projectRoot: project,
+        createResolver: async () => { throw new Error("no model"); },
+      });
+      expect(untagged.exitCode).toBe(EVOK_EXIT.usage);
+      expect(untagged.stderr).toMatch(/not in the evoK catalog/);
+      expect(untagged.stdout).not.toContain("PI-ONLY-BODY");
     } finally {
       await rm(project, { recursive: true, force: true });
     }

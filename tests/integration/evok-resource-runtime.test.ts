@@ -13,14 +13,16 @@ async function layout(): Promise<{ home: string; project: string; workspaceRoot:
   const project = await mkdtemp(join(tmpdir(), "evok-res-project-"));
   const workspaceRoot = await mkdtemp(join(tmpdir(), "evok-res-ws-"));
   await mkdir(join(home, ".evok", "skills"), { recursive: true });
+  await mkdir(join(home, ".pi", "skills"), { recursive: true });
   await mkdir(join(project, ".evok", "skills"), { recursive: true });
+  await mkdir(join(project, ".pi", "skills"), { recursive: true });
   await mkdir(join(project, ".agents", "skills"), { recursive: true });
   return { home, project, workspaceRoot };
 }
 
 async function skillFile(path: string, name: string, description: string, body: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `---\nname: ${name}\ndescription: ${description}\n---\n${body}`);
+  await writeFile(path, `---\nname: ${name}\ndescription: ${description}\nowner: evok\ncategory: search\nstate: accepted\n---\n${body}`);
 }
 
 function newWorkspace(workspaceRoot: string): Promise<string> {
@@ -51,7 +53,7 @@ async function setupFaux(providerId: string) {
 describe("evok resources through the Pi SDK execution boundary (#110)", () => {
   test("startup is metadata-only: skill name/description/location are in the system prompt but the body is not", async () => {
     const { home, project, workspaceRoot } = await layout();
-    await skillFile(join(project, ".evok", "skills", "probe", "SKILL.md"), "probe", "probe skill description", "SECRET-SKILL-BODY-MARKER");
+    await skillFile(join(project, ".pi", "skills", "probe", "SKILL.md"), "probe", "probe skill description", "SECRET-SKILL-BODY-MARKER");
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
 
     const { faux, resolver } = await setupFaux("evok-res-meta");
@@ -74,7 +76,7 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
     expect(result.stopReason).toBeTruthy();
     expect(capturedSystem).toContain("probe");
     expect(capturedSystem).toContain("probe skill description");
-    expect(capturedSystem).toContain(join(project, ".evok", "skills", "probe", "SKILL.md"));
+    expect(capturedSystem).toContain(join(project, ".pi", "skills", "probe", "SKILL.md"));
     expect(capturedSystem).not.toContain("SECRET-SKILL-BODY-MARKER");
     await rm(home, { recursive: true, force: true });
     await rm(project, { recursive: true, force: true });
@@ -84,7 +86,7 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
 
   test("a real SDK read tool call reads a skill body and a skill-relative reference in place", async () => {
     const { home, project, workspaceRoot } = await layout();
-    const skillDir = join(project, ".evok", "skills", "method");
+    const skillDir = join(project, ".pi", "skills", "method");
     await mkdir(join(skillDir, "references"), { recursive: true });
     await writeFile(join(skillDir, "references", "guide.md"), "RELATIVE-REFERENCE-CONTENT 7", "utf8");
     await skillFile(join(skillDir, "SKILL.md"), "method", "method skill", "follow references/guide.md");
@@ -119,7 +121,7 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
 
   test("negative permissions: protected credential reads under the project root are blocked", async () => {
     const { home, project, workspaceRoot } = await layout();
-    await skillFile(join(project, ".evok", "skills", "m", "SKILL.md"), "m", "m skill", "body");
+    await skillFile(join(project, ".pi", "skills", "m", "SKILL.md"), "m", "m skill", "body");
     await mkdir(join(project, "credentials"), { recursive: true });
     await writeFile(join(project, "credentials", "api-key.txt"), "top-secret");
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
@@ -157,14 +159,14 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
 
   test("negative permissions: a skill-relative path escaping via ../ is blocked and a readable helper script is not executable", async () => {
     const { home, project, workspaceRoot } = await layout();
-    const skillDir = join(project, ".evok", "skills", "s");
+    const skillDir = join(project, ".pi", "skills", "s");
     await mkdir(join(skillDir, "bin"), { recursive: true });
     await skillFile(join(skillDir, "SKILL.md"), "s", "s skill", "run bin/helper.sh");
     await writeFile(join(skillDir, "bin", "helper.sh"), "#!/bin/sh\necho nope\n", "utf8");
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
 
     const { faux, resolver } = await setupFaux("evok-res-trav");
-    // ../../../ from project/.evok/skills/s lands at the project root; one more
+    // ../../../ from project/.pi/skills/s lands at the project root; one more
     // ../ escapes the approved roots entirely.
     const secretOutside = join(dirname(project), `outside-${Date.now()}.txt`);
     await writeFile(secretOutside, "secret", "utf8");
@@ -240,20 +242,20 @@ describe("evok resources through the Pi SDK execution boundary (#110)", () => {
 describe("evok resources through the Pi SDK execution boundary (ET-M1-SKILL / #140)", () => {
   test("default context loads accepted L0 pointers only; candidate and demoted stay out", async () => {
     const { home, project, workspaceRoot } = await layout();
-    await skillFile(join(project, ".evok", "skills", "keep", "SKILL.md"), "keep", "accepted short", "ACCEPTED-BODY");
+    await skillFile(join(project, ".pi", "skills", "keep", "SKILL.md"), "keep", "accepted short", "ACCEPTED-BODY");
     await writeFile(
-      join(project, ".evok", "skills", "keep", "SKILL.md"),
-      "---\nname: keep\ndescription: accepted short\nstate: accepted\n---\nACCEPTED-BODY\n",
+      join(project, ".pi", "skills", "keep", "SKILL.md"),
+      "---\nname: keep\ndescription: accepted short\nowner: evok\ncategory: search\nstate: accepted\n---\nACCEPTED-BODY\n",
     );
-    await mkdir(join(project, ".evok", "skills", "try"), { recursive: true });
+    await mkdir(join(project, ".pi", "skills", "try"), { recursive: true });
     await writeFile(
-      join(project, ".evok", "skills", "try", "SKILL.md"),
-      "---\nname: try\ndescription: candidate must stay out\nstate: candidate\n---\nCANDIDATE-BODY\n",
+      join(project, ".pi", "skills", "try", "SKILL.md"),
+      "---\nname: try\ndescription: candidate must stay out\nowner: evok\ncategory: search\nstate: candidate\n---\nCANDIDATE-BODY\n",
     );
-    await mkdir(join(project, ".evok", "skills", "drop"), { recursive: true });
+    await mkdir(join(project, ".pi", "skills", "drop"), { recursive: true });
     await writeFile(
-      join(project, ".evok", "skills", "drop", "SKILL.md"),
-      "---\nname: drop\ndescription: demoted must stay out\nstate: demoted\n---\nDEMOTED-BODY\n",
+      join(project, ".pi", "skills", "drop", "SKILL.md"),
+      "---\nname: drop\ndescription: demoted must stay out\nowner: evok\ncategory: search\nstate: demoted\n---\nDEMOTED-BODY\n",
     );
     const resources = await discoverEvokResources({ projectRoot: project, userRoot: join(home, ".evok") });
     const { faux, resolver } = await setupFaux("evok-res-states");

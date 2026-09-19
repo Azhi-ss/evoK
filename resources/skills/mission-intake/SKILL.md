@@ -1,6 +1,8 @@
 ---
 name: mission-intake
 description: Clarify a research request and draft a bounded evoK Mission with an initial baseline-hypothesis plan, then save it for review. Use when the user proposes a research goal, explores a direction for a new Mission, or prepares autonomous research in evoK.
+owner: evok
+namespace: evok
 state: accepted
 category: intake
 ---

@@ -180,12 +180,13 @@ options:
                     experiment entry; it does not dispatch a Pi Run or open
                     EXP gates. Same verb is reachable in TUI as \`/research\`.
   --skills          thin evoK Skills directory view (\`evok /skills\` or
-                    \`evok /evok-skills\`). Lists the eight-category scaffold
-                    and lifecycle states (candidate / accepted / demoted).
-                    Default context is accepted L0 pointers only. Accepted
-                    requires Admission; file-body writeback is not opened.
-                    TUI: \`/skills\` or \`/evok-skills\`. \`/skill <name>\`
-                    discloses L1 from the existing catalog (not authorization).
+                    \`evok /evok-skills\`). Lists evoK-tagged skills from the
+                    same Pi skills root (owner|namespace: evok) and the
+                    eight-category scaffold. Default context is accepted
+                    + evoK-tagged L0 only. \`/skill <name>\` loads L1 when
+                    name is in that tagged catalog (not authorization).
+                    Accepted requires Admission; file-body writeback is
+                    not opened. TUI: \`/skills\` or \`/evok-skills\`.
   -h, --help        show this help
 
 On a tty with no request and no Mission flag, evok launches the Pi SDK native
@@ -465,7 +466,7 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
           : "read-only (read, grep, find, ls) on the project; writes stay in the isolated Run workspace"}\n`);
     stdout.write(nativeTuiCandidate
       ? `         TUI uses Pi defaults at the project root; credentials stay in ~/.pi/agent\n`
-      : `         personal Pi prompts/skills/extensions/history and global shared skills are not loaded\n`);
+      : `         skills from the Pi root (Mission inject: accepted + evoK-tagged L0); personal Pi prompts/extensions/history are not inherited\n`);
     writeResourceReport(stdout, resources);
   } catch (error) {
     stderr.write(`evok: model configuration error: ${(error as Error).message}\n`);
@@ -1264,9 +1265,9 @@ async function runOne(
 }
 
 const SCOPE_LABEL: Readonly<Record<string, string>> = Object.freeze({
-  project: "project .evok",
+  project: "project .pi",
   "project-shared": "project .agents",
-  user: "user ~/.evok",
+  user: "user Pi",
   bundled: "evok bundled",
 });
 
