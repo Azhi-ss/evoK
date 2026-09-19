@@ -284,6 +284,28 @@ change hang / T48 predicates, unfreeze `#40`, implement
 Deploy Arena, thaw true-submit, or fill `recovery` /
 `pitfalls` skill bodies.
 
+## Amendment (ET-SKILL-REC / #164)
+
+The bundled packaging source ships a thin accepted
+`recovery` skill (`owner`/`namespace: evok`,
+`category: recovery`). It is discoverable on the
+same Pi root after sync, visible as L0 on `/skills` and the
+Mission overlay, and loadable as L1 via `/skill recovery`.
+The body is program pointers to existing continue /
+repair / hang paths (`continueResearch`,
+`recoverResearchStatus`, `resumeAuthorizedMission` /
+`reconcileInterruptedMission`, `runKillTestHang`).
+`/research repair` stays reserved. The body is not a
+second control plane, not authorization to start,
+continue, or submit, and it does not relax Admission,
+Budget, hang, or T48 predicates. It does not add a new
+hang predicate.
+
+This amendment does not change EXP Admission or Budget
+predicates, change hang / T48 predicates, unfreeze `#40`,
+implement Deploy Arena, thaw true-submit, auto-resume
+without Mission gates, or fill the `pitfalls` skill body.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
@@ -294,5 +316,5 @@ Deploy Arena, thaw true-submit, or fill `recovery` /
 - No Deploy Arena implementation.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
   selection math and Deploy Arena stay unopened). Remaining skill
-  bodies (`recovery` / `pitfalls`) stay unopened;
-  `method-improvement` is the ET-SKILL-RSI accepted body.
+  bodies (`pitfalls`) stay unopened;
+  `recovery` is the ET-SKILL-REC accepted body.
