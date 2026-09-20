@@ -14,9 +14,11 @@ The dead `src/second-toy-adapter.ts` shim is gone; import
 
 Default parent selection remains `fixed_uct` (constant exploration √2).
 Progressive (`progressive_mcgs_optin` / `StrongSearchAdapter`) is constructed
-only when explicitly selected — env must not silently override the default.
-`#40` SelectionPolicy stays off. Elite / MMD / near-dup / side-slot scores
-are not Promotion, hang, or Broker keys.
+only when Mission or config explicitly opts in — env must not silently
+override the default. `#40` SelectionPolicy stays off unless that opt-in
+is set. Anneal `c(t)` + Elite soft-switch are inner selection only.
+Elite ≠ 晋级 / Promotion / hang / Broker keys. Spec:
+[`docs/progressive-opt-in.md`](../../docs/progressive-opt-in.md).
 
 W1 SEA (`sea-plugin.ts`): mount / unmount a removable MCTS / Progressive /
 StrongSearch plugin. The default path does not depend on the plugin. MCTS

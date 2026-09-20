@@ -3,7 +3,8 @@
  *
  * Mount / unmount a removable strong-search / MCTS plugin. The default
  * parent-selection path is `fixed_uct` and does not depend on any plugin.
- * Progressive / MCTS / StrongSearch stay explicit opt-in. `#40` stays off.
+ * Progressive / MCTS / StrongSearch stay explicit opt-in. `#40` stays off
+ * unless Mission/config opts in; the host product default remains off.
  *
  * MCTS mount is expressible; selection math is not opened. Progressive
  * opt-in reuses the existing adapter. This module does not call ledger /

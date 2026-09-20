@@ -2,10 +2,11 @@
  * One authorized suite-metric continue circle (ET-RSI-LIFT / #174).
  *
  * Called from continueResearch after the existing authority / baseline /
- * Budget guards. Search owns the opt-in harness (default `fixed_uct`).
- * Evidence owns the hang. This module does not dispatch a Pi Run, does
- * not thaw External Submission, and does not change Admission / Budget /
- * hang / T48 predicates.
+ * Budget guards. Search owns the harness (default `fixed_uct`; Progressive
+ * only when Mission/config explicitly opts in). Evidence owns the hang.
+ * This module does not dispatch a Pi Run, does not thaw External
+ * Submission, and does not change Admission / Budget / hang / T48
+ * predicates. Elite ≠ 晋级.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -25,8 +26,14 @@ import {
   type SuiteLiftPropose,
 } from "../search/suite-lift-circle";
 import {
+  readSearchSelectionConfig,
+  type MissionSearchSelectionSource,
+} from "../search/progressive-opt-in";
+import {
   DEFAULT_SEARCH_SELECTION_ID,
   SELECTION_POLICY_40,
+  type SearchSelectionAdapterId,
+  type SelectionPolicy40State,
 } from "../search/search-selection-port";
 
 export type ResearchCircleVerdict = "lifted" | "killed";
@@ -40,8 +47,8 @@ export interface ResearchLiftCircleView {
   readonly evidencePath: string;
   readonly promotionBlocked: boolean;
   readonly hangOutcome: KillTestOutcome;
-  readonly selectionId: typeof DEFAULT_SEARCH_SELECTION_ID;
-  readonly selectionPolicy40: typeof SELECTION_POLICY_40;
+  readonly selectionId: SearchSelectionAdapterId;
+  readonly selectionPolicy40: SelectionPolicy40State;
   readonly reason: string;
 }
 
@@ -56,6 +63,8 @@ export interface ResearchLiftOptions {
   readonly propose?: SuiteLiftPropose;
   readonly hang?: ResearchLiftHang;
   readonly liftTarget?: number;
+  /** Explicit Mission/config Progressive opt-in. Absent stays `fixed_uct`. */
+  readonly searchSelection?: MissionSearchSelectionSource;
 }
 
 export function researchContinueEvidencePath(
@@ -75,8 +84,8 @@ export function circleFromLiftExperiment(entry: {
   readonly evidencePath?: string;
   readonly promotionBlocked?: boolean;
   readonly hangOutcome?: KillTestOutcome;
-  readonly selectionId?: typeof DEFAULT_SEARCH_SELECTION_ID;
-  readonly selectionPolicy40?: typeof SELECTION_POLICY_40;
+  readonly selectionId?: SearchSelectionAdapterId;
+  readonly selectionPolicy40?: SelectionPolicy40State;
   readonly reason?: string;
 }): ResearchLiftCircleView | undefined {
   if (entry.source !== "suite-lift") return undefined;
@@ -135,11 +144,13 @@ export async function trySuiteLiftCircle(input: {
 
   const liftTarget = input.lift?.liftTarget ?? DEFAULT_SUITE_LIFT_TARGET;
   const baselineFiles = await loadBaselineFiles(input.projectRoot);
+  const searchSelection = input.lift?.searchSelection ?? readSearchSelectionConfig(input.projectRoot);
   const circle = runSuiteLiftCircle({
     baselineFiles,
     baselineScore: input.baseline.score,
     liftTarget,
     ...(input.lift?.propose ? { propose: input.lift.propose } : {}),
+    ...(searchSelection === undefined ? {} : { searchSelection }),
   });
 
   const evaluator = await createProjectBaselineEvaluator(input.projectRoot);
@@ -244,8 +255,8 @@ export async function trySuiteLiftCircle(input: {
       blocksBroker: hang.blocksBroker,
       objections: hang.objections,
     },
-    selectionId: DEFAULT_SEARCH_SELECTION_ID,
-    selectionPolicy40: SELECTION_POLICY_40,
+    selectionId: circle.selectionId,
+    selectionPolicy40: circle.selectionPolicy40,
     submit: "frozen — true External Submission is not authorized",
     admissionUnchanged: true,
     evidenceRefs: [baselineEvidenceId, evidenceId],
@@ -267,8 +278,8 @@ export async function trySuiteLiftCircle(input: {
     evidencePath,
     promotionBlocked: hang.blocksPromotion,
     hangOutcome: hang.outcome,
-    selectionId: DEFAULT_SEARCH_SELECTION_ID,
-    selectionPolicy40: SELECTION_POLICY_40,
+    selectionId: circle.selectionId,
+    selectionPolicy40: circle.selectionPolicy40,
     reason,
   };
 }

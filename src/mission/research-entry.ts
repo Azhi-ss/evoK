@@ -21,7 +21,11 @@ import { budgetDecisionIsPass, type BudgetDecision } from "../evidence/budget-ga
 import type { KillTestOutcome } from "../evidence/hypothesis-ledger";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
+  PROGRESSIVE_MCGS_OPT_IN_ID,
   SELECTION_POLICY_40,
+  SELECTION_POLICY_40_OPT_IN,
+  type SearchSelectionAdapterId,
+  type SelectionPolicy40State,
 } from "../search/search-selection-port";
 import { isMissionId, missionsDir } from "./mission-draft";
 import {
@@ -98,8 +102,8 @@ export interface ResearchExperimentEntry {
   readonly evidencePath?: string;
   readonly promotionBlocked?: boolean;
   readonly hangOutcome?: KillTestOutcome;
-  readonly selectionId?: typeof DEFAULT_SEARCH_SELECTION_ID;
-  readonly selectionPolicy40?: typeof SELECTION_POLICY_40;
+  readonly selectionId?: SearchSelectionAdapterId;
+  readonly selectionPolicy40?: SelectionPolicy40State;
   readonly reason?: string;
 }
 
@@ -253,8 +257,12 @@ function asExperiment(payload: Record<string, unknown>, at: string): ResearchExp
     ...(hangOutcome === "pass" || hangOutcome === "fail" || hangOutcome === "inconclusive"
       ? { hangOutcome }
       : {}),
-    ...(payload.selectionId === DEFAULT_SEARCH_SELECTION_ID ? { selectionId: DEFAULT_SEARCH_SELECTION_ID } : {}),
-    ...(payload.selectionPolicy40 === SELECTION_POLICY_40 ? { selectionPolicy40: SELECTION_POLICY_40 } : {}),
+    ...(payload.selectionId === DEFAULT_SEARCH_SELECTION_ID || payload.selectionId === PROGRESSIVE_MCGS_OPT_IN_ID
+      ? { selectionId: payload.selectionId }
+      : {}),
+    ...(payload.selectionPolicy40 === SELECTION_POLICY_40 || payload.selectionPolicy40 === SELECTION_POLICY_40_OPT_IN
+      ? { selectionPolicy40: payload.selectionPolicy40 }
+      : {}),
     ...(typeof payload.reason === "string" && payload.reason !== "" ? { reason: payload.reason } : {}),
   };
 }
