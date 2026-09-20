@@ -23,7 +23,7 @@
 | **#68** E1 runner | **landed / locked** | `runOuterMinPathSetup` |
 | **#69** E3 mapped search-space refs | **landed / locked** | `buildOuterSearchSpaceFixtures` |
 | **#70** E2 outer AC | **landed / locked** | `outer-e2e-min-path` + 接到 auto-submit |
-| **#77–#79** | **locked if LLM.3 / LP.2 / ME1；else deferred** | issue 正文本环境 403 读不到。仓库已有 LLM.3 / LP.2 / ME1 named AC，未新造门语言 |
+| **#77–#79** | **deferred** | 本环境 `gh` 读 issue 正文 403，无法核票。不新造门语言；仓库已有的 LLM.3 / LP.2 / ME1 before-promotion AC 保持原测，本票不重开 |
 | **#51 全量** param-space / MMD 适配器 | **deferred** | 诊断适配器 / S* 不在本票 |
 | **#50 增列** `parent_ids` / `spawned_by` / plan.`budget`·`status` / sqlite | **deferred** | 改既有 H1/H2 形状会动已锁 AC；不发明第二套账本 |
 | DeployArena 厚编排（#182） / 商业 OS / 权重训练 | **out** | 非目标 |

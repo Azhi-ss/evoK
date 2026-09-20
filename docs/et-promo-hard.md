@@ -25,4 +25,4 @@ T48 methodology / OOF (sleep when no contract)
 - Isolated `runKillTestHang` predicate checks may omit a plan (T48 / scalar filters).
 - Before-promotion hook and contest-auto-submit **require** a ledger plan.
 - Elite / MMD / near-dup / side-slot / Team Fan-Out are not Promotion keys.
-- Durable sqlite, full param-space/MMD adapter, DeployArena thick orch, and extra `#50` columns (`parent_ids`, `spawned_by`, plan `budget`/`status`) stay out of this slice.
+- Durable sqlite, full param-space/MMD adapter, DeployArena thick orch, extra `#50` columns (`parent_ids`, `spawned_by`, plan `budget`/`status`), and `#77–#79` (issue bodies unreachable here) stay out of this slice.

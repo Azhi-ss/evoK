@@ -7,7 +7,8 @@
  * ledger-bound KillTestPlan (no plan cannot claim pass). Real network
  * submit stays behind `{ live: true }` plus an injected destination.
  *
- * Does not change Admission / Budget / hang / T48 predicates.
+ * Does not loosen Admission / Budget / hang / T48 predicates.
+ * Hang green additionally requires a ledger KillTestPlan (harden).
  * Does not change SubmissionBroker's compatibility `autoSubmit` flag
  * (that flag still cannot bypass Human Acceptance).
  * Does not weld `#40` / Progressive as the product default.

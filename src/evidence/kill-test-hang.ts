@@ -120,7 +120,10 @@ export function killTestOutcomeBlocksBroker(outcome: KillTestOutcome): boolean {
 export function killTestHangHasLedgerPlan(
   input: Pick<KillTestHangInput, "ledger" | "planId">,
 ): boolean {
-  return input.ledger !== undefined && typeof input.planId === "string" && input.planId.trim() !== "";
+  if (input.ledger === undefined || typeof input.planId !== "string" || input.planId.trim() === "") {
+    return false;
+  }
+  return input.ledger.state().plans[input.planId] !== undefined;
 }
 
 function normalizeOutcome(value: unknown): KillTestOutcome {

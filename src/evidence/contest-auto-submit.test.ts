@@ -221,6 +221,24 @@ describe("contest-arm auto-submit — all-green path", () => {
 });
 
 describe("contest-arm auto-submit — fail-closed when any gate is not green", () => {
+  test("unknown ledger planId is missing and must not submit", async () => {
+    const calls: unknown[] = [];
+    const hang = ledgerBoundHang();
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({
+        hang: {
+          ...hang,
+          planId: "kt-ghost",
+        },
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(result.submitted).toBe(false);
+    expect(result.gates.find((gate) => gate.id === "hang")?.color).toBe("missing");
+    expect(result.gates.find((gate) => gate.id === "hang")?.objections.join(" ")).toMatch(/ledger KillTestPlan/i);
+    expect(calls).toHaveLength(0);
+  });
+
   test("claiming hang pass without a ledger KillTestPlan must not submit", async () => {
     const calls: unknown[] = [];
     const ledger = new InMemoryContestAutoSubmitLedger();

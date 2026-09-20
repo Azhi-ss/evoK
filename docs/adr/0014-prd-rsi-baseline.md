@@ -366,7 +366,8 @@ Arena, open a commercial contest OS, or add a second control plane.
 
 ## Out of scope / freezes
 
-- No change to gate three-state, T48, hang, or Broker predicates.
+- No loosening of gate three-state, T48, hang, or Broker predicates
+  (ET-PROMO-HARD may tighten hang: no ledger plan cannot claim pass).
 - No weld of `#40` / Progressive as product default.
 - No commercial contest OS; contest-arm auto-submit stays fail-closed
   (all gates green + ledger) and does not loosen predicates.

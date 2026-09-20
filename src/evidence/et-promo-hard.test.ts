@@ -15,6 +15,11 @@ import {
   OUTER_MIN_KILL_EVIDENCE_ID,
 } from "../mission/outer-min-path";
 import { assembleOuterE2eMinPath } from "../mission/outer-e2e-min-path";
+import { RESEARCH_PREDICTION as prediction } from "../fixtures/research";
+import {
+  ScoreFileToyCompetitionAdapter,
+  ToyCompetitionHarness,
+} from "../toy-harness";
 import { BudgetLedger } from "./budget-gate";
 import {
   InMemoryContestAutoSubmitLedger,
@@ -197,6 +202,28 @@ describe("ET-PROMO-HARD — landed Spec stack", () => {
       "CONTEST_AUTO_SUBMIT_ATTEMPTED",
       "CONTEST_AUTO_SUBMIT_SUBMITTED",
     ]);
+
+    const promotePath = assembleOuterE2eMinPath({ outcome: "pass", resultId: "ktr-e2-promote" });
+    const harness = new ToyCompetitionHarness({
+      prediction,
+      missionId: "et-promo-hard-e2-promote",
+      taskContract: { objective: "E2 pass may PROMOTED_LOCAL" },
+      branchIds: ["candidate"],
+      runtime: {
+        selfVerify: () => ({ ok: true }),
+        propose: () => ({ files: { score: "3" } }),
+        falsify: () => ({ ok: true, objections: [] }),
+      },
+      adapter: new ScoreFileToyCompetitionAdapter(),
+      policy: { maxBranches: 1, maxParallelBranches: 1, quorum: 1 },
+      verification: { killTestHang: promotePath.killTestHang },
+    });
+    const state = await harness.run();
+    expect(state.branches.candidate.status).toBe("PROMOTED_LOCAL");
+    expect(harness.acceptChampion({
+      acceptedBy: "operator",
+      championDigest: state.champion!.snapshot.digest,
+    }).acceptedBy).toBe("operator");
   });
 
   test("fail / inconclusive / plan-less / unmapped / scalar hang cannot reach the Broker seam", async () => {
