@@ -76,6 +76,7 @@ export {
   SubmissionBroker,
   SubmissionRejected,
   externalSubmissionsFromEvents,
+  submissionChampionIsEligible,
 } from "./submission-broker";
 export {
   InMemoryContestAutoSubmitLedger,

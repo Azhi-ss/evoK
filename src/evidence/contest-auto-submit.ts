@@ -27,6 +27,8 @@ import {
 } from "./methodology";
 import {
   SubmissionBroker,
+  submissionChampionIsEligible,
+  type SubmissionChampion,
   type SubmissionRequestInput,
   type SubmissionResult,
 } from "./submission-broker";
@@ -55,16 +57,17 @@ export interface ContestAutoSubmitGateStatus {
   readonly objections: readonly string[];
 }
 
-export interface ContestPromotionChampion {
-  readonly evaluatorSucceeded?: boolean;
-  readonly evaluatorPassed?: boolean;
-  readonly successAuditorPassed?: boolean;
-  readonly successAudited?: boolean;
-  readonly verification?: Readonly<Record<string, boolean>>;
-  readonly promotionApproved?: boolean;
-  readonly promoted?: boolean;
-  readonly status?: string;
-}
+export type ContestPromotionChampion = Pick<
+  SubmissionChampion,
+  | "evaluatorSucceeded"
+  | "evaluatorPassed"
+  | "successAuditorPassed"
+  | "successAudited"
+  | "verification"
+  | "promotionApproved"
+  | "promoted"
+  | "status"
+>;
 
 export interface ContestT48Input {
   readonly evidence?: MethodologyEvidence;
@@ -144,23 +147,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function promotionEligible(champion: ContestPromotionChampion): boolean {
-  const verification = champion.verification;
-  const evaluator = champion.evaluatorSucceeded === true || champion.evaluatorPassed === true;
-  const successAuditor = champion.successAuditorPassed === true
-    || champion.successAudited === true
-    || (isRecord(verification) && verification.SuccessAuditor === true);
-  const promoted = champion.promotionApproved === true
-    || champion.promoted === true
-    || champion.status === "PROMOTED_LOCAL";
-  return evaluator && successAuditor && promoted;
-}
-
 function evaluatePromotion(champion: ContestPromotionChampion | undefined): ContestAutoSubmitGateStatus {
   if (champion === undefined) {
     return freezeGate("promotion", "missing", ["promotion champion is missing"]);
   }
-  if (promotionEligible(champion)) return freezeGate("promotion", "green");
+  if (submissionChampionIsEligible(champion as SubmissionChampion)) return freezeGate("promotion", "green");
   return freezeGate("promotion", "red", [
     "champion has not passed evaluator, Success Auditor, and promotion policy",
   ]);
@@ -292,7 +283,10 @@ export function createBrokerContestSubmitSeam(
   broker: SubmissionBroker,
   request: SubmissionRequestInput,
 ): ContestSubmitSeam {
-  return async ({ live }) => {
+  return async ({ live, decision }) => {
+    if (decision.reason === "gates-not-green" || decision.refusedGates.length > 0) {
+      throw new Error("contest auto-submit seam refused: gates are not green");
+    }
     if (live === true) {
       const created = broker.createRequest({ ...request, dryRun: false });
       broker.approve(created, {
@@ -358,12 +352,12 @@ export async function attemptContestAutoSubmit(
   }
 
   const submission = await input.submit({ live, decision: evaluated });
-  const submitted = submission.status === "DRY_RUN" || submission.status === "SUCCEEDED";
+  const ok = submission.status === "DRY_RUN" || submission.status === "SUCCEEDED";
   const accepted = decisionOf({
     gates: evaluated.gates,
     reason: "gates-green",
-    submitted,
-    ok: submitted,
+    submitted: true,
+    ok,
   });
   append(ledger, "CONTEST_AUTO_SUBMIT_SUBMITTED", {
     outcome: "submitted",

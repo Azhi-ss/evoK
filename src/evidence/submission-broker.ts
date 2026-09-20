@@ -501,6 +501,11 @@ function eligibleChampion(champion: SubmissionChampion): boolean {
   return evaluator && successAuditor && promoted;
 }
 
+/** Same promotion predicate the Broker uses; request flags are not a second policy. */
+export function submissionChampionIsEligible(champion: SubmissionChampion): boolean {
+  return eligibleChampion(champion);
+}
+
 function normalizeChampion(value: unknown): SubmissionChampion {
   if (!isPlainRecord(value)) throw new TypeError("champion is required");
   const missionId = ownValue(value, "missionId");

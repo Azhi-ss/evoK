@@ -107,7 +107,7 @@ T48 / Broker / Admission / Budget Gate predicates. Recorded in
 - No change to gate, T48, hang, or #40 semantics.
 - No change to `SearchSelectionPort` or `runGoldenPath` behavior.
 - No `src/*.ts` logic change.
-- No true contest External Submission.
+- Contest-arm auto-submit stays fail-closed (all gates green + ledger).
 - No Elite-as-promotion.
 - No C thicken of the execution roster.
 - P6 residue cleanup is recorded in ADR-0013 (no second package move).

@@ -47,7 +47,7 @@ explicit `{ live: true }`. `#40` stays opt-in.
 
 - No change to gate three-state, T48, hang, or Broker predicates.
 - No weld of `#40` / Progressive as product default.
-- No real contest submit path enabled.
+- Contest-arm auto-submit stays fail-closed and evidence-owned.
 - No move of `src/mission/`, `src/cli/`, `src/execution/`,
   `src/evidence/`, or `src/search/`.
 - No start of P6 residue cleanup.

@@ -46,7 +46,7 @@ Fan-Out are not Promotion keys. Pattern C is not thickened.
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
-- No real contest submit path enabled.
+- Contest-arm auto-submit stays fail-closed (all gates green + ledger).
 - No move of `search-selection-port` / Progressive, `runGoldenPath` / mission-*,
   `llm-comp-arm*` runtime, or Team orchestra.
 - No `#40` / default `fixed_uct` / Progressive default change.

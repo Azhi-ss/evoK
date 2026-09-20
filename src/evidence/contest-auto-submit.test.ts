@@ -257,6 +257,29 @@ describe("contest-arm auto-submit — fail-closed when any gate is not green", (
     expect(calls).toHaveLength(0);
   });
 
+  test("Admission hang is yellow and must not submit", async () => {
+    const calls: unknown[] = [];
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({
+        admission: {
+          validity: evaluateExperimentValidity({
+            hang: true,
+            slices: [
+              { kind: "official_samples", present: true, outcome: "pass" },
+              { kind: "adversarial_labeled", present: true, outcome: "pass" },
+              { kind: "protected_holdout", present: true, outcome: "pass" },
+            ],
+          }),
+          slices: { officialSamples: true, adversarialLabeled: true, protectedHoldout: true },
+        },
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(result.submitted).toBe(false);
+    expect(result.gates.find((gate) => gate.id === "admission")?.color).toBe("yellow");
+    expect(calls).toHaveLength(0);
+  });
+
   test("missing Admission input is missing and must not submit", async () => {
     const calls: unknown[] = [];
     const result = await attemptContestAutoSubmit({
@@ -311,6 +334,25 @@ describe("contest-arm auto-submit — fail-closed when any gate is not green", (
     expect(result.submitted).toBe(false);
     expect(result.gates.find((gate) => gate.id === "t48")?.color).toBe("red");
     expect(result.gates.find((gate) => gate.id === "t48")?.objections.join(" ")).toMatch(/split|OOF|leak/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("T48 missing used-split digest is red and must not submit", async () => {
+    const calls: unknown[] = [];
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({
+        t48: {
+          evidence: { splitDigestAgreement: "unknown", oofPresent: true },
+          contracts: {
+            splitContract: { splitRef: { digest: "sha256:expected-split" } },
+          },
+        },
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(result.submitted).toBe(false);
+    expect(result.gates.find((gate) => gate.id === "t48")?.color).toBe("red");
+    expect(result.gates.find((gate) => gate.id === "t48")?.objections.join(" ")).toMatch(/missing|used-split/i);
     expect(calls).toHaveLength(0);
   });
 
