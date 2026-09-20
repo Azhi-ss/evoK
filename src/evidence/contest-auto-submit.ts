@@ -3,10 +3,12 @@
  *
  * Thin orchestrator: reuse existing gate APIs, fail closed on any
  * red / yellow / missing color, write an attempt ledger every time,
- * and only then call the existing submit seam. Real network submit
- * stays behind `{ live: true }` plus an injected destination.
+ * and only then call the existing submit seam. The hang gate requires a
+ * ledger-bound KillTestPlan (no plan cannot claim pass). Real network
+ * submit stays behind `{ live: true }` plus an injected destination.
  *
- * Does not change Admission / Budget / hang / T48 predicates.
+ * Does not loosen Admission / Budget / hang / T48 predicates.
+ * Hang green additionally requires a ledger KillTestPlan (harden).
  * Does not change SubmissionBroker's compatibility `autoSubmit` flag
  * (that flag still cannot bypass Human Acceptance).
  * Does not weld `#40` / Progressive as the product default.
@@ -17,7 +19,7 @@ import {
   evaluateBudgetGate,
   type BudgetAuthorizationInput,
 } from "./budget-gate";
-import { runKillTestHang, type KillTestHangInput } from "./kill-test-hang";
+import { killTestHangHasLedgerPlan, runKillTestHang, type KillTestHangInput } from "./kill-test-hang";
 import { evaluateMethodAdmission, type MethodAdmissionInput } from "./method-admission";
 import {
   auditMethodology,
@@ -160,6 +162,9 @@ function evaluatePromotion(champion: ContestPromotionChampion | undefined): Cont
 function evaluateHang(input: KillTestHangInput | undefined): ContestAutoSubmitGateStatus {
   if (input === undefined) {
     return freezeGate("hang", "missing", ["kill-test hang input is missing"]);
+  }
+  if (!killTestHangHasLedgerPlan(input)) {
+    return freezeGate("hang", "missing", ["kill-test hang requires a ledger KillTestPlan"]);
   }
   try {
     const hang = runKillTestHang(input);

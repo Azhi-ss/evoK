@@ -7,6 +7,8 @@ a green live baseline, `#40` Progressive as the product default, Deploy Arena, o
 unopened capability. Chat is not Mission authority. Loading a Skill is not
 authorization to start, continue, or submit. Contest-arm auto-submit is
 evidence-owned and fail-closed — see [contest-auto-submit.md](contest-auto-submit.md).
+Promotion hardening (ledger hang before Broker) is
+[et-promo-hard.md](et-promo-hard.md).
 `#40` Progressive is explicit Mission/config opt-in only — see
 [progressive-opt-in.md](progressive-opt-in.md).
 
@@ -404,7 +406,7 @@ even when every blocking start-path check is clear:
 | **Budget Gate** | reserve → settle still refuses continue or writeback when spend is unreserved or over the Mission Policy cap. Budget pass is not Admission pass. |
 | **hang** | Inconclusive hang is not pass. Predicates unchanged. |
 | **T48** | Unmapped T48 artifacts still block. Predicates unchanged. |
-| **External Submission / Broker** | Contest-arm auto-submit only after every promotion/evidence gate is green; each attempt is ledged; any non-green gate fails closed. Start is not submit authorization. Broker predicates unchanged. |
+| **External Submission / Broker** | Contest-arm auto-submit only after every promotion/evidence gate is green (hang needs a ledger KillTestPlan); each attempt is ledged; any non-green gate fails closed. Start is not submit authorization. Broker predicates unchanged. |
 
 **Pi model/auth** is a **blocking start-path check**, not one of those
 in-force lines. It can pass once `~/.pi/agent` resolves and preflights the

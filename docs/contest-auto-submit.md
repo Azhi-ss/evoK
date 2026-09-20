@@ -33,7 +33,7 @@ cannot bypass Human Acceptance on a direct `broker.submit` call.
 | Gate | Existing API | Green | Not green |
 |---|---|---|---|
 | **promotion** | champion eligibility (evaluator + Success Auditor + local promote) | all three true | missing champion, or not promoted |
-| **hang** | `runKillTestHang` | `ok` | missing; `fail` = red; `inconclusive` = yellow |
+| **hang** | `runKillTestHang` | `ok` **and** a ledger `KillTestPlan` | missing input or missing plan; `fail` = red; `inconclusive` = yellow. Claiming pass without a plan is not green. |
 | **T48** | `auditMethodology` + `oofEnsembleGate` | both `ok` (sleep when no contract is injected — existing predicate) | disagree / missing used-split / required OOF absent |
 | **Admission** | `evaluateMethodAdmission` | `admitted` | missing input; missing holdout / official / adversarial = red; hang / inconclusive = yellow |
 | **Budget** | `evaluateBudgetGate` / `budgetDecisionIsPass` | pass | missing input; unreserved / over-budget = red |

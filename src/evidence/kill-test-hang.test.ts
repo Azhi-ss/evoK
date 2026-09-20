@@ -168,6 +168,25 @@ describe("kill-test hang tri-state vs broker analog", () => {
 });
 
 describe("before-promotion KillTester stacks after SuccessAuditor", () => {
+  test("before-promotion hook cannot claim pass without a ledger KillTestPlan", async () => {
+    const catalog = catalogWithMappedIds();
+    const hook = createKillTestHangHook({
+      outcome: "pass",
+      evidenceRefs: ["ev-kill"],
+      catalog,
+    });
+    const result = await hook({
+      role: "KillTester",
+      contract: verificationRoleContract("KillTester"),
+      missionId: "planless-hang",
+      branchId: "candidate",
+      taskContract: { objective: "planless hang must not claim pass" },
+      snapshot: { digest: "sha256:planless" },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.objections.join(" ")).toMatch(/ledger KillTestPlan/i);
+  });
+
   test("KillTester stays on the SuccessAuditor family and does not replace it", () => {
     expect(verificationRoleContract("KillTester")).toMatchObject({
       trigger: "before-promotion",
@@ -186,6 +205,7 @@ describe("before-promotion KillTester stacks after SuccessAuditor", () => {
     const policy = { maxBranches: 1, maxParallelBranches: 1, quorum: 1 };
 
     async function runWith(outcome: KillTestOutcome) {
+      const { catalog: ledgerCatalog, ledger, plan } = ledgerWithOpenPlan(catalog);
       const order: string[] = [];
       const harness = new ToyCompetitionHarness({
         missionId: `k1-${outcome}`,
@@ -203,7 +223,9 @@ describe("before-promotion KillTester stacks after SuccessAuditor", () => {
           killTestHang: createKillTestHangHook({
             outcome,
             evidenceRefs: ["ev-kill"],
-            catalog,
+            catalog: ledgerCatalog,
+            ledger,
+            planId: plan.planId,
             contracts,
             methodologyEvidence: evidence,
           }),

@@ -103,6 +103,7 @@ describe("P6 six-pack physical closeout", () => {
   test("evidence barrel is the gate-authority surface and does not swallow other packs", () => {
     expect(typeof evidence.runKillTestHang).toBe("function");
     expect(typeof evidence.createKillTestHangHook).toBe("function");
+    expect(typeof evidence.killTestHangHasLedgerPlan).toBe("function");
     expect(typeof evidence.auditMethodology).toBe("function");
     expect(typeof evidence.oofEnsembleGate).toBe("function");
     expect(typeof evidence.HypothesisLedger).toBe("function");

@@ -7,8 +7,11 @@
  * analog: local promote (`PROMOTED_LOCAL`) and `HumanAcceptanceGate`.
  *
  * When a ledger + planId are supplied, the hang reads `KillTestPlan` and
- * writes `KillTestResult` through H2. It does not invent a second store,
- * skip the hang, or relax T48 / Broker.
+ * writes `KillTestResult` through H2. Before-promotion (`createKillTestHangHook`)
+ * and Broker / contest-auto-submit consumers require that plan — claiming
+ * pass without a ledger KillTestPlan fails closed. Isolated `runKillTestHang`
+ * predicate checks may omit it. It does not invent a second store, skip the
+ * hang, or relax T48 / Broker.
  */
 import { deepFreeze } from "../security-boundary";
 import {
@@ -111,6 +114,16 @@ function decision(
 export function killTestOutcomeBlocksBroker(outcome: KillTestOutcome): boolean {
   if (outcome === "inconclusive") return true;
   return !killTestOutcomeIsPass(outcome);
+}
+
+/** Broker / before-promotion consumers require a ledger KillTestPlan. Isolated predicate checks may omit it. */
+export function killTestHangHasLedgerPlan(
+  input: Pick<KillTestHangInput, "ledger" | "planId">,
+): boolean {
+  if (input.ledger === undefined || typeof input.planId !== "string" || input.planId.trim() === "") {
+    return false;
+  }
+  return input.ledger.state().plans[input.planId] !== undefined;
 }
 
 function normalizeOutcome(value: unknown): KillTestOutcome {
@@ -249,6 +262,12 @@ export function createKillTestHangHook(
   return (context) => {
     try {
       const request = typeof input === "function" ? input(context) : input;
+      if (!killTestHangHasLedgerPlan(request)) {
+        return deepFreeze({
+          ok: false,
+          objections: Object.freeze(["kill-test hang requires a ledger KillTestPlan"]),
+        }) as VerificationResult;
+      }
       const hang = runKillTestHang(request);
       return deepFreeze({
         ok: hang.ok,

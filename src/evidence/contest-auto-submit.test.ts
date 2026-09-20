@@ -23,7 +23,8 @@ import {
   type ContestSubmitSeam,
 } from "./contest-auto-submit";
 import { evaluateExperimentValidity } from "./experiment-validity";
-import { T48MappedCatalog } from "./hypothesis-ledger";
+import { HypothesisLedger, T48MappedCatalog, type KillTestOutcome } from "./hypothesis-ledger";
+import { type KillTestHangInput } from "./kill-test-hang";
 import { type MethodAdmissionInput } from "./method-admission";
 import {
   InMemorySubmissionLedger,
@@ -81,14 +82,41 @@ function championPass(): SubmissionChampion {
   };
 }
 
+function ledgerBoundHang(overrides: Partial<KillTestHangInput> & { outcome?: KillTestOutcome } = {}): KillTestHangInput {
+  const catalog = overrides.catalog ?? catalogWithMappedIds();
+  const ledger = overrides.ledger instanceof HypothesisLedger
+    ? overrides.ledger
+    : new HypothesisLedger({ catalog });
+  const planId = overrides.planId ?? "kt-contest";
+  if (ledger.state().hypotheses["h-contest"] === undefined) {
+    ledger.createHypothesis({
+      hypothesisId: "h-contest",
+      statement: "contest-arm champion survives the predeclared kill-test",
+      evidenceRefs: ["ev-holdout"],
+    });
+  }
+  if (ledger.state().plans[planId] === undefined) {
+    ledger.planKillTest({
+      planId,
+      hypothesisId: "h-contest",
+      predicate: "protected hold-out must not move after removing the shared step",
+      evidenceRefs: ["ev-holdout"],
+    });
+  }
+  return {
+    outcome: "pass",
+    evidenceRefs: ["ev-kill"],
+    ...overrides,
+    catalog,
+    ledger,
+    planId,
+  };
+}
+
 function greenInput(overrides: Partial<ContestAutoSubmitInput> = {}): ContestAutoSubmitInput {
   return {
     champion: championPass(),
-    hang: {
-      outcome: "pass",
-      evidenceRefs: ["ev-kill"],
-      catalog: catalogWithMappedIds(),
-    },
+    hang: ledgerBoundHang(),
     admission: admissionPass(),
     budget: budgetPassInput(),
     ...overrides,
@@ -121,6 +149,24 @@ describe("contest-arm auto-submit — all-green path", () => {
     expect(result.refusedGates).toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ live: false });
+    expect(result.gates.find((gate) => gate.id === "hang")?.color).toBe("green");
+  });
+
+  test("all-green hang writes KillTestResult through the HypothesisLedger", async () => {
+    const hang = ledgerBoundHang({ resultId: "ktr-contest-green" });
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({ hang }),
+      submit: recordingSubmit([]),
+    });
+    expect(result.submitted).toBe(true);
+    expect(hang.ledger?.resultFor("kt-contest")).toEqual({
+      resultId: "ktr-contest-green",
+      planId: "kt-contest",
+      hypothesisId: "h-contest",
+      outcome: "pass",
+      evidenceRefs: [{ kind: "evidence", id: "ev-kill" }],
+    });
+    expect(hang.ledger?.state().hypotheses["h-contest"]?.status).toBe("open");
   });
 
   test("live all-green path uses the existing broker destination (mockable; still ledgers)", async () => {
@@ -175,16 +221,58 @@ describe("contest-arm auto-submit — all-green path", () => {
 });
 
 describe("contest-arm auto-submit — fail-closed when any gate is not green", () => {
-  test("inconclusive hang is yellow and must not submit", async () => {
+  test("unknown ledger planId is missing and must not submit", async () => {
+    const calls: unknown[] = [];
+    const hang = ledgerBoundHang();
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({
+        hang: {
+          ...hang,
+          planId: "kt-ghost",
+        },
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(result.submitted).toBe(false);
+    expect(result.gates.find((gate) => gate.id === "hang")?.color).toBe("missing");
+    expect(result.gates.find((gate) => gate.id === "hang")?.objections.join(" ")).toMatch(/ledger KillTestPlan/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("claiming hang pass without a ledger KillTestPlan must not submit", async () => {
     const calls: unknown[] = [];
     const ledger = new InMemoryContestAutoSubmitLedger();
     const result = await attemptContestAutoSubmit({
       ...greenInput({
         hang: {
-          outcome: "inconclusive",
+          outcome: "pass",
           evidenceRefs: ["ev-kill"],
           catalog: catalogWithMappedIds(),
         },
+      }),
+      submit: recordingSubmit(calls),
+      ledger,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.submitted).toBe(false);
+    expect(result.outcome).toBe("refused");
+    expect(result.reason).toBe("gates-not-green");
+    expect(result.gates.find((gate) => gate.id === "hang")?.color).toBe("missing");
+    expect(result.gates.find((gate) => gate.id === "hang")?.objections.join(" ")).toMatch(/ledger KillTestPlan/i);
+    expect(calls).toHaveLength(0);
+    expect(ledger.events().map((event) => event.type)).toEqual([
+      "CONTEST_AUTO_SUBMIT_ATTEMPTED",
+      "CONTEST_AUTO_SUBMIT_REFUSED",
+    ]);
+  });
+
+  test("inconclusive hang is yellow and must not submit", async () => {
+    const calls: unknown[] = [];
+    const ledger = new InMemoryContestAutoSubmitLedger();
+    const result = await attemptContestAutoSubmit({
+      ...greenInput({
+        hang: ledgerBoundHang({ outcome: "inconclusive" }),
       }),
       submit: recordingSubmit(calls),
       ledger,
@@ -210,11 +298,7 @@ describe("contest-arm auto-submit — fail-closed when any gate is not green", (
     const calls: unknown[] = [];
     const result = await attemptContestAutoSubmit({
       ...greenInput({
-        hang: {
-          outcome: "fail",
-          evidenceRefs: ["ev-kill"],
-          catalog: catalogWithMappedIds(),
-        },
+        hang: ledgerBoundHang({ outcome: "fail" }),
       }),
       submit: recordingSubmit(calls),
     });
@@ -410,11 +494,7 @@ describe("contest-arm auto-submit — fail-closed when any gate is not green", (
     const result = await attemptContestAutoSubmit({
       ...greenInput({
         champion,
-        hang: {
-          outcome: "inconclusive",
-          evidenceRefs: ["ev-kill"],
-          catalog: catalogWithMappedIds(),
-        },
+        hang: ledgerBoundHang({ outcome: "inconclusive" }),
       }),
       live: true,
       submit: createBrokerContestSubmitSeam(broker, {
@@ -428,6 +508,34 @@ describe("contest-arm auto-submit — fail-closed when any gate is not green", (
     });
     expect(result.submitted).toBe(false);
     expect(destinationCalls).toHaveLength(0);
+  });
+
+  test("unmapped Artifact or scalar-only diagnosis hard-rejects hang and must not submit", async () => {
+    const calls: unknown[] = [];
+    const unmapped = await attemptContestAutoSubmit({
+      ...greenInput({
+        hang: ledgerBoundHang({ artifacts: [{ artifactId: "unmapped-art" }] }),
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(unmapped.submitted).toBe(false);
+    expect(unmapped.gates.find((gate) => gate.id === "hang")?.color).toBe("red");
+    expect(unmapped.gates.find((gate) => gate.id === "hang")?.objections.join(" ")).toMatch(/T48|artifact/i);
+
+    const scalar = await attemptContestAutoSubmit({
+      ...greenInput({
+        hang: ledgerBoundHang({
+          catalog: catalogWithMappedIds(),
+          evidenceRefs: [{ mmd: 0.12 }],
+          planId: "kt-scalar",
+        }),
+      }),
+      submit: recordingSubmit(calls),
+    });
+    expect(scalar.submitted).toBe(false);
+    expect(scalar.gates.find((gate) => gate.id === "hang")?.color).toBe("red");
+    expect(scalar.gates.find((gate) => gate.id === "hang")?.objections.join(" ")).toMatch(/side-slot|MMD|near-dup|diversity|scalar/i);
+    expect(calls).toHaveLength(0);
   });
 });
 
