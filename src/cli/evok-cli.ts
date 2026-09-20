@@ -54,9 +54,11 @@ import {
   DEFAULT_MAX_EXPERIMENTS,
 } from "../mission-start";
 import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission-director";
-import { EvaluationContractError, loadEvaluationContract, createFileMetricEvaluator } from "../local-file-evaluator";
+import { EvaluationContractError } from "../local-file-evaluator";
+import { createProjectBaselineEvaluator } from "../project-evaluator";
 import {
   DEMO_START_RELATIVE_PATH,
+  DEMO_SUITE_RELATIVE_PATH,
   EVALUATION_TEMPLATE_RELATIVE_PATH,
   formatStartHardGateReport,
   inspectStartHardGates,
@@ -216,6 +218,8 @@ Copyable evaluation contract: ${EVALUATION_TEMPLATE_RELATIVE_PATH}
 (fields: id, version, relative artifact, optional metric/min/max). Copy it to
 <abs-project>/.evok/evaluation.json. Minimal demo: ${DEMO_START_RELATIVE_PATH}
 (\`evok --start --baseline-only --project <abs-demo> --mission demo-start\`).
+True-domain suite-metric demo: ${DEMO_SUITE_RELATIVE_PATH}
+(\`evok --start --baseline-only --project <abs-demo> --mission demo-suite\`).
 If a live baseline cannot run, remaining hard gates are listed; Admission /
 Budget / hang / T48 / Broker are not downgraded and true submit is not
 authorized.
@@ -930,16 +934,17 @@ async function runMissionStart(
   let evaluator: BaselineEvaluator | undefined = options.evaluator;
   if (!evaluator) {
     // Production default: the project's declared local evaluation contract
-    // (<project>/.evok/evaluation.json). No contract => no measurable baseline.
-    const contract = await loadEvaluationContract(projectRoot).catch((error: unknown) => {
+    // (<project>/.evok/evaluation.json). file-metric or suite-metric.
+    // No contract => no measurable baseline.
+    try {
+      evaluator = await createProjectBaselineEvaluator(projectRoot);
+    } catch (error) {
       if (error instanceof EvaluationContractError) {
         stderr.write(`evok: ${error.message}\n`);
-        return undefined;
+        return EVOK_EXIT.configError;
       }
       throw error;
-    });
-    if (!contract) return EVOK_EXIT.configError;
-    evaluator = createFileMetricEvaluator(contract);
+    }
   }
   let missionId: string | undefined = args.mission;
   if (!missionId) {
@@ -1114,15 +1119,15 @@ async function runMissionResume(
 ): Promise<number> {
   let evaluator: BaselineEvaluator | undefined = options.evaluator;
   if (!evaluator) {
-    const contract = await loadEvaluationContract(projectRoot).catch((error: unknown) => {
+    try {
+      evaluator = await createProjectBaselineEvaluator(projectRoot);
+    } catch (error) {
       if (error instanceof EvaluationContractError) {
         stderr.write(`evok: ${error.message}\n`);
-        return undefined;
+        return EVOK_EXIT.configError;
       }
       throw error;
-    });
-    if (!contract) return EVOK_EXIT.configError;
-    evaluator = createFileMetricEvaluator(contract);
+    }
   }
   let missionId: string | undefined = args.mission;
   if (!missionId) {

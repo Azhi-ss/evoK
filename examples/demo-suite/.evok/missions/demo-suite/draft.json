@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "demo-suite",
+  "status": "draft",
+  "objective": "Raise the independent suite-metric pass_rate toward 0.8 by implementing the remaining local helpers. Do not self-report a score.",
+  "successCriteria": [
+    "src/solve.js exports are measured by the trusted local suite; pass_rate is n_pass / n_total"
+  ],
+  "data": {
+    "description": "local true-domain helpers shipped with examples/demo-suite; trusted cases live in suite/cases.json"
+  },
+  "evaluation": {
+    "method": "suite-metric",
+    "metric": "pass_rate"
+  },
+  "constraints": {
+    "permissions": [
+      "read-project",
+      "isolated-workspace-write"
+    ],
+    "hardRules": [
+      "no network",
+      "no external submission",
+      "never self-report a score"
+    ]
+  },
+  "budget": {
+    "total": 1,
+    "units": "model-USD",
+    "note": "demo envelope; live spend still requires Pi auth"
+  },
+  "outputs": [
+    "src/solve.js"
+  ],
+  "stopConditions": [
+    "budget exhausted",
+    "user interruption",
+    "baseline measured"
+  ],
+  "unresolvedPrerequisites": [],
+  "decisions": [],
+  "sources": [],
+  "plan": {
+    "baselineHypothesis": "the shipped incomplete helpers are independently measurable at about 0.4 pass_rate",
+    "tasks": [
+      {
+        "taskId": "baseline",
+        "objective": "materialize src/solve.js so the trusted local suite can measure pass_rate"
+      }
+    ]
+  },
+  "usage": {
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0
+    },
+    "cost": {
+      "total": 0,
+      "units": "model-USD"
+    }
+  },
+  "createdAt": "2026-09-20T00:00:00.000Z",
+  "updatedAt": "2026-09-20T00:00:00.000Z"
+}

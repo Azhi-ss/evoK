@@ -1,0 +1,5 @@
+# Generated Mission storage (ADR-0004). The reviewed demo draft stays versionable.
+*
+!.gitignore
+!demo-suite/
+!demo-suite/draft.json

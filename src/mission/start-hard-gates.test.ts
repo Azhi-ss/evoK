@@ -12,10 +12,12 @@ import { draftReadyForReview } from "./mission-intake";
 import { loadMissionDraft, MISSION_DRAFT_SCHEMA_VERSION } from "./mission-draft";
 import {
   DEMO_START_RELATIVE_PATH,
+  DEMO_SUITE_RELATIVE_PATH,
   EVALUATION_TEMPLATE_RELATIVE_PATH,
   formatStartHardGateReport,
   inspectStartHardGates,
 } from "./start-hard-gates";
+import { normalizeSuiteMetricContract } from "../competition/suite-metric";
 
 describe("copyable evaluation.json template (ET-OPS-START)", () => {
   test("documented template fields match the Mission file-metric contract", async () => {
@@ -144,6 +146,71 @@ describe("demo start scaffold (ET-OPS-START)", () => {
     expect(readme).toMatch(/--start --baseline-only/);
     expect(readme).toMatch(/templates\/evaluation\.json/);
     expect(readme).toMatch(/isolated/i);
+  });
+});
+
+describe("demo suite scaffold (ET-OPS-DOMAIN / #173)", () => {
+  test("examples/demo-suite ships a suite-metric contract and a reviewable draft", async () => {
+    const demo = join(process.cwd(), DEMO_SUITE_RELATIVE_PATH);
+    const shipped = JSON.parse(await readFile(join(demo, ".evok", "evaluation.json"), "utf8"));
+    const contract = normalizeSuiteMetricContract(shipped);
+    expect(contract.id).toBe("suite-metric");
+    expect(contract.version).toBe("1");
+    expect(contract.suite.kind).toBe("local-tests");
+    expect(contract.suite.runner).toBe("local-js-exports");
+    expect(contract.suite.cases_glob_or_manifest).toBe("suite/cases.json");
+    expect(contract.score.metric).toBe("pass_rate");
+    expect(contract.score.min).toBe(0);
+    expect(contract.score.max).toBe(1);
+    const draft = await loadMissionDraft(demo, "demo-suite");
+    expect(draftReadyForReview(draft)).toBe(true);
+    expect(draft.evaluation.method).toBe("suite-metric");
+    expect(draft.budget.units).toBe("model-USD");
+    for (const permission of draft.constraints.permissions ?? []) {
+      expect(permission).not.toMatch(/submi|external|network|internet|credential|deploy|publish/i);
+    }
+  });
+
+  test("demo-suite README documents absolute-path operation and forbids true submit", async () => {
+    const readme = await readFile(join(process.cwd(), DEMO_SUITE_RELATIVE_PATH, "README.md"), "utf8");
+    expect(readme).toMatch(/--project/);
+    expect(readme).toMatch(/absolute/i);
+    expect(readme).toMatch(/evaluation\.json/);
+    expect(readme).toMatch(/--start --baseline-only/);
+    expect(readme).toMatch(/suite-metric/);
+    expect(readme).toMatch(/isolated/i);
+    expect(readme).toMatch(/pass_rate/);
+    expect(readme).not.toMatch(/true submit authorized|#40 Progressive stays on/i);
+  });
+
+  test("inspectStartHardGates accepts the demo-suite contract and does not downgrade in-force gates", async () => {
+    const demo = join(process.cwd(), DEMO_SUITE_RELATIVE_PATH);
+    const report = await inspectStartHardGates({
+      projectRoot: demo,
+      missionId: "demo-suite",
+      authorization: { requested: true, token: "/start", missionSelector: "displayed" },
+      modelProbe: async () => ({ ok: false, error: "Pi model/auth is not configured" }),
+    });
+    expect(report.ready).toBe(false);
+    expect(report.passed.map((gate) => gate.id)).toEqual(expect.arrayContaining([
+      "project-absolute",
+      "evaluation-contract",
+      "reviewed-draft",
+    ]));
+    expect(report.blocking.map((gate) => gate.id)).toContain("model-auth");
+    expect(report.inForce.map((gate) => gate.id)).toEqual(expect.arrayContaining([
+      "admission",
+      "budget-gate",
+      "hang",
+      "t48",
+      "external-submission",
+    ]));
+    expect(report.inForce.every((gate) => gate.status === "in-force")).toBe(true);
+    const printed = formatStartHardGateReport(report);
+    expect(printed).toMatch(/remaining hard gates/i);
+    expect(printed).toMatch(/nothing dispatched/i);
+    expect(printed).toMatch(/suite-metric/);
+    expect(printed).not.toMatch(/true submit authorized|#40 Progressive stays on|Admission passed/i);
   });
 });
 
