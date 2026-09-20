@@ -16,3 +16,4 @@ export * from "./search-space-profile";
 export * from "./outer-search-space-fixtures";
 export * from "./sea-plugin";
 export * from "./method-version-stats";
+export * from "./suite-lift-circle";

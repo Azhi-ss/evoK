@@ -9,8 +9,11 @@ The shipped baseline is intentionally incomplete (2 of 5 cases pass).
 prints remaining hard gates. It does not invent a green pass, does not
 read a hand-written `0.4` seed, and does not authorize true submit.
 
-Target lift ≥0.8 is a later ticket (ET-RSI-LIFT). This scaffold proves
-baseline measurement only.
+After a recorded baseline, one authorized `/research continue` runs the
+search-owned lift circle (default `fixed_uct`, `#40` off): independently
+re-measure `pass_rate`, engage the promotion hang, then **lift toward ≥0.8**
+or archive an honest kill under `evidence/research-continue/`. The shipped
+`src/solve.js` stays the incomplete 0.4 baseline.
 
 ## Absolute-path operation
 
@@ -35,6 +38,9 @@ DEMO="$(cd /tmp/evok-demo-suite && pwd)"
 
 bun run evok --start --baseline-only --project "$DEMO" --mission demo-suite
 # equivalent: bun run evok /start --baseline-only --project "$DEMO" --mission demo-suite
+
+# after a recorded baseline — one authorized continue circle
+bun run evok /research continue --project "$DEMO" --mission demo-suite
 ```
 
 If Pi model/auth (or another start prerequisite) is missing, the CLI lists
@@ -82,4 +88,5 @@ cannot replace the measured `pass_rate`.
 - Does not open DeployArena
 - Does not unfreeze `#40` / Progressive default
 - Does not change Admission / Budget / hang / T48 predicates
-- Does not implement the research lift toward ≥0.8
+- Does not dispatch a Pi Run on `/research continue`
+- Does not rewrite the shipped `src/solve.js` (proposal + hang live in `evidence/`)

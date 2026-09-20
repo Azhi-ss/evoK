@@ -3,10 +3,12 @@
  * (ET-M1-EVT / #138).
  *
  * Authority stays in mission/: authorize / continue / repair / stop. The chat
- * transcript is not authority. This module is a yellow-light skeleton — it
- * records a readable baseline → one experiment path and recovers that view
- * from durable events (plus the existing MissionRecord). It does not dispatch
- * a Pi Run or register Pi slash commands. When a BudgetDecision is passed
+ * transcript is not authority. Events-only / file-metric continue stays the
+ * yellow-light skeleton experiment entry. After a measured suite-metric
+ * baseline, one authorized continue runs the search-owned lift circle
+ * (ET-RSI-LIFT): independent pass_rate + promotion hang, then a measured
+ * lift or an honest kill archived under evidence/. It does not dispatch a
+ * Pi Run or register Pi slash commands. When a BudgetDecision is passed
  * in, over-budget or unreserved refuses continue (ET-M1-BUD). Budget pass
  * is not Admission pass and is not Mission authorization.
  *
@@ -16,7 +18,19 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { budgetDecisionIsPass, type BudgetDecision } from "../evidence/budget-gate";
+import type { KillTestOutcome } from "../evidence/hypothesis-ledger";
+import {
+  DEFAULT_SEARCH_SELECTION_ID,
+  SELECTION_POLICY_40,
+} from "../search/search-selection-port";
 import { isMissionId, missionsDir } from "./mission-draft";
+import {
+  circleFromLiftExperiment,
+  trySuiteLiftCircle,
+  type ResearchCircleVerdict,
+  type ResearchLiftCircleView,
+  type ResearchLiftOptions,
+} from "./research-continue-lift";
 import {
   loadMissionRecord,
   MissionRecordCorruptionError,
@@ -25,6 +39,8 @@ import {
   type ExperimentTrailEntry,
   type MissionRecord,
 } from "./mission-start";
+
+export type { ResearchCircleVerdict, ResearchLiftCircleView, ResearchLiftOptions } from "./research-continue-lift";
 
 export type MissionControlAction = "authorize" | "continue" | "repair" | "stop";
 
@@ -67,12 +83,24 @@ export interface ResearchBaselineView {
   readonly at: string;
 }
 
+export type ResearchExperimentSource = "skeleton" | "mission-record" | "suite-lift";
+
 export interface ResearchExperimentEntry {
   readonly experimentId: string;
   readonly objective: string;
-  readonly source: "skeleton" | "mission-record";
+  readonly source: ResearchExperimentSource;
   readonly at: string;
   readonly runId?: string;
+  readonly verdict?: ResearchCircleVerdict;
+  readonly measuredScore?: number;
+  readonly baselineScore?: number;
+  readonly liftTarget?: number;
+  readonly evidencePath?: string;
+  readonly promotionBlocked?: boolean;
+  readonly hangOutcome?: KillTestOutcome;
+  readonly selectionId?: typeof DEFAULT_SEARCH_SELECTION_ID;
+  readonly selectionPolicy40?: typeof SELECTION_POLICY_40;
+  readonly reason?: string;
 }
 
 export type ResearchPhase = "unauthorized" | "authorized" | "baseline" | "experimenting" | "stopped";
@@ -89,6 +117,7 @@ export interface ResearchStatusView {
   readonly lastAction?: MissionControlAction;
   readonly stopReason?: string;
   readonly recoveredFrom: ResearchRecoverySource;
+  readonly circle?: ResearchLiftCircleView;
 }
 
 export interface ContinueResearchOptions {
@@ -103,6 +132,11 @@ export interface ContinueResearchOptions {
    * authorization.
    */
   readonly budget?: BudgetDecision;
+  /**
+   * Optional suite-metric lift knobs (search-owned harness). File-metric
+   * and events-only Missions ignore this and stay on the skeleton path.
+   */
+  readonly lift?: ResearchLiftOptions;
   readonly clock?: () => string;
   readonly nextId?: () => string;
 }
@@ -184,18 +218,54 @@ function asBaseline(payload: Record<string, unknown>, at: string): ResearchBasel
   };
 }
 
+function asExperimentSource(value: unknown): ResearchExperimentSource | undefined {
+  if (value === "mission-record" || value === "skeleton" || value === "suite-lift") return value;
+  return undefined;
+}
+
 function asExperiment(payload: Record<string, unknown>, at: string): ResearchExperimentEntry | undefined {
   if (typeof payload.experimentId !== "string" || payload.experimentId === "") return undefined;
   if (typeof payload.objective !== "string" || payload.objective === "") return undefined;
-  const source = payload.source === "mission-record" ? "mission-record" : payload.source === "skeleton" ? "skeleton" : undefined;
+  const source = asExperimentSource(payload.source);
   if (!source) return undefined;
+  const hangOutcome = payload.hangOutcome;
+  const verdict = payload.verdict;
   return {
     experimentId: payload.experimentId,
     objective: payload.objective,
     source,
     at: typeof payload.at === "string" && payload.at !== "" ? payload.at : at,
     ...(typeof payload.runId === "string" && payload.runId !== "" ? { runId: payload.runId } : {}),
+    ...(verdict === "lifted" || verdict === "killed" ? { verdict } : {}),
+    ...(typeof payload.measuredScore === "number" && Number.isFinite(payload.measuredScore)
+      ? { measuredScore: payload.measuredScore }
+      : {}),
+    ...(typeof payload.baselineScore === "number" && Number.isFinite(payload.baselineScore)
+      ? { baselineScore: payload.baselineScore }
+      : {}),
+    ...(typeof payload.liftTarget === "number" && Number.isFinite(payload.liftTarget)
+      ? { liftTarget: payload.liftTarget }
+      : {}),
+    ...(typeof payload.evidencePath === "string" && payload.evidencePath !== ""
+      ? { evidencePath: payload.evidencePath }
+      : {}),
+    ...(typeof payload.promotionBlocked === "boolean" ? { promotionBlocked: payload.promotionBlocked } : {}),
+    ...(hangOutcome === "pass" || hangOutcome === "fail" || hangOutcome === "inconclusive"
+      ? { hangOutcome }
+      : {}),
+    ...(payload.selectionId === DEFAULT_SEARCH_SELECTION_ID ? { selectionId: DEFAULT_SEARCH_SELECTION_ID } : {}),
+    ...(payload.selectionPolicy40 === SELECTION_POLICY_40 ? { selectionPolicy40: SELECTION_POLICY_40 } : {}),
+    ...(typeof payload.reason === "string" && payload.reason !== "" ? { reason: payload.reason } : {}),
   };
+}
+
+function attachCircle(view: ResearchStatusView): ResearchStatusView {
+  if (view.circle) return view;
+  for (let index = view.experiments.length - 1; index >= 0; index -= 1) {
+    const circle = circleFromLiftExperiment(view.experiments[index]!);
+    if (circle) return frozenCopy({ ...view, circle });
+  }
+  return view;
 }
 
 /**
@@ -267,7 +337,7 @@ export function recoverResearchStatus(
     }
   }
 
-  return frozenCopy({
+  return attachCircle(frozenCopy({
     missionId,
     phase: phaseOf({ authorized, stopped, baseline, experiments }),
     authorized,
@@ -277,7 +347,7 @@ export function recoverResearchStatus(
     ...(lastAction ? { lastAction } : {}),
     ...(stopReason ? { stopReason } : {}),
     recoveredFrom: "events",
-  });
+  }));
 }
 
 function hydrateBaseline(record: MissionRecord): ResearchBaselineView | undefined {
@@ -325,7 +395,7 @@ function mergeRecord(view: ResearchStatusView, record: MissionRecord | undefined
     : "mission-record";
   const stopped = view.phase === "stopped" || recordStopped;
   const stopReason = view.stopReason ?? record.stopReason;
-  return frozenCopy({
+  return attachCircle(frozenCopy({
     missionId: view.missionId || record.id,
     phase: phaseOf({ authorized, stopped, baseline, experiments }),
     authorized,
@@ -335,7 +405,8 @@ function mergeRecord(view: ResearchStatusView, record: MissionRecord | undefined
     ...(stopped ? { lastAction: view.lastAction ?? "stop" } : view.lastAction ? { lastAction: view.lastAction } : {}),
     ...(stopReason ? { stopReason } : {}),
     recoveredFrom,
-  });
+    ...(view.circle ? { circle: view.circle } : {}),
+  }));
 }
 
 /**
@@ -532,6 +603,15 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
 
   const at = (options.clock ?? (() => new Date().toISOString()))();
   const experimentId = (options.nextId ?? (() => `exp-${events.length + 1}`))();
+  const circle = await trySuiteLiftCircle({
+    projectRoot,
+    missionId,
+    experimentId,
+    at,
+    objective: view.objective,
+    baseline: view.baseline,
+    ...(options.lift ? { lift: options.lift } : {}),
+  });
   events = appendUnique(events, authorityEventsFromView(events, view, missionId, at));
   const sequence = nextSequence(events);
   const continued: MissionControlEvent = {
@@ -549,11 +629,28 @@ export async function continueResearch(options: ContinueResearchOptions): Promis
     type: "EXPERIMENT_ENTERED",
     at,
     missionId,
-    payload: {
-      experimentId,
-      objective: view.objective ?? missionId,
-      source: "skeleton",
-    },
+    payload: circle
+      ? {
+        experimentId,
+        objective: view.objective ?? missionId,
+        source: "suite-lift",
+        runId: experimentId,
+        verdict: circle.verdict,
+        measuredScore: circle.measuredScore,
+        baselineScore: circle.baselineScore,
+        liftTarget: circle.liftTarget,
+        evidencePath: circle.evidencePath,
+        promotionBlocked: circle.promotionBlocked,
+        hangOutcome: circle.hangOutcome,
+        selectionId: circle.selectionId,
+        selectionPolicy40: circle.selectionPolicy40,
+        reason: circle.reason,
+      }
+      : {
+        experimentId,
+        objective: view.objective ?? missionId,
+        source: "skeleton",
+      },
   };
   events = appendUnique(events, [continued, entered]);
   await writeEventLog(projectRoot, missionId, events);
@@ -576,6 +673,15 @@ export function formatResearchStatus(view: ResearchStatusView): string {
   lines.push(`   experiments: ${view.experiments.length}`);
   for (const experiment of view.experiments) {
     lines.push(`     - ${experiment.experimentId} [${experiment.source}] ${experiment.objective}`);
+  }
+  if (view.circle) {
+    const baseline = typeof view.circle.baselineScore === "number" ? String(view.circle.baselineScore) : "?";
+    const measured = typeof view.circle.measuredScore === "number" ? String(view.circle.measuredScore) : "?";
+    lines.push(`   circle: suite-lift verdict ${view.circle.verdict} pass_rate baseline=${baseline} measured=${measured} target=${view.circle.liftTarget}`);
+    lines.push(`   promotion hang: outcome=${view.circle.hangOutcome} blocked=${view.circle.promotionBlocked}`);
+    lines.push(`   evidence: ${view.circle.evidencePath}`);
+    lines.push(`   selection: ${view.circle.selectionId} (#40 ${view.circle.selectionPolicy40})`);
+    lines.push(`   submit: frozen — true External Submission is not authorized`);
   }
   lines.push(`   recovered from: ${view.recoveredFrom} (chat transcript is not authority)`);
   return `${lines.join("\n")}\n`;

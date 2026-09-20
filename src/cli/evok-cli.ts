@@ -189,9 +189,12 @@ options:
   --research [verb] thin evoK product entry (\`evok /research status\` or
                     \`evok /research continue\`). Status is readable from
                     durable Mission events/records with no model. Continue is
-                    one authorized yellow-light path that records a visible
-                    experiment entry; it does not dispatch a Pi Run or open
-                    EXP gates. Same verb is reachable in TUI as \`/research\`.
+                    one authorized circle: events-only / file-metric stay a
+                    visible skeleton experiment; after a measured suite-metric
+                    baseline the search-owned lift harness re-measures
+                    pass_rate and engages the promotion hang — lift or honest
+                    kill under evidence/. It does not dispatch a Pi Run, open
+                    EXP gates, or authorize true submit. TUI: \`/research\`.
   --skills          thin evoK Skills directory view (\`evok /skills\` or
                     \`evok /evok-skills\`). Lists evoK-tagged skills from the
                     same Pi skills root (owner|namespace: evok) and the

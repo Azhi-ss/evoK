@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1224,6 +1224,46 @@ describe("thin /research product entry (ET-M1-EVT / #138)", () => {
     expect(stdout.text()).toMatch(/phase experimenting/);
     expect(stdout.text()).toMatch(/last action: continue/);
     expect(stdout.text()).toMatch(/experiments: 1/);
+    await rm(project, { recursive: true, force: true });
+  });
+
+  test("/research continue on a demo-suite copy lifts measured pass_rate without a model", async () => {
+    const demo = join(process.cwd(), DEMO_SUITE_RELATIVE_PATH);
+    const project = await mkdtemp(join(tmpdir(), "evok-cli-demo-suite-"));
+    await mkdir(join(project, ".evok", "missions", "demo-suite"), { recursive: true });
+    await mkdir(join(project, "src"), { recursive: true });
+    await mkdir(join(project, "suite"), { recursive: true });
+    await writeFile(join(project, ".evok", "evaluation.json"), await readFile(join(demo, ".evok", "evaluation.json")));
+    await writeFile(join(project, "suite", "cases.json"), await readFile(join(demo, "suite", "cases.json")));
+    await writeFile(join(project, "src", "solve.js"), await readFile(join(demo, "src", "solve.js")));
+    await writeFile(join(project, ".evok", "missions", "demo-suite", "control-events.jsonl"), [
+      JSON.stringify({
+        eventId: "evt-1", sequence: 1, type: "MISSION_AUTHORIZED", at: "2026-09-20T04:00:00.000Z",
+        missionId: "demo-suite", action: "authorize",
+        payload: { objective: "raise suite-metric pass_rate toward 0.8" },
+      }),
+      JSON.stringify({
+        eventId: "evt-2", sequence: 2, type: "BASELINE_RECORDED", at: "2026-09-20T04:00:01.000Z",
+        missionId: "demo-suite", payload: { runId: "demo-suite:baseline:1", ok: true, score: 0.4 },
+      }),
+    ].join("\n") + "\n");
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/research", "continue", "--project", project, "--mission", "demo-suite"]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    expect(stdout.text()).toMatch(/verdict lifted/);
+    expect(stdout.text()).toMatch(/pass_rate baseline=0\.4 measured=1(?:\.0)? target=0\.8/);
+    expect(stdout.text()).toMatch(/evidence\//);
+    expect(stdout.text()).toMatch(/fixed_uct/);
+    expect(stdout.text()).not.toMatch(/true submit authorized|#40 Progressive stays on/i);
     await rm(project, { recursive: true, force: true });
   });
 });
