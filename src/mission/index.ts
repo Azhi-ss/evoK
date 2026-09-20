@@ -33,6 +33,11 @@ export {
   V1_GOLDEN_HYPOTHESIS_ID,
   V1_GOLDEN_PLAN_ID,
 } from "./v1-golden-path";
+export {
+  ORCH_GAP_KIND,
+  ORCHESTRA_KIND_THIN_IMPL,
+  runOrchGap,
+} from "./orch-gap";
 export { assembleLlmCompArmSetup } from "./llm-propose-outer-min";
 export { assembleOuterMinPath } from "./outer-min-path";
 export { assembleOuterE2eMinPath } from "./outer-e2e-min-path";

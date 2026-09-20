@@ -19,6 +19,8 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
   accepted / demoted — detail = W1).
 - Search pluggable; default `fixed_uct`; strong search / MCTS /
   `#40` Progressive explicit opt-in; gates live in evidence.
+  ET-ORCH-GAP: ModelOrchestra thin impl, golden-path glue landed,
+  StrongSearch opt-in port (default unchanged).
 - Contest-arm auto-submit is fail-closed: all promotion/evidence gates
   green + ledger, or no submit. The hang gate requires a ledger
   KillTestPlan. Expanding authority / changing Human Acceptance on the

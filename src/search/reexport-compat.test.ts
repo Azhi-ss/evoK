@@ -39,6 +39,7 @@ describe("search pack re-export isomorphism", () => {
     expect(searchPacked.DEFAULT_SEARCH_SELECTION_ID).toBe("fixed_uct");
     expect(searchPacked.SELECTION_POLICY_40).toBe("off");
     expect(searchPacked.PROGRESSIVE_MCGS_OPT_IN_ID).toBe("progressive_mcgs_optin");
+    expect(searchPacked.STRONG_SEARCH_OPT_IN_ID).toBe("strong_search");
     expect(searchPacked.SEARCH_SPACE_BINDING).toBe("diagnostic_only");
     expect(searchPacked.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
     expect(searchPacked.createSearchSelectionPort().id).toBe("fixed_uct");

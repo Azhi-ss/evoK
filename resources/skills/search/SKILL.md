@@ -50,7 +50,7 @@ Do not treat this skill as Admission, Promotion, Budget pass, or a relaxation of
 
 ## Default stays `fixed_uct`
 
-Default parent selection remains `fixed_uct`. Progressive / MCTS / StrongSearch remain explicit Mission/config opt-in only. `#40` product default stays off. Env does not flip the default. Programmable exploration heuristics may be written as docs or guidance; they do not change default selection math. Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key.
+Default parent selection remains `fixed_uct`. Progressive / MCTS / StrongSearch remain explicit Mission/config opt-in only (`{ progressive: true }` or `{ strongSearch: true }`). `#40` product default stays off. Env does not flip the default. Programmable exploration heuristics may be written as docs or guidance; they do not change default selection math. Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key.
 
 ## Handoff
 

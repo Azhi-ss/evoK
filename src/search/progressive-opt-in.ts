@@ -26,6 +26,7 @@ import {
   type SearchSelectionPort,
   type SelectionPolicy40State,
 } from "./search-selection-port";
+import { layerOptsInStrongSearch } from "./strong-search-opt-in";
 
 /** Elite is never 晋级 / Promotion / Broker / kill-test / Admission authority. */
 export const ELITE_IS_NOT_JINJI = true as const;
@@ -46,6 +47,7 @@ export interface ProgressiveOptInConfig extends ProgressiveMcgsOptions {
   readonly selectionId?: string;
   readonly selectionPolicy40?: string;
   readonly progressive?: boolean;
+  readonly strongSearch?: boolean;
   readonly t?: number;
 }
 
@@ -54,6 +56,8 @@ export interface ProgressiveOptInFields extends ProgressiveMcgsOptions {
   readonly searchSelection?: string | ProgressiveOptInConfig;
   readonly selectionId?: string;
   readonly selectionPolicy40?: string;
+  /** Explicit StrongSearch alias (#99). Same port as Progressive; not a second default. */
+  readonly strongSearch?: boolean | ProgressiveOptInConfig;
   /** Search step for anneal c(t) / Elite w(t). Absent is t = 0. */
   readonly t?: number;
 }
@@ -125,6 +129,7 @@ function isExplicitOptInPolicy(value: unknown): boolean {
 
 function layerOptsIn(layer: ProgressiveOptInFields | undefined): boolean {
   if (layer === undefined) return false;
+  if (layerOptsInStrongSearch(layer)) return true;
   if (layer.progressive === true) return true;
   if (isProgressiveId(layer.selectionId) || isProgressiveId(layer.searchSelection)) return true;
   if (isExplicitOptInPolicy(layer.selectionPolicy40)) return true;
@@ -134,6 +139,7 @@ function layerOptsIn(layer: ProgressiveOptInFields | undefined): boolean {
   }
   const searchSelection = asConfigObject(layer.searchSelection);
   if (searchSelection?.enabled === true || searchSelection?.progressive === true
+    || searchSelection?.strongSearch === true
     || isProgressiveId(searchSelection?.selectionId) || isExplicitOptInPolicy(searchSelection?.selectionPolicy40)) {
     return true;
   }
@@ -150,6 +156,8 @@ function pickField<K extends "t" | "seed" | "tau" | "topK" | "exploration">(
     if (direct !== undefined) return direct;
     const fromProgressive = asConfigObject(layer.progressive)?.[key];
     if (fromProgressive !== undefined) return fromProgressive as ProgressiveOptInFields[K];
+    const fromStrong = asConfigObject(layer.strongSearch)?.[key];
+    if (fromStrong !== undefined) return fromStrong as ProgressiveOptInFields[K];
     const fromSearch = asConfigObject(layer.searchSelection)?.[key];
     if (fromSearch !== undefined) return fromSearch as ProgressiveOptInFields[K];
   }
@@ -166,6 +174,8 @@ function pickOption<K extends keyof ProgressiveMcgsOptions>(
     if (direct !== undefined) return direct;
     const fromProgressive = asConfigObject(layer.progressive)?.[key];
     if (fromProgressive !== undefined) return fromProgressive;
+    const fromStrong = asConfigObject(layer.strongSearch)?.[key];
+    if (fromStrong !== undefined) return fromStrong;
     const fromSearch = asConfigObject(layer.searchSelection)?.[key];
     if (fromSearch !== undefined) return fromSearch;
   }
