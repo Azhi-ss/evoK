@@ -1,0 +1,9 @@
+{
+  "cases": [
+    { "id": "a", "artifact": "answers/a.txt", "expected": "ok-a" },
+    { "id": "b", "artifact": "answers/b.txt", "expected": "ok-b" },
+    { "id": "c", "artifact": "answers/c.txt", "expected": "ok-c" },
+    { "id": "d", "artifact": "answers/d.txt", "expected": "ok-d" },
+    { "id": "e", "artifact": "answers/e.txt", "expected": "ok-e" }
+  ]
+}
