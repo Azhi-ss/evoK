@@ -11,9 +11,11 @@
  *
  * W1 SEA (#146): removable plugin mount/unmount + method-version stats
  * isolation live here. The default path does not depend on a plugin.
+ * StrongSearch (`strong_search`) is an explicit #99 alias of Progressive.
  */
 export * from "./search-selection-port";
 export * from "./progressive-opt-in";
+export * from "./strong-search-opt-in";
 export * from "./search-space-profile";
 export * from "./outer-search-space-fixtures";
 export * from "./sea-plugin";

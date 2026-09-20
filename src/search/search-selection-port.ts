@@ -20,6 +20,8 @@ import { deepFreeze } from "../security-boundary";
 export const SEARCH_SELECTION_SCHEMA_VERSION = "1" as const;
 export const DEFAULT_SEARCH_SELECTION_ID = "fixed_uct" as const;
 export const PROGRESSIVE_MCGS_OPT_IN_ID = "progressive_mcgs_optin" as const;
+/** Explicit StrongSearch opt-in alias. Not a third product default. */
+export const STRONG_SEARCH_OPT_IN_ID = "strong_search" as const;
 export const DEFAULT_UCT_EXPLORATION = Math.SQRT2;
 export const SELECTION_POLICY_40 = "off" as const;
 export const SELECTION_POLICY_40_OPT_IN = "opt-in" as const;
@@ -33,6 +35,11 @@ const MAX_FAIL_NOTE = 280;
 export type SearchSelectionAdapterId =
   | typeof DEFAULT_SEARCH_SELECTION_ID
   | typeof PROGRESSIVE_MCGS_OPT_IN_ID;
+
+/** Request id may use the StrongSearch alias; the constructed port id stays Progressive. */
+export type SearchSelectionPortRequestId =
+  | SearchSelectionAdapterId
+  | typeof STRONG_SEARCH_OPT_IN_ID;
 
 export type SearchSelectionRole = "parent-selection";
 
@@ -419,10 +426,12 @@ export function createDefaultSearchSelectionPort(options: FixedUctSelectionOptio
 }
 
 export function createSearchSelectionPort(
-  id: SearchSelectionAdapterId = DEFAULT_SEARCH_SELECTION_ID,
+  id: SearchSelectionPortRequestId = DEFAULT_SEARCH_SELECTION_ID,
   options: SearchSelectionPortOptions = {},
 ): SearchSelectionPort {
   if (id === DEFAULT_SEARCH_SELECTION_ID) return new FixedUctSelectionAdapter(options);
-  if (id === PROGRESSIVE_MCGS_OPT_IN_ID) return new ProgressiveMcgsOptInAdapter(options);
+  if (id === PROGRESSIVE_MCGS_OPT_IN_ID || id === STRONG_SEARCH_OPT_IN_ID) {
+    return new ProgressiveMcgsOptInAdapter(options);
+  }
   throw new RangeError(`unknown SearchSelectionPort id: ${String(id)}`);
 }

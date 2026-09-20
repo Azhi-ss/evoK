@@ -212,6 +212,19 @@ function isConfiguredConfig(config: unknown): config is Record<TierId, unknown> 
 }
 
 /**
+ * One-shot thin impl (ET-ORCH-GAP / #27). Resolves a tier without ToyHarness
+ * or a second control plane. Unconfigured → catalog default. Invalid
+ * pattern / unbound tier fails closed.
+ */
+export function runModelOrchestra(
+  catalog: ModelCatalog,
+  config?: OrchestraConfig | null,
+  ctx: OrchestraResolveContext = {},
+): OrchestraResolution {
+  return new ModelOrchestra(catalog, config).resolve(ctx);
+}
+
+/**
  * Validates the config against the catalog at construction time so invalid
  * configs fail closed before a mission starts.
  */

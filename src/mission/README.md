@@ -25,10 +25,13 @@ migration-period re-exports for one more release
 The dead `src/file-blueprint.ts` shim is gone; import
 `src/mission/file-blueprint` instead.
 
-`runGoldenPath` / assemble stay **mock default**. Live opens only with
-explicit `{ live: true }` (plus key fail-closed). `EVOK_NEWAPI_LIVE` alone
-does not open the product path. MethodologyEvidence auto-seam (ME-1) stays
-wired through the existing propose → hang path.
+`runGoldenPath` / assemble stay **mock default** (ET-ORCH-GAP / #98
+**landed**). `runOrchGap` may call that glue; omit / `false` does not
+auto-run hang. Live opens only with explicit `{ live: true }` (plus key
+fail-closed). `EVOK_NEWAPI_LIVE` alone does not open the product path.
+MethodologyEvidence auto-seam (ME-1) stays wired through the existing
+propose → hang path. `#27` ModelOrchestra is a **thin impl**
+(`runModelOrchestra`); this pack does not own search-graph authority.
 
 Secrets are read from the environment only and must be redacted in errors.
 Elite / side-slots / Team Fan-Out are not Promotion keys (Elite ≠ 晋级).

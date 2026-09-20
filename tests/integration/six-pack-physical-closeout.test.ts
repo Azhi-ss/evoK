@@ -128,9 +128,11 @@ describe("P6 six-pack physical closeout", () => {
   test("search barrel keeps #40 off and does not re-export ToyHarness or Mission authority", () => {
     expect(search.DEFAULT_SEARCH_SELECTION_ID).toBe("fixed_uct");
     expect(search.SELECTION_POLICY_40).toBe("off");
+    expect(search.STRONG_SEARCH_OPT_IN_ID).toBe("strong_search");
     expect(search.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
     expect(typeof search.createSeaHost).toBe("function");
     expect(typeof search.createMethodVersionStats).toBe("function");
+    expect(typeof search.optInStrongSearchPort).toBe("function");
     expect(search.createSeaHost().defaultSelection().id).toBe("fixed_uct");
 
     const keys = runtimeKeys(search);
@@ -163,6 +165,7 @@ describe("P6 six-pack physical closeout", () => {
   test("mission / cli / execution / competition barrels stay on their existing locks", () => {
     expect(typeof mission.startAuthorizedMission).toBe("function");
     expect(typeof mission.runGoldenPath).toBe("function");
+    expect(typeof mission.runOrchGap).toBe("function");
     expect(typeof mission.parseResearchCommand).toBe("function");
     expect(typeof mission.continueResearch).toBe("function");
     expect(typeof mission.parseSkillsCommand).toBe("function");

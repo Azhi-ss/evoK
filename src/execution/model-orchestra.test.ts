@@ -7,6 +7,7 @@ import {
   OrchestraValidationError,
   ROLE_CLASS_VALUES,
   createPiModelCatalog,
+  runModelOrchestra,
   type BudgetState,
   type ModelCatalog,
   type ModelConfig,
@@ -436,5 +437,26 @@ describe("createPiModelCatalog (Pi SDK models.json)", () => {
 
     const catalog = await createPiModelCatalog({ modelsPath, settingsPath });
     expect(catalog.defaultModel()).toEqual(FLASH);
+  });
+});
+
+describe("runModelOrchestra thin impl (ET-ORCH-GAP / #27)", () => {
+  test("unconfigured one-shot resolves the catalog default without a second control plane", () => {
+    const result = runModelOrchestra(fakeCatalog([FLASH, PRO], FLASH.id));
+    expect(result).toEqual({ tier: "default", model: FLASH, reason: "unconfigured" });
+  });
+
+  test("configured one-shot is flash-first and fail-closed on unknown gates", () => {
+    const catalog = fakeCatalog([FLASH, PRO], FLASH.id);
+    const configured = runModelOrchestra(catalog, { fast: FLASH.id, deep: PRO.id });
+    expect(configured).toEqual({ tier: "fast", model: FLASH, reason: "role" });
+    expect(runModelOrchestra(catalog, { fast: FLASH.id, deep: PRO.id }, {
+      pattern: { modelMix: "flash_primary", deepGates: ["success_audit"] },
+      gate: "success_audit",
+      budget: BUDGET_OK,
+    })).toEqual({ tier: "deep", model: PRO, reason: "gate" });
+    expect(() => runModelOrchestra(catalog, { fast: FLASH.id, deep: PRO.id }, {
+      pattern: { deepGates: ["made_up_gate"] },
+    })).toThrow(OrchestraValidationError);
   });
 });

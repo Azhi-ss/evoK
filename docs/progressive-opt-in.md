@@ -10,6 +10,7 @@ Opt-in is explicit only. Any one of:
 
 - Mission / lift: `{ progressive: true }` or `{ searchSelection: "progressive_mcgs_optin" }`
 - Config object: `{ selectionId: "progressive_mcgs_optin" }` or `{ selectionPolicy40: "opt-in" }`
+- StrongSearch alias (#99): `{ strongSearch: true }` or `{ selectionId: "strong_search" }`
 - Project file: `<abs-project>/.evok/search.json` with the same explicit fields
 
 Resolver: `resolveSearchSelection` / `readSearchSelectionConfig` in

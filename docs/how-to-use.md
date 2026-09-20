@@ -322,6 +322,10 @@ soft-switch, write an explicit project config or pass a Mission
 ```
 
 Spec and formulas: [progressive-opt-in.md](progressive-opt-in.md).
+Orchestration-gap ports (#27 thin impl / #98 golden-path landed /
+#99 StrongSearch opt-in): [orch-gap.md](orch-gap.md). `{ strongSearch: true }`
+is the same explicit opt-in alias — it does **not** flip the product
+default. Elite ≠ 晋级.
 
 Prove the 0.4 → ≥0.8 circle offline (no live model):
 

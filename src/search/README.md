@@ -14,7 +14,8 @@ The dead `src/second-toy-adapter.ts` shim is gone; import
 
 Default parent selection remains `fixed_uct` (constant exploration √2).
 Progressive (`progressive_mcgs_optin` / `StrongSearchAdapter`) is constructed
-only when Mission or config explicitly opts in — env must not silently
+only when Mission or config explicitly opts in — `{ strongSearch: true }` /
+`strong_search` is the same #99 alias. Env must not silently
 override the default. `#40` SelectionPolicy stays off unless that opt-in
 is set. Anneal `c(t)` + Elite soft-switch are inner selection only.
 Elite ≠ 晋级 / Promotion / hang / Broker keys. Spec:
