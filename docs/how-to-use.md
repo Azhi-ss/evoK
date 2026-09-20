@@ -217,9 +217,12 @@ measurement.
 ## 5. Research
 
 Thin product entry. Status is readable from durable events / Mission records
-with **no model**. Continue is one authorized yellow-light path that records
-a visible experiment entry. It does **not** dispatch a Pi Run and does **not**
-open EXP gates.
+with **no model**. Continue is one authorized circle. Events-only / file-metric
+Missions still record a visible skeleton experiment. After a **measured**
+`suite-metric` baseline, the same `/research continue` verb runs the
+search-owned one-circle lift harness (default parent selection stays
+`fixed_uct`). It does **not** dispatch a Pi Run, does **not** open EXP gates,
+and does **not** authorize true submit.
 
 ```bash
 PROJECT="$(pwd)/examples/demo-start"   # after a real start, not the unstarted demo
@@ -255,6 +258,58 @@ budget is never restored.
 A separate offline faux-model lifecycle already lives under
 [`examples/lifecycle/`](../examples/lifecycle/README.md); it is **not** this
 start path and is **not** a live-model pass.
+
+---
+
+## 6. Suite-metric + one-circle lift
+
+True-domain loop on [`examples/demo-suite`](../examples/demo-suite/README.md).
+The shipped `src/solve.js` is deliberately incomplete. The independent
+`suite-metric` Evaluator measures `pass_rate = n_pass / n_total` against
+`suite/cases.json`. That baseline is about **0.4** (2 of 5) — a real suite
+result, not a hand-written seed.
+
+```bash
+# from the evoK repo root — always absolute --project
+DEMO="$(pwd)/examples/demo-suite"
+# copy if you want a private working tree
+cp -R "$DEMO" /tmp/evok-demo-suite
+DEMO="$(cd /tmp/evok-demo-suite && pwd)"
+
+# 1) measure baseline (≈ 0.4 real pass_rate, or remaining hard gates)
+bun run evok --start --baseline-only --project "$DEMO" --mission demo-suite
+
+# 2) one authorized continue after a recorded baseline
+bun run evok /research continue --project "$DEMO" --mission demo-suite
+# TUI: /research continue
+```
+
+What continue does on this contract:
+
+1. Requires user `/research continue`, an authorized Mission, and a recorded
+   baseline. Chat / model-authored approval cannot continue.
+2. Search proposes one Candidate (local helper-completion) and selects the
+   unvisited child with default **`fixed_uct`**. `#40` Progressive stays off.
+3. The independent suite-metric Evaluator re-measures the proposal. A model
+   self-score cannot replace `pass_rate`.
+4. The existing promotion hang (`runKillTestHang`, T48-mapped evidence) is
+   engaged. Unmapped evidence or a failed hang **blocks Promotion**.
+5. Acceptance is **measured lift** toward **≥ 0.8** **or** an evidence-complete
+   honest kill archived at:
+
+   `<abs-project>/evidence/research-continue/<mission-id>/<experiment-id>.json`
+
+The shipped template `src/solve.js` is **not** rewritten. The proposal and
+the hang decision live in `evidence/`. True submit / Deploy Arena stay
+frozen. Admission / Budget / hang / T48 predicates are unchanged.
+
+Prove the 0.4 → ≥0.8 circle offline (no live model):
+
+```bash
+bun test src/project-evaluator.test.ts
+bun test src/search/suite-lift-circle.test.ts
+bun test src/mission/research-continue-lift.test.ts
+```
 
 ---
 
@@ -342,7 +397,8 @@ Also still true, and **not** claimed by this guide:
 - `#40` Progressive stays **off** (not a product default)
 - Deploy Arena stays orthogonal **standby**
 - Elite ≠ Promotion / Admission
-- `/research continue` does not dispatch a Pi Run
+- `/research continue` does not dispatch a Pi Run; suite-metric continue
+  measures a local Candidate and engages the promotion hang
 - `/research repair` / `/research stop` are reserved
 
 ## What this page does not claim

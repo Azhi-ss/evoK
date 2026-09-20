@@ -177,6 +177,7 @@ describe("demo suite scaffold (ET-OPS-DOMAIN / #173)", () => {
     expect(readme).toMatch(/absolute/i);
     expect(readme).toMatch(/evaluation\.json/);
     expect(readme).toMatch(/--start --baseline-only/);
+    expect(readme).toMatch(/\/research continue/);
     expect(readme).toMatch(/suite-metric/);
     expect(readme).toMatch(/isolated/i);
     expect(readme).toMatch(/pass_rate/);
