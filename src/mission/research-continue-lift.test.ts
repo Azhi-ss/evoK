@@ -233,6 +233,39 @@ describe("one authorized suite-metric continue circle (ET-RSI-LIFT / #174)", () 
     }
   });
 
+  test("explicit Mission Progressive opt-in is callable and does not weld the default", async () => {
+    const projectRoot = await seedDemoSuiteProject();
+    try {
+      const view = await continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: userAuth,
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "opt-in Progressive without welding default" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: `${MISSION_ID}:baseline:1`, ok: true, score: 0.4 }),
+        ],
+        lift: {
+          searchSelection: { progressive: true, topK: 1, tau: 8, seed: 7 },
+        },
+        clock: () => "2026-09-20T05:00:00.000Z",
+        nextId: () => "exp-prog-1",
+      });
+      expect(view.circle?.selectionId).toBe("progressive_mcgs_optin");
+      expect(view.circle?.selectionPolicy40).toBe("opt-in");
+      expect(view.circle?.verdict).toBe("lifted");
+      const archive = JSON.parse(await readFile(view.circle!.evidencePath, "utf8")) as {
+        selectionId: string;
+        selectionPolicy40: string;
+        submit: string;
+      };
+      expect(archive.selectionId).toBe("progressive_mcgs_optin");
+      expect(archive.selectionPolicy40).toBe("opt-in");
+      expect(archive.submit).toMatch(/frozen|not authorized/i);
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   test("how-to-use documents the suite-metric one-circle lift loop", async () => {
     const howTo = await readFile(join(process.cwd(), "docs", "how-to-use.md"), "utf8");
     expect(howTo).toMatch(/Suite-metric \+ one-circle lift/);

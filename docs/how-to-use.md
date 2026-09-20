@@ -3,9 +3,10 @@
 Followable product path: **Explore → intake → review → start → research**.
 
 This page documents **only shipped CLI / TUI behavior**. It does not invent
-green, true submit, `#40` Progressive as default, Deploy Arena, or any other
+green, true submit, `#40` Progressive as the product default, Deploy Arena, or any other
 unopened capability. Chat is not Mission authority. Loading a Skill is not
-authorization to start, continue, or submit.
+authorization to start, continue, or submit. `#40` Progressive is explicit
+Mission/config opt-in only — see [progressive-opt-in.md](progressive-opt-in.md).
 
 Product baseline: [ADR-0014](adr/0014-prd-rsi-baseline.md). Domain vocabulary:
 [CONTEXT.md](../CONTEXT.md).
@@ -289,7 +290,8 @@ What continue does on this contract:
 1. Requires user `/research continue`, an authorized Mission, and a recorded
    baseline. Chat / model-authored approval cannot continue.
 2. Search proposes one Candidate (local helper-completion) and selects the
-   unvisited child with default **`fixed_uct`**. `#40` Progressive stays off.
+   unvisited child with default **`fixed_uct`**. `#40` Progressive stays off
+   unless Mission or `.evok/search.json` explicitly opts in.
 3. The independent suite-metric Evaluator re-measures the proposal. A model
    self-score cannot replace `pass_rate`.
 4. The existing promotion hang (`runKillTestHang`, T48-mapped evidence) is
@@ -302,6 +304,19 @@ What continue does on this contract:
 The shipped template `src/solve.js` is **not** rewritten. The proposal and
 the hang decision live in `evidence/`. True submit / Deploy Arena stay
 frozen. Admission / Budget / hang / T48 predicates are unchanged.
+
+### `#40` Progressive opt-in (not the product default)
+
+Default continue stays `fixed_uct`. To enable anneal `c(t)` + Elite
+soft-switch, write an explicit project config or pass a Mission
+`searchSelection`. Env vars do **not** flip the default. Elite ≠ 晋级.
+
+```bash
+# <abs-project>/.evok/search.json
+# { "progressive": true, "tau": 8, "topK": 2 }
+```
+
+Spec and formulas: [progressive-opt-in.md](progressive-opt-in.md).
 
 Prove the 0.4 → ≥0.8 circle offline (no live model):
 
@@ -356,8 +371,9 @@ opened** — the shell is read-only. Budget pass is not Admission pass.
 Each shipped L1 body states: when to use; what not to do; **≠** start /
 continue / submit authorization; relation to Admission · Budget.
 
-`/skill search` does **not** unfreeze `#40`. Default parent selection stays
-`fixed_uct`. Progressive / MCTS / StrongSearch remain explicit opt-in.
+`/skill search` does **not** weld `#40` as the product default. Default parent
+selection stays `fixed_uct`. Progressive / MCTS / StrongSearch remain
+explicit Mission/config opt-in. Elite ≠ 晋级.
 
 `/skill method-improvement` is validation-gated (version id → verify command /
 adversarial tags → enable record → rollbackable). It is not automatic
@@ -394,9 +410,10 @@ never treated as a pass.
 
 Also still true, and **not** claimed by this guide:
 
-- `#40` Progressive stays **off** (not a product default)
+- `#40` Progressive stays **off** as the product default; Mission/config may
+  explicitly opt in ([progressive-opt-in.md](progressive-opt-in.md))
 - Deploy Arena stays orthogonal **standby**
-- Elite ≠ Promotion / Admission
+- Elite ≠ 晋级 / Promotion / Admission
 - `/research continue` does not dispatch a Pi Run; suite-metric continue
   measures a local Candidate and engages the promotion hang
 - `/research repair` / `/research stop` are reserved
@@ -407,7 +424,7 @@ Also still true, and **not** claimed by this guide:
   gates when Pi model/auth or another prerequisite is missing)
 - True External Submission / AtCoder true-submit
 - Deploy Arena as a mainline
-- `#40` / Progressive welded on
+- `#40` / Progressive welded on as the product default
 - Admission / Budget / hang / T48 / Broker predicate changes
 - Skill body as start, continue, or submit authorization
 - A `/review` command, a second control plane, or ToyHarness as production

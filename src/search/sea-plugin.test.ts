@@ -167,7 +167,7 @@ describe("SEA Progressive / MCTS / StrongSearch stay explicit opt-in", () => {
     expect(optIn).toBeInstanceOf(ProgressiveMcgsOptInAdapter);
     expect(optIn.id).toBe("progressive_mcgs_optin");
     expect(optIn.describe().productDefault).toBe(false);
-    expect(optIn.describe().selectionPolicy40).toBe("off");
+    expect(optIn.describe().selectionPolicy40).toBe("opt-in");
     expect(host.defaultSelection().id).toBe("fixed_uct");
     expect(host.defaultSelection().selectParent({ nodes: WORKED }).parentId).toBe("b");
 

@@ -31,7 +31,8 @@ does not open the product path. MethodologyEvidence auto-seam (ME-1) stays
 wired through the existing propose → hang path.
 
 Secrets are read from the environment only and must be redacted in errors.
-Elite / side-slots / Team Fan-Out are not Promotion keys. `#40` stays off.
+Elite / side-slots / Team Fan-Out are not Promotion keys (Elite ≠ 晋级).
+`#40` Progressive stays off unless Mission/config explicitly opts in.
 True contest External Submission stays frozen. Pattern C is not thickened
 here.
 

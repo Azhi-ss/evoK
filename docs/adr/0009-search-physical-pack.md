@@ -48,3 +48,16 @@ MCTS / StrongSearch stay explicit opt-in. `#40` stays off. The
 default path does not depend on a plugin. Old-version stats are
 not new-version authority. Selection math, gate predicates, and
 ToyHarness-as-control-plane are unchanged.
+
+## Amendment (ET-PROG-40 / #178)
+
+`#40` Progressive is usable as **explicit opt-in**. Product default
+remains `fixed_uct`; `#40` stays off unless Mission or
+`.evok/search.json` / config opts in. Env must not silently override
+the default. Opt-in enables anneal `c(t) = c0 / (1 + t / tau)` and
+Elite soft-switch `w(t) = min(1, t / tau)` for **inner parent
+selection only**.
+
+**Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key.**
+Gate / T48 / hang / Broker predicates, true submit, and Deploy Arena
+are unchanged. Progressive is not welded as the product default.

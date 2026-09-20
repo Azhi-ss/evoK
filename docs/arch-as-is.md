@@ -17,10 +17,10 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
   self-built Agent Loop; no custom readline REPL. #134 **landed**.
 - Skills on (eight categories + progressive disclosure; candidate /
   accepted / demoted — detail = W1).
-- Search pluggable; default `fixed_uct`; strong search / MCTS opt-in;
-  gates live in evidence.
+- Search pluggable; default `fixed_uct`; strong search / MCTS /
+  `#40` Progressive explicit opt-in; gates live in evidence.
 - Red lights still ask the user: real submit / expand authority / change
-  acceptance / unfreeze AtCoder · `#40`.
+  acceptance / unfreeze AtCoder true-submit. `#40` default stays off.
 - Deploy Arena is orthogonal standby — not welded into the RSI mainline.
 
 ## Physical layout
@@ -30,7 +30,7 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 | **mission** | `src/mission/` | 勾 | Research Loop = product control plane |
 | **evidence** | `src/evidence/` | 勾 | Ledger / T48 / hang / Broker simulation |
 | **execution** | `src/execution/` | 勾 | Thin default B; C thicken still rejected |
-| **search** | `src/search/` | 勾 | Default `fixed_uct`; `#40` off |
+| **search** | `src/search/` | 勾 | Default `fixed_uct`; `#40` opt-in only |
 | **competition** | `src/competition/` | 勾 | Live explicit; no true submit; Deploy Arena standby |
 | **cli** | `src/cli/` | 勾 | Thin shell + Pi native TUI (#134 / #148 mirror); not a second control plane |
 
@@ -45,9 +45,9 @@ re-exports are migration-period (one more release). Inventory: ADR-0013.
 ## Frozen (unchanged)
 
 - Gate / T48 / hang three-state
-- `#40` SelectionPolicy off
+- `#40` SelectionPolicy off unless Mission/config explicitly opts in
 - No true External Submission
-- Elite ≠ Promotion keys
+- Elite ≠ 晋级 / Promotion keys
 - C thicken forbidden
 - Deploy Arena not advanced (orthogonal standby)
 - W1 EVT landed; Skills routing shell landed (#140); EXP Admission landed (#142); BUD skeleton landed (#144); SEA plugin contract + method-version stats isolation landed (#146)

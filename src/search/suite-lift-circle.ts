@@ -4,18 +4,23 @@
  * Opt-in: Mission `/research continue` may call this after a measured
  * suite-metric baseline. It is not a second control plane, not Promotion
  * authority, and not a Pi Run. Default parent selection stays `fixed_uct`.
- * Progressive / MCTS / `#40` stay off.
+ * Progressive / `#40` stay off unless Mission or config explicitly opts in.
  *
  * The harness proposes a Candidate snapshot. An independent Evaluator
  * (owned by competition/) must measure pass_rate. A model self-score
  * cannot replace that measurement.
  */
 import {
+  resolveSearchSelection,
+  type MissionSearchSelectionSource,
+} from "./progressive-opt-in";
+import {
   DEFAULT_SEARCH_SELECTION_ID,
   SELECTION_POLICY_40,
-  createDefaultSearchSelectionPort,
   type SearchParentCandidate,
   type SearchParentSelection,
+  type SearchSelectionAdapterId,
+  type SelectionPolicy40State,
 } from "./search-selection-port";
 
 export const SUITE_LIFT_CIRCLE_ID = "suite_lift_one_circle" as const;
@@ -24,8 +29,8 @@ export const DEFAULT_SUITE_LIFT_TARGET = 0.8 as const;
 export interface SuiteLiftProposal {
   readonly files: Readonly<Record<string, string>>;
   readonly note: string;
-  readonly selectionId: typeof DEFAULT_SEARCH_SELECTION_ID;
-  readonly selectionPolicy40: typeof SELECTION_POLICY_40;
+  readonly selectionId: SearchSelectionAdapterId;
+  readonly selectionPolicy40: SelectionPolicy40State;
 }
 
 export type SuiteLiftPropose = (baselineFiles: Readonly<Record<string, string>>) => SuiteLiftProposal;
@@ -35,12 +40,14 @@ export interface SuiteLiftCircleInput {
   readonly baselineScore?: number;
   readonly liftTarget?: number;
   readonly propose?: SuiteLiftPropose;
+  /** Explicit Mission/config Progressive opt-in. Absent stays `fixed_uct`. */
+  readonly searchSelection?: MissionSearchSelectionSource;
 }
 
 export interface SuiteLiftCircleResult {
   readonly circleId: typeof SUITE_LIFT_CIRCLE_ID;
-  readonly selectionId: typeof DEFAULT_SEARCH_SELECTION_ID;
-  readonly selectionPolicy40: typeof SELECTION_POLICY_40;
+  readonly selectionId: SearchSelectionAdapterId;
+  readonly selectionPolicy40: SelectionPolicy40State;
   readonly liftTarget: number;
   readonly selectedNodeId: "identity" | "helper-completion";
   readonly selection: SearchParentSelection;
@@ -114,18 +121,20 @@ function sameFiles(
 }
 
 /**
- * One authorized search circle: pick a parent with default `fixed_uct`
- * (unvisited helper-completion is preferred over the visited identity).
+ * One authorized search circle. Default parent selection is `fixed_uct`
+ * (unvisited helper-completion is preferred). Progressive / `#40` only when
+ * `searchSelection` is an explicit Mission/config opt-in.
  */
 export function runSuiteLiftCircle(input: SuiteLiftCircleInput): SuiteLiftCircleResult {
   const liftTarget = input.liftTarget ?? DEFAULT_SUITE_LIFT_TARGET;
   const propose = input.propose ?? proposeSuiteLiftCandidate;
   const proposed = propose(input.baselineFiles);
+  const resolved = resolveSearchSelection(input.searchSelection);
   const identityProposal: SuiteLiftProposal = {
     files: { ...input.baselineFiles },
     note: "identity baseline snapshot",
-    selectionId: DEFAULT_SEARCH_SELECTION_ID,
-    selectionPolicy40: SELECTION_POLICY_40,
+    selectionId: resolved.selectionId,
+    selectionPolicy40: resolved.selectionPolicy40,
   };
   const distinct = !sameFiles(proposed.files, input.baselineFiles);
   const nodes: SearchParentCandidate[] = [
@@ -134,18 +143,17 @@ export function runSuiteLiftCircle(input: SuiteLiftCircleInput): SuiteLiftCircle
       ? [{ nodeId: "helper-completion", visits: 0, value: 0, parentVisits: 2 } satisfies SearchParentCandidate]
       : []),
   ];
-  const port = createDefaultSearchSelectionPort();
-  const selection = port.selectParent({ nodes });
+  const selection = resolved.port.selectParent({ nodes });
   const selectedNodeId = selection.parentId === "helper-completion" ? "helper-completion" : "identity";
   const proposal = selectedNodeId === "helper-completion" ? {
     ...proposed,
-    selectionId: DEFAULT_SEARCH_SELECTION_ID,
-    selectionPolicy40: SELECTION_POLICY_40,
+    selectionId: resolved.selectionId,
+    selectionPolicy40: resolved.selectionPolicy40,
   } : identityProposal;
   return {
     circleId: SUITE_LIFT_CIRCLE_ID,
-    selectionId: DEFAULT_SEARCH_SELECTION_ID,
-    selectionPolicy40: SELECTION_POLICY_40,
+    selectionId: resolved.selectionId,
+    selectionPolicy40: resolved.selectionPolicy40,
     liftTarget,
     selectedNodeId,
     selection,

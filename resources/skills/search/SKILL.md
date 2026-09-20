@@ -28,15 +28,15 @@ Use this skill when a Mission already has an authorized envelope and someone is 
 Do not use this skill to:
 
 - weld Progressive / MCTS / StrongSearch as the product default
-- unfreeze `#40` / SelectionPolicy — `#40` stays off
+- treat `#40` as on by default — product default stays off; only an explicit Mission/config opt-in enables anneal + Elite
 - silently override `fixed_uct` via environment variables or chat
-- treat Elite, MMD, near-dup, or side-slot scores as Promotion, hang, or Broker keys
+- treat Elite, MMD, near-dup, or side-slot scores as 晋级 / Promotion, hang, or Broker keys
 - treat ToyHarness as a second control plane
 - change default selection math
 
 ## Not authorization
 
-This skill is not authorization to start, continue, or submit. A Search Plugin is not Promotion authority and is not a second control plane. Loading this text does not mount a plugin, opt in Progressive, or thaw `#40`.
+This skill is not authorization to start, continue, or submit. A Search Plugin is not Promotion authority and is not a second control plane. Loading this text does not mount a plugin, opt in Progressive, or flip `#40` on. Elite ≠ 晋级.
 
 ## Relation to Admission · Budget
 
@@ -50,7 +50,7 @@ Do not treat this skill as Admission, Promotion, Budget pass, or a relaxation of
 
 ## Default stays `fixed_uct`
 
-Default parent selection remains `fixed_uct`. Progressive / MCTS / StrongSearch remain explicit opt-in only. `#40` stays off. Programmable exploration heuristics may be written as docs or guidance; they do not change default selection math.
+Default parent selection remains `fixed_uct`. Progressive / MCTS / StrongSearch remain explicit Mission/config opt-in only. `#40` product default stays off. Env does not flip the default. Programmable exploration heuristics may be written as docs or guidance; they do not change default selection math. Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key.
 
 ## Handoff
 

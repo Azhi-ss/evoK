@@ -150,7 +150,7 @@ describe("progressive_mcgs_optin is constructed only when selected", () => {
       id: "progressive_mcgs_optin",
       kind: "progressive_mcgs_optin",
       productDefault: false,
-      selectionPolicy40: "off",
+      selectionPolicy40: "opt-in",
       explorationMode: "c(t) decay",
       role: "parent-selection",
       topK: 1,

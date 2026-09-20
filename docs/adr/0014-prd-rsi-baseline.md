@@ -327,6 +327,19 @@ predicates, change hang / T48 predicates, unfreeze `#40`,
 implement Deploy Arena, thaw true-submit, or hard-code a
 rejection blacklist.
 
+## Amendment (ET-PROG-40 / #178)
+
+`#40` Progressive moved from stub to usable **opt-in**. Product
+default remains `fixed_uct` / `#40` off. Mission or config must
+explicitly opt in to anneal `c(t)` + Elite soft-switch. Env does
+not flip the default. Spec: [progressive-opt-in.md](../progressive-opt-in.md).
+
+Elite scores influence inner selection only when opted in.
+**Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key.**
+This amendment does not change Admission / Budget / hang / T48
+predicates, thaw true-submit, implement Deploy Arena, or weld
+Progressive as the product default.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

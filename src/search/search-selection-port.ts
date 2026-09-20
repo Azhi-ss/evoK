@@ -5,8 +5,9 @@
  * Default inner A stays tree + `fixed_uct` (constant exploration √2), aligned
  * with algorithm-evolve `select_node`. Progressive MCGS-minded selection
  * (`progressive_mcgs_optin` / `StrongSearchAdapter`) is constructed only when
- * explicitly selected — it is not the product default and does not weld #40
- * SelectionPolicy open.
+ * explicitly selected — it is not the product default. `#40` stays off unless
+ * Mission or config opts in (see `resolveSearchSelection`). Env never flips
+ * the default.
  *
  * This port picks a parent. It is not `ToyCompetitionAdapter` (eval), does
  * not call HypothesisLedger / Kill-test hang / Broker, and does not let
@@ -21,6 +22,10 @@ export const DEFAULT_SEARCH_SELECTION_ID = "fixed_uct" as const;
 export const PROGRESSIVE_MCGS_OPT_IN_ID = "progressive_mcgs_optin" as const;
 export const DEFAULT_UCT_EXPLORATION = Math.SQRT2;
 export const SELECTION_POLICY_40 = "off" as const;
+export const SELECTION_POLICY_40_OPT_IN = "opt-in" as const;
+export type SelectionPolicy40State =
+  | typeof SELECTION_POLICY_40
+  | typeof SELECTION_POLICY_40_OPT_IN;
 export const DEFAULT_PROGRESSIVE_TAU = 8;
 export const DEFAULT_PROGRESSIVE_TOP_K = 2;
 const MAX_FAIL_NOTE = 280;
@@ -72,7 +77,7 @@ export interface SearchSelectionDescription {
   readonly kind: SearchSelectionAdapterId;
   readonly role: SearchSelectionRole;
   readonly productDefault: boolean;
-  readonly selectionPolicy40: typeof SELECTION_POLICY_40;
+  readonly selectionPolicy40: SelectionPolicy40State;
   readonly exploration: number;
   readonly explorationMode: "constant" | "c(t) decay";
   readonly topK?: number;
@@ -347,7 +352,10 @@ export class FixedUctSelectionAdapter extends SearchSelectionAdapter {
 
 /**
  * Opt-in Progressive MCGS-minded adapter: decaying c(t) plus Elite soft-switch
- * by w(t)/top-K. Not the product default.
+ * by w(t)/top-K. Not the product default. Constructing this adapter is an
+ * explicit `#40` opt-in (`selectionPolicy40: "opt-in"`). Elite scores
+ * influence inner parent selection only — Elite ≠ 晋级 / Promotion /
+ * Admission / Broker / kill-test key.
  *
  *   c(t) = c0 / (1 + t / tau)
  *   w(t) = min(1, t / tau)
@@ -395,7 +403,7 @@ export class ProgressiveMcgsOptInAdapter extends SearchSelectionAdapter {
       kind: this.id,
       role: "parent-selection",
       productDefault: false,
-      selectionPolicy40: SELECTION_POLICY_40,
+      selectionPolicy40: SELECTION_POLICY_40_OPT_IN,
       exploration: this.exploration,
       explorationMode: "c(t) decay",
       topK: this.topK,
