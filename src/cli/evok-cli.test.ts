@@ -10,7 +10,7 @@ import { createEvokModelResolver } from "../evok-model";
 import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission-start";
 import { parseResearchCommand } from "../mission/research-entry";
 import { parseSkillsCommand } from "../mission/skills-routing";
-import { DEMO_START_RELATIVE_PATH, EVALUATION_TEMPLATE_RELATIVE_PATH } from "../mission/start-hard-gates";
+import { DEMO_START_RELATIVE_PATH, DEMO_SUITE_RELATIVE_PATH, EVALUATION_TEMPLATE_RELATIVE_PATH } from "../mission/start-hard-gates";
 
 async function tempProject(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "evok-cli-project-"));
@@ -1463,6 +1463,7 @@ describe("runEvok start hard-gate inventory (ET-OPS-START)", () => {
     expect(EVOK_USAGE).toMatch(/absolute/i);
     expect(EVOK_USAGE).toMatch(EVALUATION_TEMPLATE_RELATIVE_PATH);
     expect(EVOK_USAGE).toMatch(DEMO_START_RELATIVE_PATH);
+    expect(EVOK_USAGE).toMatch(DEMO_SUITE_RELATIVE_PATH);
     expect(EVOK_USAGE).toMatch(/--start --baseline-only|--baseline-only/);
   });
 
@@ -1486,6 +1487,31 @@ describe("runEvok start hard-gate inventory (ET-OPS-START)", () => {
     expect(text).toMatch(/Admission/);
     expect(text).toMatch(/Budget Gate/);
     expect(text).toMatch(/T48/);
+    expect(text).toContain(demo);
+    expect(text).not.toMatch(/baseline-complete|start succeeded|true submit authorized/i);
+  });
+
+  test("--start --baseline-only on demo-suite lists remaining hard gates and does not invent green", async () => {
+    const demo = join(process.cwd(), DEMO_SUITE_RELATIVE_PATH);
+    const stdout = new CollectStream();
+    const stderr = new CollectStream();
+    const code = await runEvok({
+      args: parseEvokArgs(["--start", "--baseline-only", "--project", demo, "--mission", "demo-suite"]),
+      createResolver: async () => {
+        throw new Error("Pi model/auth is not configured");
+      },
+      stdout,
+      stderr,
+    });
+    expect(code).toBe(EVOK_EXIT.configError);
+    const text = `${stdout.text()}\n${stderr.text()}`;
+    expect(text).toMatch(/remaining hard gates/i);
+    expect(text).toMatch(/nothing dispatched/i);
+    expect(text).toMatch(/Pi model\/auth|model-auth/i);
+    expect(text).toMatch(/Admission/);
+    expect(text).toMatch(/Budget Gate/);
+    expect(text).toMatch(/T48/);
+    expect(text).toMatch(/suite-metric/);
     expect(text).toContain(demo);
     expect(text).not.toMatch(/baseline-complete|start succeeded|true submit authorized/i);
   });

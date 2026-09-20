@@ -25,6 +25,8 @@ Hang / T48 stay in `src/evidence/`. Search structure stays in
 are not Promotion keys. True External Submission stays frozen.
 `suite-metric` is an independent evaluation observation (`pass_rate`);
 it is not welded into Admission, Budget, hang, T48, or Promotion.
+The copyable true-domain scaffold is `examples/demo-suite/` (local-js-exports
+runner; baseline is a measured incomplete suite, not a file-metric seed).
 
 `idea-types` stays at `src/` (research diversity vocabulary, not
 problem-facing). Methodology JSON fixtures stay at

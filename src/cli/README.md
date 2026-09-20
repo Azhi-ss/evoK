@@ -28,7 +28,7 @@ Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
 start path is not ready (`src/mission/start-hard-gates.ts`). Prefer an
 absolute `--project`. Copyable contract: `templates/evaluation.json`. Demo:
-`examples/demo-start/`.
+`examples/demo-start/`. True-domain suite-metric demo: `examples/demo-suite/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).
 
 P6: physical pack is in place. The dead `src/evok-cli.ts` shim is gone;

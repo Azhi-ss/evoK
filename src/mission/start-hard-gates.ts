@@ -10,8 +10,8 @@ import { isAbsolute, join } from "node:path";
 import {
   EvaluationContractError,
   evaluationContractPath,
-  loadEvaluationContract,
 } from "../local-file-evaluator";
+import { loadProjectEvaluationContract } from "../project-evaluator";
 import {
   draftReadyForReview,
   listDraftStartGaps,
@@ -35,6 +35,7 @@ import {
 
 export const EVALUATION_TEMPLATE_RELATIVE_PATH = "templates/evaluation.json";
 export const DEMO_START_RELATIVE_PATH = "examples/demo-start";
+export const DEMO_SUITE_RELATIVE_PATH = "examples/demo-suite";
 
 export type StartHardGateId =
   | "project-absolute"
@@ -354,12 +355,15 @@ async function inspectControllerLock(projectRoot: string, missionId: string | un
 
 async function inspectEvaluation(projectRoot: string): Promise<StartHardGate> {
   try {
-    const contract = await loadEvaluationContract(projectRoot);
+    const loaded = await loadProjectEvaluationContract(projectRoot);
+    const detail = loaded.kind === "suite-metric"
+      ? `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} runner=${loaded.contract.suite.runner} manifest=${loaded.contract.suite.cases_glob_or_manifest}`
+      : `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} artifact=${loaded.contract.artifact}`;
     return gate(
       "evaluation-contract",
       "pass",
       "evaluation contract",
-      `${evaluationContractPath(projectRoot)} id=${contract.id} artifact=${contract.artifact}`,
+      detail,
     );
   } catch (error) {
     const detail = error instanceof EvaluationContractError

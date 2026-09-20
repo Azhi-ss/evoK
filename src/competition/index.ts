@@ -27,6 +27,7 @@ export type {
 } from "./llm-comp-arm-before-promotion";
 export {
   FIXTURE_MANIFEST_RUNNER,
+  LOCAL_JS_EXPORTS_RUNNER,
   SUITE_METRIC_ID,
   SUITE_REPORT_REF,
   SuiteMetricContractError,
@@ -34,6 +35,7 @@ export {
   evaluateSuiteMetric,
   normalizeSuiteMetricContract,
 } from "./suite-metric";
+export { localJsExportsRunner } from "./local-js-exports-runner";
 export type {
   SuiteEvalStatus,
   SuiteMetricContract,

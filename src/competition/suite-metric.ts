@@ -16,10 +16,12 @@
  */
 import { isAbsolute } from "node:path";
 import type { BaselineEvaluator, BaselineMeasurement } from "../mission-start";
+import { LOCAL_JS_EXPORTS_RUNNER, localJsExportsRunner } from "./local-js-exports-runner";
 
 export const SUITE_METRIC_ID = "suite-metric" as const;
 export const SUITE_REPORT_REF = "suite-report.json";
 export const FIXTURE_MANIFEST_RUNNER = "fixture-manifest";
+export { LOCAL_JS_EXPORTS_RUNNER } from "./local-js-exports-runner";
 
 export class SuiteMetricContractError extends Error {
   readonly kind = "suite-metric-contract" as const;
@@ -246,6 +248,7 @@ const fixtureManifestRunner: SuiteRunner = {
 
 function resolveBuiltinRunner(name: string): SuiteRunner | undefined {
   if (name === FIXTURE_MANIFEST_RUNNER) return fixtureManifestRunner;
+  if (name === LOCAL_JS_EXPORTS_RUNNER) return localJsExportsRunner;
   return undefined;
 }
 

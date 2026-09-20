@@ -1,0 +1,10 @@
+{
+  "module": "src/solve.js",
+  "cases": [
+    { "id": "double", "export": "double", "args": [21], "expected": 42 },
+    { "id": "isEven", "export": "isEven", "args": [4], "expected": true },
+    { "id": "sum", "export": "sum", "args": [2, 3], "expected": 5 },
+    { "id": "max", "export": "max", "args": [2, 9], "expected": 9 },
+    { "id": "clamp", "export": "clamp", "args": [15, 0, 10], "expected": 10 }
+  ]
+}

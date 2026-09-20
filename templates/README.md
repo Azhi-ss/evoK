@@ -28,5 +28,6 @@ cp templates/evaluation.json "$PROJECT/.evok/evaluation.json"
 ```
 
 Do not pass a relative `--project` and do not point `--project` at an isolated
-Run workspace. A newcomer scaffold that already includes this file lives at
-`examples/demo-start/`.
+Run workspace. A newcomer scaffold that already includes the file-metric
+contract lives at `examples/demo-start/`. The true-domain suite-metric
+scaffold lives at `examples/demo-suite/`.
