@@ -56,5 +56,6 @@ Live Broker submits also write the existing SubmissionBroker events.
 - Admission / Budget / hang / T48 **predicates are not loosened**.
   Hardening (fail-closed on missing) is intentional.
 - `#40` / Progressive default stays **off** / `fixed_uct`.
-- Deploy Arena stays orthogonal standby.
+- Deploy Arena is an orthogonal opt-in arm (`competitionId=deploy-arena`);
+  it reuses this auto-submit seam and does not bypass it.
 - No commercial contest OS, weight training, or Elite-as-promotion key.

@@ -29,6 +29,9 @@ The dead `src/file-blueprint.ts` shim is gone; import
 **landed**). `runOrchGap` may call that glue; omit / `false` does not
 auto-run hang. Live opens only with explicit `{ live: true }` (plus key
 fail-closed). `EVOK_NEWAPI_LIVE` alone does not open the product path.
+`runDeployArenaOrch` hangs the orthogonal DeployArena arm only when
+`competitionId=deploy-arena`; it wires COI into evidence auto-submit
+and does not become a second control plane.
 MethodologyEvidence auto-seam (ME-1) stays wired through the existing
 propose → hang path. `#27` ModelOrchestra is a **thin impl**
 (`runModelOrchestra`); this pack does not own search-graph authority.
@@ -36,8 +39,9 @@ propose → hang path. `#27` ModelOrchestra is a **thin impl**
 Secrets are read from the environment only and must be redacted in errors.
 Elite / side-slots / Team Fan-Out are not Promotion keys (Elite ≠ 晋级).
 `#40` Progressive stays off unless Mission/config explicitly opts in.
-True contest External Submission stays frozen. Pattern C is not thickened
-here.
+AtCoder true-submit stays frozen. DeployArena live playground submit
+is fail-closed (credentials + `{ live: true }` + all-green gates).
+Pattern C is not thickened here.
 
 Do not move hang / T48 into this pack. Do not grow a second control plane
 in `src/cli/`. Contest-arm runtime stays in `src/competition/`; this pack

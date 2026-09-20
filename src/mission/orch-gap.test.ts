@@ -187,6 +187,6 @@ describe("orch-gap does not widen gates or start DeployArena", () => {
     expect(spec).toMatch(/golden-path/);
     expect(spec).toMatch(/strong.search/i);
     expect(spec).toMatch(/fixed_uct/);
-    expect(spec).toMatch(/Deploy Arena stays standby/i);
+    expect(spec).toMatch(/not opened\s+from this path/i);
   });
 });

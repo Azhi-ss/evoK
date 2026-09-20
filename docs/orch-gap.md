@@ -2,8 +2,9 @@
 
 Control-plane glue for three already-owned ports. Product defaults stay
 **`fixed_uct`**. Progressive / StrongSearch stay **opt-in / off**.
-Environment variables never flip that default. Deploy Arena stays standby.
-This is not a second control plane.
+Environment variables never flip that default. Deploy Arena is a
+separate opt-in arm (`runDeployArenaOrch`, #182) and is not opened
+from this path. This is not a second control plane.
 
 ## #27 ModelOrchestra — thin impl
 

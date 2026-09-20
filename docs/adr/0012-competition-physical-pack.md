@@ -43,6 +43,13 @@ stays in evidence (`attemptContestAutoSubmit`). Competition still
 does not own gate predicates or the Broker. Live destination remains
 explicit `{ live: true }`. `#40` stays opt-in.
 
+Amendment (ET-DEPLOY-ORCH / #182): Deploy Arena thick orchestration
+lives here (`deploy-arena`): task/service graph, multi-machine /
+multi-GPU workers, local metric aggregation, and the COI adapter
+that assembles `submission.json`. Mission hangs it only with
+`competitionId=deploy-arena`. Auto-submit stays evidence-owned.
+This is not a commercial contest OS and not execution Pattern C.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

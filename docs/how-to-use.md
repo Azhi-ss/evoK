@@ -3,7 +3,7 @@
 Followable product path: **Explore → intake → review → start → research**.
 
 This page documents **only shipped CLI / TUI behavior**. It does not invent
-a green live baseline, `#40` Progressive as the product default, Deploy Arena, or any other
+a green live baseline, `#40` Progressive as the product default, or any other
 unopened capability. Chat is not Mission authority. Loading a Skill is not
 authorization to start, continue, or submit. Contest-arm auto-submit is
 evidence-owned and fail-closed — see [contest-auto-submit.md](contest-auto-submit.md).
@@ -11,6 +11,9 @@ Promotion hardening (ledger hang before Broker) is
 [et-promo-hard.md](et-promo-hard.md).
 `#40` Progressive is explicit Mission/config opt-in only — see
 [progressive-opt-in.md](progressive-opt-in.md).
+Deploy Arena thick orchestration is an orthogonal API
+(`competitionId=deploy-arena`) — see [deploy-arena.md](deploy-arena.md).
+It is not a CLI mainline and not a commercial contest OS.
 
 Product baseline: [ADR-0014](adr/0014-prd-rsi-baseline.md). Domain vocabulary:
 [CONTEXT.md](../CONTEXT.md).
@@ -307,8 +310,8 @@ What continue does on this contract:
 
 The shipped template `src/solve.js` is **not** rewritten. The proposal and
 the hang decision live in `evidence/`. Contest-arm auto-submit stays
-fail-closed (all gates green + ledger). Deploy Arena stays standby.
-Admission / Budget / hang / T48 predicates are unchanged.
+fail-closed (all gates green + ledger). `/research continue` does not
+open Deploy Arena. Admission / Budget / hang / T48 predicates are unchanged.
 
 ### `#40` Progressive opt-in (not the product default)
 
@@ -421,7 +424,9 @@ Also still true, and **not** claimed by this guide:
 
 - `#40` Progressive stays **off** as the product default; Mission/config may
   explicitly opt in ([progressive-opt-in.md](progressive-opt-in.md))
-- Deploy Arena stays orthogonal **standby**
+- Deploy Arena is orthogonal **opt-in** (`competitionId=deploy-arena`);
+  env never opens live; missing playground/bohr credentials fail closed
+  ([deploy-arena.md](deploy-arena.md))
 - Elite ≠ 晋级 / Promotion / Admission
 - `/research continue` does not dispatch a Pi Run; suite-metric continue
   measures a local Candidate and engages the promotion hang
@@ -432,7 +437,7 @@ Also still true, and **not** claimed by this guide:
 - A green / passing live baseline on every machine (demo lists remaining hard
   gates when Pi model/auth or another prerequisite is missing)
 - A commercial contest OS, or auto-submit when any gate is not green
-- Deploy Arena as a mainline
+- Deploy Arena as a CLI / RSI mainline or commercial contest OS
 - `#40` / Progressive welded on as the product default
 - Admission / Budget / hang / T48 / Broker predicate changes
 - Skill body as start, continue, or submit authorization

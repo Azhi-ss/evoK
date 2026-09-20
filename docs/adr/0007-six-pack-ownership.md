@@ -19,7 +19,7 @@ transcript is not authority.
 | **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate, contest-arm auto-submit (all-green only), authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing, SEA mount/unmount, method-version stats isolation | Promotion; gate override; Admission / Budget predicates |
-| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | Auto-submit authority (evidence-owned, fail-closed) |
+| **competition** | Contest and local Evaluator adapters; Deploy Arena graph / COI (opt-in, not mainline) | Auto-submit authority (evidence-owned, fail-closed) |
 | **cli** | Thin Mission CLI shell + Pi native TUI | A second control plane |
 
 The product control plane is the Research Loop: authorize, continue,
@@ -81,7 +81,7 @@ for one more release.
 Product baseline is the task-internal RSI PRD v1.0. Recorded in
 [ADR-0014](0014-prd-rsi-baseline.md). The six-package list is unchanged.
 The Owns notes for **cli** (Pi native TUI) and **competition** (Deploy
-Arena standby) are extended in the table above. Interactive surface is
+Arena opt-in arm) are extended in the table above. Interactive surface is
 Pi native TUI (#134 / PR #135). `ToyHarness` remains fixtures/tests only
 — not a second control plane.
 
