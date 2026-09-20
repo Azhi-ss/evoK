@@ -10,6 +10,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MockLlmCompetitionRuntime } from "../competition/llm-competition-runtime";
+import {
+  LiveLlmKeyMissingError,
+  NEWAPI_API_KEY_ENV,
+  NEWAPI_LIVE_ENV,
+} from "../newapi-client";
 import { evaluateMethodAdmission } from "../evidence/method-admission";
 import { evaluateExperimentValidity } from "../evidence/experiment-validity";
 import { BudgetLedger } from "../evidence/budget-gate";
@@ -104,6 +109,26 @@ describe("runOrchGap opt-in ports keep the product default off", () => {
     expect(def.search.selectionId).toBe("fixed_uct");
     expect(def.search.selectionPolicy40).toBe("off");
     expect(def.goldenPath).toBeUndefined();
+  });
+
+  test("goldenPath: true is mock; EVOK_NEWAPI_LIVE alone does not open live; live needs a key", async () => {
+    const savedKey = process.env[NEWAPI_API_KEY_ENV];
+    const savedLive = process.env[NEWAPI_LIVE_ENV];
+    delete process.env[NEWAPI_API_KEY_ENV];
+    process.env[NEWAPI_LIVE_ENV] = "1";
+    try {
+      const mocked = await runOrchGap({ catalog: fakeCatalog(), goldenPath: true });
+      expect(mocked.goldenPath?.arm.runtime).toBeInstanceOf(MockLlmCompetitionRuntime);
+      await expect(runOrchGap({
+        catalog: fakeCatalog(),
+        goldenPath: { live: true, statement: "orch-gap live fail-closed" },
+      })).rejects.toBeInstanceOf(LiveLlmKeyMissingError);
+    } finally {
+      if (savedKey === undefined) delete process.env[NEWAPI_API_KEY_ENV];
+      else process.env[NEWAPI_API_KEY_ENV] = savedKey;
+      if (savedLive === undefined) delete process.env[NEWAPI_LIVE_ENV];
+      else process.env[NEWAPI_LIVE_ENV] = savedLive;
+    }
   });
 });
 

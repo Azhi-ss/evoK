@@ -10,6 +10,9 @@
  * Env never flips the default. Elite ≠ 晋级.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
   DEFAULT_UCT_EXPLORATION,
@@ -22,7 +25,7 @@ import {
   createSearchSelectionPort,
   type SearchParentCandidate,
 } from "./search-selection-port";
-import { resolveSearchSelection } from "./progressive-opt-in";
+import { readSearchSelectionConfig, resolveSearchSelection } from "./progressive-opt-in";
 import {
   mountStrongSearchOptIn,
   optInStrongSearchPort,
@@ -145,6 +148,33 @@ describe("explicit StrongSearch opt-in is callable and is not the product defaul
     expect(mounted).toBeInstanceOf(StrongSearchAdapter);
     expect(host.defaultSelection().id).toBe("fixed_uct");
     expect(host.defaultSelection().selectParent({ nodes: WORKED }).parentId).toBe("b");
+  });
+});
+
+describe("project search.json strongSearch is explicit file opt-in", () => {
+  test("missing file stays default; { strongSearch: true } opts in", async () => {
+    const project = await mkdtemp(join(tmpdir(), "evok-strong-search-"));
+    try {
+      withEnv({ EVOK_SEARCH_SELECTION: "strong_search" }, () => {
+        expect(readSearchSelectionConfig(project)).toBeUndefined();
+        expect(resolveSearchSelection(readSearchSelectionConfig(project)).selectionId).toBe("fixed_uct");
+      });
+      await mkdir(join(project, ".evok"), { recursive: true });
+      await writeFile(join(project, ".evok", "search.json"), `${JSON.stringify({
+        strongSearch: true,
+        topK: 1,
+        tau: 8,
+        seed: 7,
+      }, null, 2)}\n`);
+      const config = readSearchSelectionConfig(project);
+      expect(config).toEqual({ strongSearch: true, topK: 1, tau: 8, seed: 7 });
+      const resolved = resolveSearchSelection(config, { from: "config" });
+      expect(resolved.port).toBeInstanceOf(StrongSearchAdapter);
+      expect(resolved.selectionPolicy40).toBe("opt-in");
+      expect(resolved.port.selectParent({ nodes: WITH_UNVISITED, t: 8 }).parentId).toBe("a");
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
   });
 });
 
