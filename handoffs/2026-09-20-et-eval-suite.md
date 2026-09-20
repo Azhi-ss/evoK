@@ -58,6 +58,6 @@ await evaluateSuiteMetric({
 
 ## 打开的缝 / 未开的缝
 
-- **打开**：`suite-metric` 适配器与 LLM arm / file-metric **并列**；`evaluation.json` 合同可复制；三态 + 自报覆盖单测；`suite-report.json` 形状在结果里（`report_ref`）。
+- **打开**：`suite-metric` 适配器与 LLM arm / file-metric **并列**；`evaluation.json` 合同可复制；三态 + 自报覆盖单测；每次评测产出机器可读 `suite-report.json`（`artifact_refs` + `artifacts`）；超时 / 崩溃 / 缺清单 fail-closed。
 - **未开（有意）**：`examples/demo-suite`；`/research continue` 抬分圈；把 suite 分焊成 Elite/晋级键；CLI `/start` 自动改走 suite-metric。
 - **未改**：Admission / Budget / hang / T48 谓词；`#40`；真交 / DeployArena / Bohrium。

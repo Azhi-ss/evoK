@@ -74,6 +74,11 @@ describe("suite-metric Competition Adapter (ET-EVAL-SUITE / #172)", () => {
     expect(result.score).toBe(0);
     expect(result.score).not.toBe(1);
     expect(result.report_ref).toBe(SUITE_REPORT_REF);
+    expect(result.artifact_refs).toEqual([SUITE_REPORT_REF]);
+    expect(result.report.artifact_refs).toEqual([SUITE_REPORT_REF]);
+    const written = JSON.parse(result.artifacts[SUITE_REPORT_REF] ?? "null") as { n_pass: number; cases: { status: string }[] };
+    expect(written.n_pass).toBe(0);
+    expect(written.cases.every((item) => item.status === "fail")).toBe(true);
     expect(result.report.cases.every((item) => item.status === "fail")).toBe(true);
 
     const measurement = await createSuiteMetricEvaluator(suiteContract(), { suiteFiles: suiteFiles() })
@@ -167,6 +172,16 @@ describe("suite-metric Competition Adapter (ET-EVAL-SUITE / #172)", () => {
     );
     expect(unknown.status === "fail" || unknown.status === "inconclusive").toBe(true);
     expect(unknown.score).not.toBe(1);
+
+    const hung: SuiteRunner = { run() { return new Promise(() => {}); } };
+    const timedOut = await evaluateSuiteMetric(answers("a", "b", "c", "d", "e"), suiteContract(), {
+      runner: hung,
+      suiteFiles: suiteFiles(),
+      timeoutMs: 20,
+    });
+    expect(timedOut.status === "fail" || timedOut.status === "inconclusive").toBe(true);
+    expect(timedOut.score).not.toBe(1);
+    expect(timedOut.report.reason).toMatch(/timed out/i);
   });
 
   test("copyable evaluation.json contract expresses suite-metric pass_rate in [0, 1]", async () => {

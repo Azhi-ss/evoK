@@ -61,6 +61,7 @@ export interface SuiteReport {
   readonly score?: number;
   readonly status: SuiteEvalStatus;
   readonly cases: readonly SuiteCaseResult[];
+  readonly artifact_refs: readonly string[];
   readonly reason?: string;
 }
 
@@ -70,7 +71,10 @@ export interface SuiteMetricResult {
   readonly n_total: number;
   readonly status: SuiteEvalStatus;
   readonly report_ref: typeof SUITE_REPORT_REF;
+  readonly artifact_refs: readonly string[];
   readonly report: SuiteReport;
+  /** Machine-readable evaluation artifact; not a Candidate file. */
+  readonly artifacts: Readonly<Record<string, string>>;
 }
 
 export interface SuiteRunnerInput {
@@ -92,6 +96,8 @@ export interface SuiteRunner {
 export interface SuiteMetricEvaluateOptions {
   readonly runner?: SuiteRunner;
   readonly suiteFiles?: Readonly<Record<string, string>>;
+  /** Fail closed if the runner does not settle within this bound. */
+  readonly timeoutMs?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -139,13 +145,17 @@ export function normalizeSuiteMetricContract(value: unknown): SuiteMetricContrac
   };
 }
 
-function result(
+function countPasses(cases: readonly SuiteCaseResult[]): number {
+  return cases.filter((item) => item.status === "pass").length;
+}
+
+function suiteMetricResult(
   status: SuiteEvalStatus,
   cases: readonly SuiteCaseResult[],
   reason?: string,
 ): SuiteMetricResult {
   const n_total = cases.length;
-  const n_pass = cases.filter((item) => item.status === "pass").length;
+  const n_pass = countPasses(cases);
   const scored = status !== "inconclusive" && n_total > 0;
   const score = scored ? n_pass / n_total : undefined;
   const report: SuiteReport = {
@@ -155,10 +165,21 @@ function result(
     n_total,
     status,
     cases,
+    artifact_refs: [SUITE_REPORT_REF],
     ...(score !== undefined ? { score } : {}),
     ...(reason ? { reason } : {}),
   };
-  return { n_pass, n_total, status, report_ref: SUITE_REPORT_REF, report, ...(score !== undefined ? { score } : {}) };
+  const artifacts = { [SUITE_REPORT_REF]: `${JSON.stringify(report, null, 2)}\n` };
+  return {
+    n_pass,
+    n_total,
+    status,
+    report_ref: SUITE_REPORT_REF,
+    artifact_refs: [SUITE_REPORT_REF],
+    report,
+    artifacts,
+    ...(score !== undefined ? { score } : {}),
+  };
 }
 
 interface SuiteCaseSpec {
@@ -230,18 +251,40 @@ function resolveBuiltinRunner(name: string): SuiteRunner | undefined {
 
 function summarize(outcome: SuiteRunnerOutcome): SuiteMetricResult {
   if (outcome.status === "inconclusive") {
-    return result("inconclusive", outcome.cases, outcome.reason ?? "suite produced no measurable cases");
+    return suiteMetricResult("inconclusive", outcome.cases, outcome.reason ?? "suite produced no measurable cases");
   }
   if (outcome.cases.length === 0) {
-    return result(
+    return suiteMetricResult(
       outcome.status === "fail" ? "fail" : "inconclusive",
       [],
       outcome.reason ?? (outcome.status === "fail" ? "suite runner failed" : "suite produced no measurable cases"),
     );
   }
-  const n_pass = outcome.cases.filter((item) => item.status === "pass").length;
-  const status: SuiteEvalStatus = n_pass === outcome.cases.length ? "pass" : "fail";
-  return result(status, outcome.cases, outcome.reason);
+  const status: SuiteEvalStatus = countPasses(outcome.cases) === outcome.cases.length ? "pass" : "fail";
+  return suiteMetricResult(status, outcome.cases, outcome.reason);
+}
+
+async function settleRunner(
+  run: ReturnType<SuiteRunner["run"]>,
+  timeoutMs: number | undefined,
+): Promise<SuiteRunnerOutcome> {
+  if (timeoutMs === undefined) return run;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("suite runner timeoutMs must be a positive finite number");
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(run),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`suite runner timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -256,15 +299,18 @@ export async function evaluateSuiteMetric(
   try {
     const runner = options.runner ?? resolveBuiltinRunner(contract.suite.runner);
     if (!runner) {
-      return result(
+      return suiteMetricResult(
         "inconclusive",
         [],
         `unknown suite runner ${JSON.stringify(contract.suite.runner)}; no implementation was supplied`,
       );
     }
-    return summarize(await runner.run({ snapshot, contract, suiteFiles: options.suiteFiles }));
+    return summarize(await settleRunner(
+      runner.run({ snapshot, contract, suiteFiles: options.suiteFiles }),
+      options.timeoutMs,
+    ));
   } catch (error) {
-    return result("fail", [], `suite runner failed: ${(error as Error).message}`);
+    return suiteMetricResult("fail", [], `suite runner failed: ${(error as Error).message}`);
   }
 }
 
