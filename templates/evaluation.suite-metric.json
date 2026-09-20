@@ -1,0 +1,15 @@
+{
+  "id": "suite-metric",
+  "version": "1",
+  "suite": {
+    "kind": "local-tests",
+    "runner": "fixture-manifest",
+    "cases_glob_or_manifest": "suite/cases.json"
+  },
+  "score": {
+    "metric": "pass_rate",
+    "min": 0,
+    "max": 1
+  },
+  "artifact_refs": []
+}
