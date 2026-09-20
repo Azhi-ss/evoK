@@ -6,8 +6,9 @@
  * auto-submit (all-green / fail-closed).
  * Does not own search-tree structure or Team Coordinator / Role planning.
  * Contest-arm auto-submit is allowed only when every promotion/evidence
- * gate is green; each attempt is ledged and any non-green gate fails
- * closed. Hang / T48 three-state is unchanged.
+ * gate is green; the hang gate requires a ledger KillTestPlan. Each
+ * attempt is ledged and any non-green gate fails closed. Hang / T48
+ * three-state is not loosened.
  *
  * `methodology.ts` (T44 gate predicates) is the barrel methodology surface.
  * `methodology-contracts.ts` stays a sibling module — same names, different
@@ -33,6 +34,7 @@ export type {
 } from "./hypothesis-ledger";
 export {
   createKillTestHangHook,
+  killTestHangHasLedgerPlan,
   killTestOutcomeBlocksBroker,
   runKillTestHang,
 } from "./kill-test-hang";

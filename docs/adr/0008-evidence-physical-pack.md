@@ -34,6 +34,12 @@ or the attempt is ledged and refused. Predicates are reused, not
 loosened. Compatibility `autoSubmit` still cannot bypass Human
 Acceptance on a direct `SubmissionBroker.submit` call.
 
+Amendment (ET-PROMO-HARD / #180): the hang gate on contest-auto-submit
+and the before-promotion hook require a ledger `KillTestPlan`. Claiming
+kill-test pass without a plan fails closed. Isolated `runKillTestHang`
+predicate checks may omit a plan. Admission / Budget / T48 / hang
+tri-state predicates are not loosened.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

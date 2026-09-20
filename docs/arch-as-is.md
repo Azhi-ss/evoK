@@ -20,8 +20,9 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 - Search pluggable; default `fixed_uct`; strong search / MCTS /
   `#40` Progressive explicit opt-in; gates live in evidence.
 - Contest-arm auto-submit is fail-closed: all promotion/evidence gates
-  green + ledger, or no submit. Expanding authority / changing Human
-  Acceptance on the direct Broker path still ask the user. `#40` default stays off.
+  green + ledger, or no submit. The hang gate requires a ledger
+  KillTestPlan. Expanding authority / changing Human Acceptance on the
+  direct Broker path still ask the user. `#40` default stays off.
 - Deploy Arena is orthogonal standby — not welded into the RSI mainline.
 
 ## Physical layout
@@ -47,7 +48,7 @@ re-exports are migration-period (one more release). Inventory: ADR-0013.
 
 - Gate / T48 / hang three-state
 - `#40` SelectionPolicy off unless Mission/config explicitly opts in
-- Contest-arm auto-submit only when every gate is green; missing/red/yellow fails closed
+- Contest-arm auto-submit only when every gate is green; hang needs a ledger KillTestPlan; missing/red/yellow fails closed
 - Elite ≠ 晋级 / Promotion keys
 - C thicken forbidden
 - Deploy Arena not advanced (orthogonal standby)

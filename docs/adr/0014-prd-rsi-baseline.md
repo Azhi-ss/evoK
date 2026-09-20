@@ -353,6 +353,17 @@ Arena, or open a commercial contest OS. The compatibility
 `autoSubmit` flag still cannot bypass Human Acceptance on a
 direct Broker submit.
 
+## Amendment (ET-PROMO-HARD / #180)
+
+Landable before-promotion / kill-hang / ledger Specs stay on the
+existing hang and contest-auto-submit seams. Broker / before-promotion
+consumers require a ledger `KillTestPlan`; claiming pass without a
+plan fails closed. Spec: [et-promo-hard.md](../et-promo-hard.md).
+
+This amendment does not loosen Admission / Budget / hang / T48
+predicates, weld `#40` as the product default, implement Deploy
+Arena, open a commercial contest OS, or add a second control plane.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
