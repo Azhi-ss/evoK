@@ -2,9 +2,12 @@
  * Physical evidence pack (ET-A1 / #121; P6 barrel).
  *
  * Owns ledger, T48, kill/hang, promotion gates, Admission / method writeback,
- * Budget Gate (reserve → settle), and Broker simulation.
+ * Budget Gate (reserve → settle), Broker simulation, and contest-arm
+ * auto-submit (all-green / fail-closed).
  * Does not own search-tree structure or Team Coordinator / Role planning.
- * True External Submission stays frozen. Hang / T48 three-state is unchanged.
+ * Contest-arm auto-submit is allowed only when every promotion/evidence
+ * gate is green; each attempt is ledged and any non-green gate fails
+ * closed. Hang / T48 three-state is unchanged.
  *
  * `methodology.ts` (T44 gate predicates) is the barrel methodology surface.
  * `methodology-contracts.ts` stays a sibling module — same names, different
@@ -73,7 +76,22 @@ export {
   SubmissionBroker,
   SubmissionRejected,
   externalSubmissionsFromEvents,
+  submissionChampionIsEligible,
 } from "./submission-broker";
+export {
+  InMemoryContestAutoSubmitLedger,
+  attemptContestAutoSubmit,
+  createBrokerContestSubmitSeam,
+  evaluateContestAutoSubmitGates,
+} from "./contest-auto-submit";
+export type {
+  ContestAutoSubmitAttempt,
+  ContestAutoSubmitDecision,
+  ContestAutoSubmitEvent,
+  ContestAutoSubmitGateStatus,
+  ContestAutoSubmitInput,
+  ContestSubmitSeam,
+} from "./contest-auto-submit";
 export { LEDGER_EVENT_KINDS, ledgerEventKind } from "./ledger-kinds";
 export {
   evaluateExperimentValidity,

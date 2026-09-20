@@ -6,7 +6,7 @@
  * evidence gates (hang / T48 / Broker) or Mission propose/assemble glue.
  * Live stays explicit `{ live: true }`; product path must not open the
  * arm via env alone. Model allowlist is DeepSeek* / Gemini* only — GPT*
- * stays banned. True External Submission stays frozen.
+ * stays banned. Contest-arm auto-submit is evidence-owned and fail-closed.
  */
 export {
   LiveLlmCompetitionRuntime,

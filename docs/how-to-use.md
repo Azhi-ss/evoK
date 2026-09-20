@@ -3,10 +3,12 @@
 Followable product path: **Explore → intake → review → start → research**.
 
 This page documents **only shipped CLI / TUI behavior**. It does not invent
-green, true submit, `#40` Progressive as the product default, Deploy Arena, or any other
+a green live baseline, `#40` Progressive as the product default, Deploy Arena, or any other
 unopened capability. Chat is not Mission authority. Loading a Skill is not
-authorization to start, continue, or submit. `#40` Progressive is explicit
-Mission/config opt-in only — see [progressive-opt-in.md](progressive-opt-in.md).
+authorization to start, continue, or submit. Contest-arm auto-submit is
+evidence-owned and fail-closed — see [contest-auto-submit.md](contest-auto-submit.md).
+`#40` Progressive is explicit Mission/config opt-in only — see
+[progressive-opt-in.md](progressive-opt-in.md).
 
 Product baseline: [ADR-0014](adr/0014-prd-rsi-baseline.md). Domain vocabulary:
 [CONTEXT.md](../CONTEXT.md).
@@ -302,8 +304,9 @@ What continue does on this contract:
    `<abs-project>/evidence/research-continue/<mission-id>/<experiment-id>.json`
 
 The shipped template `src/solve.js` is **not** rewritten. The proposal and
-the hang decision live in `evidence/`. True submit / Deploy Arena stay
-frozen. Admission / Budget / hang / T48 predicates are unchanged.
+the hang decision live in `evidence/`. Contest-arm auto-submit stays
+fail-closed (all gates green + ledger). Deploy Arena stays standby.
+Admission / Budget / hang / T48 predicates are unchanged.
 
 ### `#40` Progressive opt-in (not the product default)
 
@@ -401,7 +404,7 @@ even when every blocking start-path check is clear:
 | **Budget Gate** | reserve → settle still refuses continue or writeback when spend is unreserved or over the Mission Policy cap. Budget pass is not Admission pass. |
 | **hang** | Inconclusive hang is not pass. Predicates unchanged. |
 | **T48** | Unmapped T48 artifacts still block. Predicates unchanged. |
-| **External Submission / Broker** | True submit stays frozen. Start is not submit authorization. Broker predicates unchanged. |
+| **External Submission / Broker** | Contest-arm auto-submit only after every promotion/evidence gate is green; each attempt is ledged; any non-green gate fails closed. Start is not submit authorization. Broker predicates unchanged. |
 
 **Pi model/auth** is a **blocking start-path check**, not one of those
 in-force lines. It can pass once `~/.pi/agent` resolves and preflights the
@@ -422,7 +425,7 @@ Also still true, and **not** claimed by this guide:
 
 - A green / passing live baseline on every machine (demo lists remaining hard
   gates when Pi model/auth or another prerequisite is missing)
-- True External Submission / AtCoder true-submit
+- A commercial contest OS, or auto-submit when any gate is not green
 - Deploy Arena as a mainline
 - `#40` / Progressive welded on as the product default
 - Admission / Budget / hang / T48 / Broker predicate changes

@@ -340,11 +340,25 @@ This amendment does not change Admission / Budget / hang / T48
 predicates, thaw true-submit, implement Deploy Arena, or weld
 Progressive as the product default.
 
+## Amendment (ET-SUBMIT-AUTO / #179)
+
+Contest-arm auto-submit is allowed only when every promotion /
+evidence gate is green. Each attempt writes a ledger. Any red /
+yellow / missing gate fails closed and must not submit. Spec:
+[contest-auto-submit.md](../contest-auto-submit.md).
+
+This amendment does not loosen Admission / Budget / hang / T48
+predicates, weld `#40` as the product default, implement Deploy
+Arena, or open a commercial contest OS. The compatibility
+`autoSubmit` flag still cannot bypass Human Acceptance on a
+direct Broker submit.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.
 - No weld of `#40` / Progressive as product default.
-- No real contest External Submission; AtCoder true-submit stays frozen.
+- No commercial contest OS; contest-arm auto-submit stays fail-closed
+  (all gates green + ledger) and does not loosen predicates.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
 - No Deploy Arena implementation.
