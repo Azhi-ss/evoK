@@ -19,8 +19,9 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
   accepted / demoted — detail = W1).
 - Search pluggable; default `fixed_uct`; strong search / MCTS /
   `#40` Progressive explicit opt-in; gates live in evidence.
-- Red lights still ask the user: real submit / expand authority / change
-  acceptance / unfreeze AtCoder true-submit. `#40` default stays off.
+- Contest-arm auto-submit is fail-closed: all promotion/evidence gates
+  green + ledger, or no submit. Expanding authority / changing Human
+  Acceptance on the direct Broker path still ask the user. `#40` default stays off.
 - Deploy Arena is orthogonal standby — not welded into the RSI mainline.
 
 ## Physical layout
@@ -31,7 +32,7 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 | **evidence** | `src/evidence/` | 勾 | Ledger / T48 / hang / Broker simulation |
 | **execution** | `src/execution/` | 勾 | Thin default B; C thicken still rejected |
 | **search** | `src/search/` | 勾 | Default `fixed_uct`; `#40` opt-in only |
-| **competition** | `src/competition/` | 勾 | Live explicit; no true submit; Deploy Arena standby |
+| **competition** | `src/competition/` | 勾 | Live explicit; auto-submit is evidence-owned / fail-closed; Deploy Arena standby |
 | **cli** | `src/cli/` | 勾 | Thin shell + Pi native TUI (#134 / #148 mirror); not a second control plane |
 
 `ToyHarness` lives under `src/search/fixtures/` (fixtures/tests only).
@@ -46,7 +47,7 @@ re-exports are migration-period (one more release). Inventory: ADR-0013.
 
 - Gate / T48 / hang three-state
 - `#40` SelectionPolicy off unless Mission/config explicitly opts in
-- No true External Submission
+- Contest-arm auto-submit only when every gate is green; missing/red/yellow fails closed
 - Elite ≠ 晋级 / Promotion keys
 - C thicken forbidden
 - Deploy Arena not advanced (orthogonal standby)

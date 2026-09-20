@@ -22,7 +22,8 @@ Hang / T48 stay in `src/evidence/`. Search structure stays in
 `src/search/`. Mission authorize / continue / repair / stop stay in
 `src/mission/`. Execution Team / runtime stay in `src/execution/`.
 `#40` SelectionPolicy stays off. Elite / side-slots / competition scores
-are not Promotion keys. True External Submission stays frozen.
+are not Promotion keys. Contest-arm auto-submit lives in evidence and
+fails closed unless every gate is green.
 `suite-metric` is an independent evaluation observation (`pass_rate`);
 it is not welded into Admission, Budget, hang, T48, or Promotion.
 The copyable true-domain scaffold is `examples/demo-suite/` (local-js-exports

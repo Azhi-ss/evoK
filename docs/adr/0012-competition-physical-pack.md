@@ -38,6 +38,11 @@ stays at `src/` (CLI / Mission start wiring; not this cut).
 (shared wiring). P6 residue cleanup is recorded in
 [ADR-0013](0013-six-pack-physical-closeout.md).
 
+Amendment (ET-SUBMIT-AUTO / #179): contest-arm auto-submit authority
+stays in evidence (`attemptContestAutoSubmit`). Competition still
+does not own gate predicates or the Broker. Live destination remains
+explicit `{ live: true }`. `#40` stays opt-in.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

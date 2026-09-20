@@ -108,6 +108,8 @@ describe("P6 six-pack physical closeout", () => {
     expect(typeof evidence.HypothesisLedger).toBe("function");
     expect(typeof evidence.verificationRoleContract).toBe("function");
     expect(typeof evidence.SubmissionBroker).toBe("function");
+    expect(typeof evidence.attemptContestAutoSubmit).toBe("function");
+    expect(typeof evidence.evaluateContestAutoSubmitGates).toBe("function");
     expect(typeof evidence.ledgerEventKind).toBe("function");
 
     const keys = runtimeKeys(evidence);

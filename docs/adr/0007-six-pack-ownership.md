@@ -16,10 +16,10 @@ transcript is not authority.
 | Package | Owns | Does not own |
 |---|---|---|
 | **mission** | Mission Director, authorize, budget, Task Contract, continue / repair / stop | Business/competition code; search-graph authority; Team blueprint details |
-| **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate, authoritative edge results | Search tree structure; Team Coordinator / Role planning |
+| **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate, contest-arm auto-submit (all-green only), authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing, SEA mount/unmount, method-version stats isolation | Promotion; gate override; Admission / Budget predicates |
-| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | True External Submission (still frozen) |
+| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | Auto-submit authority (evidence-owned, fail-closed) |
 | **cli** | Thin Mission CLI shell + Pi native TUI | A second control plane |
 
 The product control plane is the Research Loop: authorize, continue,

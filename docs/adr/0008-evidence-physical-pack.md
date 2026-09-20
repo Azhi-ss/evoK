@@ -28,14 +28,20 @@ refuses continue / writeback. Budget pass is not Admission pass.
 It does not replace MissionRecord operational accounting and does
 not change Kill-test / T48 / hang / Broker predicates.
 
+Amendment (ET-SUBMIT-AUTO / #179): contest-arm auto-submit lives here
+(`contest-auto-submit`). All promotion / evidence gates must be green
+or the attempt is ledged and refused. Predicates are reused, not
+loosened. Compatibility `autoSubmit` still cannot bypass Human
+Acceptance on a direct `SubmissionBroker.submit` call.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
 **Boundary:** evidence 独占门权威；search 持结构；mission 只读摘要 / 挂 hang.
 
 Methodology fixtures stay at `src/fixtures/methodology/` with an ownership
-pin. True contest External Submission stays frozen. Elite / Team Fan-Out are
-not Promotion keys. Pattern C is not thickened.
+pin. Contest-arm auto-submit is fail-closed and ledged. Elite / Team
+Fan-Out are not Promotion keys. Pattern C is not thickened.
 
 ## Out of scope / freezes
 
