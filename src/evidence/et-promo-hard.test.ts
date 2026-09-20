@@ -86,10 +86,10 @@ function hangFromOuter(outcome: KillTestOutcome = "pass", extra: Partial<KillTes
     catalog: path.setup.fixture.catalog,
     ledger: path.setup.ledger,
     planId: path.setup.planId,
-    ...extra,
-    catalog: path.setup.fixture.catalog,
-    ledger: path.setup.ledger,
-    planId: path.setup.planId,
+    ...(extra.resultId === undefined ? {} : { resultId: extra.resultId }),
+    ...(extra.artifacts === undefined ? {} : { artifacts: extra.artifacts }),
+    ...(extra.contracts === undefined ? {} : { contracts: extra.contracts }),
+    ...(extra.methodologyEvidence === undefined ? {} : { methodologyEvidence: extra.methodologyEvidence }),
   };
 }
 
@@ -102,26 +102,31 @@ function recordingSubmit(calls: unknown[]): ContestSubmitSeam {
 
 describe("ET-PROMO-HARD — landed Spec stack", () => {
   test("#50/#52 field names stay H1/H2 camelCase and expand_requested writes no search nodes", () => {
-    const hang = hangFromOuter("fail", { resultId: "ktr-field" });
-    const decided = runKillTestHang(hang);
-    expect(decided.ok).toBe(false);
-    expect(decided.plan).toMatchObject({
-      planId: hang.planId,
-      hypothesisId: "h-outer-min",
-      predicate: expect.stringMatching(/hold-out|kill/i),
+    const path = assembleOuterE2eMinPath();
+    const decided = runKillTestHang({
+      outcome: "fail",
+      evidenceRefs: [OUTER_MIN_KILL_EVIDENCE_ID],
+      catalog: path.setup.fixture.catalog,
+      ledger: path.setup.ledger,
+      planId: path.setup.planId,
+      resultId: "ktr-field",
     });
+    expect(decided.ok).toBe(false);
+    expect(decided.plan?.planId).toBe(path.setup.planId);
+    expect(decided.plan?.hypothesisId).toBe("h-outer-min");
+    expect(decided.plan?.predicate).toMatch(/hold-out|kill/i);
     expect(Object.keys(decided.plan ?? {})).toEqual(["planId", "hypothesisId", "predicate", "evidenceRefs"]);
-    const recorded = hang.ledger?.resultFor(hang.planId!);
+    const recorded = path.setup.ledger.resultFor(path.setup.planId);
     expect(recorded).toEqual({
       resultId: "ktr-field",
-      planId: hang.planId,
+      planId: path.setup.planId,
       hypothesisId: "h-outer-min",
       outcome: "fail",
       evidenceRefs: [{ kind: "evidence", id: OUTER_MIN_KILL_EVIDENCE_ID }],
     });
     expect(Object.keys(recorded ?? {})).toEqual(["resultId", "planId", "hypothesisId", "outcome", "evidenceRefs"]);
-    expect(hang.ledger?.state().hypotheses["h-outer-min"]?.status).toBe("killed");
-    expect(hang.ledger?.events().map((event) => event.type)).toEqual([
+    expect(path.setup.ledger.state().hypotheses["h-outer-min"]?.status).toBe("killed");
+    expect(path.setup.ledger.events().map((event) => event.type)).toEqual([
       "hypothesis.created",
       "kill_test.planned",
       "kill_test.finished",

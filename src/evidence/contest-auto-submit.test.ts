@@ -84,7 +84,9 @@ function championPass(): SubmissionChampion {
 
 function ledgerBoundHang(overrides: Partial<KillTestHangInput> & { outcome?: KillTestOutcome } = {}): KillTestHangInput {
   const catalog = overrides.catalog ?? catalogWithMappedIds();
-  const ledger = overrides.ledger ?? new HypothesisLedger({ catalog });
+  const ledger = overrides.ledger instanceof HypothesisLedger
+    ? overrides.ledger
+    : new HypothesisLedger({ catalog });
   const planId = overrides.planId ?? "kt-contest";
   if (ledger.state().hypotheses["h-contest"] === undefined) {
     ledger.createHypothesis({
