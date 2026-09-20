@@ -40,6 +40,11 @@ kill-test pass without a plan fails closed. Isolated `runKillTestHang`
 predicate checks may omit a plan. Admission / Budget / T48 / hang
 tri-state predicates are not loosened.
 
+Amendment (ET-DEPLOY-ORCH / #182): DeployArena COI reuses
+`attemptContestAutoSubmit`. Competition assembles `submission.json`
+and the playground seam; this pack still owns the gate colors and
+ledger. Predicates are not loosened.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

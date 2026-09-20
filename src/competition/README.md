@@ -4,8 +4,10 @@ Contest and local Evaluator adapters. Does not own evidence gates or a
 true contest External Submission path.
 
 Physical home of `llm-competition-runtime`, `llm-comp-arm-before-promotion`,
-and the local `suite-metric` Evaluator (measured `pass_rate`, never a
-model self-score).
+the local `suite-metric` Evaluator (measured `pass_rate`, never a
+model self-score), and DeployArena thick orchestration (`deploy-arena`:
+task/service graph, multi-worker aggregation, COI `submission.json`).
+DeployArena opens only when Mission hangs `competitionId=deploy-arena`.
 P6: physical pack is in place. Remaining flat `src/*.ts` files are
 migration-period re-exports for one more release
 ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).

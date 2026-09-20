@@ -25,7 +25,8 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
   green + ledger, or no submit. The hang gate requires a ledger
   KillTestPlan. Expanding authority / changing Human Acceptance on the
   direct Broker path still ask the user. `#40` default stays off.
-- Deploy Arena is orthogonal standby — not welded into the RSI mainline.
+- Deploy Arena is an orthogonal opt-in arm (`competitionId=deploy-arena`)
+  — not welded into the RSI mainline, not a commercial contest OS.
 
 ## Physical layout
 
@@ -35,7 +36,7 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 | **evidence** | `src/evidence/` | 勾 | Ledger / T48 / hang / Broker simulation |
 | **execution** | `src/execution/` | 勾 | Thin default B; C thicken still rejected |
 | **search** | `src/search/` | 勾 | Default `fixed_uct`; `#40` opt-in only |
-| **competition** | `src/competition/` | 勾 | Live explicit; auto-submit is evidence-owned / fail-closed; Deploy Arena standby |
+| **competition** | `src/competition/` | 勾 | Live explicit; auto-submit is evidence-owned / fail-closed; Deploy Arena opt-in graph / COI |
 | **cli** | `src/cli/` | 勾 | Thin shell + Pi native TUI (#134 / #148 mirror); not a second control plane |
 
 `ToyHarness` lives under `src/search/fixtures/` (fixtures/tests only).
@@ -53,5 +54,5 @@ re-exports are migration-period (one more release). Inventory: ADR-0013.
 - Contest-arm auto-submit only when every gate is green; hang needs a ledger KillTestPlan; missing/red/yellow fails closed
 - Elite ≠ 晋级 / Promotion keys
 - C thicken forbidden
-- Deploy Arena not advanced (orthogonal standby)
+- Deploy Arena is opt-in (`competitionId=deploy-arena`); env never opens live
 - W1 EVT landed; Skills routing shell landed (#140); EXP Admission landed (#142); BUD skeleton landed (#144); SEA plugin contract + method-version stats isolation landed (#146)

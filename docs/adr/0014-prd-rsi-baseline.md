@@ -42,9 +42,10 @@ does not implement W1.
    budget or permissions past the authorized Mission Policy; changing
    formal Human Acceptance; unfreezing AtCoder true-submit / `#40`
    welded semantics. Yellow-light engineering detail is autonomous.
-6. **Deploy Arena is orthogonal standby.** Competition-serving (Bohrium
-   and kin) stays a competition-arm adapter. Do not weld it into the
-   RSI / Mission research mainline. This ADR does not advance it.
+6. **Deploy Arena is an orthogonal opt-in arm.** Competition-serving
+   (Bohrium and kin) stays a competition-arm adapter. Do not weld it
+   into the RSI / Mission research mainline. Open only with explicit
+   `competitionId=deploy-arena`.
 
 ### Six-pack mapping
 
@@ -54,7 +55,7 @@ does not implement W1.
 | Evidence, lineage, admission / promotion gates | **evidence** | Gates stay here |
 | Pi Run runtime, Team, Policy Guard | **execution** | Thin default B; no C thicken |
 | Pluggable selection; default `fixed_uct` | **search** | Strong search / MCTS opt-in; SEA mount/unmount skeleton; ToyHarness = fixtures only |
-| Contest / local Evaluator adapters; Deploy Arena standby | **competition** | True submit frozen |
+| Contest / local Evaluator adapters; Deploy Arena graph / COI (opt-in) | **competition** | Auto-submit stays evidence-owned / fail-closed; AtCoder true-submit frozen |
 | Thin argv / resource shell; Pi native TUI | **cli** | Not a second control plane |
 
 Agents remain replaceable Run execution ([ADR-0005](0005-pi-sdk-execution-path.md)).
@@ -364,6 +365,21 @@ This amendment does not loosen Admission / Budget / hang / T48
 predicates, weld `#40` as the product default, implement Deploy
 Arena, open a commercial contest OS, or add a second control plane.
 
+## Amendment (ET-DEPLOY-ORCH / #182)
+
+Deploy Arena thick orchestration landed as an orthogonal opt-in
+arm: task/service graph, multi-machine / multi-GPU workers, local
+metric aggregation, and a COI adapter into contest-arm auto-submit.
+Callers must pass `competitionId=deploy-arena`. Env never opens
+live. Missing playground / bohr credentials fail closed. Spec:
+[deploy-arena.md](../deploy-arena.md).
+
+This is not a commercial contest OS (no accounts / billing /
+multi-tenant / Web marketplace). Execution Pattern C is not
+thickened. Admission / Budget / hang / T48 predicates are not
+loosened. `#40` stays opt-in / default `fixed_uct`. AtCoder
+true-submit stays frozen.
+
 ## Out of scope / freezes
 
 - No loosening of gate three-state, T48, hang, or Broker predicates
@@ -373,9 +389,10 @@ Arena, open a commercial contest OS, or add a second control plane.
   (all gates green + ledger) and does not loosen predicates.
 - No C thicken of the execution roster.
 - No Elite / side-slot / Team Fan-Out as Promotion keys.
-- No Deploy Arena implementation.
+- Deploy Arena is opt-in (`competitionId=deploy-arena`) and is not
+  a commercial contest OS. Env never opens live.
 - SEA is a mount/unmount + stats-isolation skeleton only (MCTS
-  selection math and Deploy Arena stay unopened). The eight
+  selection math stays unopened). The eight
   category accepted skill bodies are shipped; `pitfalls` is
   the ET-SKILL-PIT accepted body (docs-only failure
   signatures, not a rejection library).

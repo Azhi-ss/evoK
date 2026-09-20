@@ -11,7 +11,8 @@ P6: physical pack is in place (barrel `index.ts`). Remaining flat
 ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 Contest-arm auto-submit (`contest-auto-submit`) is allowed only when every
-promotion / evidence gate is green. The hang gate requires a ledger-bound
+promotion / evidence gate is green. DeployArena COI reuses this seam
+and must not bypass it. The hang gate requires a ledger-bound
 `KillTestPlan`. Each attempt writes a ledger; any red / yellow / missing
 gate fails closed and must not submit. `submission-broker`
 keeps the existing simulation (`PROMOTED_LOCAL` / dry-run / acceptChampion

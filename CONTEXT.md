@@ -19,8 +19,8 @@ The competition-specific boundary that explains the rules, inputs, preparation r
 _Avoid_: Competition plugin, competition agent
 
 **Deploy Arena**:
-An orthogonal competition-serving arm kept on standby. It is not part of the Mission research / Method Improvement mainline and is not a second control plane.
-_Avoid_: RSI deploy path, mainline serving
+An orthogonal competition-serving arm. It opens only when a Task Contract sets `competitionId=deploy-arena`. It is not part of the Mission research / Method Improvement mainline, not a second control plane, and not a commercial contest OS.
+_Avoid_: RSI deploy path, mainline serving, commercial OS
 
 **Method Improvement**:
 A Mission-internal action that proposes, verifies, enables, and inherits a change to the working method (task-internal RSI). It is not a separate project or a second mainline.
@@ -271,7 +271,7 @@ Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-m
 | **evidence** | Ledger, T48, kill/hang, promotion gates, Admission / Method Writeback, Budget Gate (reserve → settle), contest-arm auto-submit (all-green only), authoritative edge results | Search tree structure; Team Coordinator / Role planning |
 | **execution** | Dynamic Team: Pattern, Team Coordinator, Roles, runtime, Policy Guard | Gate override; replacing the Evaluator. Thin execution default already landed — do not reopen C thickening |
 | **search** | Pluggable harness, candidate/attempt graph, failure neighborhood, retrieval slicing, SEA mount/unmount, method-version stats isolation | Promotion; gate override; Admission / Budget predicates |
-| **competition** | Contest and local Evaluator adapters; Deploy Arena standby (not mainline) | Auto-submit authority (evidence-owned, fail-closed) |
+| **competition** | Contest and local Evaluator adapters; Deploy Arena graph / COI (opt-in `competitionId=deploy-arena`, not mainline) | Auto-submit authority (evidence-owned, fail-closed) |
 | **cli** | Thin Mission CLI shell + Pi native TUI (CLI-equivalent mirror slashes; Pi owns Pi shorts) | A second control plane |
 
 The product control plane is the Research Loop (authorize / continue / repair / stop). Agents are replaceable Run execution (ADR-0005); they do not own Mission decisions. The interactive surface is Pi native TUI (ADR-0014). ToyHarness is fixtures and tests only — not a second control plane.
@@ -286,4 +286,4 @@ The product control plane is the Research Loop (authorize / continue / repair / 
 - The v1 default Team is a single Branch; raise multi-branch Fan-Out and verification Roles only on demand. An Execution Plan, Pattern, Role roster, or Elite/Team Fan-Out is not Promotion proof.
 - The six logical packages (mission, evidence, execution, search, competition, cli) own the rows in Six-pack ownership. The Research Loop is the product control plane; the chat transcript, Pi native TUI, and ToyHarness are not.
 - A Search Plugin is removable. Default parent selection stays `fixed_uct`. Method-version stats do not carry across a version switch and are not Promotion proof.
-- Contest-arm auto-submit is allowed only when every promotion/evidence gate is green; the hang gate requires a ledger KillTestPlan. Every attempt is ledged, and any non-green gate fails closed. Expanding budget or permissions past Mission Policy, and changing Human Acceptance on the direct Broker path, remain human-owned. `#40` Progressive is explicit Mission/config opt-in only; the product default stays `fixed_uct` / off. Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key. Deploy Arena stays orthogonal standby.
+- Contest-arm auto-submit is allowed only when every promotion/evidence gate is green; the hang gate requires a ledger KillTestPlan. Every attempt is ledged, and any non-green gate fails closed. Expanding budget or permissions past Mission Policy, and changing Human Acceptance on the direct Broker path, remain human-owned. `#40` Progressive is explicit Mission/config opt-in only; the product default stays `fixed_uct` / off. Elite ≠ 晋级 / Promotion / Admission / Broker / kill-test key. Deploy Arena is an orthogonal opt-in arm (`competitionId=deploy-arena`); env never opens live; missing playground/bohr credentials fail closed. It is not a commercial contest OS.

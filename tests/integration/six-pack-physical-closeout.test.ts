@@ -166,6 +166,7 @@ describe("P6 six-pack physical closeout", () => {
     expect(typeof mission.startAuthorizedMission).toBe("function");
     expect(typeof mission.runGoldenPath).toBe("function");
     expect(typeof mission.runOrchGap).toBe("function");
+    expect(typeof mission.runDeployArenaOrch).toBe("function");
     expect(typeof mission.parseResearchCommand).toBe("function");
     expect(typeof mission.continueResearch).toBe("function");
     expect(typeof mission.parseSkillsCommand).toBe("function");
@@ -188,6 +189,8 @@ describe("P6 six-pack physical closeout", () => {
     expect(runtimeKeys(execution)).not.toContain("requireFullRoster");
 
     expect(typeof competition.createLlmCompetitionRuntime).toBe("function");
+    expect(typeof competition.runDeployArenaGraph).toBe("function");
+    expect(typeof competition.assembleDeployArenaSubmission).toBe("function");
     expect(runtimeKeys(competition)).not.toContain("SubmissionBroker");
     expect(runtimeKeys(competition)).not.toContain("submitContest");
     expect(runtimeKeys(competition)).not.toContain("createKillTestHangHook");
