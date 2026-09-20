@@ -26,17 +26,17 @@ function sameValue(actual: unknown, expected: unknown): boolean {
   return JSON.stringify(actual) === JSON.stringify(expected);
 }
 
-function loadExports(source: string): Record<string, unknown> | { error: string } {
+function loadExports(source: string): { ok: true; exports: Record<string, unknown> } | { ok: false; error: string } {
   const module = { exports: {} as Record<string, unknown> };
   const context = createContext({ module, exports: module.exports });
   try {
     new Script(source, { filename: "candidate-module.js" }).runInContext(context, { timeout: 200 });
   } catch (error) {
-    return { error: `candidate module failed: ${(error as Error).message}` };
+    return { ok: false, error: `candidate module failed: ${(error as Error).message}` };
   }
   const exported = (context as { module: { exports: unknown } }).module.exports;
-  if (!isRecord(exported)) return { error: "candidate module.exports must be an object" };
-  return exported;
+  if (!isRecord(exported)) return { ok: false, error: "candidate module.exports must be an object" };
+  return { ok: true, exports: exported };
 }
 
 interface JsCaseSpec {
@@ -109,7 +109,7 @@ export const localJsExportsRunner: SuiteRunner = {
       };
     }
     const loaded = loadExports(source);
-    if ("error" in loaded) {
+    if (!loaded.ok) {
       return {
         status: "ok",
         cases: parsed.specs.map((spec) => ({
@@ -120,7 +120,7 @@ export const localJsExportsRunner: SuiteRunner = {
       };
     }
     const cases: SuiteCaseResult[] = parsed.specs.map((spec) => {
-      const fn = loaded[spec.exportName];
+      const fn = loaded.exports[spec.exportName];
       if (typeof fn !== "function") {
         return { id: spec.id, status: "fail", reason: `export ${spec.exportName} is not a function` };
       }
