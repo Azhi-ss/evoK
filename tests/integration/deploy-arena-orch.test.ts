@@ -51,11 +51,6 @@ describe("DeployArena thick-orchestration smoke", () => {
       },
       gates: {
         champion: {
-          missionId: "deploy-arena-smoke",
-          competition: DEPLOY_ARENA_COMPETITION_ID,
-          branchId: "serving",
-          championDigest: "sha256:deploy-arena-smoke",
-          artifactDigest: "sha256:deploy-arena-smoke",
           evaluatorSucceeded: true,
           successAuditorPassed: true,
           promotionApproved: true,

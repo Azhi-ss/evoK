@@ -144,7 +144,7 @@ describe("DeployArena COI submission.json", () => {
       trace: "/tmp/deploy-arena.trace",
       credentials: { playground: false, bohr: false },
       exec: async (argv) => {
-        calls.push(argv);
+        calls.push([...argv]);
         return { code: 0, stdout: "ok", stderr: "" };
       },
     });

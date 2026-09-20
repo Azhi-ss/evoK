@@ -228,7 +228,9 @@ export function aggregateDeployArenaMetrics(
   }
   const groups = new Map<string, DeployArenaObservation[]>();
   for (const row of observations) {
-    if (!isRecord(row)) throw new DeployArenaContractError("observation must be an object");
+    if (row === null || typeof row !== "object") {
+      throw new DeployArenaContractError("observation must be an object");
+    }
     const subject = requireNonEmpty("subject", row.subject);
     if (typeof row.score !== "number" || !Number.isFinite(row.score)) {
       throw new DeployArenaContractError(`score is required for ${subject}`);
