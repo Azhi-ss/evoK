@@ -176,6 +176,27 @@ describe("runDeployArenaOrch hangs the DeployArena arm only when asked", () => {
     expect(DEFAULT_SEARCH_SELECTION_ID).toBe("fixed_uct");
   });
 
+  test("default COI dry-run carries the assembled submission.json payload", async () => {
+    const result = await runDeployArenaOrch({
+      competitionId: "deploy-arena",
+      knobs: {
+        image: "registry.example/serving:v1",
+        command: "python -m serve",
+        env: { CONCURRENCY: "4" },
+      },
+      gates: greenGates(),
+    });
+    expect(result.autoSubmit.submitted).toBe(true);
+    expect(result.autoSubmit.submission?.status).toBe("DRY_RUN");
+    expect(result.autoSubmit.submission?.response).toMatchObject({
+      submission: {
+        image: "registry.example/serving:v1",
+        command: "python -m serve",
+        env: { CONCURRENCY: "4" },
+      },
+    });
+  });
+
   test("reuses contest-arm auto-submit: a red gate never calls the playground seam", async () => {
     const calls: unknown[] = [];
     const result = await runDeployArenaOrch({
@@ -203,9 +224,8 @@ describe("runDeployArenaOrch hangs the DeployArena arm only when asked", () => {
         return { code: 0, stdout: "ok", stderr: "" };
       },
     });
-    expect(result.autoSubmit?.submitted).toBe(true);
-    expect(result.autoSubmit?.submission?.status).toBe("FAILED");
-    expect(result.autoSubmit?.submission?.response).toMatchObject({ reason: "credentials-missing" });
+    expect(result.autoSubmit?.submitted).toBe(false);
+    expect(result.autoSubmit?.reason).toBe("submit-unavailable");
     expect(argvCalls).toEqual([]);
   });
 

@@ -19,7 +19,7 @@ export const CAPABILITY_GATE_THRESHOLD = 95;
 export const DEFAULT_DEPLOY_ARENA_CHALLENGE_ID = "llm-challenge-arena-v1" as const;
 
 export type DeployArenaTaskKind = "capability" | "load" | "aggregate";
-export type DeployArenaTaskStatus = "completed" | "failed";
+export type DeployArenaTaskStatus = "completed" | "failed" | "skipped";
 
 export interface DeployArenaWorker {
   readonly id: string;
@@ -113,6 +113,7 @@ export interface PlaygroundContestSubmitOptions {
   readonly trace?: string;
   readonly credentials?: DeployArenaCredentials;
   readonly exec?: DeployArenaExec;
+  readonly submission?: DeployArenaSubmission;
 }
 
 export interface RunDeployArenaGraphInput {
@@ -283,6 +284,16 @@ export async function runDeployArenaGraph(input: RunDeployArenaGraphInput): Prom
 
   for (const layer of layers) {
     const executed = await Promise.all(layer.map(async (task) => {
+      if (task.kind === "load" && !aggregateDeployArenaMetrics(observations).capability.passed) {
+        return {
+          observation: undefined,
+          state: deepFreeze({
+            id: task.id,
+            status: "skipped",
+            ...(task.workerId === undefined ? {} : { workerId: task.workerId }),
+          }) as DeployArenaTaskState,
+        };
+      }
       if (task.kind === "capability" || task.kind === "load") {
         const workerId = requireNonEmpty("workerId", task.workerId);
         const subject = requireNonEmpty("subject", task.subject);
@@ -311,7 +322,7 @@ export async function runDeployArenaGraph(input: RunDeployArenaGraphInput): Prom
   }
 
   return deepFreeze({
-    ok: states.every((task) => task.status === "completed"),
+    ok: states.every((task) => task.status === "completed" || task.status === "skipped"),
     workers: [...workers.values()],
     observations,
     tasks: states,
@@ -386,7 +397,11 @@ export function createPlaygroundContestSubmitSeam(
     if (live !== true) {
       return deepFreeze({
         status: "DRY_RUN",
-        response: { challengeId, argv },
+        response: {
+          challengeId,
+          argv,
+          ...(options.submission === undefined ? {} : { submission: options.submission }),
+        },
       }) as ContestSubmitSeamResult;
     }
     if (!credentialsPresent(options.credentials)) {

@@ -22,7 +22,7 @@ const result = await runDeployArenaOrch({
 - 未声明 / 非 `deploy-arena`：fail-closed，不开本臂。
 - 烟测图：两台机器 / 两块 GPU worker 跑 `aime26` + `gpqa-diamond`，本地均值汇聚，双科 **>95** 才过能力门。
 - COI 只组装 `{ image, command, env }`，交卷走 `attemptContestAutoSubmit`；门未绿不调 playground。
-- `{ live: true }` 且缺 playground/bohr 凭证 → `credentials-missing`，不 exec。
+- `{ live: true }` 且缺 playground/bohr 凭证 → 不挂 submit seam（`submit-unavailable`），不 exec。
 - `EVOK_DEPLOY_ARENA_LIVE` **不会**翻 live。
 
 Bohrium CLI（用户环境，密钥不进仓）：见 [docs/deploy-arena.md](../docs/deploy-arena.md)。

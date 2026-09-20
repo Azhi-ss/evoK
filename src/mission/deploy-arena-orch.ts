@@ -62,6 +62,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function credentialsPresent(credentials: DeployArenaCredentials | undefined): boolean {
+  return credentials?.playground === true || credentials?.bohr === true;
+}
+
 export async function runDeployArenaOrch(input: DeployArenaOrchInput): Promise<DeployArenaOrchResult> {
   if (!isRecord(input)) {
     throw new TypeError("runDeployArenaOrch requires an object");
@@ -78,14 +82,18 @@ export async function runDeployArenaOrch(input: DeployArenaOrchInput): Promise<D
   });
   const submission = assembleDeployArenaSubmission(input.knobs);
   const ledger = input.ledger ?? new InMemoryContestAutoSubmitLedger();
-  const submit = input.submit ?? createPlaygroundContestSubmitSeam({
-    credentials: input.credentials,
-    exec: input.exec,
-  });
+  const liveCredentialsMissing = live && input.submit === undefined && !credentialsPresent(input.credentials);
+  const submit = liveCredentialsMissing
+    ? undefined
+    : input.submit ?? createPlaygroundContestSubmitSeam({
+      credentials: input.credentials,
+      exec: input.exec,
+      submission,
+    });
   const autoSubmit = await attemptContestAutoSubmit({
     ...(input.gates ?? {}),
     live,
-    submit,
+    ...(submit === undefined ? {} : { submit }),
     ledger,
   });
   return deepFreeze({

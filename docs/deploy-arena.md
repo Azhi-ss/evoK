@@ -49,9 +49,10 @@ const result = await runDeployArenaOrch({
 - All evidence gates green + dry-run → `autoSubmit.submitted === true`, status `DRY_RUN`.
 - Any red / yellow / missing gate → refuse; playground is not called.
 - `{ live: true }` without playground / bohr credentials → fail-closed
-  (`credentials-missing`); no CLI exec.
+  (`submit-unavailable`); playground is not called.
 - Capability scores are local evaluation. They are **not** a Promotion key
-  and do not loosen evidence predicates.
+  and do not loosen evidence predicates. If either subject mean is not
+  **> 95**, load (`n-at-slo`) tasks are **skipped**.
 
 ## Bohrium / playground CLI (user environment)
 

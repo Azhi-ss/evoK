@@ -43,6 +43,20 @@ describe("DeployArena multi-worker task graph", () => {
     expect(result.tasks.every((task) => task.status === "completed")).toBe(true);
   });
 
+  test("load tasks stay skipped until both capability subjects are above 95", async () => {
+    const result = await runDeployArenaGraph({
+      graph: DEPLOY_ARENA_SMOKE_GRAPH,
+      scores: {
+        w0: { aime26: 90, "gpqa-diamond": 97, "n-at-slo": 80 },
+        w1: { aime26: 91, "gpqa-diamond": 98, "n-at-slo": 82 },
+      },
+    });
+    expect(result.aggregation.capability.passed).toBe(false);
+    expect(result.aggregation.capability.aime26).toBe(90.5);
+    expect(result.tasks.filter((task) => task.id.startsWith("load-")).every((task) => task.status === "skipped")).toBe(true);
+    expect(result.observations.some((row) => row.subject === "n-at-slo")).toBe(false);
+  });
+
   test("unknown worker or cyclic graph fails closed", async () => {
     await expect(runDeployArenaGraph({
       graph: {
