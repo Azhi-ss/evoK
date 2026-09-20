@@ -68,10 +68,12 @@ frozen.
 {
   "progressive": true,
   "tau": 8,
-  "topK": 2
+  "topK": 2,
+  "t": 8
 }
 ```
 
-Write that object as `.evok/search.json`, or pass it as
-`continueResearch({ lift: { searchSelection: { progressive: true } } })`.
+`t` is the anneal step (absent ⇒ `t = 0`, so `w = 0` and Elite is not yet
+on). Write that object as `.evok/search.json`, or pass it as
+`continueResearch({ lift: { searchSelection: { progressive: true, t: 8 } } })`.
 Do not set env vars expecting a silent default flip.

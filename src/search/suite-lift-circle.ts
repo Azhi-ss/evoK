@@ -143,7 +143,11 @@ export function runSuiteLiftCircle(input: SuiteLiftCircleInput): SuiteLiftCircle
       ? [{ nodeId: "helper-completion", visits: 0, value: 0, parentVisits: 2 } satisfies SearchParentCandidate]
       : []),
   ];
-  const selection = resolved.port.selectParent({ nodes });
+  const selection = resolved.port.selectParent({
+    nodes,
+    ...(resolved.t === undefined ? {} : { t: resolved.t }),
+    ...(resolved.seed === undefined ? {} : { seed: resolved.seed }),
+  });
   const selectedNodeId = selection.parentId === "helper-completion" ? "helper-completion" : "identity";
   const proposal = selectedNodeId === "helper-completion" ? {
     ...proposed,

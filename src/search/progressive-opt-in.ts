@@ -46,6 +46,7 @@ export interface ProgressiveOptInConfig extends ProgressiveMcgsOptions {
   readonly selectionId?: string;
   readonly selectionPolicy40?: string;
   readonly progressive?: boolean;
+  readonly t?: number;
 }
 
 export interface ProgressiveOptInFields extends ProgressiveMcgsOptions {
@@ -53,6 +54,8 @@ export interface ProgressiveOptInFields extends ProgressiveMcgsOptions {
   readonly searchSelection?: string | ProgressiveOptInConfig;
   readonly selectionId?: string;
   readonly selectionPolicy40?: string;
+  /** Search step for anneal c(t) / Elite w(t). Absent is t = 0. */
+  readonly t?: number;
 }
 
 export interface MissionSearchSelectionSource extends ProgressiveOptInFields {
@@ -74,6 +77,8 @@ export interface ResolvedSearchSelection {
   readonly eliteInnerOnly: typeof ELITE_ROLE_WHEN_OPTED_IN extends "inner-selection-only" ? true : never;
   readonly eliteIsJinji: false;
   readonly eliteIsPromotionKey: false;
+  readonly t?: number;
+  readonly seed?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,7 +120,7 @@ function isProgressiveId(value: unknown): boolean {
 }
 
 function isExplicitOptInPolicy(value: unknown): boolean {
-  return value === SELECTION_POLICY_40_OPT_IN || value === "on";
+  return value === SELECTION_POLICY_40_OPT_IN;
 }
 
 function layerOptsIn(layer: ProgressiveOptInFields | undefined): boolean {
@@ -133,6 +138,22 @@ function layerOptsIn(layer: ProgressiveOptInFields | undefined): boolean {
     return true;
   }
   return false;
+}
+
+function pickField<K extends "t" | "seed" | "tau" | "topK" | "exploration">(
+  layers: readonly (ProgressiveOptInFields | undefined)[],
+  key: K,
+): ProgressiveOptInFields[K] | undefined {
+  for (const layer of layers) {
+    if (layer === undefined) continue;
+    const direct = layer[key];
+    if (direct !== undefined) return direct;
+    const fromProgressive = asConfigObject(layer.progressive)?.[key];
+    if (fromProgressive !== undefined) return fromProgressive as ProgressiveOptInFields[K];
+    const fromSearch = asConfigObject(layer.searchSelection)?.[key];
+    if (fromSearch !== undefined) return fromSearch as ProgressiveOptInFields[K];
+  }
+  return undefined;
 }
 
 function pickOption<K extends keyof ProgressiveMcgsOptions>(
@@ -212,6 +233,8 @@ export function resolveSearchSelection(
   }
 
   const port = createSearchSelectionPort(PROGRESSIVE_MCGS_OPT_IN_ID, adapterOptions(layers));
+  const t = pickField(layers, "t");
+  const seed = pickField(layers, "seed");
   return freezeResolved({
     port,
     selectionId: PROGRESSIVE_MCGS_OPT_IN_ID,
@@ -219,6 +242,8 @@ export function resolveSearchSelection(
     productDefault: false,
     source: resolveSource(options.from, source ?? undefined),
     anneal: true,
+    ...(t === undefined ? {} : { t }),
+    ...(seed === undefined ? {} : { seed }),
   });
 }
 

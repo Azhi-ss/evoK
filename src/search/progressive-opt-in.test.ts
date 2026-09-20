@@ -141,6 +141,8 @@ describe("Mission or config must explicitly opt in", () => {
     expect(late?.eliteWeight).toBe(1);
     expect(late?.exploration).toBe(DEFAULT_UCT_EXPLORATION / 2);
     expect(resolved.port.selectParent({ nodes: WITH_UNVISITED, t: 8, seed: 7 }).parentId).toBe("a");
+    expect(resolveSearchSelection({ progressive: true, t: 8, seed: 7 }).t).toBe(8);
+    expect(resolveSearchSelection({ progressive: true, t: 8, seed: 7 }).seed).toBe(7);
   });
 
   test("config selectionId progressive_mcgs_optin is an explicit opt-in", () => {
@@ -328,10 +330,11 @@ describe("suite-lift default stays off; explicit searchSelection opts in", () =>
   test("Mission/config opt-in makes the circle callable on Progressive", () => {
     const circle = runSuiteLiftCircle({
       baselineFiles: { "src/solve.js": "module.exports = {};" },
-      searchSelection: { progressive: true, topK: 1, tau: 8, seed: 7 },
+      searchSelection: { progressive: true, topK: 1, tau: 8, seed: 7, t: 8 },
     });
     expect(circle.selectionId).toBe("progressive_mcgs_optin");
     expect(circle.selectionPolicy40).toBe("opt-in");
     expect(circle.selection.adapterId).toBe("progressive_mcgs_optin");
+    expect(circle.selection.exploration).toBe(DEFAULT_UCT_EXPLORATION / 2);
   });
 });

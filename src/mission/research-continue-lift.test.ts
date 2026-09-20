@@ -245,7 +245,7 @@ describe("one authorized suite-metric continue circle (ET-RSI-LIFT / #174)", () 
           event(2, "BASELINE_RECORDED", { runId: `${MISSION_ID}:baseline:1`, ok: true, score: 0.4 }),
         ],
         lift: {
-          searchSelection: { progressive: true, topK: 1, tau: 8, seed: 7 },
+          searchSelection: { progressive: true, topK: 1, tau: 8, seed: 7, t: 8 },
         },
         clock: () => "2026-09-20T05:00:00.000Z",
         nextId: () => "exp-prog-1",
@@ -262,6 +262,31 @@ describe("one authorized suite-metric continue circle (ET-RSI-LIFT / #174)", () 
       expect(archive.selectionPolicy40).toBe("opt-in");
       expect(archive.submit).toMatch(/frozen|not authorized/i);
     } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("env does not silently flip continue onto Progressive", async () => {
+    const projectRoot = await seedDemoSuiteProject();
+    const previous = process.env.EVOK_SEARCH_SELECTION;
+    process.env.EVOK_SEARCH_SELECTION = "progressive_mcgs_optin";
+    try {
+      const view = await continueResearch({
+        projectRoot,
+        missionId: MISSION_ID,
+        authorization: userAuth,
+        seedEvents: [
+          event(1, "MISSION_AUTHORIZED", { objective: "env must not opt in" }, { action: "authorize" }),
+          event(2, "BASELINE_RECORDED", { runId: `${MISSION_ID}:baseline:1`, ok: true, score: 0.4 }),
+        ],
+        clock: () => "2026-09-20T06:00:00.000Z",
+        nextId: () => "exp-env-1",
+      });
+      expect(view.circle?.selectionId).toBe("fixed_uct");
+      expect(view.circle?.selectionPolicy40).toBe("off");
+    } finally {
+      if (previous === undefined) delete process.env.EVOK_SEARCH_SELECTION;
+      else process.env.EVOK_SEARCH_SELECTION = previous;
       await rm(projectRoot, { recursive: true, force: true });
     }
   });
