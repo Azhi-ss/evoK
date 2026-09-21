@@ -40,6 +40,9 @@ describe("evok-platform is independently declarable", () => {
     expect(existsSync(join(declaration.packageDir, "package.json"))).toBe(true);
     expect(existsSync(join(declaration.packageDir, declaration.facets.session))).toBe(true);
     expect(existsSync(join(declaration.packageDir, declaration.facets.tui))).toBe(true);
+    const repoRoot = join(HERE, "../..");
+    expect(existsSync(join(repoRoot, "src/mission"))).toBe(true);
+    expect(existsSync(join(repoRoot, "src/cli"))).toBe(true);
   });
 
   test("package.json is a conventional Chord plugin and does not mention other domain plugins", async () => {
@@ -109,7 +112,7 @@ describe("evok-platform docs stay honest about Chord hot-plug", () => {
       expect(text).toMatch(/evok-platform/);
       expect(text).toMatch(/experimental|试点/i);
       expect(text).toMatch(/changelog/i);
-      expect(text).not.toMatch(/changelog-official Chord hot-plug/i);
+      expect(text.toLowerCase()).toMatch(/not[\s*]+(advertise|changelog-official)|未宣传|不是.*官方/);
       expect(text.toLowerCase()).not.toMatch(/officially supported chord hot-?plug/);
     }
     expect(howto).toMatch(/evok-platform-chord\.md/);

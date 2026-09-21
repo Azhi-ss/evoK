@@ -35,7 +35,9 @@ bun run typecheck
 ```
 
 期望：`declareEvokPlatformPlugin().changelogOfficialHotPlug === false`；
-session 可单独加载；session+tui 一起加载并登记 `/evok-platform` 烟测命令。
+session 可单独加载；session+tui 一起加载并登记 `evok-platform` 烟测命令
+（自定义服务 `listCommands`，不是 Pi InteractiveMode slash，也不是
+changelog 官方热插拔）。
 
 ## 下一票
 

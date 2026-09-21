@@ -42,6 +42,6 @@ await loaded.dispose();
 `evok-research` (#191) and `evok-eval` (#192) are other seats. This
 package does not declare or load them.
 
-Pi experimental `-e plugins/evok-platform` uses the same convention.
-That is still experimental and is **not** changelog-official Chord
-hot-plug.
+The package uses the same `chord.facets` convention as pi 0.86 example
+plugins. That does **not** make Pi experimental `-e` a shipped evoK
+product path, and it is **not** changelog-official Chord hot-plug.

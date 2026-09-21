@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   createFacetHost,
   createStaticFacetLoader,
@@ -26,8 +26,6 @@ import {
   EvokPlatform,
   EvokPlatformTui,
 } from "../../plugins/evok-platform/src/contract";
-import sessionFacet from "../../plugins/evok-platform/src/session";
-import tuiFacet from "../../plugins/evok-platform/src/tui";
 
 export type EvokPlatformFacetSet = "session" | "session+tui";
 
@@ -104,9 +102,19 @@ export function declareEvokPlatformPlugin(repoRoot?: string): EvokPlatformPlugin
   };
 }
 
-function facetsFor(set: EvokPlatformFacetSet): readonly Facet[] {
-  if (set === "session") return [sessionFacet];
-  return [sessionFacet, tuiFacet];
+async function importDeclaredFacet(packageDir: string, relativePath: string): Promise<Facet> {
+  const href = pathToFileURL(resolve(packageDir, relativePath)).href;
+  const mod = (await import(href)) as { default?: Facet };
+  if (mod.default === undefined || typeof mod.default.setup !== "function" || typeof mod.default.id !== "string") {
+    throw new Error(`evok-platform facet ${relativePath} must default-export a Chord facet`);
+  }
+  return mod.default;
+}
+
+async function facetsFor(declaration: EvokPlatformPluginDeclaration, set: EvokPlatformFacetSet): Promise<readonly Facet[]> {
+  const session = await importDeclaredFacet(declaration.packageDir, declaration.facets.session);
+  if (set === "session") return [session];
+  return [session, await importDeclaredFacet(declaration.packageDir, declaration.facets.tui)];
 }
 
 export async function loadEvokPlatformPlugin(
@@ -114,7 +122,7 @@ export async function loadEvokPlatformPlugin(
 ): Promise<LoadedEvokPlatformPlugin> {
   const declaration = declareEvokPlatformPlugin(options.repoRoot);
   const set = options.facets ?? "session+tui";
-  const loader = createStaticFacetLoader(facetsFor(set));
+  const loader = createStaticFacetLoader(await facetsFor(declaration, set));
   const loaded = await loader.load();
   const host: FacetHost = await createFacetHost({ facets: loaded.facets });
   try {
