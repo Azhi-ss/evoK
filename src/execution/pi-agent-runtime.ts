@@ -33,8 +33,7 @@ import { isShellToolName, resolveUserBash } from "./user-bash";
 export { MissingAuthenticationError } from "../evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-export const SHELL_TOOLS = ["bash", "powershell", "user_bash"] as const;
-export const CODING_TOOLS = ["bash", "powershell", "user_bash", "edit", "write"] as const;
+export const CODING_TOOLS = ["bash", "powershell", "edit", "write"] as const;
 
 export interface TaskPlan {
   readonly objective: string;

@@ -71,7 +71,6 @@ export function resolveUserBash(
 /** True when the value is a 0.86-legal defined stop (not continue, not invalid). */
 export function isUserBashFailClosedResult(value: unknown): value is { result: UserBashDeniedResult } {
   if (value === undefined || value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  if (!("result" in value) || "operations" in value && !("result" in value)) return false;
   const result = (value as { result?: unknown }).result;
   if (!result || typeof result !== "object" || Array.isArray(result)) return false;
   const record = result as Record<string, unknown>;

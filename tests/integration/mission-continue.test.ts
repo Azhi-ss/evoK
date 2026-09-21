@@ -612,11 +612,10 @@ describe("explicit-unit budget including decision calls stops dispatch truthfull
     const project = await tempProject();
     tempDirs.push(project);
     const draft = await saveMissionDraft(project, completeDraft("m-t5-nodec", {
-      // One baseline Run (~0.39) fits; the subsequent decision reserve does not.
-      // Envelope tracks accepted L0 prompt size (experiment + evidence +
-      // later accepted skills). One baseline Run must still fit; the
-      // subsequent decision reserve must not.
-      budget: { total: 0.46, units: "model-USD" },
+      // One baseline Run (~0.31 on the 0.86 prompt envelope) fits; the
+      // subsequent 0.05 decision reserve does not. Fixture margin only —
+      // not a Budget predicate change.
+      budget: { total: 0.34, units: "model-USD" },
     }));
     const harness = await controlledHarness(project, [{ value: 0.4 }, { value: 0.9 }]);
     // Tiny but real reservation: the baseline fits, the post-baseline

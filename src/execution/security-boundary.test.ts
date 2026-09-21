@@ -79,6 +79,8 @@ describe("security boundary", () => {
     expect(() => restricted.assertToolCall("bash", { command: "cat /etc/passwd" })).toThrow(SandboxViolation);
     expect(() => restricted.assertToolCall("bash", { command: "curl https://example.com" })).toThrow(SandboxViolation);
     expect(() => restricted.assertToolCall("powershell", { command: "curl https://example.com" })).toThrow(SandboxViolation);
+    // user_bash is the extension event name; if it appears as a tool call, the
+    // same command policy applies (allowedTools must list it for this probe).
     expect(() => restricted.assertToolCall("user_bash", { command: "cat /etc/passwd" })).toThrow(SandboxViolation);
   });
 
