@@ -9,7 +9,8 @@ did **not** advertise Chord hot-plug. Do not treat this path as a
 changelog-official or production multi-environment capability. Failure
 may roll back to a single extension entry.
 
-Full how-to / limits write-up is ET-DOC-CHORD / #193.
+Full how-to / limits write-up: [chord-plugins.md](chord-plugins.md)
+(ET-DOC-CHORD / #193).
 
 ## Declare
 

@@ -35,6 +35,8 @@ The experimental `evok-eval` Chord plugin loader
 (`evok-eval-plugin.ts`) is the eval / promotion / Broker seat
 (fail-closed; auto-submit fail-closed; Elite ≠ Promotion), not
 changelog-official hot-plug and not a second control plane.
+Install / load / limits for all three:
+[docs/chord-plugins.md](../../docs/chord-plugins.md).
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
 start path is not ready (`src/mission/start-hard-gates.ts`). Prefer an

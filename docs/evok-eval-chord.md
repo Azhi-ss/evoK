@@ -13,7 +13,8 @@ Admission / Budget / hang / T48 / Broker predicates stay **fail-closed**.
 This plugin does **not** loosen those gates. Contest-arm auto-submit
 remains fail-closed. Elite ≠ 晋级 / Promotion / Admission / Broker.
 
-Full how-to / limits write-up is ET-DOC-CHORD / #193.
+Full how-to / limits write-up: [chord-plugins.md](chord-plugins.md)
+(ET-DOC-CHORD / #193).
 
 ## Declare
 

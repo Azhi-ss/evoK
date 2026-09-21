@@ -13,7 +13,8 @@ Product default remains **`fixed_uct`**. `#40` Progressive / MCTS /
 StrongSearch stay **explicit Mission/config opt-in only**. This plugin
 does **not** flip those defaults. Elite ≠ 晋级 / Promotion / Admission.
 
-Full how-to / limits write-up is ET-DOC-CHORD / #193.
+Full how-to / limits write-up: [chord-plugins.md](chord-plugins.md)
+(ET-DOC-CHORD / #193).
 
 ## Declare
 
