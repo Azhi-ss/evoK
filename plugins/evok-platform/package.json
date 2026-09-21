@@ -1,0 +1,16 @@
+{
+  "name": "evok-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pilot Chord plugin for the evoK Mission / orchestration / TUI·CLI seat. Experimental local path; not changelog-official hot-plug.",
+  "peerDependencies": {
+    "@earendil-works/chord": "^0.86.1"
+  },
+  "chord": {
+    "facets": {
+      "session": "./src/session.ts",
+      "tui": "./src/tui.ts"
+    }
+  }
+}

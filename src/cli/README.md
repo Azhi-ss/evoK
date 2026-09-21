@@ -24,6 +24,9 @@ writeback not opened). `/skill <name>` loads L1 from that tagged
 catalog and is not authorization. The TUI is an entry mirror, not
 Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
+The experimental `evok-platform` Chord plugin loader
+(`evok-platform-plugin.ts`) is a local pilot seat, not changelog-official
+hot-plug and not a second control plane.
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
 start path is not ready (`src/mission/start-hard-gates.ts`). Prefer an
