@@ -14,15 +14,12 @@ Promotion hardening (ledger hang before Broker) is
 Deploy Arena thick orchestration is an orthogonal API
 (`competitionId=deploy-arena`) — see [deploy-arena.md](deploy-arena.md).
 It is not a CLI mainline and not a commercial contest OS.
-The `evok-platform` Chord plugin is an experimental local pilot
-([evok-platform-chord.md](evok-platform-chord.md)); it is **not changelog-official**
-Chord hot-plug.
-The `evok-research` Chord plugin is an experimental local pilot
-([evok-research-chord.md](evok-research-chord.md)); it is **not changelog-official**
-Chord hot-plug. Default selection stays `fixed_uct`.
-The `evok-eval` Chord plugin is an experimental local pilot
-([evok-eval-chord.md](evok-eval-chord.md)); it is **not changelog-official**
-Chord hot-plug. Admission / Budget / hang / T48 / Broker stay **fail-closed**.
+Chord multi-plugin install / load / limits (experimental local pilot;
+**not changelog-official** hot-plug; rollback to a single extension
+entry is OK): [chord-plugins.md](chord-plugins.md). Per-seat notes:
+[evok-platform-chord.md](evok-platform-chord.md),
+[evok-research-chord.md](evok-research-chord.md) (default `fixed_uct`),
+[evok-eval-chord.md](evok-eval-chord.md) (gates stay **fail-closed**).
 
 Product baseline: [ADR-0014](adr/0014-prd-rsi-baseline.md). Domain vocabulary:
 [CONTEXT.md](../CONTEXT.md).
@@ -452,6 +449,9 @@ Also still true, and **not** claimed by this guide:
 - Skill body as start, continue, or submit authorization
 - A `/review` command, a second control plane, or ToyHarness as production
   Mission authority
+- Changelog-official Chord hot-plug, Pi experimental `-e` as an evoK
+  product path, or production multi-plugin / multi-env Chord
+  ([chord-plugins.md](chord-plugins.md))
 
 Offline CLI contract tests (faux provider, no credentials) live next to the
 modules they cover (`src/cli/evok-cli.test.ts`,
