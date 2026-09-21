@@ -1,8 +1,8 @@
 # Chord multi-plugin pilot
 
 How to install and load the three independent Chord plugins that landed
-on the Pi 0.86 / Chord wave. Per-seat contracts stay in the SPLIT notes
-this page points at. This page is the install / load / limits how-to
+on the Pi 0.86 / Chord wave. Per-seat contracts stay in the
+ET-CHORD-SPLIT notes this page points at. This page is the install / load / limits how-to
 (ET-DOC-CHORD / #193).
 
 Authority: `approved/2026-09-21-decision-pi-086-chord-plugins.md`.
@@ -136,7 +136,7 @@ What this path does **not** do:
 If hot-plug fails: keep using the shipped single extension entry. Do
 not treat a failed or missing plugin load as a product regression.
 
-## Smoke (from the SPLIT tickets)
+## Smoke (from ET-CHORD-SPLIT-PLATFORM / RESEARCH / EVAL)
 
 Offline; no InteractiveMode and no live model.
 
@@ -153,7 +153,7 @@ bun test src/cli/evok-eval-plugin.test.ts
 bun run typecheck
 ```
 
-Expected, matching the SPLIT handoffs:
+Expected, matching the ET-CHORD-SPLIT handoffs:
 
 | Ticket | Expect |
 | --- | --- |
