@@ -1,0 +1,16 @@
+{
+  "name": "evok-research",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pilot Chord plugin for the evoK 选点 / Harness / SelectionPolicy seat. Experimental local path; default fixed_uct; Progressive opt-in only; not changelog-official hot-plug.",
+  "peerDependencies": {
+    "@earendil-works/chord": "^0.86.1"
+  },
+  "chord": {
+    "facets": {
+      "session": "./src/session.ts",
+      "tui": "./src/tui.ts"
+    }
+  }
+}
