@@ -20,6 +20,9 @@ Chord hot-plug.
 The `evok-research` Chord plugin is an experimental local pilot
 ([evok-research-chord.md](evok-research-chord.md)); it is **not changelog-official**
 Chord hot-plug. Default selection stays `fixed_uct`.
+The `evok-eval` Chord plugin is an experimental local pilot
+([evok-eval-chord.md](evok-eval-chord.md)); it is **not changelog-official**
+Chord hot-plug. Admission / Budget / hang / T48 / Broker stay **fail-closed**.
 
 Product baseline: [ADR-0014](adr/0014-prd-rsi-baseline.md). Domain vocabulary:
 [CONTEXT.md](../CONTEXT.md).
