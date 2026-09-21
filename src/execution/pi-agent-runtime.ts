@@ -29,10 +29,12 @@ import {
 import { MissingAuthenticationError, type SessionModelResolver } from "../evok-model";
 import type { EvokResources } from "../evok-resources";
 import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
+import { isShellToolName, resolveUserBash } from "./user-bash";
 export { MissingAuthenticationError } from "../evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-export const CODING_TOOLS = ["bash", "edit", "write"] as const;
+export const SHELL_TOOLS = ["bash", "powershell", "user_bash"] as const;
+export const CODING_TOOLS = ["bash", "powershell", "user_bash", "edit", "write"] as const;
 
 export interface TaskPlan {
   readonly objective: string;
@@ -334,7 +336,7 @@ export type RuntimeEvent = {
     | "turn_start" | "turn_end" | "agent_settled"
     | "message_start" | "message_update" | "message_end"
     | "tool_execution_start" | "tool_execution_update" | "tool_execution_end" | "error"
-    | "compaction_start" | "compaction_end"
+    | "compaction_start" | "compaction_end" | "session_compact_failed"
     | "auto_retry_start" | "auto_retry_end"
     | "summarization_retry_scheduled" | "summarization_retry_attempt_start" | "summarization_retry_finished";
   readonly sessionId: string;
@@ -509,7 +511,7 @@ function textFromMessage(message: Record<string, unknown>): string {
 const NORMALIZED_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
   "session_start", "session_end", "agent_start", "agent_end", "turn_start", "turn_end", "agent_settled",
   "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "error",
-  "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+  "compaction_start", "compaction_end", "session_compact_failed", "auto_retry_start", "auto_retry_end",
   "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
 ]);
 
@@ -519,7 +521,8 @@ const NORMALIZED_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
  * policy drift or a config bypass: the Run must fail closed.
  */
 const POLICY_VIOLATION_EVENT_TYPES = new Set<RuntimeEvent["type"]>([
-  "compaction_start", "compaction_end", "auto_retry_start", "auto_retry_end",
+  "compaction_start", "compaction_end", "session_compact_failed",
+  "auto_retry_start", "auto_retry_end",
   "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
 ]);
 
@@ -559,7 +562,7 @@ function toolsFor(
   if (sandboxPolicy.allowedTools && requested.some((tool) => !sandboxPolicy.allowedTools!.includes(tool))) {
     throw new Error("role requests a tool outside the sandbox allowlist");
   }
-  if (requested.includes("bash") && sandboxPolicy.allowBash !== true) {
+  if (requested.some(isShellToolName) && sandboxPolicy.allowBash !== true) {
     throw new Error("bash requires an explicitly enabled sandbox policy");
   }
   if (role.allowCodingTools !== undefined && typeof role.allowCodingTools !== "boolean") {
@@ -577,7 +580,7 @@ function toolsFor(
     if (coding && requested.some((tool) => tool === "edit" || tool === "write")) {
       throw new Error(`${contract.role} cannot modify a candidate workspace`);
     }
-    if (requested.includes("bash") && (role.allowTestExecution !== true || sandboxPolicy.allowBash !== true)) {
+    if (requested.some(isShellToolName) && (role.allowTestExecution !== true || sandboxPolicy.allowBash !== true)) {
       throw new Error(`${contract.role} may run tests only through an explicitly sandboxed command policy`);
     }
   }
@@ -616,6 +619,39 @@ function verificationFromText(text: string | undefined, stage: string): { ok: bo
   return { ok: parsed.ok, objections: parsed.ok || objections.length > 0 ? objections : [`${stage} rejected the candidate`] };
 }
 
+export function createSandboxSecurityExtension(options: {
+  readonly boundary: SandboxBoundary;
+  readonly redactor?: SecretRedactor;
+}): InlineExtension {
+  const { boundary, redactor } = options;
+  return {
+    name: "evok-sandbox-boundary",
+    hidden: true,
+    factory(pi) {
+      pi.on("tool_call", (event) => {
+        try {
+          boundary.assertToolCall(event.toolName, event.input);
+          return { block: false };
+        } catch (error) {
+          return { block: true, reason: redactor?.error(error).message ?? "sandbox policy denied the tool call" };
+        }
+      });
+      // 0.86 fail-closed: a throw or invalid defined result aborts without
+      // local execution. Always return undefined or `{ result }`.
+      pi.on("user_bash", (event) => {
+        const command = typeof event.command === "string" ? event.command : "";
+        return resolveUserBash(
+          { command },
+          {
+            allowBash: boundary.policy.allowBash === true,
+            assertCommand: (value) => boundary.assertToolCall("bash", { command: value }),
+          },
+        );
+      });
+    },
+  };
+}
+
 export const defaultSessionFactory: AgentSessionFactory = async (options) => {
   const { sandbox, redactor, evokResources, ...sdkOptions } = options;
   const cwd = sdkOptions.cwd!;
@@ -629,20 +665,7 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
     allowedTools: sdkOptions.tools,
     allowBash: sandbox?.allowBash === true,
   });
-  const securityExtension: InlineExtension = {
-    name: "evok-sandbox-boundary",
-    hidden: true,
-    factory(pi) {
-      pi.on("tool_call", (event) => {
-        try {
-          boundary.assertToolCall(event.toolName, event.input);
-          return { block: false };
-        } catch (error) {
-          return { block: true, reason: redactor?.error(error).message ?? "sandbox policy denied the tool call" };
-        }
-      });
-    },
-  };
+  const securityExtension = createSandboxSecurityExtension({ boundary, redactor });
   // #110: explicit evoK resource sources. noSkills stays true UNCONDITIONALLY:
   // flipping it false when resources are absent would re-enable the SDK default
   // project .pi and global ~/.agents skill discovery on non-CLI runtime paths,

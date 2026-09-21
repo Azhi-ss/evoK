@@ -75,9 +75,11 @@ describe("security boundary", () => {
   });
 
   test("keeps per-run policy restrictions from enabling forbidden capabilities", () => {
-    const restricted = new SandboxBoundary({ root: "/tmp/evok-policy", allowedTools: ["bash"], allowBash: true });
+    const restricted = new SandboxBoundary({ root: "/tmp/evok-policy", allowedTools: ["bash", "powershell", "user_bash"], allowBash: true });
     expect(() => restricted.assertToolCall("bash", { command: "cat /etc/passwd" })).toThrow(SandboxViolation);
     expect(() => restricted.assertToolCall("bash", { command: "curl https://example.com" })).toThrow(SandboxViolation);
+    expect(() => restricted.assertToolCall("powershell", { command: "curl https://example.com" })).toThrow(SandboxViolation);
+    expect(() => restricted.assertToolCall("user_bash", { command: "cat /etc/passwd" })).toThrow(SandboxViolation);
   });
 
   test("readRoots permit read access to approved project roots but never writes or escapes", () => {

@@ -80,4 +80,16 @@ describe("PiAgentRuntime T06 boundary", () => {
     }))).rejects.toThrow();
     expect(created).toBe(false);
   });
+
+  test("powershell and user_bash stay fail-closed unless bash is explicitly granted", async () => {
+    let created = false;
+    const runtime = new PiAgentRuntime({ sessionFactory: async () => { created = true; return session([]); } });
+    await expect(runtime.execute(request({
+      role: { name: "worker", tools: ["powershell"], allowCodingTools: true },
+    }))).rejects.toThrow();
+    await expect(runtime.execute(request({
+      role: { name: "worker", tools: ["user_bash"], allowCodingTools: true },
+    }))).rejects.toThrow();
+    expect(created).toBe(false);
+  });
 });
