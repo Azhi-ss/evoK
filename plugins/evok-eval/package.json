@@ -1,0 +1,16 @@
+{
+  "name": "evok-eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pilot Chord plugin for the evoK eval / promotion / Broker seat. Experimental local path; fail-closed Admission / Budget / hang / T48 / Broker; auto-submit fail-closed; not changelog-official hot-plug.",
+  "peerDependencies": {
+    "@earendil-works/chord": "^0.86.1"
+  },
+  "chord": {
+    "facets": {
+      "session": "./src/session.ts",
+      "tui": "./src/tui.ts"
+    }
+  }
+}

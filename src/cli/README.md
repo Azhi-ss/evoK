@@ -31,6 +31,10 @@ The experimental `evok-research` Chord plugin loader
 (`evok-research-plugin.ts`) is the 选点 / Harness / SelectionPolicy seat
 (default `fixed_uct`; Progressive opt-in only), not changelog-official
 hot-plug and not Promotion authority.
+The experimental `evok-eval` Chord plugin loader
+(`evok-eval-plugin.ts`) is the eval / promotion / Broker seat
+(fail-closed; auto-submit fail-closed; Elite ≠ Promotion), not
+changelog-official hot-plug and not a second control plane.
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
 start path is not ready (`src/mission/start-hard-gates.ts`). Prefer an
