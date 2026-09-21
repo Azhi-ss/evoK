@@ -35,7 +35,8 @@ export interface EvokEvalSeat {
 
 export const EVOK_EVAL_SURFACES: readonly EvokEvalSurface[] = Object.freeze([
   { id: "eval", pack: "src/competition", role: "scoring-suite-metric" },
-  { id: "promotion", pack: "src/evidence", role: "evidence-admission-gates" },
+  // Evidence pack owns both; Promotion ≠ Admission (CONTEXT.md).
+  { id: "promotion", pack: "src/evidence", role: "promotion-admission-gates" },
   { id: "broker", pack: "src/evidence", role: "submission-broker" },
 ]);
 

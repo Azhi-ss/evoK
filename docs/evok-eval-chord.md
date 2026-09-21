@@ -35,8 +35,8 @@ declareEvokEvalPlugin();
 
 In-process Chord `FacetHost` + static facet loader. Session facet
 provides `evok.eval`. TUI facet consumes it and lists a smoke
-command. Neither facet owns scoring math, Admission, Budget, hang,
-T48, or Broker.
+command. Neither facet owns scoring math, Promotion, Admission,
+Budget, hang, T48, or Broker. Promotion ≠ Admission.
 
 ```ts
 import { loadEvokEvalPlugin } from "../src/cli/evok-eval-plugin";

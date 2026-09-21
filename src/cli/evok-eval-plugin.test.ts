@@ -48,7 +48,7 @@ describe("evok-eval is independently declarable", () => {
       },
       surfaces: [
         { id: "eval", pack: "src/competition", role: "scoring-suite-metric" },
-        { id: "promotion", pack: "src/evidence", role: "evidence-admission-gates" },
+        { id: "promotion", pack: "src/evidence", role: "promotion-admission-gates" },
         { id: "broker", pack: "src/evidence", role: "submission-broker" },
       ],
     });
@@ -98,7 +98,7 @@ describe("evok-eval is independently loadable on the local pilot path", () => {
         eliteIsPromotion: false,
         surfaces: [
           { id: "eval", pack: "src/competition", role: "scoring-suite-metric" },
-          { id: "promotion", pack: "src/evidence", role: "evidence-admission-gates" },
+          { id: "promotion", pack: "src/evidence", role: "promotion-admission-gates" },
           { id: "broker", pack: "src/evidence", role: "submission-broker" },
         ],
       });
