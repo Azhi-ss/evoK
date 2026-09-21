@@ -7,6 +7,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isShellToolName } from "./user-bash";
 
 export type SandboxViolationKind =
   | "path-traversal"
@@ -57,7 +58,7 @@ const DEFAULT_PROTECTED_SEGMENTS = new Set([
   ".env", "credentials", "credential", "secret", "secrets", "evaluator", "evaluation", "contract", "ledger", "policy",
 ]);
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-const KNOWN_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"] as const;
+const KNOWN_TOOLS = ["read", "grep", "find", "ls", "bash", "powershell", "edit", "write"] as const;
 const NETWORK_COMMAND = /\b(?:curl|wget|nc|ncat|netcat|telnet|socat|ssh|scp|ftp|httpie|nslookup|dig|ping|fetch|docker|podman|kubectl|psql|mysql|redis-cli)\b|\b(?:git\s+(?:clone|fetch|pull|push)|npm\s+(?:install|ci|update)|bun\s+(?:install|add|update)|pnpm\s+(?:install|add|update))\b|\/dev\/(?:tcp|udp)\b|\b(?:connect|socket)\s*\(/i;
 const INLINE_COMMAND = /(?:^|[;&|\r\n])\s*(?:sh|bash|zsh|fish|node|bun|deno|python(?:3)?|perl|ruby)\s+(?:-e|--eval|-c)\b|\b(?:eval|exec)\s*\(|\$\(|`/i;
 const PROTECTED_COMMAND_PATH = /(?:^|[\s"'=])(?:~(?:\/|\\)|\/)(?:[^\s"']*\/)?(?:\.ssh|\.aws|\.config|\.npmrc|\.git-credentials|\.env(?:\.|\b)|credentials?|secrets?|id_rsa|id_ed25519|etc\/(?:passwd|shadow|sudoers)|var\/run|proc(?:\/|\b)|sys(?:\/|\b)|dev\/((?:tcp|udp)|docker\.sock))/i;
@@ -352,15 +353,17 @@ export class SandboxBoundary {
     if (typeof tool !== "string" || tool.trim() === "") throw new SandboxViolation("tool", "tool name is required");
     const allowed = this.policy.allowedTools ?? READ_ONLY_TOOLS;
     if (!allowed.includes(tool)) throw new SandboxViolation("tool", `tool is not allowed in this sandbox: ${tool}`);
-    if (tool === "bash" && this.policy.allowBash !== true) throw new SandboxViolation("tool", "bash requires an explicitly enabled sandbox policy");
+    if (isShellToolName(tool) && this.policy.allowBash !== true) {
+      throw new SandboxViolation("tool", `${tool} requires an explicitly enabled sandbox policy`);
+    }
   }
 
   assertToolCall(tool: string, args: Record<string, unknown> = {}): void {
     this.assertTool(tool);
     if (typeof args.path === "string") this.assertPath(args.path, tool === "read" ? "read" : "write");
-    if (tool === "bash") {
+    if (isShellToolName(tool)) {
       const command = typeof args.command === "string" ? args.command : "";
-      if (command.trim() === "") throw new SandboxViolation("tool", "bash command is required");
+      if (command.trim() === "") throw new SandboxViolation("tool", `${tool} command is required`);
       if (INLINE_COMMAND.test(command)) throw new SandboxViolation("network", "indirect shell and interpreter commands are not allowed");
       if (normalizedPath(command).split("/").includes("..")) throw new SandboxViolation("path-traversal", "path traversal is not allowed in commands");
       if (PROTECTED_COMMAND_PATH.test(command)) throw new SandboxViolation("protected-path", "protected data is not accessible from commands");

@@ -13,7 +13,7 @@
     "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.86.1",
     "typebox": "1.3.7"
   }
 }

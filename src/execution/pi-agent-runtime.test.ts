@@ -51,6 +51,7 @@ function assertExternalCompletion(result: AgentRuntimeResult, approvedRoot: stri
 const POLICY_LIFECYCLE_TYPES = [
   "compaction_start",
   "compaction_end",
+  "session_compact_failed",
   "auto_retry_start",
   "auto_retry_end",
   "summarization_retry_scheduled",
