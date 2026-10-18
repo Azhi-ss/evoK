@@ -1,0 +1,10 @@
+{
+  "name": "harness-opt",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Deterministic harness-optimizer skeleton for the Bohrium BioMaster harness contest. pi-subagents is an optional host and is not imported.",
+  "bin": {
+    "harness-opt": "./src/cli.ts"
+  }
+}

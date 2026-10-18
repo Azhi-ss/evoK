@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "tests/**/*.ts", "bin/**/*.ts", "plugins/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "tests/**/*.ts", "bin/**/*.ts", "plugins/**/*.ts", "harness-opt/**/*.ts"]
 }
