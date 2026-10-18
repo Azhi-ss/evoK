@@ -227,8 +227,12 @@ describe("live round", () => {
         expect(task).toContain("不能写成下跌");
         expect(verdict.reason).not.toContain("下跌");
       }
-      const saved = JSON.parse(readFileSync(join(dir, "review.json"), "utf8")) as { accept: boolean; reason: string };
-      expect(saved).toEqual(verdict);
+      const saved = JSON.parse(readFileSync(join(dir, "review.json"), "utf8")) as {
+        accept: boolean;
+        reason: string;
+        modelReason: string;
+      };
+      expect(saved).toEqual({ ...verdict, modelReason: item.modelReason });
     }
     expect(reviewerTask({
       child,

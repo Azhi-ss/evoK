@@ -84,13 +84,50 @@ export function applyPatch(base: HarnessConfig, patch: PatchProposal): HarnessCo
     modelId: base.modelId,
     parts: {
       ...base.parts,
-      [patch.part]: {
-        ...base.parts[patch.part],
-        ...patch.changes,
-      },
+      [patch.part]: applyChanges(base.parts[patch.part], patch.changes),
     },
     search,
   };
+}
+
+const REJECTED_SEGMENT = new Set(["__proto__", "constructor", "prototype"]);
+
+/** A dotted key such as `a.b.c` is a nested path. A key without a dot stays flat. */
+function applyChanges(
+  base: Readonly<Record<string, unknown>>,
+  changes: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(changes)) {
+    if (REJECTED_SEGMENT.has(key)) throw new Error(`patch change key is not a nested path: ${key}`);
+    if (key.includes(".")) assignNested(out, key, value);
+    else out[key] = value;
+  }
+  return out;
+}
+
+function assignNested(out: Record<string, unknown>, key: string, value: unknown): void {
+  const segments = key.split(".");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || REJECTED_SEGMENT.has(segment))) {
+    throw new Error(`patch change key is not a nested path: ${key}`);
+  }
+  let cursor = out;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index] as string;
+    const existing = cursor[segment];
+    if (isRecord(existing)) {
+      const copy = { ...existing };
+      cursor[segment] = copy;
+      cursor = copy;
+    } else if (existing === undefined) {
+      const next: Record<string, unknown> = {};
+      cursor[segment] = next;
+      cursor = next;
+    } else {
+      throw new Error(`patch change key collides with a non-object: ${key}`);
+    }
+  }
+  cursor[segments[segments.length - 1] as string] = value;
 }
 
 export function mergeGenes(base: SearchGenes, overlay: Partial<SearchGenes> | undefined): SearchGenes {
@@ -106,6 +143,10 @@ export function mergeGenes(base: SearchGenes, overlay: Partial<SearchGenes> | un
   }
   if (next.samples < 1) throw new Error("search gene samples must be at least 1");
   return next;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function findLeak(value: unknown, path = "$"): string | null {

@@ -106,7 +106,10 @@ export function liveRoles(options: {
         throw new Error("reviewer-gate output is missing accept or reason");
       }
       const verdict = forcedReviewVerdict(input) ?? { accept: value.accept, reason: value.reason };
-      writeRoleJson(options.root, "reviewer-gate", "review.json", verdict);
+      writeRoleJson(options.root, "reviewer-gate", "review.json", {
+        ...verdict,
+        modelReason: value.reason,
+      });
       return verdict;
     },
     reportWriter: ({ child }): EvidencePack => {

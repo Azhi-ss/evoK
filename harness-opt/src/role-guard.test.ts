@@ -367,6 +367,35 @@ describe("subagent role guard", () => {
     expect(contractEvents(root)).toHaveLength(1);
   });
 
+  test("a second path argument cannot point outside the contract", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/t1.json", file_path: "/etc/hostname" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "grep",
+      input: { path: "traces", paths: ["/etc/hostname"] },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { file_path: "tests/hidden.ts" },
+    })).toThrow(/forbidden path/);
+    const events = contractEvents(root);
+    expect(events).toHaveLength(3);
+    expect(events.every((event) => event.kind === "contract")).toBe(true);
+    expect(JSON.stringify(events)).toContain("/etc/hostname");
+    expect(JSON.stringify(events)).toContain("tests/hidden.ts");
+  });
+
   test("the child tool_call hook blocks the built-in write and read", () => {
     const handlers = new Map<string, (event: { toolName: string; input: Record<string, unknown> }, ctx: { cwd: string; getSystemPrompt: () => string }) => { block?: boolean; reason?: string } | undefined>();
     roleGuardExtension({

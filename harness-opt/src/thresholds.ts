@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { writeHostFile } from "./artifacts";
+import { readHostFile, writeHostFile } from "./artifacts";
 
 /** Explicit run inputs. The gate and the loop do not fill these in. */
 export const THRESHOLD_KEYS = [
@@ -29,10 +27,9 @@ export function missingThresholds(value: Partial<RunThresholds> | undefined): Th
 }
 
 export function readThresholds(root: string): { readonly ok: true; readonly value: RunThresholds } | { readonly ok: false; readonly missing: readonly string[] } {
-  const file = join(root, THRESHOLDS_FILE);
   let parsed: Partial<RunThresholds> | undefined;
   try {
-    parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<RunThresholds>;
+    parsed = JSON.parse(readHostFile(root, THRESHOLDS_FILE)) as Partial<RunThresholds>;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code ?? "unreadable";
     return { ok: false, missing: [`${THRESHOLDS_FILE} (${code})`, ...THRESHOLD_KEYS] };
@@ -50,7 +47,7 @@ export function writeThresholds(root: string, value: RunThresholds): void {
 
 export function readTokensSpent(root: string): { readonly ok: true; readonly tokensSpent: number } | { readonly ok: false; readonly missing: "tokensSpent" } {
   try {
-    const parsed = JSON.parse(readFileSync(join(root, USAGE_FILE), "utf8")) as { tokensSpent?: unknown };
+    const parsed = JSON.parse(readHostFile(root, USAGE_FILE)) as { tokensSpent?: unknown };
     if (typeof parsed.tokensSpent !== "number" || !Number.isFinite(parsed.tokensSpent) || parsed.tokensSpent < 0) {
       return { ok: false, missing: "tokensSpent" };
     }

@@ -37,7 +37,20 @@ export const FRAMEWORK_TOOLS = [
 
 const FILE_IO_TOOL_SET = new Set<string>(FILE_IO_TOOLS);
 const FRAMEWORK_TOOL_SET = new Set<string>(FRAMEWORK_TOOLS);
-const PATH_ARGUMENT_KEYS = new Set(["path", "file", "file_path", "filePath", "full_output_path", "command"]);
+const PATH_ARGUMENT_KEYS = new Set([
+  "path",
+  "paths",
+  "file",
+  "files",
+  "file_path",
+  "filePath",
+  "full_output_path",
+  "directory",
+  "dir",
+  "cwd",
+  "target",
+  "command",
+]);
 
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -67,15 +80,14 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
       guardCommand(call.root, role, call.tool, call.input);
       return;
     }
-    const raw = filesystemPath(call.tool, call.input);
-    if (raw === undefined) {
-      assertRoleTool(role, call.tool);
-      return;
-    }
-    const rel = canonicalRelative(call.root, role, raw);
+    const raws = filesystemPaths(call.tool, call.input);
+    const resolved: string[] = [];
+    for (const raw of raws) resolved.push(canonicalRelative(call.root, role, raw));
     assertRoleTool(role, call.tool);
-    if (WRITE_TOOLS.has(call.tool)) assertRoleWrite(role, rel);
-    else assertRoleRead(role, rel);
+    for (const rel of resolved) {
+      if (WRITE_TOOLS.has(call.tool)) assertRoleWrite(role, rel);
+      else assertRoleRead(role, rel);
+    }
   } catch (error) {
     const err = error instanceof Error ? error.message : String(error);
     try {
@@ -99,7 +111,8 @@ function isUngatedTool(tool: string, input: Record<string, unknown>): boolean {
 }
 
 function hasFilePathArgument(input: Record<string, unknown>): boolean {
-  return Object.entries(input).some(([key, value]) => PATH_ARGUMENT_KEYS.has(key) && typeof value === "string" && value.trim() !== "");
+  return collectPathValues(input).length > 0
+    || (typeof input.command === "string" && input.command.trim() !== "");
 }
 
 function requireSubagentRole(roleName: string | null, tool: string): SubagentRole {
@@ -122,6 +135,10 @@ function guardCommand(root: string, role: SubagentRole, tool: string, input: Rec
   }
   for (const token of pathTokens(command, outputPath)) {
     const rel = canonicalRelative(root, role, token);
+    assertCommandTarget(role, rel);
+  }
+  for (const raw of collectPathValues(input)) {
+    const rel = canonicalRelative(root, role, raw);
     assertCommandTarget(role, rel);
   }
   assertRoleTool(role, tool);
@@ -159,20 +176,43 @@ function pathTokens(command: string, outputPath: string): string[] {
   return tokens;
 }
 
-function filesystemPath(tool: string, input: Record<string, unknown>): string | undefined {
-  if (typeof input.path === "string" && input.path.trim() !== "") return input.path;
-  if (READ_TOOLS.has(tool)) return ".";
-  if (WRITE_TOOLS.has(tool)) throw new Error(`${tool} is missing a path`);
-  return undefined;
+function filesystemPaths(tool: string, input: Record<string, unknown>): string[] {
+  const found = collectPathValues(input);
+  if (found.length === 0) {
+    if (READ_TOOLS.has(tool)) return ["."];
+    if (WRITE_TOOLS.has(tool)) throw new Error(`${tool} is missing a path`);
+  }
+  return found;
+}
+
+/** Every path-like argument, including `file_path` and a `paths` array. `command` stays with the shell check. */
+function collectPathValues(input: Record<string, unknown>): string[] {
+  const found: string[] = [];
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "command" || !PATH_ARGUMENT_KEYS.has(key)) continue;
+    pushPathValues(found, value);
+  }
+  return found;
+}
+
+function pushPathValues(found: string[], value: unknown): void {
+  if (typeof value === "string") {
+    if (value.trim() !== "") found.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) pushPathValues(found, entry);
+  }
 }
 
 function pathForLog(tool: string, input: Record<string, unknown>): string {
   if (COMMAND_TOOLS.has(tool)) {
     const command = typeof input.command === "string" ? input.command : "";
     const outputPath = typeof input.full_output_path === "string" ? input.full_output_path : "";
-    return [command, outputPath].filter(Boolean).join(" ");
+    return [command, outputPath, ...collectPathValues(input)].filter(Boolean).join(" ");
   }
-  return typeof input.path === "string" ? input.path : "";
+  const paths = collectPathValues(input);
+  return paths.length > 0 ? paths.join(" ") : "";
 }
 
 /** Contest denylist: tests/, solution, private, including solution.* / private.* / tests.*. */

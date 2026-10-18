@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readHostFile } from "./artifacts";
 import { ensureRealDir } from "./containment";
 import { listTraceFiles } from "./traces";
 import { flag } from "./args";
@@ -76,7 +76,7 @@ export async function runDirectorySubmitGate(root: string): Promise<SubmitGateRe
 
 function readModelId(root: string, configPath: string): string {
   try {
-    const parsed = JSON.parse(readFileSync(join(root, configPath), "utf8")) as { modelId?: unknown };
+    const parsed = JSON.parse(readHostFile(root, configPath)) as { modelId?: unknown };
     return typeof parsed.modelId === "string" ? parsed.modelId : "";
   } catch {
     return "";
@@ -84,19 +84,19 @@ function readModelId(root: string, configPath: string): string {
 }
 
 function tracePackComplete(root: string): boolean {
-  const dir = join(root, "traces");
-  if (!existsSync(dir)) return false;
   try {
-    return listTraceFiles(dir).length > 0;
+    return listTraceFiles(join(root, "traces")).length > 0;
   } catch {
     return false;
   }
 }
 
 function changeNotePresent(root: string): boolean {
-  const note = join(root, "evidence_pack", "change-note.md");
-  if (!existsSync(note)) return false;
-  return readFileSync(note, "utf8").trim() !== "";
+  try {
+    return readHostFile(root, "evidence_pack/change-note.md").trim() !== "";
+  } catch {
+    return false;
+  }
 }
 
 function unusedRoles() {

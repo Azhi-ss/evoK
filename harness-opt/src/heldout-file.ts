@@ -1,6 +1,4 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { writeHostFile } from "./artifacts";
+import { readHostFile, writeHostFile } from "./artifacts";
 
 /** Single held-out convention for the empty run and the Pi gate. */
 export const HELD_OUT_SCORE_FILE = "sealed/heldout-score.json";
@@ -88,13 +86,12 @@ export function recordEvaluatedHeldOut(root: string, configPath: string, score: 
 
 function readHeldOutObject(root: string): Record<string, unknown> {
   const file = HELD_OUT_SCORE_FILE;
-  const abs = join(root, file);
   let raw: string;
   try {
-    raw = readFileSync(abs, "utf8");
+    raw = readHostFile(root, file);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code ?? "unreadable";
-    throw new HeldOutReadError(file, code);
+    if (!isEnoent(error)) throw error;
+    throw new HeldOutReadError(file, "ENOENT");
   }
   let parsed: unknown;
   try {
@@ -108,4 +105,8 @@ function readHeldOutObject(root: string): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }

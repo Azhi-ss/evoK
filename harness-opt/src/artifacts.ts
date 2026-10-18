@@ -1,4 +1,4 @@
-import { ensureRealDir, writeContained } from "./containment";
+import { ensureRealDir, readContained, writeContained } from "./containment";
 import { Lineage } from "./lineage";
 import { ROLE_CONTRACTS, type RoleId } from "./roles";
 
@@ -80,7 +80,7 @@ export function writeRoleFile(root: string, role: RoleId, relativeName: string, 
     const text = body.endsWith("\n") ? body : `${body}\n`;
     return writeContained(root, relativeName, text);
   } catch (error) {
-    recordContract(root, role, relativeName, error);
+    recordContract(root, role, relativeName, error, "write");
     throw error instanceof Error ? error : new Error(String(error));
   }
 }
@@ -90,24 +90,41 @@ export function writeHostFile(root: string, relativeName: string, body: string):
   try {
     return writeContained(root, relativeName, body);
   } catch (error) {
-    recordContract(root, "orchestrator", relativeName, error);
+    recordContract(root, "orchestrator", relativeName, error, "write");
     throw error instanceof Error ? error : new Error(String(error));
   }
 }
 
-function recordContract(root: string, role: string, relativeName: string, error: unknown): void {
+/**
+ * Host read. The resolved path must stay at `relativeName` inside the run root.
+ * A missing file is not a contract event. A symlink or any other escape is.
+ */
+export function readHostFile(root: string, relativeName: string): string {
+  try {
+    return readContained(root, relativeName);
+  } catch (error) {
+    if (!isEnoent(error)) recordContract(root, "orchestrator", relativeName, error, "read");
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+function recordContract(root: string, role: string, relativeName: string, error: unknown, tool: string): void {
   const err = error instanceof Error ? error.message : String(error);
   try {
     const state = ensureRealDir(root, "state");
     new Lineage(state).log("contract", {
       role,
-      tool: "write",
+      tool,
       path: relativeName.length > 500 ? `${relativeName.slice(0, 500)}…` : relativeName,
       err,
     });
   } catch {
-    // The write stays refused when the contract line itself cannot be stored.
+    // The operation stays refused when the contract line itself cannot be stored.
   }
+}
+
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }
 
 export function writeRoleJson(root: string, role: RoleId, relativeName: string, value: unknown): string {

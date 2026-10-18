@@ -95,7 +95,9 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 守卫在 Pi 打开文件之前解析符号链接。Pi 自带的 read/write 不接受 `O_NOFOLLOW`，守卫也拿不到它们随后打开的那个 fd，所以检查和真正打开之间仍有一段窗口，链接可能在这中间被换掉。这是已知限制。
 
-宿主自己的落盘走同一套解析：`writeRoleFile`，以及 `state/`、`reports/`、`candidates/`、`traces/`、阈值、held-out 和 `run_state.json`。解析后的位置必须仍是请求的那条相对路径，并且留在运行根里。跑到运行根外，或被链接改到另一条路径，就拒绝，并在 `state/lineage.jsonl` 记一条 `kind: contract`。链接目标按每一段再解析：link1 指向 link2、link2 再指向 `/etc`、`sealed/`、`tests/`、`solution`、`private`、合约外或运行根外，读和写都拒绝。最终文件用 `O_NOFOLLOW` 打开。中间目录在检查和创建之间被换成链接的窗口还在。
+宿主自己的落盘走同一套解析：`writeRoleFile`，以及 `state/`、`reports/`、`candidates/`、`traces/`、阈值、held-out 和 `run_state.json`。held-out 评分文件和 `state/tts-comparison.json` 的读取也走这一套：逐段解析，最终用 `O_NOFOLLOW` 打开。解析后的位置必须仍是请求的那条相对路径，并且留在运行根里。跑到运行根外，或被链接改到另一条路径（包括 `sealed/`、`tests/`、`solution`、`private`），就拒绝，并在 `state/lineage.jsonl` 记一条 `kind: contract`，文件内容不读入。链接目标按每一段再解析：link1 指向 link2、link2 再指向 `/etc`、`sealed/`、`tests/`、`solution`、`private`、合约外或运行根外，读和写都拒绝。符号链接这一跳落地后必须仍在运行根内，才继续看后面的段。read、write、edit、grep、find、ls、bash 上的 `path`、`file_path`、`paths` 以及其它路径参数都过同一条解析。中间目录在检查和创建之间被换成链接的窗口还在。
+
+`review.json` 里的 `reason` 是编排器用的判定理由。reviewer 模型自己写的原文另存在 `modelReason`。
 
 innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
 

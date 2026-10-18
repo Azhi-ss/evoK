@@ -46,6 +46,24 @@ describe("proposer boundary", () => {
     expect(next.parts.skills).toEqual({ trigger: "format" });
   });
 
+  test("a dotted patch key expands into a nested path", () => {
+    const parent: HarnessConfig = {
+      ...base,
+      parts: {
+        ...emptyParts(),
+        "agent-loop": { a: { b: { d: 2 } }, keep: true },
+      },
+    };
+    const next = applyPatch(parent, {
+      part: "agent-loop",
+      motivation: "set the nested checker",
+      expectedFailureClass: "tool-misuse",
+      changes: { "a.b.c": 1 },
+    });
+    expect(next.parts["agent-loop"]).toEqual({ a: { b: { d: 2, c: 1 } }, keep: true });
+    expect(Object.keys(next.parts["agent-loop"])).toEqual(["a", "keep"]);
+  });
+
   test("an unmotivated patch is rejected", () => {
     expect(() => applyPatch(base, {
       part: "memory",

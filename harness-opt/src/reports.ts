@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { writeHostFile } from "./artifacts";
+import { readHostFile, writeHostFile } from "./artifacts";
 import { parseGapReport, parsePatchFile } from "./schemas";
 import { listTraceFiles } from "./traces";
 
@@ -23,7 +23,7 @@ export function writeStageReport(root: string, report: StageReport): string {
 
 export function readStageReport(root: string, round: number, stage: string): StageReport | undefined {
   try {
-    return JSON.parse(readFileSync(join(reportsDir(root, round), `${stage}.json`), "utf8")) as StageReport;
+    return JSON.parse(readHostFile(root, `reports/round-${round}/${stage}.json`)) as StageReport;
   } catch {
     return undefined;
   }
@@ -67,7 +67,10 @@ export function reviewRoundE2E(root: string, round: number): { readonly ok: bool
 
 export function listStageReports(root: string, round: number): string[] {
   try {
-    return readdirSync(reportsDir(root, round)).filter((name) => name.endsWith(".json")).sort();
+    const dir = reportsDir(root, round);
+    const info = lstatSync(dir);
+    if (info.isSymbolicLink() || !info.isDirectory()) return [];
+    return readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
   } catch {
     return [];
   }
@@ -82,7 +85,7 @@ function traceFinding(root: string): E2EFinding {
   }
   if (names.length === 0) return { stage: "trace", ok: false, detail: "no trace file" };
   try {
-    const body = JSON.parse(readFileSync(join(root, "traces", names[0] as string), "utf8")) as { steps?: unknown };
+    const body = JSON.parse(readHostFile(root, `traces/${names[0] as string}`)) as { steps?: unknown };
     const steps = body.steps;
     if (!Array.isArray(steps) || steps.length === 0) {
       return { stage: "trace", ok: false, detail: "trace has no steps" };
@@ -136,7 +139,7 @@ function stageShape(stage: string, output: Record<string, unknown>): string | un
 
 function gapArtifactFinding(root: string): E2EFinding {
   try {
-    const gaps = parseGapReport(JSON.parse(readFileSync(join(root, "gaps.json"), "utf8")) as unknown);
+    const gaps = parseGapReport(JSON.parse(readHostFile(root, "gaps.json")) as unknown);
     if (gaps.gaps.length < 1) return { stage: "gap artifact", ok: false, detail: "gaps.json has no gaps" };
     return { stage: "gap artifact", ok: true, detail: `gaps.json has ${gaps.gaps.length} gaps` };
   } catch (error) {
@@ -146,7 +149,7 @@ function gapArtifactFinding(root: string): E2EFinding {
 
 function patchArtifactFinding(root: string): E2EFinding {
   try {
-    parsePatchFile(JSON.parse(readFileSync(join(root, "patch.json"), "utf8")) as unknown);
+    parsePatchFile(JSON.parse(readHostFile(root, "patch.json")) as unknown);
     return { stage: "patch artifact", ok: true, detail: "patch.json" };
   } catch (error) {
     return { stage: "patch artifact", ok: false, detail: error instanceof Error ? error.message : String(error) };
@@ -155,7 +158,7 @@ function patchArtifactFinding(root: string): E2EFinding {
 
 function reviewArtifactFinding(root: string): E2EFinding {
   try {
-    const value = JSON.parse(readFileSync(join(root, "review.json"), "utf8")) as { accept?: unknown; reason?: unknown };
+    const value = JSON.parse(readHostFile(root, "review.json")) as { accept?: unknown; reason?: unknown };
     if (typeof value.accept !== "boolean" || typeof value.reason !== "string" || value.reason.trim() === "") {
       return { stage: "review artifact", ok: false, detail: "review.json is missing accept or reason" };
     }
@@ -168,13 +171,17 @@ function reviewArtifactFinding(root: string): E2EFinding {
 function evidencePackFinding(root: string, review: StageReport | undefined): E2EFinding {
   const kept = review !== undefined && isRecord(review.output) && review.output.accept === true;
   const packPath = join(root, "evidence_pack", "pack.json");
-  const notePath = join(root, "evidence_pack", "change-note.md");
   if (!kept && !existsSync(packPath)) {
     return { stage: "evidence_pack", ok: true, detail: "candidate was not promoted; evidence_pack is absent" };
   }
   try {
-    const pack = JSON.parse(readFileSync(packPath, "utf8")) as Record<string, unknown>;
-    const note = existsSync(notePath) ? readFileSync(notePath, "utf8") : "";
+    const pack = JSON.parse(readHostFile(root, "evidence_pack/pack.json")) as Record<string, unknown>;
+    let note = "";
+    try {
+      note = readHostFile(root, "evidence_pack/change-note.md");
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+    }
     if (!isRecord(pack) || typeof pack.modelId !== "string" || pack.modelId === ""
       || typeof pack.changeNote !== "string" || pack.changeNote.trim() === ""
       || !Array.isArray(pack.traceIndex) || pack.traceIndex.length === 0
@@ -189,4 +196,8 @@ function evidencePackFinding(root: string, review: StageReport | undefined): E2E
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }

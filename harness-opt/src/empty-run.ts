@@ -1,7 +1,6 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { SandboxBoundary } from "../../src/execution/security-boundary";
-import { writeHostFile, writeRoleFile, writeRoleJson } from "./artifacts";
+import { readHostFile, writeHostFile, writeRoleFile, writeRoleJson } from "./artifacts";
 import { ensureRealDir } from "./containment";
 import { Budget } from "./budget";
 import { writeRunState } from "../bin/record";
@@ -200,10 +199,10 @@ export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult
     },
   });
   const phase = await orchestrator.step();
-  const traceReady = readFileSync(join(options.out, "traces", "t1.json"), "utf8").includes("t1");
+  const traceReady = readHostFile(options.out, "traces/t1.json").includes("t1");
   let noteReady = false;
   try {
-    noteReady = readFileSync(join(options.out, "evidence_pack", "change-note.md"), "utf8").trim() !== "";
+    noteReady = readHostFile(options.out, "evidence_pack/change-note.md").trim() !== "";
   } catch {
     noteReady = false;
   }

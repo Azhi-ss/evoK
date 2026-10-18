@@ -171,8 +171,9 @@ function resolveLink(linkPath: string, rootReal: string, rawPath: string, seen: 
 /**
  * Walk `target` one segment at a time from a real directory.
  * `..` is applied after a symlink hop, and a missing tail cannot climb back out.
- * An absolute target may pass through directories outside the run; the landed
- * path still has to finish inside it.
+ * A symlink hop that lands outside throws before later segments run.
+ * An absolute path may cross ancestors outside the run until it enters;
+ * after that, leaving throws.
  */
 function walkTarget(fromReal: string, target: string, rootReal: string, rawPath: string, seen: Set<string>): string {
   const parts = target.split(/[/\\]/).filter((part) => part.length > 0 && part !== ".");
@@ -196,6 +197,7 @@ function walkTarget(fromReal: string, target: string, rootReal: string, rawPath:
       }
       if (info.isSymbolicLink()) {
         base = resolveLink(next, rootReal, rawPath, seen);
+        if (!isInside(rootReal, base)) throw new Error(`path escapes the run root: ${rawPath}`);
         inside = true;
         continue;
       }

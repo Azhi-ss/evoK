@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const CANDIDATE = /(?:^|\/)candidates\/([^/]+)\//;
@@ -15,6 +15,10 @@ export function traceRelPath(configPath: string, taskId: string): string {
 
 /** Trace JSON files under `traces/`, including one directory per candidate. Symlinks are skipped. */
 export function listTraceFiles(tracesDir: string): string[] {
+  const rootInfo = lstatSync(tracesDir);
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+    throw new Error(`path escapes the run root: ${tracesDir}`);
+  }
   const found: string[] = [];
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

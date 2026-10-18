@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeHostFile, writeRoleJson } from "./artifacts";
+import { readHostFile, writeHostFile, writeRoleJson } from "./artifacts";
 import { ensureRealDir } from "./containment";
 import { flag } from "./args";
 import { Budget } from "./budget";
@@ -507,7 +507,7 @@ function sessionPath(root: string): string {
 
 function readSession(root: string): SavedSession | undefined {
   try {
-    return JSON.parse(readFileSync(sessionPath(root), "utf8")) as SavedSession;
+    return JSON.parse(readHostFile(root, "state/session.json")) as SavedSession;
   } catch {
     return undefined;
   }
