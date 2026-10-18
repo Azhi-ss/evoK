@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { handleSubmitGate } from "../../src/submit-gate";
 
 /**
  * Pi extension factory. Same shape as evoK `createEvokTuiMirrorExtension`:
@@ -59,11 +60,9 @@ export function createHarnessOptExtension(): (pi: Pick<ExtensionAPI, "registerCo
       },
     });
     pi.registerCommand("harnessopt_submit_gate", {
-      description: "Held-out plus TTS baseline gate. The only playground-submit seam.",
-      handler: async () => {
-        // Held-out eval (`bin/eval.ts --split heldout --gate`) and playground
-        // submit both stay inside this command. Agent roles are not given it.
-        // Live submit is unwired; a green gate still does not POST.
+      description: "Evidence gate: pinned model, held-out, traces, change note, budget, TTS, and dry-run. Live submit stays off.",
+      handler: async (args) => {
+        await handleSubmitGate(args);
       },
     });
     pi.on("session_start", async () => {

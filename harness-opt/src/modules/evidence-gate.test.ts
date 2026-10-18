@@ -12,6 +12,7 @@ const open = {
   maxSubmitsPerDay: 1,
   tokensSpent: 10,
   tokenBudget: 100,
+  dryRun: "passed" as const,
 };
 
 describe("evidence gate", () => {
@@ -25,10 +26,21 @@ describe("evidence gate", () => {
     expect(evaluateEvidenceGate(open).ok).toBe(true);
   });
 
-  test("training ids and off-list models fail closed", () => {
+  test("training ids and any id other than the pinned model fail closed", () => {
     expect(modelAllowed("deepseek-v4.1-flash")).toBe(true);
     expect(modelAllowed("grpo-deepseek")).toBe(false);
-    expect(evaluateEvidenceGate({ ...open, modelId: "gpt-private" }).ok).toBe(false);
+    expect(modelAllowed("qwen-max")).toBe(false);
+    expect(modelAllowed("qwen")).toBe(false);
+    expect(modelAllowed("deepseek-v4.1-flash-extra")).toBe(false);
+    expect(evaluateEvidenceGate({ ...open, modelId: "qwen-max" }).ok).toBe(false);
+  });
+
+  test("an unsupported dry-run is marked not-run and fails closed", () => {
+    const result = evaluateEvidenceGate({ ...open, dryRun: "unsupported" });
+    expect(result.ok).toBe(false);
+    const dry = result.checks.find((check) => check.id === "playground-submit-dry-run");
+    expect(dry?.ok).toBe(false);
+    expect(dry?.detail).toContain("not-run");
   });
 
   test("an injected evoK consult can keep the gate shut", () => {

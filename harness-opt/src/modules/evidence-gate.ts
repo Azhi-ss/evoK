@@ -1,12 +1,13 @@
-import { DEFAULT_MODEL_ALLOWLIST } from "../types";
+import { FIXED_MODEL_ID, modelIdMatchesFixed } from "../fixed-model";
+import type { DryRunStatus } from "../playground-dry-run";
 
 /**
- * Submission gate (PRD §9). Fail closed.
+ * Submission checklist (PRD §9). Fail closed.
  *
- * Held-out is read here and nowhere in the proposer. A missing held-out
- * score, a missing trace pack, or a TTS comparison that was not run all
- * refuse submission. Live submit stays off unless the caller opts in,
- * and even then the gate only *authorizes* it; the submitter performs it.
+ * Every item below has to pass together: exact fixed model id, held-out
+ * floor, complete trace pack, change note, TTS matched-budget, token budget,
+ * daily submit quota, and `playground submit --dry-run`. An unsupported
+ * dry-run is marked not-run and fails closed. This function does not submit.
  *
  * evoK's contest auto-submit gates are a separate consult. Pass them in
  * via `consultEvok` when the caller wants that extra fail-closed check.
@@ -17,7 +18,8 @@ export type TtsStatus = "passed" | "not-run" | "failed";
 
 export interface EvidenceGateInput {
   readonly modelId: string;
-  readonly allowlist?: readonly string[];
+  /** Exact id from `fixed-model.json`. Prefix families are not accepted. */
+  readonly fixedModelId?: string;
   readonly heldOutScore: number | null;
   readonly heldOutFloor: number;
   readonly tracePackComplete: boolean;
@@ -27,6 +29,8 @@ export interface EvidenceGateInput {
   readonly maxSubmitsPerDay: number;
   readonly tokensSpent: number;
   readonly tokenBudget: number;
+  /** `unsupported` is an explicit not-run and does not pass. */
+  readonly dryRun: DryRunStatus;
   readonly consultEvok?: () => { readonly ok: boolean; readonly refusedGateIds: readonly string[] };
 }
 
@@ -43,24 +47,21 @@ export interface EvidenceGateResult {
 
 const TRAINING_MODEL = /sft|grpo|rlhf|finetune|fine-tune|\blora\b/i;
 
-export function modelAllowed(modelId: string, allowlist: readonly string[] = DEFAULT_MODEL_ALLOWLIST): boolean {
+export function modelAllowed(modelId: string, fixedModelId: string = FIXED_MODEL_ID): boolean {
   if (TRAINING_MODEL.test(modelId)) return false;
-  const normalized = modelId.toLowerCase();
-  return allowlist.some((entry) => {
-    const prefix = entry.toLowerCase();
-    return normalized === prefix || normalized.startsWith(`${prefix}-`) || normalized.startsWith(`${prefix}/`);
-  });
+  return modelIdMatchesFixed(modelId, fixedModelId);
 }
 
 export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResult {
-  const allowlist = input.allowlist ?? DEFAULT_MODEL_ALLOWLIST;
+  const fixedModelId = input.fixedModelId ?? FIXED_MODEL_ID;
+  const modelOk = modelAllowed(input.modelId, fixedModelId);
   const checks: EvidenceCheck[] = [
     check(
       "model",
-      modelAllowed(input.modelId, allowlist),
-      modelAllowed(input.modelId, allowlist)
-        ? `model ${input.modelId} is on the allowlist`
-        : `model ${input.modelId} is missing from the allowlist or is a training id`,
+      modelOk,
+      modelOk
+        ? `model ${input.modelId} matches the pinned id`
+        : `model ${input.modelId} is not the pinned id ${fixedModelId}`,
     ),
     check(
       "held-out",
@@ -87,6 +88,15 @@ export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResu
       "budget",
       input.tokensSpent <= input.tokenBudget,
       `tokens ${input.tokensSpent} / budget ${input.tokenBudget}`,
+    ),
+    check(
+      "playground-submit-dry-run",
+      input.dryRun === "passed",
+      input.dryRun === "passed"
+        ? "playground submit --dry-run succeeded"
+        : input.dryRun === "unsupported"
+          ? "not-run: playground submit --dry-run is unsupported; fail-closed"
+          : "playground submit --dry-run failed",
     ),
   ];
   if (input.consultEvok) {

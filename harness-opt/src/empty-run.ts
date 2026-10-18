@@ -4,10 +4,13 @@ import { SandboxBoundary } from "../../src/execution/security-boundary";
 import { writeRoleFile, writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
 import { writeRunState } from "../bin/record";
+import { FIXED_MODEL_ID } from "./fixed-model";
 import { Lineage, Node } from "./lineage";
 import { HeldOutVault } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
-import { Orchestrator, type Proposal, type Roles } from "./orchestrator";
+import { Orchestrator, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
+import type { DryRunStatus } from "./playground-dry-run";
+import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
 import { emptyParts, type HarnessConfig, type TaskRef } from "./types";
 
 export interface EmptyRunOptions {
@@ -17,6 +20,8 @@ export interface EmptyRunOptions {
   readonly ttsBaseline?: number;
   readonly baseHeldout?: number;
   readonly day?: string;
+  readonly dryRun?: DryRunStatus;
+  readonly milestoneHeldOut?: Readonly<Record<string, number>>;
   readonly devTasks?: readonly TaskRef[];
   readonly heldOutTasks?: readonly TaskRef[];
   readonly roles?: Partial<Roles>;
@@ -25,11 +30,12 @@ export interface EmptyRunOptions {
 export interface EmptyRunResult {
   readonly bestId: string;
   readonly submit: boolean;
-  readonly heldout: number;
+  readonly heldout: number | null;
   readonly selector: string;
   readonly phase: string;
   readonly childStatus: string;
   readonly liveSubmitCalled: boolean;
+  readonly failedChecks: readonly string[];
 }
 
 const SECRET_HELD_OUT = "sealed-held-out-body";
@@ -42,7 +48,11 @@ const SECRET_HELD_OUT = "sealed-held-out-body";
 export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
   mkdirSync(options.out, { recursive: true });
   const state = join(options.out, "state");
-  const modelId = options.modelId ?? "deepseek-v4.1-flash";
+  const modelId = options.modelId ?? FIXED_MODEL_ID;
+  const milestoneHeldOut = options.milestoneHeldOut ?? {
+    "candidates/base/config.json": 0.5,
+    "candidates/c1/config.json": 0.55,
+  };
   const base: HarnessConfig = {
     id: "base",
     modelId,
@@ -78,16 +88,17 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
   let liveSubmitCalled = false;
   const fixture: Roles = {
     gapFinder: () => {
-      const gaps = {
+      const gaps = parseGapReport({
         gaps: [{
           id: "g1",
           failureClass: "idle-loop",
           summary: "the loop rereads the task and never writes an answer",
           traceIds: ["seed"],
         }],
-      };
+      });
       writeRoleJson(options.out, "gap-finder", "gaps.json", gaps);
-      return gaps;
+      writeRoleFile(options.out, "gap-finder", "gaps.md", renderGapsMarkdown(gaps));
+      return gaps as unknown as Record<string, unknown>;
     },
     innovator: (_parent, gaps, tried) => {
       const blob = JSON.stringify({ gaps, tried });
@@ -103,8 +114,16 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
         search: { samples: 1, selfChecks: 0, retries: 1 },
       };
       writeRoleJson(options.out, "innovator", "candidates/c1/config.json", config);
-      const proposal: Proposal = {
+      const patch = parsePatchFile({
+        part: "agent-loop",
+        motivation: "stop the idle reread by capping steps and requiring a write",
+        expectedFailureClass: "idle-loop",
         summary: "cap idle reread and require a write",
+        changes: { maxSteps: 4, requireWrite: true },
+      });
+      writeRoleJson(options.out, "innovator", "patch.json", patch);
+      const proposal: Proposal = {
+        summary: patch.summary,
         configPath: "candidates/c1/config.json",
         tokens: 30,
       };
@@ -114,24 +133,85 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
       const abs = boundary.assertPath(configPath, "read");
       const config = JSON.parse(readFileSync(abs, "utf8")) as { fixtureScore?: number };
       const score = config.fixtureScore ?? 0.5;
+      writeRoleJson(options.out, "runner", "traces/t1.json", {
+        taskId: "t1",
+        reward: score,
+        tokens: 30,
+        failed: false,
+        labels: [],
+      });
       return subset === "dev_full" ? [score, score] : [score];
     },
-    reviewer: (child, parent) => {
-      const accept = (child.devMean ?? 0) >= (parent.devMean ?? 0) - 0.01;
-      const verdict = { accept, reason: accept ? "keep-better" : "below parent" };
+    reviewer: (input: ReviewInput) => {
+      const accept = !input.devRoseHeldOutFell
+        && (input.child.devMean ?? 0) >= (input.parent.devMean ?? 0) - 0.01;
+      const verdict = {
+        accept,
+        reason: input.devRoseHeldOutFell
+          ? "dev rose and held-out fell relative to the parent"
+          : accept ? "keep-better" : "below parent",
+      };
       writeRoleJson(options.out, "reviewer-gate", "review.json", verdict);
       return verdict;
     },
+    reportWriter: ({ child }): EvidencePack => {
+      const pack: EvidencePack = {
+        modelId,
+        changeNote: child.patchSummary || "cap the idle reread",
+        traceIndex: ["t1"],
+        devScore: child.devMean ?? 0,
+        configPath: child.configPath,
+      };
+      writeRoleJson(options.out, "report-writer", "evidence_pack/pack.json", pack);
+      writeRoleFile(options.out, "report-writer", "evidence_pack/change-note.md", pack.changeNote);
+      return pack;
+    },
+    submitter: (): SubmitReceipt => {
+      liveSubmitCalled = false;
+      const receipt: SubmitReceipt = {
+        ok: true,
+        submitted: false,
+        mode: "dry-run",
+        detail: "evidence gate is green; live playground submit is off",
+      };
+      writeRoleJson(options.out, "submitter", "submit-receipt.json", receipt);
+      return receipt;
+    },
   };
   const roles: Roles = { ...fixture, ...options.roles };
-  const orchestrator = new Orchestrator(lineage, roles, new GreedySelector(), new Budget(), { ids: () => "c1" });
+  const orchestrator = new Orchestrator(lineage, roles, new GreedySelector(), new Budget(), {
+    ids: () => "c1",
+    heldOutAtMilestone: (configPath) => {
+      const score = milestoneHeldOut[configPath];
+      if (typeof score !== "number") throw new Error(`held-out milestone missing for ${configPath}`);
+      return score;
+    },
+  });
   const phase = orchestrator.step();
-  const gate = orchestrator.submitGate(
-    () => options.heldout ?? 0.1,
-    options.ttsBaseline ?? 0.5,
-    options.baseHeldout ?? 0.4,
-    options.day ?? "2026-10-18",
-  );
+  const traceReady = readFileSync(join(options.out, "traces", "t1.json"), "utf8").includes("t1");
+  let noteReady = false;
+  try {
+    noteReady = readFileSync(join(options.out, "evidence_pack", "change-note.md"), "utf8").trim() !== "";
+  } catch {
+    noteReady = false;
+  }
+  const gate = orchestrator.submitGate({
+    heldoutEval: () => options.heldout ?? 0.1,
+    ttsBaseline: options.ttsBaseline ?? 0.5,
+    baseHeldout: options.baseHeldout ?? 0.4,
+    day: options.day ?? "2026-10-18",
+    modelId,
+    tracePackComplete: traceReady,
+    changeNotePresent: noteReady,
+    tokenBudget: 10_000,
+    tokensSpent: orchestrator.budget.usedTokens,
+    dryRun: () => ({
+      status: options.dryRun ?? "unsupported",
+      detail: options.dryRun === "passed"
+        ? "playground submit --dry-run succeeded"
+        : "not-run: playground submit --dry-run is unsupported; fail-closed",
+    }),
+  });
   const child = lineage.nodes.get("c1");
   writeRunState(state, {
     phase,
@@ -142,6 +222,7 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
     childStatus: child?.status ?? "missing",
     liveSubmitCalled,
     heldOutSealed: heldOut.size,
+    failed: gate.checks.filter((check) => !check.ok).map((check) => check.id),
   });
   writeRoleFile(options.out, "orchestrator", "state/schedule.log", phase);
   return {
@@ -152,6 +233,7 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
     phase,
     childStatus: child?.status ?? "missing",
     liveSubmitCalled,
+    failedChecks: gate.checks.filter((check) => !check.ok).map((check) => check.id),
   };
 }
 

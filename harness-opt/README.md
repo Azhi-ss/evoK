@@ -48,18 +48,32 @@ harness-opt/
 | 选择器 | `src/modules/selector.ts`，默认 `GreedySelector` |
 | 证据门控提交 | `Orchestrator.submitGate`（BaselineGate）+ `src/modules/evidence-gate.ts` + `src/adapters/evok-submission.ts` |
 
-Orchestrator（`src/orchestrator.ts`）是确定性代码，工序跟 `design/orchestrator.py` 一致：
+Orchestrator（`src/orchestrator.ts`）是确定性代码，工序跟 `design/orchestrator.py` 一致，并补上 PRD 的晋升守门和证据门：
 
-`select → gap → propose → dev_small（够格才 dev_full）→ review → backprop`
+`select → gap → propose → dev_small（够格才 dev_full）→ review（含 held-out 回归）→ backprop →（accept 才）report writer`
 
-Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否决。重复的补丁摘要直接丢掉。held-out 只在 `submitGate` 里经回调读取，不进 Gap Finder / Innovator。
+Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否决。重复的补丁摘要直接丢掉。评测器在里程碑读 held-out：候选 dev 上涨且 held-out 相对父节点下跌，就拒绝晋升。没读到 held-out 也拒绝晋升。这个读数不进 Gap Finder / Innovator，也不写进节点 JSON。
+
+## 证据门
+
+`Orchestrator.submitGate` 调用 `evaluateEvidenceGate`，再与另外三道相与。任一项不过就 fail-closed，不调用 live playground submit：
+
+1. 固定模型 ID 与 `fixed-model.json` 里的 `deepseek-v4.1-flash` 精确一致（`qwen-*` 这类前缀过不了）
+2. held-out 不低于基线 + Δ
+3. 存在完整 trace 包
+4. 存在变更说明
+5. TTS matched-budget 对照已跑且 held-out 不低于 TTS 基线（未跑则禁止自动交）
+6. token 预算与当日提交次数未超
+7. `playground submit --dry-run` 成功；CLI 不支持时显式标 `not-run` 并失败关闭
+
+`harnessopt_submit_gate` 的 handler 会跑这条全链路。门全绿时 Submitter stub 写回执，`submitted` 仍是 false。
 
 主会话三步对应扩展命令：`harnessopt_select` → `subagent({workflow:'harnessopt.round'})` → `harnessopt_record`。`subagent` 调用本身还没接（见下面的 TODO）。`harnessopt_submit_gate` 是唯一允许读 held-out、也是唯一允许碰 playground submit 的入口；这一轮 live submit 不接线。
 
 三条硬线：
 
 1. held-out 只有 `bin/eval.ts --split heldout --gate` 能读，而且只有提交门会带 `--gate`。角色工具列表里没有 bash。
-2. playground submit 只留在 `harnessopt_submit_gate` 里面，当前实现不发起请求。
+2. playground submit 只留在 `harnessopt_submit_gate` 里面。支持时只跑 `--dry-run`；不支持则标未跑并失败关闭。live 请求不发。
 3. 命名工作流的 `usageBudget.tokens.hard` 是 200000。
 
 ## 选择器
@@ -103,7 +117,7 @@ pi-subagents **没有安装，也没有被 import**。`UnverifiedPiSubagentsDele
 bun harness-opt/src/cli.ts empty --out /tmp/harness-opt-empty
 ```
 
-空跑种一个 dev 均值 0.4 的根节点，贪心扩展出一个 0.8 的子节点，小子集过线后跑完整 dev，Reviewer 收下。随后 `submitGate` 用 0.1 的 held-out 对 0.5 的 TTS 基线，`submit` 为 false。不调用模型，不读 held-out 题面进 proposer。
+空跑种一个 dev 均值 0.4 的根节点，贪心扩展出一个 0.8 的子节点。里程碑 held-out 从 0.5 到 0.55，没有回归，Reviewer 收下，并写出 trace 包和变更说明。随后提交门用 0.1 的 held-out 对 0.5 的 TTS 基线，加上本机没有 playground CLI 时的 dry-run（标 not-run），`submit` 为 false。不调用模型，不把 held-out 题面交给 proposer。
 
 `run --dev <题库目录>` 会按 `split` 切开 dev / held-out，held-out 只留在密封库里，执行器仍是夹具分数。
 

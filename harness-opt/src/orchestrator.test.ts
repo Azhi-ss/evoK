@@ -3,9 +3,26 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Budget } from "./budget";
+import { FIXED_MODEL_ID } from "./fixed-model";
 import { Lineage, Node } from "./lineage";
 import { GreedySelector } from "./modules/selector";
-import { Orchestrator, Phase, type Roles } from "./orchestrator";
+import { Orchestrator, Phase, type Roles, type SubmitGateRequest } from "./orchestrator";
+
+function gateRequest(heldout: number, extra: Partial<SubmitGateRequest> = {}): SubmitGateRequest {
+  return {
+    heldoutEval: () => heldout,
+    ttsBaseline: 0.5,
+    baseHeldout: 0.4,
+    day: "2026-10-18",
+    modelId: FIXED_MODEL_ID,
+    tracePackComplete: true,
+    changeNotePresent: true,
+    tokenBudget: 1000,
+    tokensSpent: 10,
+    dryRun: () => ({ status: "passed", detail: "playground submit --dry-run succeeded" }),
+    ...extra,
+  };
+}
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), "harness-opt-orch-"));
@@ -20,6 +37,9 @@ function machine(scores: number[], options?: {
   readonly patience?: number;
   readonly budget?: Budget;
   readonly onInnovator?: (gaps: Record<string, unknown>, tried: readonly string[]) => void;
+  readonly heldOut?: (configPath: string) => number;
+  readonly skipMilestone?: boolean;
+  readonly onGap?: (parent: Node) => void;
 }) {
   const lin = new Lineage(dir());
   lin.put(new Node({
@@ -33,7 +53,8 @@ function machine(scores: number[], options?: {
   const calls: string[] = [];
   let innovatorCalls = 0;
   const roles: Roles = {
-    gapFinder: () => {
+    gapFinder: (parent) => {
+      options?.onGap?.(parent);
       if (options?.throwAt === "gap") throw new Error("gap failed");
       return options?.gap ?? { gaps: [{ id: "g1", summary: "idle" }] };
     },
@@ -53,6 +74,7 @@ function machine(scores: number[], options?: {
   const orchestrator = new Orchestrator(lin, roles, new GreedySelector(), options?.budget ?? new Budget(), {
     patience: options?.patience ?? 15,
     ids: () => "child",
+    ...(options?.skipMilestone ? {} : { heldOutAtMilestone: options?.heldOut ?? (() => 0.5) }),
   });
   return { lin, orchestrator, calls, innovatorCalls: () => innovatorCalls };
 }
@@ -91,15 +113,46 @@ describe("orchestrator", () => {
     expect(lin.events().some((event) => event.kind === "dup_patch")).toBe(true);
   });
 
-  test("submit gate compares held-out with the TTS baseline and does not spend the daily quota", () => {
+  test("submit gate ANDs the evidence checklist, held-out, TTS, and dry-run", () => {
     const { lin, orchestrator } = machine([0.2]);
     orchestrator.step();
-    const gate = orchestrator.submitGate(() => 0.2, 0.5, 0.4, "2026-10-18");
-    expect(gate).toEqual({ node: "root", heldout: 0.2, submit: false });
+    const low = orchestrator.submitGate(gateRequest(0.2));
+    expect(low.submit).toBe(false);
+    expect(low.heldout).toBe(0.2);
+    expect(low.checks.map((check) => check.id)).toEqual([
+      "model", "held-out", "trace-pack", "change-note", "tts", "quota", "budget", "playground-submit-dry-run",
+    ]);
     expect(orchestrator.budget.canSubmit("2026-10-18")).toBe(true);
     expect(lin.events().some((event) => event.kind === "gate" && event.ok === false)).toBe(true);
-    const open = orchestrator.submitGate(() => 0.8, 0.5, 0.4, "2026-10-18");
+    const open = orchestrator.submitGate(gateRequest(0.8));
     expect(open.submit).toBe(true);
+    expect(open.checks.every((check) => check.ok)).toBe(true);
+    const prefix = orchestrator.submitGate(gateRequest(0.8, { modelId: "qwen-max" }));
+    expect(prefix.submit).toBe(false);
+    expect(prefix.checks.find((check) => check.id === "model")?.ok).toBe(false);
+    const unread = orchestrator.submitGate(gateRequest(0.8, { tts: "not-run" }));
+    expect(unread.submit).toBe(false);
+    const noDry = orchestrator.submitGate(gateRequest(0.8, {
+      dryRun: () => ({ status: "unsupported", detail: "not-run: playground submit --dry-run is unsupported" }),
+    }));
+    expect(noDry.submit).toBe(false);
+    expect(noDry.checks.find((check) => check.id === "playground-submit-dry-run")?.detail).toContain("not-run");
+    expect(orchestrator.budget.canSubmit("2026-10-18")).toBe(true);
+  });
+
+  test("a dev rise with a held-out drop is refused and stays out of the innovator", () => {
+    let parentKeys: string[] = [];
+    const run = machine([0.9], {
+      heldOut: (configPath) => configPath.endsWith("child/config.json") ? 0.2 : 0.8,
+      onGap: (parent) => {
+        parentKeys = Object.keys(parent.toJSON());
+      },
+    });
+    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(run.lin.nodes.get("child")?.status).toBe("rejected");
+    expect(run.lin.events().some((event) => event.kind === "review" && event.heldOutRegression === true)).toBe(true);
+    expect(parentKeys).not.toContain("heldOut");
+    expect(run.lin.best().id).toBe("root");
   });
 
   test("plateau, budget, and a gap-finder failure stay inside the state machine", () => {

@@ -1,17 +1,22 @@
 import { randomBytes } from "node:crypto";
 import { Budget } from "./budget";
 import { Lineage, Node } from "./lineage";
+import { evaluateEvidenceGate, type EvidenceCheck, type TtsStatus } from "./modules/evidence-gate";
 import { assertNoHeldOutLeak } from "./modules/proposer";
+import { probePlaygroundDryRun, type DryRunStatus } from "./playground-dry-run";
 import { backprop, type Selector } from "./modules/selector";
 
 /**
  * Deterministic loop. Port of `design/orchestrator.py` `Orchestrator`.
- * No model call lives here. Held-out is read only inside `submitGate`.
+ * No model call lives here.
+ *
+ * Held-out is read by the evaluator at two places only: the promotion
+ * milestone inside `step`, and `submitGate`. The numbers are not placed on
+ * the node, and they are not passed to Gap Finder or Innovator.
  *
  * Keep-better uses a noise leeway. Staged eval runs `dev_small` first and
  * `dev_full` only when the small mean clears `stagedThreshold * parent`.
- * `PairedLcbKeep` and `SuccessiveHalvingStage` are the swap points; they
- * throw until the selector note's P0 experiments exist.
+ * A dev rise whose held-out fell versus the parent is refused (PRD §5.2).
  */
 
 export const Phase = {
@@ -38,11 +43,44 @@ export interface ReviewVerdict {
   readonly reason: string;
 }
 
+/** Scores the evaluator already read. Reviewer does not open `sealed/`. */
+export interface MilestoneHeldOut {
+  readonly child: number;
+  readonly parent: number;
+}
+
+export interface ReviewInput {
+  readonly child: Node;
+  readonly parent: Node;
+  readonly heldOut: MilestoneHeldOut | null;
+  /** True when dev rose and held-out fell, or when the milestone read failed. */
+  readonly devRoseHeldOutFell: boolean;
+}
+
+export interface EvidencePack {
+  readonly modelId: string;
+  readonly changeNote: string;
+  readonly traceIndex: readonly string[];
+  readonly devScore: number;
+  readonly configPath: string;
+}
+
+export interface SubmitReceipt {
+  readonly ok: boolean;
+  readonly submitted: boolean;
+  readonly mode: "blocked" | "dry-run";
+  readonly detail: string;
+}
+
 export interface Roles {
   gapFinder: (parent: Node, lin: Lineage) => Record<string, unknown>;
   innovator: (parent: Node, gaps: Record<string, unknown>, tried: readonly string[]) => Proposal;
   runner: (configPath: string, subset: "dev_small" | "dev_full") => number[];
-  reviewer: (child: Node, parent: Node) => ReviewVerdict;
+  reviewer: (input: ReviewInput) => ReviewVerdict;
+  /** Called after a dev+held-out accept. Stub may write `evidence_pack/`. */
+  reportWriter?: (input: { readonly child: Node; readonly parent: Node }) => EvidencePack;
+  /** Called only after the evidence gate is green. Live submit stays off. */
+  submitter?: (input: { readonly pack: EvidencePack | null; readonly gateGreen: boolean }) => SubmitReceipt;
 }
 
 export interface OrchestratorOptions {
@@ -50,12 +88,37 @@ export interface OrchestratorOptions {
   readonly stagedThreshold?: number;
   readonly patience?: number;
   readonly ids?: () => string;
+  /**
+   * Evaluator read for the promotion milestone. Missing or throwing is
+   * fail-closed: the child is not promoted. Not visible to Gap Finder.
+   */
+  readonly heldOutAtMilestone?: (configPath: string) => number;
+}
+
+export interface SubmitGateRequest {
+  readonly heldoutEval: (configPath: string) => number;
+  readonly ttsBaseline: number;
+  readonly baseHeldout: number;
+  readonly day: string;
+  readonly minDelta?: number;
+  readonly modelId: string;
+  readonly tracePackComplete: boolean;
+  readonly changeNotePresent: boolean;
+  readonly tokenBudget: number;
+  readonly tokensSpent?: number;
+  readonly submitCountToday?: number;
+  readonly maxSubmitsPerDay?: number;
+  /** Omit to derive passed/failed from the numeric TTS comparison. `not-run` always fails. */
+  readonly tts?: TtsStatus;
+  readonly dryRun?: () => { readonly status: DryRunStatus; readonly detail: string };
+  readonly consultEvok?: () => { readonly ok: boolean; readonly refusedGateIds: readonly string[] };
 }
 
 export interface SubmitGateResult {
   readonly node: string;
-  readonly heldout: number;
+  readonly heldout: number | null;
   readonly submit: boolean;
+  readonly checks: readonly EvidenceCheck[];
 }
 
 export class Orchestrator {
@@ -65,6 +128,8 @@ export class Orchestrator {
   sinceImprove = 0;
   phase: Phase = Phase.SELECT;
   private readonly ids: () => string;
+  private readonly heldOutAtMilestone: ((configPath: string) => number) | undefined;
+  lastPack: EvidencePack | null = null;
 
   constructor(
     readonly lin: Lineage,
@@ -77,6 +142,7 @@ export class Orchestrator {
     this.stagedThreshold = options.stagedThreshold ?? 0.9;
     this.patience = options.patience ?? 15;
     this.ids = options.ids ?? (() => randomBytes(4).toString("hex"));
+    this.heldOutAtMilestone = options.heldOutAtMilestone;
   }
 
   step(): Phase {
@@ -130,18 +196,33 @@ export class Orchestrator {
       }
       child.status = "evaluated";
       this.lin.put(child);
-      const verdict = this.roles.reviewer(child, parent);
       const childMean = child.devMean ?? 0;
-      const keep = verdict.accept && childMean >= (parent.devMean ?? 0) - this.noiseLeeway;
+      const milestone = readMilestone(this.heldOutAtMilestone, child.configPath, parent.configPath);
+      const devRose = parent.devMean !== null && childMean > parent.devMean;
+      const heldOutFell = milestone !== null && milestone.child < milestone.parent;
+      const devRoseHeldOutFell = milestone === null || (devRose && heldOutFell);
+      const verdict = this.roles.reviewer({ child, parent, heldOut: milestone, devRoseHeldOutFell });
+      const keep = verdict.accept
+        && childMean >= (parent.devMean ?? 0) - this.noiseLeeway
+        && !devRoseHeldOutFell;
+      const reason = devRoseHeldOutFell
+        ? milestone === null
+          ? "held-out milestone was not read; promotion refused"
+          : "dev rose and held-out fell relative to the parent; promotion refused"
+        : verdict.reason;
       if (!keep) {
         child.status = "rejected";
         this.lin.put(child);
+      } else {
+        const pack = this.roles.reportWriter?.({ child, parent }) ?? null;
+        this.lastPack = pack;
       }
       this.lin.log("review", {
         node: child.id,
         accept: child.status === "evaluated",
         dev: child.devMean,
-        reason: verdict.reason,
+        heldOutRegression: devRoseHeldOutFell,
+        reason,
       });
       backprop(this.lin, child, childMean);
       const best = this.lin.best();
@@ -168,22 +249,91 @@ export class Orchestrator {
   }
 
   /**
-   * Held-out + matched-budget TTS baseline + daily quota.
-   * This is the only method that receives a held-out callback.
+   * PRD §9, all required, any miss fails closed:
+   * evaluateEvidenceGate (pinned model, trace pack, change note, budget, quota,
+   * held-out floor, TTS status, dry-run) AND the held-out floor AND the
+   * matched-budget TTS comparison AND a successful dry-run.
+   * Submitter runs only when that conjunction is true, and it still does not
+   * live-post.
    */
-  submitGate(
-    heldoutEval: (configPath: string) => number,
-    ttsBaseline: number,
-    baseHeldout: number,
-    day: string,
-    minDelta = 0,
-  ): SubmitGateResult {
+  submitGate(request: SubmitGateRequest): SubmitGateResult {
     const best = this.lin.best();
-    const heldout = heldoutEval(best.configPath);
-    const submit = heldout >= baseHeldout + minDelta && heldout >= ttsBaseline && this.budget.canSubmit(day);
-    this.lin.log("gate", { node: best.id, heldout, tts: ttsBaseline, base: baseHeldout, ok: submit });
-    return { node: best.id, heldout, submit };
+    const minDelta = request.minDelta ?? 0;
+    let heldout: number | null = null;
+    try {
+      const score = request.heldoutEval(best.configPath);
+      heldout = Number.isFinite(score) ? score : null;
+    } catch {
+      heldout = null;
+    }
+    const dry = (request.dryRun ?? probePlaygroundDryRun)();
+    const compared = heldout !== null && Number.isFinite(request.ttsBaseline);
+    const ttsStatus: TtsStatus = request.tts ?? (compared
+      ? (heldout as number) >= request.ttsBaseline ? "passed" : "failed"
+      : "not-run");
+    const submitCountToday = request.submitCountToday ?? this.budget.submits[request.day] ?? 0;
+    const maxSubmitsPerDay = request.maxSubmitsPerDay ?? this.budget.maxOnlineSubmitsPerDay;
+    const tokensSpent = request.tokensSpent ?? this.budget.usedTokens;
+    const evidence = evaluateEvidenceGate({
+      modelId: request.modelId,
+      heldOutScore: heldout,
+      heldOutFloor: request.baseHeldout + minDelta,
+      tracePackComplete: request.tracePackComplete,
+      changeNotePresent: request.changeNotePresent,
+      tts: ttsStatus,
+      submitCountToday,
+      maxSubmitsPerDay,
+      tokensSpent,
+      tokenBudget: request.tokenBudget,
+      dryRun: dry.status,
+      ...(request.consultEvok ? { consultEvok: request.consultEvok } : {}),
+    });
+    const heldOutGate = heldout !== null && heldout >= request.baseHeldout + minDelta;
+    const ttsGate = ttsStatus === "passed" && heldout !== null && heldout >= request.ttsBaseline;
+    const dryGate = dry.status === "passed";
+    const budgetGate = tokensSpent <= request.tokenBudget && this.budget.canSubmit(request.day);
+    const submit = evidence.ok && heldOutGate && ttsGate && dryGate && budgetGate;
+    if (submit) {
+      const receipt = (this.roles.submitter ?? defaultSubmitter)({ pack: this.lastPack, gateGreen: true });
+      if (receipt.submitted) {
+        throw new Error("live playground submit is off");
+      }
+    }
+    this.lin.log("gate", {
+      node: best.id,
+      heldout,
+      tts: request.ttsBaseline,
+      base: request.baseHeldout,
+      ok: submit,
+      failed: evidence.checks.filter((item) => !item.ok).map((item) => item.id),
+    });
+    return { node: best.id, heldout, submit, checks: evidence.checks };
   }
+}
+
+function readMilestone(
+  read: ((configPath: string) => number) | undefined,
+  childPath: string,
+  parentPath: string,
+): MilestoneHeldOut | null {
+  if (!read) return null;
+  try {
+    const child = read(childPath);
+    const parent = read(parentPath);
+    if (!Number.isFinite(child) || !Number.isFinite(parent)) return null;
+    return { child, parent };
+  } catch {
+    return null;
+  }
+}
+
+function defaultSubmitter(_input: { readonly pack: EvidencePack | null; readonly gateGreen: boolean }): SubmitReceipt {
+  return {
+    ok: true,
+    submitted: false,
+    mode: "dry-run",
+    detail: "evidence gate is green; live playground submit is off",
+  };
 }
 
 export function assertScores(scores: readonly number[]): number[] {

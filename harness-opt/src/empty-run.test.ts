@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertRoleWrite } from "./artifacts";
+import { assertRoleRead, assertRoleTool, assertRoleWrite } from "./artifacts";
 import { main } from "./cli";
 import { runEmpty } from "./empty-run";
 import { UnverifiedPiSubagentsDelegator } from "./pi/subagents-port";
@@ -28,6 +28,18 @@ describe("empty round", () => {
     expect(child).toContain("\"stage\": \"full\"");
     expect(readFileSync(join(dir, "state", "lineage.jsonl"), "utf8")).toContain("\"kind\":\"review\"");
     expect(readFileSync(join(dir, "gaps.json"), "utf8")).toContain("idle-loop");
+    const gapsMd = readFileSync(join(dir, "gaps.md"), "utf8");
+    for (const field of ["id:", "failureClass:", "summary:", "traceIds:"]) {
+      expect(gapsMd).toContain(field);
+    }
+    const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as Record<string, unknown>;
+    expect(patch).toMatchObject({
+      part: "agent-loop",
+      expectedFailureClass: "idle-loop",
+    });
+    expect(typeof patch.motivation).toBe("string");
+    expect(result.failedChecks).toEqual(expect.arrayContaining(["held-out", "tts", "playground-submit-dry-run"]));
+    expect(readFileSync(join(dir, "evidence_pack", "change-note.md"), "utf8").trim().length).toBeGreaterThan(0);
   });
 
   test("reviewer veto rejects the child and does not submit", () => {
@@ -42,15 +54,29 @@ describe("empty round", () => {
     expect(result.bestId).toBe("base");
   });
 
-  test("a held-out score above the TTS baseline still does not call playground submit", () => {
-    const result = runEmpty({
+  test("a green numeric gate still does not live-submit, and a missing dry-run stays shut", () => {
+    const blocked = runEmpty({
       out: out(),
       heldout: 0.9,
       ttsBaseline: 0.5,
       baseHeldout: 0.4,
     });
-    expect(result.submit).toBe(true);
-    expect(result.liveSubmitCalled).toBe(false);
+    expect(blocked.submit).toBe(false);
+    expect(blocked.failedChecks).toContain("playground-submit-dry-run");
+    expect(blocked.liveSubmitCalled).toBe(false);
+    const greenDir = out();
+    const opened = runEmpty({
+      out: greenDir,
+      heldout: 0.9,
+      ttsBaseline: 0.5,
+      baseHeldout: 0.4,
+      dryRun: "passed",
+    });
+    expect(opened.submit).toBe(true);
+    expect(opened.liveSubmitCalled).toBe(false);
+    expect(opened.failedChecks).toEqual([]);
+    const receipt = JSON.parse(readFileSync(join(greenDir, "submit-receipt.json"), "utf8")) as { submitted: boolean };
+    expect(receipt.submitted).toBe(false);
   });
 
   test("pi-subagents delegation stays an unverified stub", () => {
@@ -61,6 +87,14 @@ describe("empty round", () => {
     expect(() => assertRoleWrite("innovator", "gaps.json")).toThrow(/cannot write/);
     expect(() => assertRoleWrite("runner", "traces/t1.json")).not.toThrow();
     expect(() => assertRoleWrite("innovator", "candidates/c1/config.json")).not.toThrow();
+    expect(() => assertRoleWrite("innovator", "sealed/heldout-score.json")).toThrow(/held-out/);
+    expect(() => assertRoleRead("innovator", "sealed/heldout-score.json")).toThrow(/held-out/);
+    expect(() => assertRoleRead("gap-finder", "review.json")).toThrow(/cannot read/);
+    expect(() => assertRoleRead("gap-finder", "traces/t1.json")).not.toThrow();
+    expect(() => assertRoleTool("innovator", "bash")).toThrow(/cannot use tool/);
+    expect(() => assertRoleTool("reviewer-gate", "contact_supervisor")).toThrow(/cannot use tool/);
+    expect(() => assertRoleTool("gap-finder", "write")).toThrow(/cannot use tool/);
+    expect(() => assertRoleTool("reviewer-gate", "read")).not.toThrow();
   });
 
   test("cli empty run completes with submit false", () => {

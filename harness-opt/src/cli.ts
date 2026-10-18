@@ -30,6 +30,7 @@ export function main(argv: readonly string[]): number {
     phase: result.phase,
     childStatus: result.childStatus,
     liveSubmitCalled: result.liveSubmitCalled,
+    failedChecks: result.failedChecks,
   }, null, 2)}\n`);
   return 0;
 }
