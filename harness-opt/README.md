@@ -87,7 +87,13 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 每一轮写 `reports/round-N/<stage>.json`：`round`、`stage`、`output`、`explanation`。阶段是 select、gap、propose、run、review、backprop、gate。
 
-`reviewRoundE2E` 在 step 末尾检查这七份报告的 `stage`、非空 `explanation` 和非空 `output`，并按阶段核对内容（gap 要能被 `parseGapReport` 接受且至少一条，propose 要有 summary 和 configPath，review 要有布尔 `accept` 和非空 `reason`）。产物同样用 `parseGapReport` / `parsePatchFile` 校验，`{}` 不能过。候选被留下时，`evidence_pack/pack.json` 必须有 model、变更说明和 trace 索引；没被留下且目录不存在则记一笔「未晋升」。结果写 `reports/round-N/e2e.json`。缺阶段或内容不符则 E2E 失败。提交门因 dry-run、手填 held-out 或 TTS not-run 而红，本身不让 E2E 失败。
+`reviewRoundE2E` 在 step 末尾检查这七份报告的 `stage`、非空 `explanation` 和非空 `output`，并按阶段核对内容（gap 要能被 `parseGapReport` 接受且至少一条，propose 要有 summary 和 configPath，review 要有布尔 `accept` 和非空 `reason`）。产物同样用 `parseGapReport` / `parsePatchFile` 校验，`{}` 不能过。候选被留下时，`evidence_pack/pack.json` 必须有 model、变更说明和 trace 索引；没被留下且目录不存在则记一笔「未晋升」。结果写 `reports/round-N/e2e.json`。缺阶段或内容不符则 E2E 失败。gate 报告里的 `ok` 不是 true 时，e2e 的 gate 项也是 false，整份 e2e 因此不通过。dry-run、手填 held-out、TTS not-run 都会让这项为 false。
+
+## 角色守卫
+
+子代理的 read、write、edit、grep、find、ls、bash 在执行前过合约。`structured_output` 以及其它不带文件路径参数的委派框架工具直接放行，用来把角色结果交回父会话。
+
+守卫在 Pi 打开文件之前解析符号链接。Pi 自带的 read/write 不接受 `O_NOFOLLOW`，守卫也拿不到它们随后打开的那个 fd，所以检查和真正打开之间仍有一段窗口，链接可能在这中间被换掉。这是已知限制。
 
 ## 证据门
 

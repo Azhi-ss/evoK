@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { roleGuardExtension } from "../extensions/harness-opt/role-guard";
 import { Lineage } from "./lineage";
-import { guardSubagentToolCall } from "./role-guard";
+import { FILE_IO_TOOLS, FRAMEWORK_TOOLS, guardSubagentToolCall } from "./role-guard";
 
 function prompt(role: string): string {
   return `<active_agent name="${role}"/>\n只读合约内的文件。`;
@@ -231,6 +231,55 @@ describe("subagent role guard", () => {
     expect(events.map((event) => event.tool)).toEqual(["read", "ls", "read", "write", "bash"]);
     expect(events.every((event) => event.kind === "contract" && typeof event.err === "string")).toBe(true);
     expect(JSON.stringify(events)).not.toContain("\"score\":0.1");
+  });
+
+  test("framework tools pass and filesystem tools stay on the contract", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    for (const role of ["gap-finder", "innovator", "reviewer-gate"]) {
+      for (const tool of FRAMEWORK_TOOLS) {
+        expect(() => guardSubagentToolCall({
+          root,
+          prompt: prompt(role),
+          tool,
+          input: { value: { accept: true, reason: "kept" }, path: "should-not-matter" },
+        })).not.toThrow();
+      }
+      expect(() => guardSubagentToolCall({
+        root,
+        prompt: prompt(role),
+        tool: "structured_output",
+        input: { value: { gaps: [] } },
+      })).not.toThrow();
+    }
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "clock",
+      input: { now: 1 },
+    })).not.toThrow();
+    expect(contractEvents(root)).toHaveLength(0);
+    expect(FILE_IO_TOOLS).toContain("read");
+    expect(FILE_IO_TOOLS).toContain("write");
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "tests/hidden.ts" },
+    })).toThrow(/forbidden path/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "ls",
+      input: { path: "traces" },
+    })).not.toThrow();
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "custom_reader",
+      input: { path: "solution/secret.ts" },
+    })).toThrow(/forbidden path/);
+    expect(contractEvents(root).every((event) => event.tool !== "structured_output")).toBe(true);
   });
 
   test("the child tool_call hook blocks the built-in write and read", () => {

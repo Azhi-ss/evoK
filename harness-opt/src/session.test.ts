@@ -8,7 +8,8 @@ import { createExecutor } from "./modules/executor";
 import { PlaygroundTaskSource } from "./modules/probe";
 import { createMemoryBus } from "./pi/delegate";
 import { SUBAGENT_DELEGATION_CANCEL_EVENT, SUBAGENT_DELEGATION_REQUEST_EVENT, SUBAGENT_DELEGATION_UPDATE_EVENT } from "pi-subagents/delegation";
-import { readStageReport, reviewRoundE2E } from "./reports";
+import { guardSubagentToolCall } from "./role-guard";
+import { readStageReport, reviewRoundE2E, type E2EFinding } from "./reports";
 import { dispatchHarnessCommand, runClosedLoopDemo } from "./session";
 import { readTokensSpent } from "./thresholds";
 
@@ -20,8 +21,9 @@ describe("closed loop", () => {
   test("one sample-bridge round writes every stage report and an e2e review", async () => {
     const dir = out();
     const result = await runClosedLoopDemo(dir);
-    expect(result.ok).toBe(true);
-    expect(result.e2eOk).toBe(true);
+    expect(result.e2eOk).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("e2e fail");
     expect(result.text).toContain("executor sample-trace");
     expect(result.text).toContain("bridge none");
     expect(result.text).toContain("bridge sample");
@@ -57,6 +59,20 @@ describe("closed loop", () => {
     expect(readFileSync(join(dir, "state", "lineage.jsonl"), "utf8")).not.toContain("heldout");
     const review = readStageReport(dir, 1, "review");
     expect(review?.output).toMatchObject({ accept: false });
+    const e2e = readStageReport(dir, 1, "e2e");
+    const findings = (e2e?.output as { findings?: E2EFinding[] } | undefined)?.findings ?? [];
+    expect(findings.find((item) => item.stage === "gate")?.ok).toBe(false);
+    expect(readFileSync(join(dir, "gaps.json"), "utf8").length).toBeGreaterThan(0);
+    expect(readFileSync(join(dir, "patch.json"), "utf8").length).toBeGreaterThan(0);
+    expect(readFileSync(join(dir, "review.json"), "utf8").length).toBeGreaterThan(0);
+    for (const role of ["gap-finder", "innovator", "reviewer-gate"]) {
+      expect(() => guardSubagentToolCall({
+        root: dir,
+        prompt: `<active_agent name="${role}"/>`,
+        tool: "structured_output",
+        input: { value: { accept: true, reason: "sample" } },
+      })).not.toThrow();
+    }
     writeFileSync(join(dir, "reports", "round-1", "gap.json"), "{}\n");
     const emptied = reviewRoundE2E(dir, 1);
     expect(emptied.ok).toBe(false);
@@ -75,7 +91,8 @@ describe("closed loop", () => {
     expect(missing.missing.join(" ")).toContain("tokenBudget");
     expect(missing.text).toContain("missing");
     const demo = await runClosedLoopDemo(dir);
-    expect(demo.ok).toBe(true);
+    expect(demo.text).toContain("bridge sample");
+    expect(demo.e2eOk).toBe(false);
     const stopped = await dispatchHarnessCommand(["stop", "--out", dir], { cwd: dir });
     expect(stopped.ok).toBe(true);
     expect(stopped.panel.some((line) => line.startsWith("phase stop"))).toBe(true);
@@ -187,8 +204,14 @@ describe("closed loop", () => {
 
   test("cli demo completes and run without thresholds names minDelta", async () => {
     const dir = out();
-    expect(await main(["demo", "--out", dir])).toBe(0);
-    expect(readStageReport(dir, 1, "e2e")).toMatchObject({ output: { ok: true } });
+    expect(await main(["demo", "--out", dir])).toBe(1);
+    const demoE2e = readStageReport(dir, 1, "e2e");
+    expect(demoE2e?.output).toMatchObject({ ok: false });
+    const demoFindings = (demoE2e?.output as { findings?: E2EFinding[] }).findings ?? [];
+    expect(demoFindings.find((item) => item.stage === "gate")?.ok).toBe(false);
+    expect(readFileSync(join(dir, "gaps.json"), "utf8")).toContain("tool-misuse");
+    expect(readFileSync(join(dir, "patch.json"), "utf8")).toContain("require a write");
+    expect(readFileSync(join(dir, "review.json"), "utf8").length).toBeGreaterThan(0);
     const fresh = out();
     const chunks: string[] = [];
     const original = process.stdout.write.bind(process.stdout);

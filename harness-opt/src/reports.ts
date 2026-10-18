@@ -129,7 +129,10 @@ function stageShape(stage: string, output: Record<string, unknown>): string | un
     return "review output is missing accept or reason";
   }
   if (stage === "backprop" && typeof output.node !== "string") return "backprop output has no node";
-  if (stage === "gate" && (typeof output.ok !== "boolean" || typeof output.node !== "string")) return "gate output is missing node or ok";
+  if (stage === "gate") {
+    if (typeof output.ok !== "boolean" || typeof output.node !== "string") return "gate output is missing node or ok";
+    if (output.ok !== true) return "gate did not pass";
+  }
   return undefined;
 }
 

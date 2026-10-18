@@ -5,12 +5,40 @@ import { Lineage } from "./lineage";
 import { ROLE_IDS } from "./roles";
 
 /**
- * Child-tool gate. Pi's built-in read/write/edit run only after this check.
+ * Child-tool gate for filesystem tools only.
  * A violation is appended to lineage and then thrown.
+ *
+ * The check runs before Pi opens the file. Pi's read/write do not take
+ * O_NOFOLLOW, and this hook cannot hold the fd they later open, so a symlink
+ * can still be swapped in that gap. See the README note.
  */
 
 const SUBAGENT_ROLES = ["gap-finder", "innovator", "reviewer-gate"] as const;
 type SubagentRole = (typeof SUBAGENT_ROLES)[number];
+
+/** Tools that read or write files. These are the only calls this gate judges. */
+export const FILE_IO_TOOLS = ["read", "write", "edit", "grep", "find", "ls", "bash", "powershell"] as const;
+
+/**
+ * pi-subagents protocol tools. They hand a structured result back or talk to
+ * the parent. They are allowed by name, including when a schema field happens
+ * to be called `path`.
+ */
+export const FRAMEWORK_TOOLS = [
+  "structured_output",
+  "contact_supervisor",
+  "intercom",
+  "subagent",
+  "subagents_enable",
+  "subagent_supervisor",
+  "bg_wait",
+  "source_check",
+  "watchdog_diff",
+] as const;
+
+const FILE_IO_TOOL_SET = new Set<string>(FILE_IO_TOOLS);
+const FRAMEWORK_TOOL_SET = new Set<string>(FRAMEWORK_TOOLS);
+const PATH_ARGUMENT_KEYS = new Set(["path", "file", "file_path", "filePath", "full_output_path", "command"]);
 
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -29,8 +57,9 @@ export function activeAgentName(prompt: string): string | null {
   return match?.[1] ?? null;
 }
 
-/** Refuse the call, record it, and throw. Allowed calls return without a log line. */
+/** Refuse a filesystem call, record it, and throw. Non-file tools return without a log line. */
 export function guardSubagentToolCall(call: SubagentToolCall): void {
+  if (isUngatedTool(call.tool, call.input)) return;
   const roleName = activeAgentName(call.prompt);
   const loggedPath = clip(pathForLog(call.tool, call.input));
   try {
@@ -62,6 +91,16 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
     }
     throw error instanceof Error ? error : new Error(err);
   }
+}
+
+function isUngatedTool(tool: string, input: Record<string, unknown>): boolean {
+  if (FRAMEWORK_TOOL_SET.has(tool)) return true;
+  if (FILE_IO_TOOL_SET.has(tool)) return false;
+  return !hasFilePathArgument(input);
+}
+
+function hasFilePathArgument(input: Record<string, unknown>): boolean {
+  return Object.entries(input).some(([key, value]) => PATH_ARGUMENT_KEYS.has(key) && typeof value === "string" && value.trim() !== "");
 }
 
 function requireSubagentRole(roleName: string | null, tool: string): SubagentRole {
