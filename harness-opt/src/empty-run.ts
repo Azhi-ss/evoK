@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SandboxBoundary } from "../../src/execution/security-boundary";
-import { writeRoleFile, writeRoleJson } from "./artifacts";
+import { writeHostFile, writeRoleFile, writeRoleJson } from "./artifacts";
+import { ensureRealDir } from "./containment";
 import { Budget } from "./budget";
 import { writeRunState } from "../bin/record";
 import { FIXED_MODEL_ID } from "./fixed-model";
@@ -53,7 +54,7 @@ const SECRET_HELD_OUT = "sealed-held-out-body";
  */
 export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult> {
   mkdirSync(options.out, { recursive: true });
-  const state = join(options.out, "state");
+  const state = ensureRealDir(options.out, "state");
   const modelId = options.modelId ?? FIXED_MODEL_ID;
   const milestoneHeldOut = options.milestoneHeldOut ?? {
     "candidates/base/config.json": 0.5,
@@ -66,11 +67,11 @@ export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult
     search: { samples: 1, selfChecks: 0, retries: 0 },
   };
   writeCandidate(options.out, "base", { ...base, fixtureScore: 0.4, tokens: 20 });
-  writeFileSync(join(options.out, "sealed-note.txt"), `${SECRET_HELD_OUT}\n`);
+  writeHostFile(options.out, "sealed-note.txt", `${SECRET_HELD_OUT}\n`);
   const heldoutScore = options.heldout ?? 0.1;
-  mkdirSync(join(options.out, "sealed"), { recursive: true });
-  writeFileSync(
-    join(options.out, HELD_OUT_SCORE_FILE),
+  writeHostFile(
+    options.out,
+    HELD_OUT_SCORE_FILE,
     `${JSON.stringify({ score: heldoutScore, tokens: 0 }, null, 2)}\n`,
   );
   const heldOut = new HeldOutVault(options.heldOutTasks ?? [{
@@ -249,7 +250,5 @@ export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult
 }
 
 function writeCandidate(root: string, id: string, body: unknown): void {
-  const dir = join(root, "candidates", id);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "config.json"), `${JSON.stringify(body, null, 2)}\n`);
+  writeHostFile(root, `candidates/${id}/config.json`, `${JSON.stringify(body, null, 2)}\n`);
 }

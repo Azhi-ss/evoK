@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
 import { Node } from "./lineage";
 import { liveRoles, reviewerTask } from "./live-round";
+import type { HarnessExecutor } from "./modules/executor";
 import type { ReviewInput } from "./orchestrator";
 
 function root(): string {
@@ -32,9 +34,25 @@ function pair(): { parent: Node; child: Node } {
   };
 }
 
+function plantParent(dir: string): void {
+  writeRoleJson(dir, "orchestrator", "candidates/base/config.json", {
+    id: "base",
+    modelId: "parent-model",
+    parts: {
+      "agent-loop": { maxSteps: 8 },
+      context: { window: 4 },
+      memory: {},
+      toolchain: { checker: "keep" },
+      skills: { pack: "base" },
+    },
+    search: { samples: 3, selfChecks: 1, retries: 2 },
+  });
+}
+
 describe("live round", () => {
-  test("a toolchain patch is stored on toolchain and leaves agent-loop empty", async () => {
+  test("a child candidate inherits the parent config and overlays the patch part", async () => {
     const dir = root();
+    plantParent(dir);
     let seen = "";
     const roles = liveRoles({
       root: dir,
@@ -58,14 +76,22 @@ describe("live round", () => {
     });
     await roles.innovator(pair().parent, { gaps: [] }, []);
     const config = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
+      id: string;
+      modelId: string;
       parts: Record<string, Record<string, unknown>>;
+      search: { samples: number; selfChecks: number; retries: number };
     };
+    expect(config.id).toBe("c1");
+    expect(config.modelId).toBe("parent-model");
     expect(config.parts.toolchain).toEqual({ checker: "strict" });
-    expect(config.parts["agent-loop"]).toEqual({});
-    expect(config.parts.context).toEqual({});
+    expect(config.parts["agent-loop"]).toEqual({ maxSteps: 8 });
+    expect(config.parts.context).toEqual({ window: 4 });
+    expect(config.parts.skills).toEqual({ pack: "base" });
+    expect(config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
     expect(seen).toContain("toolchain");
 
     const loopDir = root();
+    plantParent(loopDir);
     const loop = liveRoles({
       root: loopDir,
       round: 1,
@@ -86,9 +112,67 @@ describe("live round", () => {
     await loop.innovator(pair().parent, { gaps: [] }, []);
     const loopConfig = JSON.parse(readFileSync(join(loopDir, "candidates", "c1", "config.json"), "utf8")) as {
       parts: Record<string, Record<string, unknown>>;
+      search: { retries: number };
     };
     expect(loopConfig.parts["agent-loop"]).toEqual({ maxSteps: 4 });
-    expect(loopConfig.parts.toolchain).toEqual({});
+    expect(loopConfig.parts.toolchain).toEqual({ checker: "keep" });
+    expect(loopConfig.search.retries).toBe(2);
+  });
+
+  test("a child candidate refuses to invent a config when the parent file is missing", async () => {
+    const dir = root();
+    const roles = liveRoles({
+      root: dir,
+      round: 1,
+      budget: new Budget(),
+      tasks: [],
+      delegate: async (input) => ({
+        agent: input.agent,
+        tokens: 1,
+        value: {
+          part: "toolchain",
+          motivation: "pin the checker",
+          expectedFailureClass: "tool-misuse",
+          summary: "add a checker",
+          changes: { checker: "strict" },
+        },
+      }),
+    });
+    await expect(roles.innovator(pair().parent, { gaps: [] }, [])).rejects.toThrow(/parent config is missing/);
+  });
+
+  test("parent and child traces stay in separate files", async () => {
+    const dir = root();
+    const executor: HarnessExecutor = {
+      name: "fake",
+      async run(task, configPath) {
+        return {
+          taskId: task.id,
+          steps: [{ id: "s", tool: "read", args: {}, ok: true }],
+          reward: configPath.includes("/base/") ? 0.4 : 0.8,
+          tokens: 1,
+          failed: false,
+          labels: [],
+          executor: "fake",
+        };
+      },
+    };
+    const roles = liveRoles({
+      root: dir,
+      round: 1,
+      budget: new Budget(),
+      tasks: [{ id: "dev-1", split: "dev", path: "tasks/dev-1.md" }],
+      delegate: async () => {
+        throw new Error("unused");
+      },
+      executor,
+    });
+    await roles.runner("candidates/base/config.json", "dev_full");
+    await roles.runner("candidates/c1/config.json", "dev_full");
+    const parent = JSON.parse(readFileSync(join(dir, "traces", "base", "dev-1.json"), "utf8")) as { reward: number };
+    const child = JSON.parse(readFileSync(join(dir, "traces", "c1", "dev-1.json"), "utf8")) as { reward: number };
+    expect(parent.reward).toBe(0.4);
+    expect(child.reward).toBe(0.8);
   });
 
   test("the stored review reason follows unread, fell, and held", async () => {

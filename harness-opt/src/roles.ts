@@ -34,7 +34,7 @@ export const ROLE_CONTRACTS: Readonly<Record<RoleId, RoleContract>> = {
     kind: "control",
     tools: [],
     reads: ["state/", "sealed/", "candidates/", "evidence_pack/", "traces/"],
-    writes: ["state/"],
+    writes: ["state/", "candidates/base/"],
     forbids: ["edit harness", "score", "submit"],
     prompt: "src/orchestrator.ts",
   },

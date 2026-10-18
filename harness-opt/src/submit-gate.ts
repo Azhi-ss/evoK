@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensureRealDir } from "./containment";
+import { listTraceFiles } from "./traces";
 import { flag } from "./args";
 import { Budget } from "./budget";
 import { FIXED_MODEL_ID } from "./fixed-model";
@@ -25,7 +27,7 @@ export async function handleSubmitGate(args: string): Promise<SubmitGateResult> 
   const root = flag(argv, "--root");
   if (!root) throw new Error("harnessopt_submit_gate requires --root");
   const result = await runDirectorySubmitGate(root);
-  writeRunState(join(root, "state"), {
+  writeRunState(ensureRealDir(root, "state"), {
     phase: "gate",
     submit: result.submit,
     node: result.node,
@@ -36,7 +38,7 @@ export async function handleSubmitGate(args: string): Promise<SubmitGateResult> 
 
 /** Gate inputs from the run directory. Missing files stay missing; nothing is filled in. */
 export function buildDirectoryGateRequest(root: string): SubmitGateRequest {
-  const state = join(root, "state");
+  const state = ensureRealDir(root, "state");
   const lineage = new Lineage(state);
   const best = lineage.best();
   const modelId = readModelId(root, best.configPath);
@@ -66,7 +68,7 @@ export function buildDirectoryGateRequest(root: string): SubmitGateRequest {
 }
 
 export async function runDirectorySubmitGate(root: string): Promise<SubmitGateResult> {
-  const state = join(root, "state");
+  const state = ensureRealDir(root, "state");
   const lineage = new Lineage(state);
   const orchestrator = new Orchestrator(lineage, unusedRoles(), new GreedySelector(), new Budget());
   return orchestrator.submitGate(buildDirectoryGateRequest(root));
@@ -84,7 +86,11 @@ function readModelId(root: string, configPath: string): string {
 function tracePackComplete(root: string): boolean {
   const dir = join(root, "traces");
   if (!existsSync(dir)) return false;
-  return readdirSync(dir).some((name) => name.endsWith(".json"));
+  try {
+    return listTraceFiles(dir).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function changeNotePresent(root: string): boolean {

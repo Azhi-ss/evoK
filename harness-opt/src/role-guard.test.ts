@@ -282,6 +282,18 @@ describe("subagent role guard", () => {
     expect(contractEvents(root).every((event) => event.tool !== "structured_output")).toBe(true);
   });
 
+  test("innovator cannot write the baseline through the subagent guard", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "candidates", "base"), { recursive: true });
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "write",
+      input: { path: "candidates/base/config.json", content: "{\"id\":\"pwn\"}" },
+    })).toThrow(/baseline/);
+    expect(contractEvents(root)).toHaveLength(1);
+  });
+
   test("the child tool_call hook blocks the built-in write and read", () => {
     const handlers = new Map<string, (event: { toolName: string; input: Record<string, unknown> }, ctx: { cwd: string; getSystemPrompt: () => string }) => { block?: boolean; reason?: string } | undefined>();
     roleGuardExtension({

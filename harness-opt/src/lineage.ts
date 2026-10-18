@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync } from "node:fs";
+import { appendContained, ensureRealDir, openRealDirectory, readContained, renameContained, writeContained } from "./containment";
 import { stripHeldOutFields } from "./modules/proposer";
 
 /**
@@ -112,26 +112,23 @@ export interface RoleLineage {
 
 export class Lineage {
   readonly nodes = new Map<string, Node>();
-  private readonly eventsPath: string;
+  private readonly realRoot: string;
 
   constructor(readonly root: string) {
-    const dir = join(root, "nodes");
-    mkdirSync(dir, { recursive: true });
-    this.eventsPath = join(root, "lineage.jsonl");
+    this.realRoot = openRealDirectory(root);
+    const dir = ensureRealDir(this.realRoot, "nodes");
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".json") || name.startsWith(".")) continue;
-      const parsed = JSON.parse(readFileSync(join(dir, name), "utf8")) as NodeJson;
+      const parsed = JSON.parse(readContained(this.realRoot, `nodes/${name}`)) as NodeJson;
       const node = new Node(parsed);
       this.nodes.set(node.id, node);
     }
   }
 
   put(node: Node): void {
-    const dir = join(this.root, "nodes");
-    mkdirSync(dir, { recursive: true });
-    const tmp = join(dir, `.${node.id}.tmp`);
-    writeFileSync(tmp, JSON.stringify(node.toJSON(), null, 1));
-    renameSync(tmp, join(dir, `${node.id}.json`));
+    const body = JSON.stringify(node.toJSON(), null, 1);
+    writeContained(this.realRoot, `nodes/.${node.id}.tmp`, body);
+    renameContained(this.realRoot, `nodes/.${node.id}.tmp`, `nodes/${node.id}.json`);
     this.nodes.set(node.id, node);
   }
 
@@ -142,22 +139,22 @@ export class Lineage {
   log(kind: string, fields: Record<string, unknown> = {}): void {
     const safe = stripHeldOutFields(fields) as Record<string, unknown>;
     const line = JSON.stringify({ t: Date.now() / 1000, kind, ...safe });
-    appendFileSync(this.eventsPath, `${line}\n`);
+    appendContained(this.realRoot, "lineage.jsonl", `${line}\n`);
   }
 
   /** Scores and dry-run details. Not part of `events()` and not a role read. */
   gateLog(fields: Record<string, unknown>): void {
     const line = JSON.stringify({ t: Date.now() / 1000, ...fields });
-    appendFileSync(join(this.root, "gate.jsonl"), `${line}\n`);
+    appendContained(this.realRoot, "gate.jsonl", `${line}\n`);
   }
 
   events(): readonly Record<string, unknown>[] {
-    return readJsonl(this.eventsPath).map((event) => stripHeldOutFields(event) as Record<string, unknown>);
+    return readJsonl(this.realRoot, "lineage.jsonl").map((event) => stripHeldOutFields(event) as Record<string, unknown>);
   }
 
   /** Unfiltered gate file. Callers that hand a lineage to a role must not use this. */
   gateEvents(): readonly Record<string, unknown>[] {
-    return readJsonl(join(this.root, "gate.jsonl"));
+    return readJsonl(this.realRoot, "gate.jsonl");
   }
 
   roleView(): RoleLineage {
@@ -190,9 +187,9 @@ export class Lineage {
   }
 }
 
-function readJsonl(path: string): Record<string, unknown>[] {
+function readJsonl(root: string, relativeName: string): Record<string, unknown>[] {
   try {
-    return readFileSync(path, "utf8")
+    return readContained(root, relativeName)
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as Record<string, unknown>);

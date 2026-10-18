@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { ensureRealDir, writeContained } from "./containment";
+import { Lineage } from "./lineage";
 import { ROLE_CONTRACTS, type RoleId } from "./roles";
 
 export function assertRoleTool(role: RoleId, tool: string): void {
@@ -27,6 +27,9 @@ export function assertRoleWrite(role: RoleId, relativeName: string): void {
   if (isHeldOutPath(rel)) {
     throw new Error(`${role} cannot write held-out at ${rel}`);
   }
+  if (role === "innovator" && isBaselinePath(rel)) {
+    throw new Error(`${role} cannot write the baseline at ${rel}`);
+  }
   if (!covers(ROLE_CONTRACTS[role].writes, rel)) {
     throw new Error(`${role} cannot write ${rel}`);
   }
@@ -48,6 +51,11 @@ function covers(allowed: readonly string[], relativeName: string): boolean {
   });
 }
 
+function isBaselinePath(relativeName: string): boolean {
+  const name = relativeName.replace(/\/+$/, "");
+  return name === "candidates/base" || name.startsWith("candidates/base/");
+}
+
 function isGateLog(relativeName: string): boolean {
   return relativeName === "gate.jsonl" || relativeName.endsWith("/gate.jsonl");
 }
@@ -67,11 +75,39 @@ function normalizeRelative(relativeName: string): string {
 }
 
 export function writeRoleFile(root: string, role: RoleId, relativeName: string, body: string): string {
-  assertRoleWrite(role, relativeName);
-  const target = join(root, relativeName);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, body.endsWith("\n") ? body : `${body}\n`);
-  return target;
+  try {
+    assertRoleWrite(role, relativeName);
+    const text = body.endsWith("\n") ? body : `${body}\n`;
+    return writeContained(root, relativeName, text);
+  } catch (error) {
+    recordContract(root, role, relativeName, error);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+/** Host write. The resolved path must stay at `relativeName` inside the run root. */
+export function writeHostFile(root: string, relativeName: string, body: string): string {
+  try {
+    return writeContained(root, relativeName, body);
+  } catch (error) {
+    recordContract(root, "orchestrator", relativeName, error);
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+function recordContract(root: string, role: string, relativeName: string, error: unknown): void {
+  const err = error instanceof Error ? error.message : String(error);
+  try {
+    const state = ensureRealDir(root, "state");
+    new Lineage(state).log("contract", {
+      role,
+      tool: "write",
+      path: relativeName.length > 500 ? `${relativeName.slice(0, 500)}…` : relativeName,
+      err,
+    });
+  } catch {
+    // The write stays refused when the contract line itself cannot be stored.
+  }
 }
 
 export function writeRoleJson(root: string, role: RoleId, relativeName: string, value: unknown): string {

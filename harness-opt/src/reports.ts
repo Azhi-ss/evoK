@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeHostFile } from "./artifacts";
 import { parseGapReport, parsePatchFile } from "./schemas";
+import { listTraceFiles } from "./traces";
 
 export interface StageReport {
   readonly round: number;
@@ -16,11 +18,7 @@ export function reportsDir(root: string, round: number): string {
 }
 
 export function writeStageReport(root: string, report: StageReport): string {
-  const dir = reportsDir(root, report.round);
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${report.stage}.json`);
-  writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
-  return file;
+  return writeHostFile(root, `reports/round-${report.round}/${report.stage}.json`, `${JSON.stringify(report, null, 2)}\n`);
 }
 
 export function readStageReport(root: string, round: number, stage: string): StageReport | undefined {
@@ -78,7 +76,7 @@ export function listStageReports(root: string, round: number): string[] {
 function traceFinding(root: string): E2EFinding {
   let names: string[] = [];
   try {
-    names = readdirSync(join(root, "traces")).filter((name) => name.endsWith(".json"));
+    names = listTraceFiles(join(root, "traces"));
   } catch {
     return { stage: "trace", ok: false, detail: "traces/ is missing" };
   }

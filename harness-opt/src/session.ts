@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeRoleJson } from "./artifacts";
+import { writeHostFile, writeRoleJson } from "./artifacts";
+import { ensureRealDir } from "./containment";
 import { flag } from "./args";
 import { Budget } from "./budget";
 import { LOCAL_MODEL_ID } from "./fixed-model";
@@ -31,6 +32,7 @@ import {
   type RunThresholds,
   type ThresholdKey,
 } from "./thresholds";
+import { traceRelPath } from "./traces";
 import type { EvidenceCheck } from "./modules/evidence-gate";
 import type { TaskRef } from "./types";
 
@@ -211,7 +213,7 @@ async function startRun(root: string, argv: readonly string[], options: Dispatch
   writeHandFilledHeldOut(root, held.score);
 
   const configPath = "candidates/base/config.json";
-  writeRoleJson(root, "innovator", configPath, {
+  writeRoleJson(root, "orchestrator", configPath, {
     id: "base",
     modelId: LOCAL_MODEL_ID,
     parts: { "agent-loop": { maxSteps: 8 }, context: {}, memory: {}, toolchain: {}, skills: {} },
@@ -223,10 +225,10 @@ async function startRun(root: string, argv: readonly string[], options: Dispatch
   for (const task of tasks) {
     const trace = await executor.run(task, configPath);
     tokens += trace.tokens;
-    writeRoleJson(root, "runner", `traces/${trace.taskId}.json`, trace);
+    writeRoleJson(root, "runner", traceRelPath(configPath, trace.taskId), trace);
     scores.push(trace.reward);
   }
-  const lineage = new Lineage(join(root, "state"));
+  const lineage = new Lineage(ensureRealDir(root, "state"));
   lineage.put(new Node({
     id: "base",
     parentId: null,
@@ -302,7 +304,7 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
   budget.usedTokens = usage.tokensSpent;
   budget.usedRuns = saved.usedRuns;
   budget.started = saved.startedAt;
-  const lineage = new Lineage(join(root, "state"));
+  const lineage = new Lineage(ensureRealDir(root, "state"));
   const orchestrator = new Orchestrator(lineage, liveRoles({
     root,
     round,
@@ -361,7 +363,7 @@ function statusRun(root: string): CommandResult {
   }
   let bestId = "none";
   try {
-    bestId = new Lineage(join(root, "state")).best().id;
+    bestId = new Lineage(ensureRealDir(root, "state")).best().id;
   } catch {
     bestId = "none";
   }
@@ -387,7 +389,7 @@ async function gateRun(root: string): Promise<CommandResult> {
   });
   let bestId = gate.node;
   try {
-    bestId = new Lineage(join(root, "state")).best().id;
+    bestId = new Lineage(ensureRealDir(root, "state")).best().id;
   } catch {
     bestId = gate.node;
   }
@@ -405,7 +407,7 @@ function stopRun(root: string): CommandResult {
   writeSession(root, next);
   let bestId = "none";
   try {
-    bestId = new Lineage(join(root, "state")).best().id;
+    bestId = new Lineage(ensureRealDir(root, "state")).best().id;
   } catch {
     bestId = "none";
   }
@@ -512,7 +514,5 @@ function readSession(root: string): SavedSession | undefined {
 }
 
 function writeSession(root: string, saved: SavedSession): void {
-  const dir = join(root, "state");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "session.json"), `${JSON.stringify(saved, null, 2)}\n`);
+  writeHostFile(root, "state/session.json", `${JSON.stringify(saved, null, 2)}\n`);
 }

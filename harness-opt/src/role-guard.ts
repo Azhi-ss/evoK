@@ -1,6 +1,5 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertRoleRead, assertRoleTool, assertRoleWrite } from "./artifacts";
+import { ensureRealDir, runRelative } from "./containment";
 import { Lineage } from "./lineage";
 import { ROLE_IDS } from "./roles";
 
@@ -80,7 +79,7 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
   } catch (error) {
     const err = error instanceof Error ? error.message : String(error);
     try {
-      new Lineage(join(call.root, "state")).log("contract", {
+      new Lineage(ensureRealDir(call.root, "state")).log("contract", {
         role: roleName ?? "unknown",
         tool: call.tool,
         path: loggedPath,
@@ -187,82 +186,7 @@ export function forbiddenSegment(raw: string): string | null {
   return null;
 }
 
-/**
- * Path relative to the real run root. Every existing component is resolved
- * through symlinks, including links in the middle of the path. A link or
- * lexical step that lands outside the root throws.
- */
-export function runRelative(root: string, rawPath: string): string {
-  const rootReal = realpathSync(resolve(root));
-  const trimmed = rawPath.trim();
-  if (trimmed === "" || trimmed === ".") return ".";
-  const lexical = isAbsolute(trimmed) ? resolve(trimmed) : resolve(rootReal, trimmed);
-  if (!isInside(rootReal, lexical)) throw new Error(`path escapes the run root: ${rawPath}`);
-  const segments = relative(rootReal, lexical).split(sep).filter(Boolean);
-  let current = rootReal;
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index];
-    if (segment === "..") throw new Error(`path escapes the run root: ${rawPath}`);
-    const next = join(current, segment);
-    let linked = false;
-    try {
-      const info = lstatSync(next);
-      if (info.isSymbolicLink()) {
-        linked = true;
-        current = resolveLink(next, rootReal, rawPath);
-      }
-    } catch (error) {
-      if (!isEnoent(error)) throw error;
-      const rest = segments.slice(index);
-      if (rest.some((part) => part === "..")) throw new Error(`path escapes the run root: ${rawPath}`);
-      return finish(rootReal, join(current, ...rest), rawPath);
-    }
-    if (!linked) current = next;
-  }
-  return finish(rootReal, current, rawPath);
-}
-
-function resolveLink(linkPath: string, rootReal: string, rawPath: string): string {
-  const seen = new Set<string>();
-  let current = linkPath;
-  for (let hop = 0; hop < 32; hop += 1) {
-    if (seen.has(current)) throw new Error(`path escapes the run root: ${rawPath}`);
-    seen.add(current);
-    let info;
-    try {
-      info = lstatSync(current);
-    } catch (error) {
-      if (isEnoent(error)) return finishAbsolute(rootReal, current, rawPath);
-      throw error;
-    }
-    if (!info.isSymbolicLink()) return finishAbsolute(rootReal, current, rawPath);
-    const target = readlinkSync(current);
-    const next = isAbsolute(target) ? resolve(target) : resolve(dirname(current), target);
-    if (!isInside(rootReal, next)) throw new Error(`path escapes the run root: ${rawPath}`);
-    current = next;
-  }
-  throw new Error(`path escapes the run root: ${rawPath}`);
-}
-
-function finish(rootReal: string, abs: string, rawPath: string): string {
-  const real = finishAbsolute(rootReal, abs, rawPath);
-  const rel = relative(rootReal, real);
-  return rel.split(sep).join("/") || ".";
-}
-
-function finishAbsolute(rootReal: string, abs: string, rawPath: string): string {
-  if (!isInside(rootReal, abs)) throw new Error(`path escapes the run root: ${rawPath}`);
-  return abs;
-}
-
-function isInside(rootReal: string, candidate: string): boolean {
-  const rel = relative(rootReal, candidate);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function isEnoent(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
-}
+export { runRelative } from "./containment";
 
 function clip(value: string): string {
   return value.length > 500 ? `${value.slice(0, 500)}…` : value;

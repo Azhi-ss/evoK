@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,14 +41,36 @@ describe("closed loop", () => {
       expect(report?.explanation.length).toBeGreaterThan(0);
       expect(report?.output).toBeDefined();
     }
-    const trace = JSON.parse(readFileSync(join(dir, "traces", "dev-1.json"), "utf8")) as {
+    const trace = JSON.parse(readFileSync(join(dir, "traces", "base", "dev-1.json"), "utf8")) as {
       steps: { tool: string; ok: boolean; error?: string }[];
       executor: string;
+      reward: number;
+    };
+    const childTrace = JSON.parse(readFileSync(join(dir, "traces", "c1", "dev-1.json"), "utf8")) as {
+      reward: number;
+      steps: { tool: string }[];
     };
     expect(trace.executor).toBe("sample-trace");
+    expect(trace.reward).toBe(0.4);
+    expect(childTrace.reward).toBe(0.8);
     expect(trace.steps.map((step) => step.tool)).toEqual(["read", "bash", "write"]);
+    expect(childTrace.steps.map((step) => step.tool)).toEqual(["read", "bash", "write"]);
     expect(trace.steps[1]?.ok).toBe(false);
     expect(trace.steps[1]?.error).toContain("assertion failed");
+    const baseConfig = JSON.parse(readFileSync(join(dir, "candidates", "base", "config.json"), "utf8")) as {
+      modelId: string;
+      parts: { "agent-loop": { maxSteps?: number; requireWrite?: boolean } };
+    };
+    const childConfig = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
+      modelId: string;
+      parts: { "agent-loop": { maxSteps?: number; requireWrite?: boolean }; context: Record<string, unknown> };
+      search: { samples: number; selfChecks: number; retries: number };
+    };
+    expect(baseConfig.parts["agent-loop"]).toEqual({ maxSteps: 8 });
+    expect(childConfig.modelId).toBe(baseConfig.modelId);
+    expect(childConfig.parts["agent-loop"]).toEqual({ maxSteps: 4, requireWrite: true });
+    expect(childConfig.parts.context).toEqual({});
+    expect(childConfig.search).toEqual({ samples: 1, selfChecks: 0, retries: 0 });
     expect(readFileSync(join(dir, "gaps.json"), "utf8")).toContain("tool-misuse");
     expect(readFileSync(join(dir, "patch.json"), "utf8")).toContain("require a write");
     const usage = readTokensSpent(dir);
@@ -81,6 +103,20 @@ describe("closed loop", () => {
     writeFileSync(join(dir, "evidence_pack", "pack.json"), "{}\n");
     const packed = reviewRoundE2E(dir, 1);
     expect(packed.findings.find((item) => item.stage === "evidence_pack")?.ok).toBe(false);
+  });
+
+  test("sample bridge cannot write patch.json through a symlink outside the run", async () => {
+    const dir = out();
+    const outside = mkdtempSync(join(tmpdir(), "harness-opt-outside-"));
+    const leaked = join(outside, "patch.json");
+    symlinkSync(leaked, join(dir, "patch.json"));
+    const demo = await runClosedLoopDemo(dir);
+    expect(demo.ok).toBe(false);
+    expect(existsSync(leaked)).toBe(false);
+    expect(readdirSync(outside)).toEqual([]);
+    const log = readFileSync(join(dir, "state", "lineage.jsonl"), "utf8");
+    expect(log).toContain("\"kind\":\"contract\"");
+    expect(log).toContain("patch.json");
   });
 
   test("start names each missing threshold and a stopped session refuses step", async () => {

@@ -1,7 +1,6 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { flag } from "../src/args";
+import { writeContained } from "../src/containment";
 import { Lineage } from "../src/lineage";
 
 /** Append one lineage event. The log is `lineage.jsonl` inside `root`. */
@@ -11,10 +10,18 @@ export function recordEvent(root: string, kind: string, fields: Record<string, u
 
 /** Write `run_state.json` beside the lineage log. */
 export function writeRunState(root: string, state: unknown): string {
-  mkdirSync(root, { recursive: true });
-  const target = join(root, "run_state.json");
-  writeFileSync(target, `${JSON.stringify(state, null, 2)}\n`);
-  return target;
+  const body = `${JSON.stringify(state, null, 2)}\n`;
+  try {
+    return writeContained(root, "run_state.json", body);
+  } catch (error) {
+    const err = error instanceof Error ? error.message : String(error);
+    try {
+      new Lineage(root).log("contract", { role: "orchestrator", tool: "write", path: "run_state.json", err });
+    } catch {
+      // The write stays refused when the contract line itself cannot be stored.
+    }
+    throw error instanceof Error ? error : new Error(err);
+  }
 }
 
 function main(argv: readonly string[]): number {

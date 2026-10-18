@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Lineage, Node } from "./lineage";
@@ -64,6 +64,16 @@ describe("lineage", () => {
     lineage.put(loop);
     backprop(lineage, loop, 0.2);
     expect(lineage.nodes.get("c")?.visits).toBe(1);
+  });
+
+  test("a lineage.jsonl symlink cannot append outside its directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-opt-lin-"));
+    const outside = mkdtempSync(join(tmpdir(), "harness-opt-outside-"));
+    const leaked = join(outside, "lineage.jsonl");
+    symlinkSync(leaked, join(root, "lineage.jsonl"));
+    const lineage = new Lineage(root);
+    expect(() => lineage.log("note", { message: "secret-line" })).toThrow(/escapes the run root/);
+    expect(existsSync(leaked)).toBe(false);
   });
 
   test("held-out keys stay in the gate log and out of the role view", () => {

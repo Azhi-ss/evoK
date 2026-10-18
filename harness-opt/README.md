@@ -95,6 +95,10 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 守卫在 Pi 打开文件之前解析符号链接。Pi 自带的 read/write 不接受 `O_NOFOLLOW`，守卫也拿不到它们随后打开的那个 fd，所以检查和真正打开之间仍有一段窗口，链接可能在这中间被换掉。这是已知限制。
 
+宿主自己的落盘走同一套解析：`writeRoleFile`，以及 `state/`、`reports/`、`candidates/`、`traces/`、阈值、held-out 和 `run_state.json`。解析后的位置必须仍是请求的那条相对路径，并且留在运行根里。跑到运行根外，或被链接改到另一条路径，就拒绝，并在 `state/lineage.jsonl` 记一条 `kind: contract`。最终文件用 `O_NOFOLLOW` 打开。中间目录在检查和创建之间被换成链接的窗口还在。
+
+innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+
 ## 证据门
 
 `Orchestrator.submitGate` 把下列项相与。任一项不过就 fail-closed：

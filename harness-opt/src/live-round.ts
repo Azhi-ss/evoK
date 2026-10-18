@@ -1,12 +1,15 @@
 import { writeRoleFile, writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
+import { readContained } from "./containment";
 import { LOCAL_MODEL_ID } from "./fixed-model";
 import { createExecutor, type HarnessExecutor } from "./modules/executor";
+import { applyPatch } from "./modules/proposer";
 import { DelegationError, schemaFor, type DelegationValue, type RoleDelegate } from "./pi/delegate";
 import { writeStageReport } from "./reports";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
 import { forcedReviewVerdict, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
-import { ATTRIBUTION_LABELS, emptyParts, HARNESS_PARTS, type TaskRef } from "./types";
+import { traceRelPath } from "./traces";
+import { ATTRIBUTION_LABELS, emptyParts, HARNESS_PARTS, type HarnessConfig, type HarnessParts, type SearchGenes, type TaskRef } from "./types";
 
 const LABEL_LIST = ATTRIBUTION_LABELS.join(", ");
 const PART_LIST = HARNESS_PARTS.join(", ");
@@ -56,7 +59,7 @@ export function liveRoles(options: {
       writeRoleFile(options.root, "gap-finder", "gaps.md", renderGapsMarkdown(gaps));
       return gaps as unknown as Record<string, unknown>;
     },
-    innovator: async (_parent, gaps, tried) => {
+    innovator: async (parent, gaps, tried) => {
       const delegated = await delegateOrCharge(options, {
         agent: "innovator",
         task: `${INNOVATOR_TASK_PREFIX} Gaps: ${JSON.stringify(gaps)}. Already tried: ${tried.join(",")}`,
@@ -69,12 +72,7 @@ export function liveRoles(options: {
         options.budget.usedTokens += delegated.tokens;
         throw error;
       }
-      const config = {
-        id: candidateId,
-        modelId: LOCAL_MODEL_ID,
-        parts: { ...emptyParts(), [patch.part]: patch.changes },
-        search: { samples: 1, selfChecks: 0, retries: 0 },
-      };
+      const config = { ...applyPatch(readParentConfig(options.root, parent.configPath), patch), id: candidateId };
       writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
       writeRoleJson(options.root, "innovator", "patch.json", patch);
       const proposal: Proposal = {
@@ -91,7 +89,7 @@ export function liveRoles(options: {
       for (const task of tasks) {
         const trace = await executor.run(task, configPath);
         options.budget.usedTokens += trace.tokens;
-        writeRoleJson(options.root, "runner", `traces/${trace.taskId}.json`, trace);
+        writeRoleJson(options.root, "runner", traceRelPath(configPath, trace.taskId), trace);
         scores.push(trace.reward);
       }
       return scores;
@@ -134,6 +132,41 @@ export function liveRoles(options: {
       return receipt;
     },
   };
+}
+
+function readParentConfig(root: string, configPath: string): HarnessConfig {
+  let raw: string;
+  try {
+    raw = readContained(root, configPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`parent config is missing: ${configPath}`);
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`parent config is missing: ${configPath}`);
+  }
+  if (!isRecord(parsed) || typeof parsed.modelId !== "string" || parsed.modelId === "" || !isRecord(parsed.parts) || !isRecord(parsed.search)) {
+    throw new Error(`parent config is missing: ${configPath}`);
+  }
+  const search = parsed.search;
+  if (typeof search.samples !== "number" || typeof search.selfChecks !== "number" || typeof search.retries !== "number") {
+    throw new Error(`parent config is missing: ${configPath}`);
+  }
+  const genes: SearchGenes = { samples: search.samples, selfChecks: search.selfChecks, retries: search.retries };
+  const parts = { ...emptyParts(), ...parsed.parts } as HarnessParts;
+  return {
+    id: typeof parsed.id === "string" && parsed.id !== "" ? parsed.id : "parent",
+    modelId: parsed.modelId,
+    parts,
+    search: genes,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function delegateOrCharge(

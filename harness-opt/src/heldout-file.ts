@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeHostFile } from "./artifacts";
 
 /** Single held-out convention for the empty run and the Pi gate. */
 export const HELD_OUT_SCORE_FILE = "sealed/heldout-score.json";
@@ -61,9 +62,7 @@ export function readEvaluatedHeldOut(root: string, configPath: string): number {
 
 /** `--heldout-score` on start. The panel must show 手填; it is not a candidate eval. */
 export function writeHandFilledHeldOut(root: string, declaredScore: number): void {
-  const file = join(root, HELD_OUT_SCORE_FILE);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify({
+  writeHostFile(root, HELD_OUT_SCORE_FILE, `${JSON.stringify({
     source: "hand-filled",
     declaredScore,
     entries: {},
@@ -84,9 +83,7 @@ export function recordEvaluatedHeldOut(root: string, configPath: string, score: 
   }
   const entries = isRecord(parsed.entries) ? { ...parsed.entries } : {};
   entries[configPath] = { score, source: "evaluated" };
-  const file = join(root, HELD_OUT_SCORE_FILE);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify({ ...parsed, entries }, null, 2)}\n`);
+  writeHostFile(root, HELD_OUT_SCORE_FILE, `${JSON.stringify({ ...parsed, entries }, null, 2)}\n`);
 }
 
 function readHeldOutObject(root: string): Record<string, unknown> {

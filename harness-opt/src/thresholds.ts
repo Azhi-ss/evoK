@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeHostFile } from "./artifacts";
 
 /** Explicit run inputs. The gate and the loop do not fill these in. */
 export const THRESHOLD_KEYS = [
@@ -44,8 +45,7 @@ export function readThresholds(root: string): { readonly ok: true; readonly valu
 export function writeThresholds(root: string, value: RunThresholds): void {
   const missing = missingThresholds(value);
   if (missing.length > 0) throw new Error(`refusing to write thresholds, missing ${missing.join(", ")}`);
-  mkdirSync(root, { recursive: true });
-  writeFileSync(join(root, THRESHOLDS_FILE), `${JSON.stringify(value, null, 2)}\n`);
+  writeHostFile(root, THRESHOLDS_FILE, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export function readTokensSpent(root: string): { readonly ok: true; readonly tokensSpent: number } | { readonly ok: false; readonly missing: "tokensSpent" } {
@@ -64,7 +64,5 @@ export function writeTokensSpent(root: string, tokensSpent: number): void {
   if (!Number.isFinite(tokensSpent) || tokensSpent < 0) {
     throw new Error(`token count ${tokensSpent} is not a non-negative finite number`);
   }
-  const dir = join(root, "state");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "usage.json"), `${JSON.stringify({ tokensSpent }, null, 2)}\n`);
+  writeHostFile(root, USAGE_FILE, `${JSON.stringify({ tokensSpent }, null, 2)}\n`);
 }
