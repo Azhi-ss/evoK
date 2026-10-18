@@ -1,187 +1,215 @@
-import type { Scorecard, SearchGenes } from "../types";
+import type { Lineage, Node } from "../lineage";
 
 /**
- * Promotion swap point.
+ * Parent selectors ported from `design/orchestrator.py`.
  *
- * TODO(harness-opt/design/2026-10-18-evolution-selector-solutions.md §④):
- * replace the staged-threshold body with paired evaluation + confidence
- * interval lower bound + successive halving. Keep `StagedThresholds` as
- * the input the new criterion reads, and do not hard-code the comparison
- * inside the orchestrator.
+ * MVP parent picker is `GreedySelector`. `BaselineGate` lives on
+ * `Orchestrator.submitGate`. Paired LCB, successive halving, Pareto /
+ * MAP-Elites, and novelty stay interfaces that throw: the landing note in
+ * `design/2026-10-18-evolution-selector-solutions.md` asks for those as
+ * TODOs, and it says not to build a full UCT product, CMA-ME, pure novelty
+ * search, PBT, FunSearch-scale islands, or online-leaderboard feedback.
+ * `UCTSelector` below is only the formula and progressive-widening cap
+ * from the python skeleton.
  *
- * Pure greedy is registered so tests can show it is not the default.
- * AFlow / DGM / UCT parent samplers stay unimplemented until that doc
- * names the P0/P1/P2 combo. Calling them throws; it does not pretend to sample.
+ * Scores are normalised to [0, 1]. Contest ×100 display stays in scoring.ts.
  */
 
-export interface StagedThresholds {
-  readonly minScoreDelta: number;
-  readonly maxTokenRegressionRatio: number;
+const SELECTOR_DOC = "harness-opt/design/2026-10-18-evolution-selector-solutions.md";
+
+export interface Selector {
+  readonly name: string;
+  pick(lin: Lineage): Node;
 }
 
-/** One point on the 0–100 contest scale, and no token regression. */
-export const DEFAULT_STAGED_THRESHOLDS: StagedThresholds = {
-  minScoreDelta: 1,
-  maxTokenRegressionRatio: 1,
-};
-
-export interface SelectorSearchConfig {
-  /** How many archive parents a sampler would draw. Searchable, not a constant. */
-  readonly sampleCount: number;
-  readonly temperature: number;
-  readonly uctExploration: number;
+export interface Rng {
+  choices<T>(pool: readonly T[], weights: readonly number[]): T;
 }
 
-export const DEFAULT_SELECTOR_SEARCH: SelectorSearchConfig = {
-  sampleCount: 1,
-  temperature: 1,
-  uctExploration: 1.414,
-};
-
-export interface PromotionInput {
-  readonly parent: Scorecard | null;
-  readonly candidate: Scorecard;
-  readonly thresholds: StagedThresholds;
-  readonly genes: SearchGenes;
-  readonly search: SelectorSearchConfig;
+export function mathRng(random: () => number = Math.random): Rng {
+  return {
+    choices<T>(pool: readonly T[], weights: readonly number[]): T {
+      if (pool.length === 0) throw new Error("cannot choose from an empty pool");
+      const total = weights.reduce((sum, weight) => sum + weight, 0);
+      if (!(total > 0)) throw new Error("selector weights must be positive");
+      let cursor = random() * total;
+      for (let i = 0; i < pool.length; i += 1) {
+        cursor -= weights[i] ?? 0;
+        if (cursor <= 0) return pool[i] as T;
+      }
+      return pool[pool.length - 1] as T;
+    },
+  };
 }
 
-export interface PromotionDecision {
-  readonly accept: boolean;
-  readonly criterionId: string;
-  readonly reason: string;
-  readonly genes: SearchGenes;
-}
+export const DEFAULT_SELECTOR_ID = "greedy";
 
-export interface PromotionCriterion {
-  readonly id: string;
-  decide(input: PromotionInput): PromotionDecision;
-}
+export class GreedySelector implements Selector {
+  readonly name = "GreedySelector";
 
-export const STAGED_THRESHOLD_ID = "staged-threshold";
-export const GREEDY_ID = "greedy";
-export const PAIRED_CI_HALVING_ID = "paired-ci-halving";
-
-/** Default is staged keep-better, not pure greedy. */
-export const DEFAULT_SELECTOR_ID = STAGED_THRESHOLD_ID;
-
-export class StagedThresholdCriterion implements PromotionCriterion {
-  readonly id = STAGED_THRESHOLD_ID;
-
-  decide(input: PromotionInput): PromotionDecision {
-    return finish(this.id, input, stagedReason(input));
-  }
-}
-
-export class GreedyCriterion implements PromotionCriterion {
-  readonly id = GREEDY_ID;
-
-  decide(input: PromotionInput): PromotionDecision {
-    if (!eligible(input.candidate)) {
-      return finish(this.id, input, eligibleReason(input.candidate));
+  pick(lin: Lineage): Node {
+    const pool = lin.evaluated().filter((node) => !node.locked);
+    const first = pool[0];
+    if (!first) throw new Error("no evaluated unlocked node");
+    let best = first;
+    for (const node of pool.slice(1)) {
+      if ((node.devMean ?? Number.NEGATIVE_INFINITY) > (best.devMean ?? Number.NEGATIVE_INFINITY)) best = node;
     }
-    if (input.parent === null) return finish(this.id, input, null);
-    const delta = input.candidate.devScore - input.parent.devScore;
-    if (delta <= 0) return finish(this.id, input, "greedy requires a strictly higher dev score");
-    return finish(this.id, input, null);
+    return best;
   }
+}
+
+/** AFlow select_round: top-k, p = lam*uniform + (1-lam)*softmax(alpha*100*s). */
+export class SoftmaxMixSelector implements Selector {
+  readonly name = "SoftmaxMixSelector";
+
+  constructor(
+    readonly k = 4,
+    readonly alpha = 0.2,
+    readonly lam = 0.3,
+    private readonly rng: Rng = mathRng(),
+  ) {}
+
+  pick(lin: Lineage): Node {
+    const pool = [...lin.evaluated().filter((node) => !node.locked)]
+      .sort((a, b) => (b.devMean ?? 0) - (a.devMean ?? 0))
+      .slice(0, this.k);
+    if (pool.length === 0) throw new Error("no evaluated unlocked node");
+    const scores = pool.map((node) => (node.devMean ?? 0) * 100);
+    return this.rng.choices(pool, softmaxMixWeights(scores, this.alpha, this.lam));
+  }
+}
+
+export function softmaxMixWeights(scores: readonly number[], alpha: number, lam: number): number[] {
+  const max = Math.max(...scores);
+  const shifted = scores.map((score) => Math.exp(alpha * (score - max)));
+  const z = shifted.reduce((sum, weight) => sum + weight, 0);
+  return shifted.map((weight) => lam / scores.length + (1 - lam) * weight / z);
+}
+
+/** DGM score_child_prop: sigmoid(10*(s-0.5)) / (1+n_children). */
+export class ScoreChildPropSelector implements Selector {
+  readonly name = "ScoreChildPropSelector";
+
+  constructor(private readonly rng: Rng = mathRng()) {}
+
+  pick(lin: Lineage): Node {
+    const pool = lin.evaluated().filter((node) => !node.locked);
+    if (pool.length === 0) throw new Error("no evaluated unlocked node");
+    const weights = pool.map((node) => scoreChildPropWeight(node.devMean ?? 0, node.children.length));
+    return this.rng.choices(pool, weights);
+  }
+}
+
+export function scoreChildPropWeight(devMean: number, childCount: number): number {
+  return (1 / (1 + Math.exp(-10 * (devMean - 0.5)))) / (1 + childCount);
 }
 
 /**
- * Reserved id for evolution-selector §④.
- * Refuses every candidate so an unfinished criterion cannot promote.
+ * Tree descent with UCB1. Expand when the widening cap is not full.
+ * cap(n) = min(maxChildren, ceil(k * max(1, visits)^alpha)).
  */
-export class PairedCiHalvingCriterion implements PromotionCriterion {
-  readonly id = PAIRED_CI_HALVING_ID;
+export class UCTSelector implements Selector {
+  readonly name = "UCTSelector";
 
-  decide(input: PromotionInput): PromotionDecision {
-    return finish(
-      this.id,
-      input,
-      "TODO(evolution-selector §④): paired evaluation + CI lower bound + successive halving is not implemented",
-    );
+  constructor(
+    readonly c = Math.SQRT2,
+    readonly pwK = 2,
+    readonly pwAlpha = 0.5,
+    readonly maxChildren = 6,
+  ) {}
+
+  cap(node: Node): number {
+    return Math.min(this.maxChildren, Math.ceil(this.pwK * Math.max(1, node.visits) ** this.pwAlpha));
+  }
+
+  uct(child: Node, parent: Node): number {
+    if (child.visits === 0) return Number.POSITIVE_INFINITY;
+    return child.valueSum / child.visits + this.c * Math.sqrt(Math.log(Math.max(1, parent.visits)) / child.visits);
+  }
+
+  pick(lin: Lineage): Node {
+    let node = lin.rootNode();
+    while (true) {
+      const kids = node.children
+        .map((id) => lin.nodes.get(id))
+        .filter((child): child is Node => child !== undefined && child.status === "evaluated" && !child.locked);
+      if (node.children.length < this.cap(node) || kids.length === 0) return node;
+      let next = kids[0] as Node;
+      let best = this.uct(next, node);
+      for (const child of kids.slice(1)) {
+        const score = this.uct(child, node);
+        if (score > best) {
+          best = score;
+          next = child;
+        }
+      }
+      node = next;
+    }
   }
 }
 
-export type SamplerId = "greedy" | "aflow-sample" | "dgm-sample" | "uct";
-
-export interface ParentSampler {
-  readonly id: SamplerId;
-  sample(archiveIds: readonly string[], config: SelectorSearchConfig): readonly string[];
-}
-
-export function greedySampler(): ParentSampler {
-  return {
-    id: "greedy",
-    sample(archiveIds) {
-      const top = archiveIds[0];
-      return top === undefined ? [] : [top];
-    },
-  };
-}
-
-export function unimplementedSampler(id: Exclude<SamplerId, "greedy">): ParentSampler {
-  return {
-    id,
-    sample() {
-      throw new Error(
-        `TODO(harness-opt/design/2026-10-18-evolution-selector-solutions.md): ${id} parent sampling is not implemented in this skeleton`,
-      );
-    },
-  };
-}
-
-const CRITERIA: Readonly<Record<string, PromotionCriterion>> = {
-  [STAGED_THRESHOLD_ID]: new StagedThresholdCriterion(),
-  [GREEDY_ID]: new GreedyCriterion(),
-  [PAIRED_CI_HALVING_ID]: new PairedCiHalvingCriterion(),
-};
-
-const SAMPLERS: Readonly<Record<SamplerId, ParentSampler>> = {
-  greedy: greedySampler(),
-  "aflow-sample": unimplementedSampler("aflow-sample"),
-  "dgm-sample": unimplementedSampler("dgm-sample"),
-  uct: unimplementedSampler("uct"),
-};
-
-export function getPromotionCriterion(id: string = DEFAULT_SELECTOR_ID): PromotionCriterion {
-  const criterion = CRITERIA[id];
-  if (!criterion) throw new Error(`unknown promotion criterion: ${id}`);
-  return criterion;
-}
-
-export function getParentSampler(id: SamplerId): ParentSampler {
-  return SAMPLERS[id];
-}
-
-function stagedReason(input: PromotionInput): string | null {
-  const blocked = eligibleReason(input.candidate);
-  if (blocked) return blocked;
-  if (input.parent === null) return null;
-  const delta = input.candidate.devScore - input.parent.devScore;
-  if (delta < input.thresholds.minScoreDelta) {
-    return `dev delta ${delta} is below staged min ${input.thresholds.minScoreDelta}`;
+export function backprop(lin: Lineage, node: Node, reward: number): void {
+  let current: Node | undefined = node;
+  while (current) {
+    current.visits += 1;
+    current.valueSum += reward;
+    lin.put(current);
+    current = current.parentId ? lin.nodes.get(current.parentId) : undefined;
   }
-  const tokenCap = input.parent.tokens * input.thresholds.maxTokenRegressionRatio;
-  if (input.candidate.tokens > tokenCap) {
-    return `token cost ${input.candidate.tokens} exceeds staged cap ${tokenCap}`;
+}
+
+const TODO_IDS = ["paired-lcb", "successive-halving", "map-elites", "novelty"] as const;
+
+export function getSelector(id: string = DEFAULT_SELECTOR_ID, rng?: Rng): Selector {
+  if ((TODO_IDS as readonly string[]).includes(id)) {
+    throw new Error(`TODO(${SELECTOR_DOC}): ${id} is an interface only in this round`);
   }
-  return null;
-}
-
-function eligible(card: Scorecard): boolean {
-  return Number.isFinite(card.devScore) && card.attributionComplete;
-}
-
-function eligibleReason(card: Scorecard): string | null {
-  if (!Number.isFinite(card.devScore)) return "candidate dev score is not finite";
-  if (!card.attributionComplete) return "attribution coverage is incomplete";
-  return null;
-}
-
-function finish(id: string, input: PromotionInput, reason: string | null): PromotionDecision {
-  if (reason === null) {
-    return { accept: true, criterionId: id, reason: `${id} accepted the candidate`, genes: input.genes };
+  switch (id) {
+    case "greedy":
+      return new GreedySelector();
+    case "softmax-mix":
+      return new SoftmaxMixSelector(4, 0.2, 0.3, rng);
+    case "score-child-prop":
+      return new ScoreChildPropSelector(rng);
+    case "uct":
+      return new UCTSelector();
+    default:
+      throw new Error(`unknown selector: ${id}`);
   }
-  return { accept: false, criterionId: id, reason, genes: input.genes };
+}
+
+/** P0 keep rule. Throws so an unfinished criterion cannot promote. */
+export class PairedLcbKeep {
+  decide(): never {
+    throw new Error(`TODO(${SELECTOR_DOC} P0): paired evaluation + LCB keep is not implemented`);
+  }
+}
+
+/** P0 racer. Throws so staging cannot silently skip the small subset. */
+export class SuccessiveHalvingStage {
+  next(): never {
+    throw new Error(`TODO(${SELECTOR_DOC} P0): successive halving is not implemented`);
+  }
+}
+
+/** P1 archive. The linear archive is the lineage itself. */
+export class ParetoArchive {
+  consider(): never {
+    throw new Error(`TODO(${SELECTOR_DOC} P1): per-task Pareto archive is not implemented`);
+  }
+}
+
+/** P2 archive. */
+export class MapElitesArchive {
+  consider(): never {
+    throw new Error(`TODO(${SELECTOR_DOC} P2): MAP-Elites is not implemented`);
+  }
+}
+
+/** P1 filter. */
+export class NoveltyFilter {
+  allow(): never {
+    throw new Error(`TODO(${SELECTOR_DOC} P1): novelty rejection is not implemented`);
+  }
 }

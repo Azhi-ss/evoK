@@ -1,67 +1,129 @@
 import { describe, expect, test } from "bun:test";
-import type { Scorecard, SearchGenes } from "../types";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Lineage, Node } from "../lineage";
 import {
   DEFAULT_SELECTOR_ID,
-  DEFAULT_SELECTOR_SEARCH,
-  DEFAULT_STAGED_THRESHOLDS,
-  getParentSampler,
-  getPromotionCriterion,
-  GREEDY_ID,
-  PAIRED_CI_HALVING_ID,
-  STAGED_THRESHOLD_ID,
+  GreedySelector,
+  MapElitesArchive,
+  NoveltyFilter,
+  PairedLcbKeep,
+  ParetoArchive,
+  ScoreChildPropSelector,
+  SoftmaxMixSelector,
+  SuccessiveHalvingStage,
+  UCTSelector,
+  getSelector,
+  scoreChildPropWeight,
+  softmaxMixWeights,
+  type Rng,
 } from "./selector";
 
-const genes: SearchGenes = { samples: 1, selfChecks: 0, retries: 0 };
-
-function card(devScore: number, tokens: number, attributionComplete = true): Scorecard {
-  return { devScore, tokens, attributionComplete };
+function dir(): string {
+  return mkdtempSync(join(tmpdir(), "harness-opt-sel-"));
 }
 
-function decide(id: string, parent: Scorecard | null, candidate: Scorecard) {
-  return getPromotionCriterion(id).decide({
-    parent,
-    candidate,
-    thresholds: DEFAULT_STAGED_THRESHOLDS,
-    genes,
-    search: DEFAULT_SELECTOR_SEARCH,
+function evaluated(lin: Lineage, id: string, score: number, extra: Partial<ConstructorParameters<typeof Node>[0]> = {}): Node {
+  const node = new Node({
+    id,
+    parentId: extra.parentId ?? null,
+    configPath: `candidates/${id}/config.json`,
+    status: "evaluated",
+    devScores: [score],
+    stage: "full",
+    ...extra,
   });
+  lin.put(node);
+  return node;
 }
 
-describe("promotion criteria", () => {
-  test("default criterion is staged keep-better, not greedy", () => {
-    expect(DEFAULT_SELECTOR_ID).toBe(STAGED_THRESHOLD_ID);
-    expect(getPromotionCriterion().id).toBe(STAGED_THRESHOLD_ID);
+describe("selectors", () => {
+  test("the MVP default is greedy", () => {
+    expect(DEFAULT_SELECTOR_ID).toBe("greedy");
+    expect(getSelector().name).toBe("GreedySelector");
   });
 
-  test("a small dev bump clears greedy and misses the staged threshold", () => {
-    const parent = card(50, 10);
-    const candidate = card(50.5, 10);
-    expect(decide(GREEDY_ID, parent, candidate).accept).toBe(true);
-    expect(decide(STAGED_THRESHOLD_ID, parent, candidate).accept).toBe(false);
+  test("greedy skips a locked higher node and keeps the earlier tie", () => {
+    const lin = new Lineage(dir());
+    evaluated(lin, "low", 0.4);
+    const high = evaluated(lin, "high", 0.9);
+    high.locked = true;
+    lin.put(high);
+    expect(new GreedySelector().pick(lin).id).toBe("low");
+    high.locked = false;
+    lin.put(high);
+    const twin = evaluated(lin, "twin", 0.9);
+    expect(new GreedySelector().pick(lin).id).toBe("high");
+    expect(twin.devMean).toBe(0.9);
   });
 
-  test("staged threshold also refuses a token regression", () => {
-    const decision = decide(STAGED_THRESHOLD_ID, card(40, 10), card(80, 30));
-    expect(decision.accept).toBe(false);
-    expect(decision.reason).toContain("token");
+  test("softmax mix matches the AFlow weight formula", () => {
+    const weights = softmaxMixWeights([90, 10], 0.2, 0.3);
+    expect(weights[0]).toBeCloseTo(0.15 + 0.7, 6);
+    expect(weights[1]).toBeCloseTo(0.15, 4);
+    const seen: number[] = [];
+    const rng: Rng = {
+      choices<T>(pool: readonly T[], drawn: readonly number[]): T {
+        seen.push(...drawn);
+        return pool[1] as T;
+      },
+    };
+    const lin = new Lineage(dir());
+    evaluated(lin, "best", 0.9);
+    evaluated(lin, "other", 0.1);
+    expect(new SoftmaxMixSelector(4, 0.2, 0.3, rng).pick(lin).id).toBe("other");
+    expect(seen[0]).toBeCloseTo(weights[0] as number, 6);
+    expect(seen[1]).toBeCloseTo(weights[1] as number, 6);
   });
 
-  test("paired CI + halving is reserved and cannot promote", () => {
-    const decision = decide(PAIRED_CI_HALVING_ID, card(10, 10), card(90, 10));
-    expect(decision.accept).toBe(false);
-    expect(decision.reason).toContain("TODO(evolution-selector §④)");
-    expect(decision.genes).toEqual(genes);
+  test("score-child-prop down-weights nodes that already have children", () => {
+    const heavy = scoreChildPropWeight(0.8, 0);
+    const light = scoreChildPropWeight(0.8, 2);
+    expect(heavy).toBeCloseTo(1 / (1 + Math.exp(-3)), 6);
+    expect(light).toBeCloseTo(heavy / 3, 6);
+    const lin = new Lineage(dir());
+    const parent = evaluated(lin, "parent", 0.8, { children: ["a", "b"] });
+    evaluated(lin, "fresh", 0.8);
+    let picked = "";
+    const rng: Rng = {
+      choices<T>(pool: readonly T[], weights: readonly number[]): T {
+        expect(weights[0]).toBeCloseTo(scoreChildPropWeight(0.8, parent.children.length), 6);
+        expect(weights[1]).toBeCloseTo(scoreChildPropWeight(0.8, 0), 6);
+        const chosen = pool[1] as T;
+        picked = (chosen as Node).id;
+        return chosen;
+      },
+    };
+    expect(new ScoreChildPropSelector(rng).pick(lin).id).toBe(picked);
   });
 
-  test("AFlow, DGM, and UCT samplers stay unimplemented", () => {
-    for (const id of ["aflow-sample", "dgm-sample", "uct"] as const) {
-      expect(() => getParentSampler(id).sample(["parent"], DEFAULT_SELECTOR_SEARCH)).toThrow(/TODO/);
+  test("UCT cap, unvisited infinity, and descent when the cap is full", () => {
+    const selector = new UCTSelector();
+    const leaf = new Node({ id: "v1", parentId: "root", configPath: "c", visits: 1 });
+    expect(selector.cap(leaf)).toBe(2);
+    leaf.visits = 16;
+    expect(selector.cap(leaf)).toBe(6);
+    const unvisited = new Node({ id: "new", parentId: "root", configPath: "c", visits: 0 });
+    const parent = new Node({ id: "root", parentId: null, configPath: "c", visits: 1 });
+    expect(selector.uct(unvisited, parent)).toBe(Number.POSITIVE_INFINITY);
+
+    const lin = new Lineage(dir());
+    const root = evaluated(lin, "root", 0.5, { visits: 1, children: ["low", "high"] });
+    evaluated(lin, "low", 0.2, { parentId: "root", visits: 1, valueSum: 0.2 });
+    evaluated(lin, "high", 0.9, { parentId: "root", visits: 1, valueSum: 0.9 });
+    expect(selector.pick(lin).id).toBe("high");
+    expect(root.children).toEqual(["low", "high"]);
+  });
+
+  test("P0 and P2 mechanisms stay throwing interfaces", () => {
+    expect(() => new PairedLcbKeep().decide()).toThrow(/TODO/);
+    expect(() => new SuccessiveHalvingStage().next()).toThrow(/TODO/);
+    expect(() => new ParetoArchive().consider()).toThrow(/TODO/);
+    expect(() => new MapElitesArchive().consider()).toThrow(/TODO/);
+    expect(() => new NoveltyFilter().allow()).toThrow(/TODO/);
+    for (const id of ["paired-lcb", "successive-halving", "map-elites", "novelty"]) {
+      expect(() => getSelector(id)).toThrow(/TODO/);
     }
-  });
-
-  test("sampleCount stays a searchable config while greedy still returns one parent", () => {
-    const config = { ...DEFAULT_SELECTOR_SEARCH, sampleCount: 4 };
-    expect(getParentSampler("greedy").sample(["best", "other"], config)).toEqual(["best"]);
-    expect(config.sampleCount).toBe(4);
   });
 });

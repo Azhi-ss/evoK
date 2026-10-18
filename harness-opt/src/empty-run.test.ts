@@ -12,55 +12,45 @@ function out(): string {
 }
 
 describe("empty round", () => {
-  test("schedules the fixed machine and the evidence gate blocks submit", () => {
+  test("one greedy step keeps the better child and the baseline gate blocks submit", () => {
     const dir = out();
-    let innovatorKeys: string[] = [];
-    const result = runEmpty({
-      out: dir,
-      handlers: {
-        innovator: (input) => {
-          innovatorKeys = Object.keys(input);
-          return {
-            part: "agent-loop",
-            motivation: "cap the idle reread",
-            expectedFailureClass: "idle-loop",
-            changes: { maxSteps: 4 },
-          };
-        },
-      },
-    });
-    expect(result.visits).toEqual(["gap-finder", "innovator", "runner", "reviewer", "report-writer"]);
-    expect(result.accepted).toBe(true);
-    expect(result.receipt).toBeNull();
-    expect(result.stoppedReason).toContain("evidence gate refused");
-    expect(innovatorKeys).not.toContain("heldOut");
-    const lineage = readFileSync(join(dir, "lineage.json"), "utf8");
-    expect(lineage).toContain("\"status\": \"accepted\"");
+    const result = runEmpty({ out: dir });
+    expect(result.selector).toBe("GreedySelector");
+    expect(result.submit).toBe(false);
+    expect(result.heldout).toBe(0.1);
+    expect(result.childStatus).toBe("evaluated");
+    expect(result.bestId).toBe("c1");
+    expect(result.liveSubmitCalled).toBe(false);
+    const proposal = readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8");
+    expect(proposal).not.toContain("held-out");
+    expect(proposal).toContain("\"retries\": 1");
+    const child = readFileSync(join(dir, "state", "nodes", "c1.json"), "utf8");
+    expect(child).toContain("\"stage\": \"full\"");
+    expect(readFileSync(join(dir, "state", "lineage.jsonl"), "utf8")).toContain("\"kind\":\"review\"");
     expect(readFileSync(join(dir, "gaps.json"), "utf8")).toContain("idle-loop");
-    expect(readFileSync(join(dir, "review.json"), "utf8")).toContain("staged-threshold");
   });
 
-  test("reviewer veto stops before the report writer", () => {
+  test("reviewer veto rejects the child and does not submit", () => {
     const result = runEmpty({
       out: out(),
-      handlers: {
-        reviewer: () => ({ accept: false, reason: "veto", criterionId: "staged-threshold" }),
+      roles: {
+        reviewer: () => ({ accept: false, reason: "veto" }),
       },
     });
-    expect(result.accepted).toBe(false);
-    expect(result.phases).not.toContain("report-writer");
-    expect(result.node?.status).toBe("rejected");
+    expect(result.childStatus).toBe("rejected");
+    expect(result.submit).toBe(false);
+    expect(result.bestId).toBe("base");
   });
 
-  test("a green gate dry-runs and does not live-submit", () => {
+  test("a held-out score above the TTS baseline still does not call playground submit", () => {
     const result = runEmpty({
       out: out(),
-      tts: "passed",
-      heldOutScore: 70,
+      heldout: 0.9,
+      ttsBaseline: 0.5,
+      baseHeldout: 0.4,
     });
-    expect(result.evidence?.ok).toBe(true);
-    expect(result.phases).toContain("submitter");
-    expect(result.receipt).toMatchObject({ mode: "dry-run", submitted: false, ok: true });
+    expect(result.submit).toBe(true);
+    expect(result.liveSubmitCalled).toBe(false);
   });
 
   test("pi-subagents delegation stays an unverified stub", () => {
@@ -70,13 +60,15 @@ describe("empty round", () => {
   test("a role cannot write another role's artifact", () => {
     expect(() => assertRoleWrite("innovator", "gaps.json")).toThrow(/cannot write/);
     expect(() => assertRoleWrite("runner", "traces/t1.json")).not.toThrow();
+    expect(() => assertRoleWrite("innovator", "candidates/c1/config.json")).not.toThrow();
   });
 
-  test("cli empty run completes", () => {
+  test("cli empty run completes with submit false", () => {
     const dir = out();
     expect(main(["empty", "--out", dir])).toBe(0);
     expect(main(["nope"])).toBe(1);
-    const state = JSON.parse(readFileSync(join(dir, "run_state.json"), "utf8")) as { stoppedReason: string };
-    expect(state.stoppedReason).toContain("evidence gate refused");
+    const state = JSON.parse(readFileSync(join(dir, "state", "run_state.json"), "utf8")) as { submit: boolean; selector: string };
+    expect(state.submit).toBe(false);
+    expect(state.selector).toBe("GreedySelector");
   });
 });

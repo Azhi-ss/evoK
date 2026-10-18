@@ -102,17 +102,6 @@ export interface PatchProposal {
   readonly search?: Partial<SearchGenes>;
 }
 
-export interface LineageNode {
-  readonly id: string;
-  readonly parentId: string | null;
-  readonly status: "accepted" | "rejected";
-  readonly config: HarnessConfig;
-  readonly devScore: number | null;
-  readonly tokens: number | null;
-  readonly reason: string;
-  readonly criterionId: string | null;
-}
-
 export const DEFAULT_MODEL_ALLOWLIST = [
   "deepseek",
   "glm",

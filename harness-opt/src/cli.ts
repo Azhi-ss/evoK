@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { flag } from "./args";
 import { runEmpty } from "./empty-run";
 import { loadTaskBank } from "./modules/probe";
 
@@ -22,11 +23,13 @@ export function main(argv: readonly string[]): number {
   });
   process.stdout.write(`${JSON.stringify({
     out,
-    phases: result.phases,
-    visits: result.visits,
-    accepted: result.accepted,
-    stoppedReason: result.stoppedReason,
-    submitted: result.receipt?.submitted ?? false,
+    bestId: result.bestId,
+    submit: result.submit,
+    heldout: result.heldout,
+    selector: result.selector,
+    phase: result.phase,
+    childStatus: result.childStatus,
+    liveSubmitCalled: result.liveSubmitCalled,
   }, null, 2)}\n`);
   return 0;
 }
@@ -43,12 +46,6 @@ function loadBank(argv: readonly string[]) {
     return "missing" as const;
   }
   return bank;
-}
-
-function flag(argv: readonly string[], name: string): string | undefined {
-  const index = argv.indexOf(name);
-  if (index < 0) return undefined;
-  return argv[index + 1];
 }
 
 const invoked = process.argv[1];

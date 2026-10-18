@@ -1,39 +1,28 @@
 import type { RoleId } from "../roles";
 
 /**
- * Host port for pi-subagents.
+ * Host port for pi-subagents. The empty run does not import that package.
  *
- * The skeleton schedules roles through this interface. The empty run uses
- * `RecordingScheduler`, which only records the fixed order and then runs
- * the deterministic handler. It does not import pi-subagents.
+ * TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7): unverified,
+ * leave as comments, do not invent a call. Do not install pi-intercom.
+ *   1. Bare-script `gate.command` splicing `args`.
+ *   2. `import 'pi-subagents/workflow-resources'` when this package is
+ *      installed separately from pi-subagents.
+ *   3. Structured delegation from a `registerCommand` handler.
+ *   4. Default blocking timeout of `contact_supervisor`.
+ *   5. `pi install -l ./` reading `pi.subagents.agents`.
  *
- * TODO(harness-opt/design/2026-10-18-pi-subagents-intercom-setup.md):
- * these points were unverified when the skeleton was written. Do not
- * invent a call and do not install pi-intercom. pi-subagents already
- * ships `contact_supervisor`.
- *   1. Plugin import path (package export vs Pi `additionalExtensionPaths`).
- *   2. Workflow script evaluation command (clarify → scout → worker → review
- *      is only a guessed host for the product machine below).
- *   3. Structured delegation payload (`subagent` action shape).
- *   4. Mounting `harness-opt/agents/*.md` as child role files.
- *
- * Product machine (PRD §5.3), owned by deterministic code:
- *   gap-finder → innovator → runner → reviewer → report-writer → submitter
- * Node on this VM is below the Pi 22.19 line, so this port stays a stub.
+ * Node on this VM is below Pi's 22.19 line, so the loop under test is
+ * `src/orchestrator.ts`.
  */
 
 export const PI_SUBAGENTS_UNVERIFIED = [
-  "plugin import path",
-  "workflow evaluation command",
-  "structured delegation payload",
-  "local role-file mount",
+  "bare-script gate.command args concatenation",
+  "import pi-subagents/workflow-resources",
+  "structured delegation from registerCommand",
+  "contact_supervisor blocking timeout",
+  "pi install -l reading pi.subagents.agents",
 ] as const;
-
-export interface ScheduledStep<T> {
-  readonly role: RoleId;
-  readonly task: string;
-  readonly value: T;
-}
 
 export interface RoleScheduler {
   schedule<T>(role: RoleId, task: string, run: () => T): T;
@@ -51,7 +40,7 @@ export class RecordingScheduler implements RoleScheduler {
 export class UnverifiedPiSubagentsDelegator implements RoleScheduler {
   schedule<T>(_role: RoleId, _task: string, _run: () => T): T {
     throw new Error(
-      `TODO(pi-subagents): unverified ${PI_SUBAGENTS_UNVERIFIED.join("; ")}. See harness-opt/design/2026-10-18-pi-subagents-intercom-setup.md. Do not install pi-intercom.`,
+      `TODO(pi-subagents): unverified ${PI_SUBAGENTS_UNVERIFIED.join("; ")}. See harness-opt/design/2026-10-18-pi-subagents-setup.md. Do not install pi-intercom.`,
     );
   }
 }

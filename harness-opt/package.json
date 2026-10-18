@@ -1,10 +1,25 @@
 {
-  "name": "harness-opt",
+  "name": "pi-harness-opt",
+  "version": "0.0.1",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
-  "description": "Deterministic harness-optimizer skeleton for the Bohrium BioMaster harness contest. pi-subagents is an optional host and is not imported.",
+  "description": "Deterministic harness-optimizer Pi package. pi-subagents is a host dependency and is not imported.",
+  "keywords": ["pi-package"],
   "bin": {
-    "harness-opt": "./src/cli.ts"
+    "harness-opt": "./src/cli.ts",
+    "harnessopt-select": "./bin/select.ts",
+    "harnessopt-eval": "./bin/eval.ts",
+    "harnessopt-record": "./bin/record.ts"
+  },
+  "pi": {
+    "extensions": ["./extensions/harness-opt/index.ts"],
+    "subagents": {
+      "agents": ["./agents"]
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
   }
 }
