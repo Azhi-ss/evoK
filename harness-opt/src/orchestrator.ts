@@ -50,12 +50,36 @@ export interface MilestoneHeldOut {
   readonly parent: number;
 }
 
+/**
+ * unread: the milestone was not read.
+ * fell: it was read and the child is below the parent.
+ * held: it was read and the child did not fall.
+ */
+export type HeldOutMilestoneState = "unread" | "fell" | "held";
+
+export function heldOutMilestoneState(milestone: MilestoneHeldOut | null): HeldOutMilestoneState {
+  if (milestone === null) return "unread";
+  return milestone.child < milestone.parent ? "fell" : "held";
+}
+
 export interface ReviewInput {
   readonly child: Node;
   readonly parent: Node;
   readonly heldOut: MilestoneHeldOut | null;
-  /** True when dev rose and held-out fell, or when the milestone read failed. */
+  readonly heldOutState: HeldOutMilestoneState;
+  /** True only when dev rose and the milestone was read and fell. Unread is not a drop. */
   readonly devRoseHeldOutFell: boolean;
+}
+
+/** Stored reviewer verdict when the milestone state itself decides the call. */
+export function forcedReviewVerdict(input: Pick<ReviewInput, "heldOutState" | "devRoseHeldOutFell">): ReviewVerdict | null {
+  if (input.heldOutState === "unread") {
+    return { accept: false, reason: "milestone-unread：里程碑没读到" };
+  }
+  if (input.devRoseHeldOutFell) {
+    return { accept: false, reason: "held-out 相对父节点下跌" };
+  }
+  return null;
 }
 
 export interface EvidencePack {
@@ -250,20 +274,28 @@ export class Orchestrator {
       const childMean = child.devMean ?? 0;
       const milestone = readMilestone(this.heldOutAtMilestone, child.configPath, parent.configPath);
       const devRose = parent.devMean !== null && childMean > parent.devMean;
-      const heldOutFell = milestone !== null && milestone.child < milestone.parent;
-      const devRoseHeldOutFell = milestone === null || (devRose && heldOutFell);
-      const verdict = await this.roles.reviewer({ child, parent, heldOut: milestone, devRoseHeldOutFell });
+      const heldOutState = heldOutMilestoneState(milestone);
+      const devRoseHeldOutFell = devRose && heldOutState === "fell";
+      const verdict = await this.roles.reviewer({
+        child,
+        parent,
+        heldOut: milestone,
+        heldOutState,
+        devRoseHeldOutFell,
+      });
       // Placeholder keep rule, not a statistical criterion. This is an unpaired
       // comparison, not a paired difference and not an LCB. `noiseLeeway`
       // (default 0.01) is a nominal constant; it is not an estimate of noise.
+      // Unread is a separate refusal from a read drop: both block promotion.
       const keep = verdict.accept
         && childMean >= (parent.devMean ?? 0) - this.noiseLeeway
+        && heldOutState !== "unread"
         && !devRoseHeldOutFell;
-      const reason = devRoseHeldOutFell
-        ? milestone === null
-          ? "milestone-unread"
-          : "regressed"
-        : verdict.reason;
+      const reason = heldOutState === "unread"
+        ? "milestone-unread"
+        : devRoseHeldOutFell
+          ? "regressed"
+          : verdict.reason;
       if (!keep) {
         child.status = "rejected";
         this.lin.put(child);
@@ -272,12 +304,13 @@ export class Orchestrator {
         this.lastPack = pack;
       }
       this.consecutiveStalls = 0;
-      this.onStage?.("review", { accept: child.status === "evaluated", reason, regressed: devRoseHeldOutFell }, reason);
+      this.onStage?.("review", { accept: child.status === "evaluated", reason, regressed: devRoseHeldOutFell, milestone: heldOutState }, reason);
       this.lin.log("review", {
         node: child.id,
         accept: child.status === "evaluated",
         dev: child.devMean,
         regressed: devRoseHeldOutFell,
+        milestone: heldOutState,
         reason,
       });
       backprop(this.lin, child, childMean);

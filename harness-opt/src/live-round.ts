@@ -5,8 +5,8 @@ import { createExecutor, type HarnessExecutor } from "./modules/executor";
 import { DelegationError, schemaFor, type DelegationValue, type RoleDelegate } from "./pi/delegate";
 import { writeStageReport } from "./reports";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
-import type { EvidencePack, Proposal, ReviewInput, Roles, SubmitReceipt } from "./orchestrator";
-import { ATTRIBUTION_LABELS, HARNESS_PARTS, type TaskRef } from "./types";
+import { forcedReviewVerdict, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
+import { ATTRIBUTION_LABELS, emptyParts, HARNESS_PARTS, type TaskRef } from "./types";
 
 const LABEL_LIST = ATTRIBUTION_LABELS.join(", ");
 const PART_LIST = HARNESS_PARTS.join(", ");
@@ -16,6 +16,16 @@ export const GAP_FINDER_TASK = `Read traces and return gaps with id, failureClas
 export const INNOVATOR_TASK_PREFIX = `Write one patch. part must be exactly one of: ${PART_LIST}. expectedFailureClass must be exactly one of: ${LABEL_LIST}. Required fields are part, motivation, expectedFailureClass, and summary.`;
 
 export const REVIEWER_TASK_PREFIX = "Return one JSON object. accept is a boolean. reason is a string.";
+
+/** Task text names the milestone state so a missing read is not described as a drop. */
+export function reviewerTask(input: ReviewInput): string {
+  const state = input.heldOutState === "unread"
+    ? "状态 unread：没读到里程碑。拒绝理由必须写没读到，不能写成下跌。"
+    : input.heldOutState === "fell"
+      ? "状态 fell：读到了，且 held-out 相对父节点下跌。拒绝理由必须写下跌。"
+      : "状态 held：读到了，且没有下跌。拒绝理由不能写成下跌或没读到。";
+  return `${REVIEWER_TASK_PREFIX} Child dev ${input.child.devMean ?? "unread"} parent dev ${input.parent.devMean ?? "unread"}. ${state} devRoseHeldOutFell=${input.devRoseHeldOutFell}.`;
+}
 
 /**
  * Roles whose outputs are parsed. Gap finder, innovator, and reviewer-gate
@@ -62,7 +72,7 @@ export function liveRoles(options: {
       const config = {
         id: candidateId,
         modelId: LOCAL_MODEL_ID,
-        parts: { "agent-loop": patch.changes, context: {}, memory: {}, toolchain: {}, skills: {} },
+        parts: { ...emptyParts(), [patch.part]: patch.changes },
         search: { samples: 1, selfChecks: 0, retries: 0 },
       };
       writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
@@ -89,7 +99,7 @@ export function liveRoles(options: {
     reviewer: async (input: ReviewInput) => {
       const delegated = await delegateOrCharge(options, {
         agent: "reviewer-gate",
-        task: `${REVIEWER_TASK_PREFIX} Child dev ${input.child.devMean ?? "unread"} parent dev ${input.parent.devMean ?? "unread"}. devRoseHeldOutFell=${input.devRoseHeldOutFell}.`,
+        task: reviewerTask(input),
         schema: schemaFor("reviewer-gate"),
       });
       options.budget.usedTokens += delegated.tokens;
@@ -97,7 +107,7 @@ export function liveRoles(options: {
       if (typeof value.accept !== "boolean" || typeof value.reason !== "string") {
         throw new Error("reviewer-gate output is missing accept or reason");
       }
-      const verdict = { accept: value.accept, reason: value.reason };
+      const verdict = forcedReviewVerdict(input) ?? { accept: value.accept, reason: value.reason };
       writeRoleJson(options.root, "reviewer-gate", "review.json", verdict);
       return verdict;
     },

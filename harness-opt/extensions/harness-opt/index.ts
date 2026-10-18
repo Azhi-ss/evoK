@@ -1,6 +1,11 @@
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
+import {
+  registerRequiredChildExtensions,
+  type RequiredChildExtensionRegistration,
+} from "pi-subagents/required-child-extensions";
 import { registerWorkflowResource, type WorkflowResourceRegistration } from "pi-subagents/workflow-resources";
 import { flag, splitArgsPreservingJson } from "../../src/args";
 import { DEFAULT_DELEGATION_TIMEOUT_MS } from "../../src/pi/delegate";
@@ -75,9 +80,12 @@ async function runHarnessOpt(args: string, ctx: { readonly cwd: string; readonly
   return commandResult;
 }
 
+const ROLE_GUARD_EXTENSION = fileURLToPath(new URL("./role-guard.ts", import.meta.url));
+
 export function createHarnessOptExtension(): (pi: ExtensionAPI) => void {
   return (pi) => {
     let registration: WorkflowResourceRegistration | undefined;
+    let childExtensions: RequiredChildExtensionRegistration | undefined;
     pi.registerCommand("harness-opt", {
       description: HARNESS_OPT_DESCRIPTION,
       handler: async (args, ctx) => {
@@ -125,11 +133,21 @@ export function createHarnessOptExtension(): (pi: ExtensionAPI) => void {
     });
     pi.on("session_start", (_event, ctx) => {
       registration?.dispose();
+      registration = undefined;
+      childExtensions?.dispose();
+      childExtensions = undefined;
       registration = registerWorkflow(ctx);
+      childExtensions = registerRequiredChildExtensions({
+        sessionId: ctx.sessionManager.getSessionId(),
+        extensions: [{ id: "harness-opt.role-guard", path: ROLE_GUARD_EXTENSION }],
+        requireForAllRunners: true,
+      });
     });
     pi.on("session_shutdown", () => {
       registration?.dispose();
       registration = undefined;
+      childExtensions?.dispose();
+      childExtensions = undefined;
     });
   };
 }

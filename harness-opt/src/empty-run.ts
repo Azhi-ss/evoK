@@ -9,7 +9,7 @@ import { HELD_OUT_SCORE_FILE, readHeldOutScore } from "./heldout-file";
 import { Lineage, Node } from "./lineage";
 import { HeldOutVault } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
-import { Orchestrator, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
+import { forcedReviewVerdict, Orchestrator, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
 import type { TtsStatus } from "./modules/evidence-gate";
 import type { DryRunStatus } from "./playground-dry-run";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
@@ -155,13 +155,12 @@ export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult
       return subset === "dev_full" ? [score, score] : [score];
     },
     reviewer: (input: ReviewInput) => {
-      const accept = !input.devRoseHeldOutFell
-        && (input.child.devMean ?? 0) >= (input.parent.devMean ?? 0) - 0.01;
+      const forced = forcedReviewVerdict(input);
+      const accept = forced?.accept
+        ?? (input.child.devMean ?? 0) >= (input.parent.devMean ?? 0) - 0.01;
       const verdict = {
         accept,
-        reason: input.devRoseHeldOutFell
-          ? "dev rose and held-out fell relative to the parent"
-          : accept ? "keep-better" : "below parent",
+        reason: forced?.reason ?? (accept ? "keep-better" : "below parent"),
       };
       writeRoleJson(options.out, "reviewer-gate", "review.json", verdict);
       return verdict;

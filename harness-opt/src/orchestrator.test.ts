@@ -7,7 +7,7 @@ import { FIXED_MODEL_ID } from "./fixed-model";
 import { readEvaluatedHeldOut, recordEvaluatedHeldOut, writeHandFilledHeldOut } from "./heldout-file";
 import { Lineage, Node, type RoleLineage } from "./lineage";
 import { GreedySelector } from "./modules/selector";
-import { Orchestrator, Phase, type Roles, type SubmitGateRequest } from "./orchestrator";
+import { Orchestrator, Phase, type ReviewInput, type Roles, type SubmitGateRequest } from "./orchestrator";
 
 function gateRequest(heldout: number, extra: Partial<SubmitGateRequest> = {}): SubmitGateRequest {
   return {
@@ -40,6 +40,8 @@ function machine(scores: number[], options?: {
   readonly onInnovator?: (gaps: Record<string, unknown>, tried: readonly string[]) => void;
   readonly heldOut?: (configPath: string) => number;
   readonly skipMilestone?: boolean;
+  readonly reviewReason?: string;
+  readonly onReview?: (input: ReviewInput) => void;
   readonly onGap?: (parent: Node, view: RoleLineage) => void;
   readonly maxConsecutiveStalls?: number;
 }) {
@@ -71,7 +73,10 @@ function machine(scores: number[], options?: {
       if (subset === "dev_full") return options?.fullScores ?? scores;
       return scores;
     },
-    reviewer: () => ({ accept: options?.accept ?? true, reason: "fixture" }),
+    reviewer: (input) => {
+      options?.onReview?.(input);
+      return { accept: options?.accept ?? true, reason: options?.reviewReason ?? "fixture" };
+    },
   };
   const orchestrator = new Orchestrator(lin, roles, new GreedySelector(), options?.budget ?? new Budget(), {
     patience: options?.patience ?? 15,
@@ -188,18 +193,58 @@ describe("orchestrator", () => {
 
   test("a dev rise with a held-out drop is refused and stays out of the innovator", async () => {
     let parentKeys: string[] = [];
+    let review: ReviewInput | undefined;
     const run = machine([0.9], {
       heldOut: (configPath) => configPath.endsWith("child/config.json") ? 0.2 : 0.8,
+      onReview: (input) => {
+        review = input;
+      },
       onGap: (parent) => {
         parentKeys = Object.keys(parent.toJSON());
       },
     });
     expect(await run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(review?.heldOutState).toBe("fell");
+    expect(review?.devRoseHeldOutFell).toBe(true);
     expect(run.lin.nodes.get("child")?.status).toBe("rejected");
-    expect(run.lin.events().some((event) => event.kind === "review" && event.regressed === true && event.reason === "regressed")).toBe(true);
+    expect(run.lin.events().some((event) => event.kind === "review" && event.regressed === true && event.reason === "regressed" && event.milestone === "fell")).toBe(true);
     expect(JSON.stringify(run.lin.events())).not.toMatch(/heldout|held-out/i);
     expect(parentKeys).not.toContain("heldOut");
     expect(run.lin.best().id).toBe("root");
+  });
+
+  test("an unread milestone is refused as unread and is not reported as a drop", async () => {
+    let review: ReviewInput | undefined;
+    const run = machine([0.9], {
+      skipMilestone: true,
+      reviewReason: "dev rose and held-out fell",
+      onReview: (input) => {
+        review = input;
+      },
+    });
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(review?.heldOutState).toBe("unread");
+    expect(review?.heldOut).toBeNull();
+    expect(review?.devRoseHeldOutFell).toBe(false);
+    expect(run.lin.nodes.get("child")?.status).toBe("rejected");
+    const event = run.lin.events().find((item) => item.kind === "review");
+    expect(event).toMatchObject({ reason: "milestone-unread", regressed: false, milestone: "unread" });
+    expect(JSON.stringify(event)).not.toContain("fell");
+  });
+
+  test("a read milestone that did not fall is kept and is not a regression", async () => {
+    let review: ReviewInput | undefined;
+    const run = machine([0.9], {
+      heldOut: () => 0.5,
+      onReview: (input) => {
+        review = input;
+      },
+    });
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(review?.heldOutState).toBe("held");
+    expect(review?.devRoseHeldOutFell).toBe(false);
+    expect(run.lin.nodes.get("child")?.status).toBe("evaluated");
+    expect(run.lin.events().some((event) => event.kind === "review" && event.regressed === false && event.milestone === "held" && event.reason === "fixture")).toBe(true);
   });
 
   test("plateau, budget, and a gap-finder failure stay inside the state machine", async () => {

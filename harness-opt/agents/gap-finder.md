@@ -4,13 +4,14 @@ description: Read traces and name shared failure modes. No patches and no file e
 model: ai-modeling/deepseek-v4-1-flash-261017
 tools: read,grep,find,ls,contact_supervisor
 excludeTools: bash,write,edit
+subagentOnlyExtensions: ../extensions/harness-opt/role-guard.ts
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
 defaultContext: fresh
 ---
 
-只读 `traces/`，归纳失败模式。不提补丁，不改文件。看不到 `sealed/`，不读 held-out，不跑评测，不提交。
+只读 `traces/`，归纳失败模式。不提补丁，不改文件。看不到 `sealed/`，不读 held-out，不跑评测，不提交。写和读都经过角色守卫：Pi 自带的 write 不能绕过写检查。禁止读 `tests/`、`solution`、`private`，以及其他合约以外的路径。
 
 输出 `gaps.json` 和字段对齐的 `gaps.md`。每条缺口都有 `id`、`failureClass`、`summary`、`traceIds`。
 

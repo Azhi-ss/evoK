@@ -117,6 +117,16 @@ describe("pi extension", () => {
     }) as { isError?: boolean; content: { text: string }[] };
     expect(toolResult.isError).toBe(true);
     expect(toolResult.content[0]?.text).toContain("no session");
+    const requiredUrl = new URL("../node_modules/pi-subagents/src/shared/required-child-extensions.js", import.meta.url);
+    const required = await import(requiredUrl.href) as {
+      resolveRequiredChildExtensions: (sessionId: string) => readonly { id: string; path: string; requireForAllRunners?: true }[];
+    };
+    const snapshot = required.resolveRequiredChildExtensions(sessionId);
+    expect(snapshot.map((entry) => entry.id)).toEqual(["harness-opt.role-guard"]);
+    expect(snapshot[0]?.path).toContain("role-guard.ts");
+    expect(snapshot[0]?.requireForAllRunners).toBe(true);
+
     await events.get("session_shutdown")?.({}, {});
+    expect(required.resolveRequiredChildExtensions(sessionId)).toEqual([]);
   });
 });

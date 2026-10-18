@@ -101,7 +101,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 6. token 预算与当日配额（面板上合成预算一行）
 7. `playground submit --dry-run` 成功
 
-dev 上涨且 held-out 相对父节点下跌，拒绝晋升。里程碑分别用子节点和父节点的 `configPath` 去读 `entries`。没读到、或读到的是手填声明，都拒绝晋升。谱系事件只留 `regressed`。
+里程碑分三态：没读到是 `unread`，读到且下跌是 `fell`，读到且没跌是 `held`。dev 上涨且状态为 `fell` 才拒绝为回归。没读到、或读到的是手填声明，也拒绝晋升，理由是 `milestone-unread`，不是下跌。谱系事件用 `milestone` 记下这一态；`regressed` 只在读到且下跌时为真。里程碑分别用子节点和父节点的 `configPath` 去读 `entries`。
 
 留下规则 `childMean ≥ parentMean − 0.01` 和预筛 `smallMean ≥ 0.9 × parent.devMean` 是占位常数，不是 LCB，也不是配对差。`dev_small` 与 `dev_full` 在夹具里是同一分数的重复；跑过 full 之后 `devMean` 只用 full，不把两段拼起来。
 
