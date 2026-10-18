@@ -36,6 +36,9 @@ describe("harnessopt_submit_gate", () => {
     expect(dry?.detail).toContain("not-run");
     const saved = JSON.parse(readFileSync(join(state, "run_state.json"), "utf8")) as { submit: boolean };
     expect(saved.submit).toBe(false);
+    expect(saved).not.toHaveProperty("heldout");
+    expect(readFileSync(join(state, "lineage.jsonl"), "utf8")).not.toContain("heldout");
+    expect(readFileSync(join(state, "gate.jsonl"), "utf8")).toContain("\"heldout\":null");
     expect(FIXED_MODEL_ID).toBe("deepseek-v4.1-flash");
   });
 

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Budget } from "./budget";
-import { Lineage, Node } from "./lineage";
+import { Lineage, Node, type RoleLineage } from "./lineage";
 import { evaluateEvidenceGate, type EvidenceCheck, type TtsStatus } from "./modules/evidence-gate";
 import { assertNoHeldOutLeak } from "./modules/proposer";
 import { probePlaygroundDryRun, type DryRunStatus } from "./playground-dry-run";
@@ -12,7 +12,8 @@ import { backprop, type Selector } from "./modules/selector";
  *
  * Held-out is read by the evaluator at two places only: the promotion
  * milestone inside `step`, and `submitGate`. The numbers are not placed on
- * the node, and they are not passed to Gap Finder or Innovator.
+ * the node. Gap Finder receives `Lineage.roleView()`, which has already
+ * dropped held-out keys. Gate scores go to `gate.jsonl`, not `lineage.jsonl`.
  *
  * Keep-better uses a noise leeway. Staged eval runs `dev_small` first and
  * `dev_full` only when the small mean clears `stagedThreshold * parent`.
@@ -73,7 +74,7 @@ export interface SubmitReceipt {
 }
 
 export interface Roles {
-  gapFinder: (parent: Node, lin: Lineage) => Record<string, unknown>;
+  gapFinder: (parent: Node, lin: RoleLineage) => Record<string, unknown>;
   innovator: (parent: Node, gaps: Record<string, unknown>, tried: readonly string[]) => Proposal;
   runner: (configPath: string, subset: "dev_small" | "dev_full") => number[];
   reviewer: (input: ReviewInput) => ReviewVerdict;
@@ -88,6 +89,11 @@ export interface OrchestratorOptions {
   readonly stagedThreshold?: number;
   readonly patience?: number;
   readonly ids?: () => string;
+  /**
+   * Consecutive select / duplicate-patch / infra failures with no new
+   * reviewed node. `run` stops instead of spinning until the wall clock.
+   */
+  readonly maxConsecutiveStalls?: number;
   /**
    * Evaluator read for the promotion milestone. Missing or throwing is
    * fail-closed: the child is not promoted. Not visible to Gap Finder.
@@ -129,6 +135,8 @@ export class Orchestrator {
   phase: Phase = Phase.SELECT;
   private readonly ids: () => string;
   private readonly heldOutAtMilestone: ((configPath: string) => number) | undefined;
+  readonly maxConsecutiveStalls: number;
+  consecutiveStalls = 0;
   lastPack: EvidencePack | null = null;
 
   constructor(
@@ -143,6 +151,7 @@ export class Orchestrator {
     this.patience = options.patience ?? 15;
     this.ids = options.ids ?? (() => randomBytes(4).toString("hex"));
     this.heldOutAtMilestone = options.heldOutAtMilestone;
+    this.maxConsecutiveStalls = options.maxConsecutiveStalls ?? 3;
   }
 
   step(): Phase {
@@ -154,24 +163,30 @@ export class Orchestrator {
     try {
       parent = this.selector.pick(this.lin);
     } catch (error) {
-      this.lin.log("error", { node: null, err: repr(error) });
-      return Phase.SELECT;
+      return this.noteStall("error", { node: null, err: repr(error) });
     }
     parent.locked = true;
     this.lin.put(parent);
     this.lin.log("select", { node: parent.id, selector: this.selector.name });
+    let child: Node | undefined;
     try {
-      const gaps = this.roles.gapFinder(parent, this.lin);
+      const view = this.lin.roleView();
+      assertNoHeldOutLeak({ parent: parent.toJSON(), events: view.events() }, "gap finder input");
+      const gaps = this.roles.gapFinder(parent, view);
       assertNoHeldOutLeak(gaps, "gap finder output");
       const tried = parent.children.map((id) => this.lin.nodes.get(id)?.patchSummary ?? "");
+      assertNoHeldOutLeak({ parent: parent.toJSON(), gaps, tried }, "innovator input");
       const prop = this.roles.innovator(parent, gaps, tried);
       assertNoHeldOutLeak(prop, "innovator output");
       if (tried.includes(prop.summary)) {
-        this.lin.log("dup_patch", { node: parent.id });
-        return Phase.SELECT;
+        return this.noteStall("dup_patch", { node: parent.id });
       }
-      const child = new Node({
-        id: this.ids(),
+      const childId = this.ids();
+      if (this.lin.nodes.has(childId) || childId === parent.id) {
+        throw new Error(`lineage id ${childId} already exists`);
+      }
+      child = new Node({
+        id: childId,
         parentId: parent.id,
         configPath: prop.configPath,
         patchSummary: prop.summary,
@@ -207,8 +222,8 @@ export class Orchestrator {
         && !devRoseHeldOutFell;
       const reason = devRoseHeldOutFell
         ? milestone === null
-          ? "held-out milestone was not read; promotion refused"
-          : "dev rose and held-out fell relative to the parent; promotion refused"
+          ? "milestone-unread"
+          : "regressed"
         : verdict.reason;
       if (!keep) {
         child.status = "rejected";
@@ -217,11 +232,12 @@ export class Orchestrator {
         const pack = this.roles.reportWriter?.({ child, parent }) ?? null;
         this.lastPack = pack;
       }
+      this.consecutiveStalls = 0;
       this.lin.log("review", {
         node: child.id,
         accept: child.status === "evaluated",
         dev: child.devMean,
-        heldOutRegression: devRoseHeldOutFell,
+        regressed: devRoseHeldOutFell,
         reason,
       });
       backprop(this.lin, child, childMean);
@@ -233,8 +249,11 @@ export class Orchestrator {
       }
       return this.phase;
     } catch (error) {
-      this.lin.log("error", { node: parent.id, err: repr(error) });
-      return Phase.SELECT;
+      if (child?.status === "running") {
+        child.status = "failed";
+        this.lin.put(child);
+      }
+      return this.noteStall("error", { node: child?.id ?? parent.id, err: repr(error) });
     } finally {
       parent.locked = false;
       this.lin.put(parent);
@@ -299,7 +318,7 @@ export class Orchestrator {
         throw new Error("live playground submit is off");
       }
     }
-    this.lin.log("gate", {
+    this.lin.gateLog({
       node: best.id,
       heldout,
       tts: request.ttsBaseline,
@@ -307,7 +326,20 @@ export class Orchestrator {
       ok: submit,
       failed: evidence.checks.filter((item) => !item.ok).map((item) => item.id),
     });
+    this.lin.log("gate", { node: best.id, ok: submit });
     return { node: best.id, heldout, submit, checks: evidence.checks };
+  }
+
+  /** No new reviewed node. Stops the loop after N consecutive stalls. */
+  private noteStall(kind: string, fields: Record<string, unknown>): Phase {
+    this.consecutiveStalls += 1;
+    this.lin.log(kind, { ...fields, stall: this.consecutiveStalls });
+    if (this.consecutiveStalls >= this.maxConsecutiveStalls) {
+      this.phase = Phase.STOP;
+      this.lin.log("stall", { stalls: this.consecutiveStalls });
+      return Phase.STOP;
+    }
+    return Phase.SELECT;
   }
 }
 

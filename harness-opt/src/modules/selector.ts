@@ -150,8 +150,10 @@ export class UCTSelector implements Selector {
 }
 
 export function backprop(lin: Lineage, node: Node, reward: number): void {
+  const seen = new Set<string>();
   let current: Node | undefined = node;
-  while (current) {
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
     current.visits += 1;
     current.valueSum += reward;
     lin.put(current);

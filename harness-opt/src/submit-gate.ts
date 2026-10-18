@@ -12,7 +12,9 @@ import { GreedySelector } from "./modules/selector";
 /**
  * `harnessopt_submit_gate` entry. Reads the run directory, then calls
  * `Orchestrator.submitGate`, which ANDs the evidence checklist, the held-out
- * floor, the TTS baseline, and dry-run. Live playground submit is not called.
+ * floor, the TTS baseline, and dry-run. The numeric score stays in
+ * `state/gate.jsonl` and in the return value. `run_state.json` does not
+ * carry it. Live playground submit is not called.
  */
 
 export async function handleSubmitGate(args: string): Promise<SubmitGateResult> {
@@ -23,7 +25,6 @@ export async function handleSubmitGate(args: string): Promise<SubmitGateResult> 
   writeRunState(join(root, "state"), {
     phase: "gate",
     submit: result.submit,
-    heldout: result.heldout,
     node: result.node,
     failed: result.checks.filter((check) => !check.ok).map((check) => check.id),
   });

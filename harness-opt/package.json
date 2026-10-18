@@ -5,6 +5,10 @@
   "type": "module",
   "description": "Deterministic harness-optimizer Pi package. pi-subagents is a host dependency and is not imported.",
   "keywords": ["pi-package"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json --pretty false"
+  },
   "bin": {
     "harness-opt": "./src/cli.ts",
     "harnessopt-select": "./bin/select.ts",

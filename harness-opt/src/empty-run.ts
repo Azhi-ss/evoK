@@ -218,10 +218,8 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
     selector: "GreedySelector",
     bestId: lineage.best().id,
     submit: gate.submit,
-    heldout: gate.heldout,
     childStatus: child?.status ?? "missing",
     liveSubmitCalled,
-    heldOutSealed: heldOut.size,
     failed: gate.checks.filter((check) => !check.ok).map((check) => check.id),
   });
   writeRoleFile(options.out, "orchestrator", "state/schedule.log", phase);

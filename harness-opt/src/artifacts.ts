@@ -11,6 +11,9 @@ export function assertRoleTool(role: RoleId, tool: string): void {
 
 export function assertRoleRead(role: RoleId, relativeName: string): void {
   const rel = normalizeRelative(relativeName);
+  if (isGateLog(rel) && role !== "orchestrator") {
+    throw new Error(`${role} cannot read the gate log at ${rel}`);
+  }
   if (isHeldOutPath(rel) && role !== "runner" && role !== "orchestrator") {
     throw new Error(`${role} cannot read held-out at ${rel}`);
   }
@@ -35,9 +38,14 @@ function covers(allowed: readonly string[], relativeName: string): boolean {
   );
 }
 
+function isGateLog(relativeName: string): boolean {
+  return relativeName === "gate.jsonl" || relativeName.endsWith("/gate.jsonl");
+}
+
 function isHeldOutPath(relativeName: string): boolean {
   return relativeName === "sealed" || relativeName.startsWith("sealed/")
-    || relativeName.includes("held-out") || relativeName.includes("heldout");
+    || relativeName.includes("held-out") || relativeName.includes("heldout")
+    || isGateLog(relativeName);
 }
 
 function normalizeRelative(relativeName: string): string {

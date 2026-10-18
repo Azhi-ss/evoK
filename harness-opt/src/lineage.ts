@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripHeldOutFields } from "./modules/proposer";
 
 /**
  * Append-only lineage. One JSON file per node plus `lineage.jsonl`.
@@ -84,6 +85,12 @@ export class Node {
   }
 }
 
+/** What Gap Finder and Innovator are allowed to see. No gate scores. */
+export interface RoleLineage {
+  events(): readonly Record<string, unknown>[];
+  nodeSummaries(): readonly Record<string, unknown>[];
+}
+
 export class Lineage {
   readonly nodes = new Map<string, Node>();
   private readonly eventsPath: string;
@@ -109,21 +116,36 @@ export class Lineage {
     this.nodes.set(node.id, node);
   }
 
+  /**
+   * Search log. Held-out keys are dropped before the append, so a gate score
+   * cannot land here even if a caller passes one.
+   */
   log(kind: string, fields: Record<string, unknown> = {}): void {
-    const line = JSON.stringify({ t: Date.now() / 1000, kind, ...fields });
+    const safe = stripHeldOutFields(fields) as Record<string, unknown>;
+    const line = JSON.stringify({ t: Date.now() / 1000, kind, ...safe });
     appendFileSync(this.eventsPath, `${line}\n`);
   }
 
+  /** Scores and dry-run details. Not part of `events()` and not a role read. */
+  gateLog(fields: Record<string, unknown>): void {
+    const line = JSON.stringify({ t: Date.now() / 1000, ...fields });
+    appendFileSync(join(this.root, "gate.jsonl"), `${line}\n`);
+  }
+
   events(): readonly Record<string, unknown>[] {
-    try {
-      return readFileSync(this.eventsPath, "utf8")
-        .split("\n")
-        .filter((line) => line.trim() !== "")
-        .map((line) => JSON.parse(line) as Record<string, unknown>);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
+    return readJsonl(this.eventsPath).map((event) => stripHeldOutFields(event) as Record<string, unknown>);
+  }
+
+  /** Unfiltered gate file. Callers that hand a lineage to a role must not use this. */
+  gateEvents(): readonly Record<string, unknown>[] {
+    return readJsonl(join(this.root, "gate.jsonl"));
+  }
+
+  roleView(): RoleLineage {
+    return {
+      events: () => this.events(),
+      nodeSummaries: () => [...this.nodes.values()].map((node) => stripHeldOutFields(node.toJSON()) as Record<string, unknown>),
+    };
   }
 
   rootNode(): Node {
@@ -146,5 +168,17 @@ export class Lineage {
       if ((node.devMean ?? Number.NEGATIVE_INFINITY) > (best.devMean ?? Number.NEGATIVE_INFINITY)) best = node;
     }
     return best;
+  }
+}
+
+function readJsonl(path: string): Record<string, unknown>[] {
+  try {
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
   }
 }

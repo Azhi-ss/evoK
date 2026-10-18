@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Budget } from "./budget";
 import { FIXED_MODEL_ID } from "./fixed-model";
-import { Lineage, Node } from "./lineage";
+import { Lineage, Node, type RoleLineage } from "./lineage";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator, Phase, type Roles, type SubmitGateRequest } from "./orchestrator";
 
@@ -39,7 +39,8 @@ function machine(scores: number[], options?: {
   readonly onInnovator?: (gaps: Record<string, unknown>, tried: readonly string[]) => void;
   readonly heldOut?: (configPath: string) => number;
   readonly skipMilestone?: boolean;
-  readonly onGap?: (parent: Node) => void;
+  readonly onGap?: (parent: Node, view: RoleLineage) => void;
+  readonly maxConsecutiveStalls?: number;
 }) {
   const lin = new Lineage(dir());
   lin.put(new Node({
@@ -53,8 +54,8 @@ function machine(scores: number[], options?: {
   const calls: string[] = [];
   let innovatorCalls = 0;
   const roles: Roles = {
-    gapFinder: (parent) => {
-      options?.onGap?.(parent);
+    gapFinder: (parent, view) => {
+      options?.onGap?.(parent, view);
       if (options?.throwAt === "gap") throw new Error("gap failed");
       return options?.gap ?? { gaps: [{ id: "g1", summary: "idle" }] };
     },
@@ -74,6 +75,7 @@ function machine(scores: number[], options?: {
   const orchestrator = new Orchestrator(lin, roles, new GreedySelector(), options?.budget ?? new Budget(), {
     patience: options?.patience ?? 15,
     ids: () => "child",
+    ...(options?.maxConsecutiveStalls !== undefined ? { maxConsecutiveStalls: options.maxConsecutiveStalls } : {}),
     ...(options?.skipMilestone ? {} : { heldOutAtMilestone: options?.heldOut ?? (() => 0.5) }),
   });
   return { lin, orchestrator, calls, innovatorCalls: () => innovatorCalls };
@@ -124,6 +126,9 @@ describe("orchestrator", () => {
     ]);
     expect(orchestrator.budget.canSubmit("2026-10-18")).toBe(true);
     expect(lin.events().some((event) => event.kind === "gate" && event.ok === false)).toBe(true);
+    expect(lin.events().some((event) => "heldout" in event || "heldOut" in event)).toBe(false);
+    expect(lin.gateEvents()[0]).toMatchObject({ node: "root", heldout: 0.2, ok: false });
+    expect(readFileSync(join(lin.root, "lineage.jsonl"), "utf8")).not.toContain("heldout");
     const open = orchestrator.submitGate(gateRequest(0.8));
     expect(open.submit).toBe(true);
     expect(open.checks.every((check) => check.ok)).toBe(true);
@@ -150,7 +155,8 @@ describe("orchestrator", () => {
     });
     expect(run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.lin.nodes.get("child")?.status).toBe("rejected");
-    expect(run.lin.events().some((event) => event.kind === "review" && event.heldOutRegression === true)).toBe(true);
+    expect(run.lin.events().some((event) => event.kind === "review" && event.regressed === true && event.reason === "regressed")).toBe(true);
+    expect(JSON.stringify(run.lin.events())).not.toMatch(/heldout|held-out/i);
     expect(parentKeys).not.toContain("heldOut");
     expect(run.lin.best().id).toBe("root");
   });
@@ -185,6 +191,150 @@ describe("orchestrator", () => {
     const run = machine([0.5], { throwAt: "runner" });
     expect(run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.lin.events().some((event) => String(event.err).includes("no scores"))).toBe(true);
+    expect(run.lin.nodes.get("child")?.status).toBe("failed");
     expect(run.lin.rootNode().locked).toBe(false);
+  });
+
+  test("a poisoned lineage line is stripped before the gap finder reads it", () => {
+    let seen = "";
+    const run = machine([0.9], {
+      onGap: (_parent, view) => {
+        seen = JSON.stringify(view.events());
+        expect("gateEvents" in view).toBe(false);
+      },
+    });
+    appendFileSync(join(run.lin.root, "lineage.jsonl"), `${JSON.stringify({ kind: "gate", heldout: 0.13131313, hiddenScore: 1, ok: false })}\n`);
+    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(run.innovatorCalls()).toBe(1);
+    expect(seen).not.toContain("heldout");
+    expect(seen).not.toContain("hiddenScore");
+    expect(seen).not.toContain("0.13131313");
+    expect(readFileSync(join(run.lin.root, "lineage.jsonl"), "utf8")).toContain("0.13131313");
+  });
+
+  test("duplicate patches, pick failures, and runner throws stop after the stall cap", () => {
+    const dup = machine([0.9], { summary: "same", maxConsecutiveStalls: 2 });
+    const root = dup.lin.rootNode();
+    const prior = new Node({
+      id: "old",
+      parentId: "root",
+      configPath: "candidates/old/config.json",
+      patchSummary: "same",
+      status: "rejected",
+    });
+    root.children.push("old");
+    dup.lin.put(root);
+    dup.lin.put(prior);
+    expect(dup.orchestrator.run().id).toBe("root");
+    expect(dup.orchestrator.phase).toBe(Phase.STOP);
+    expect(dup.lin.events().filter((event) => event.kind === "dup_patch")).toHaveLength(2);
+    expect(dup.lin.events().some((event) => event.kind === "stall" && event.stalls === 2)).toBe(true);
+
+    const lin = new Lineage(dir());
+    lin.put(new Node({
+      id: "root",
+      parentId: null,
+      configPath: "candidates/root/config.json",
+      status: "evaluated",
+      devScores: [0.5],
+      stage: "full",
+    }));
+    let picks = 0;
+    let seq = 0;
+    const roles: Roles = {
+      gapFinder: () => ({ gaps: [] }),
+      innovator: () => ({ summary: `patch-${seq}`, configPath: "candidates/child/config.json", tokens: 1 }),
+      runner: () => {
+        throw new Error("infra down");
+      },
+      reviewer: () => ({ accept: true, reason: "fixture" }),
+    };
+    const pick = new Orchestrator(lin, roles, {
+      name: "broken",
+      pick: () => {
+        picks += 1;
+        throw new Error("no parent");
+      },
+    }, new Budget(), { maxConsecutiveStalls: 2 });
+    expect(pick.run().id).toBe("root");
+    expect(picks).toBe(2);
+    expect(pick.phase).toBe(Phase.STOP);
+    expect(lin.events().filter((event) => event.kind === "error")).toHaveLength(2);
+
+    const failed = new Lineage(dir());
+    failed.put(new Node({
+      id: "root",
+      parentId: null,
+      configPath: "candidates/root/config.json",
+      status: "evaluated",
+      devScores: [0.5],
+      stage: "full",
+    }));
+    const runner = new Orchestrator(failed, roles, new GreedySelector(), new Budget(), {
+      maxConsecutiveStalls: 2,
+      ids: () => `c${seq++}`,
+    });
+    expect(runner.run().id).toBe("root");
+    expect(failed.nodes.get("c0")?.status).toBe("failed");
+    expect(failed.nodes.get("c1")?.status).toBe("failed");
+    expect(runner.phase).toBe(Phase.STOP);
+    expect(seq).toBe(2);
+  });
+
+  test("reusing a child id is a stall, not a self-parent loop", () => {
+    const run = machine([0.9], { maxConsecutiveStalls: 1 });
+    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(run.lin.nodes.get("child")?.parentId).toBe("root");
+    expect(run.orchestrator.step()).toBe(Phase.STOP);
+    expect(run.lin.nodes.get("child")?.parentId).toBe("root");
+    expect(run.lin.events().some((event) => String(event.err).includes("already exists"))).toBe(true);
+    expect(run.lin.nodes.get("child")?.visits).toBe(1);
+  });
+
+  test("a completed review clears the stall counter", () => {
+    const lin = new Lineage(dir());
+    const root = new Node({
+      id: "root",
+      parentId: null,
+      configPath: "candidates/root/config.json",
+      status: "evaluated",
+      devScores: [0.5],
+      stage: "full",
+    });
+    const prior = new Node({
+      id: "old",
+      parentId: "root",
+      configPath: "candidates/old/config.json",
+      patchSummary: "same",
+      status: "rejected",
+    });
+    root.children.push("old");
+    lin.put(root);
+    lin.put(prior);
+    let n = 0;
+    const roles: Roles = {
+      gapFinder: () => ({ gaps: [] }),
+      innovator: () => ({
+        summary: n === 1 ? "fresh" : "same",
+        configPath: "candidates/child/config.json",
+        tokens: 1,
+      }),
+      runner: () => [0.4],
+      reviewer: () => ({ accept: true, reason: "fixture" }),
+    };
+    const orchestrator = new Orchestrator(lin, roles, new GreedySelector(), new Budget(), {
+      maxConsecutiveStalls: 2,
+      ids: () => "child",
+      heldOutAtMilestone: () => 0.5,
+    });
+    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(orchestrator.consecutiveStalls).toBe(1);
+    n = 1;
+    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(orchestrator.consecutiveStalls).toBe(0);
+    n = 0;
+    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(orchestrator.consecutiveStalls).toBe(1);
+    expect(orchestrator.phase).toBe(Phase.SELECT);
   });
 });

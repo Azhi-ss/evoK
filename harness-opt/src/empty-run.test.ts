@@ -26,7 +26,14 @@ describe("empty round", () => {
     expect(proposal).toContain("\"retries\": 1");
     const child = readFileSync(join(dir, "state", "nodes", "c1.json"), "utf8");
     expect(child).toContain("\"stage\": \"full\"");
-    expect(readFileSync(join(dir, "state", "lineage.jsonl"), "utf8")).toContain("\"kind\":\"review\"");
+    const lineageLog = readFileSync(join(dir, "state", "lineage.jsonl"), "utf8");
+    expect(lineageLog).toContain("\"kind\":\"review\"");
+    expect(lineageLog).not.toContain("heldout");
+    expect(lineageLog).not.toContain("0.1");
+    const saved = JSON.parse(readFileSync(join(dir, "state", "run_state.json"), "utf8")) as Record<string, unknown>;
+    expect(saved).not.toHaveProperty("heldout");
+    expect(JSON.stringify(saved)).not.toContain("0.1");
+    expect(readFileSync(join(dir, "state", "gate.jsonl"), "utf8")).toContain("\"heldout\":0.1");
     expect(readFileSync(join(dir, "gaps.json"), "utf8")).toContain("idle-loop");
     const gapsMd = readFileSync(join(dir, "gaps.md"), "utf8");
     for (const field of ["id:", "failureClass:", "summary:", "traceIds:"]) {
@@ -89,6 +96,11 @@ describe("empty round", () => {
     expect(() => assertRoleWrite("innovator", "candidates/c1/config.json")).not.toThrow();
     expect(() => assertRoleWrite("innovator", "sealed/heldout-score.json")).toThrow(/held-out/);
     expect(() => assertRoleRead("innovator", "sealed/heldout-score.json")).toThrow(/held-out/);
+    expect(() => assertRoleRead("gap-finder", "state/gate.jsonl")).toThrow(/gate log/);
+    expect(() => assertRoleRead("innovator", "state/gate.jsonl")).toThrow(/gate log/);
+    expect(() => assertRoleRead("reviewer-gate", "state/gate.jsonl")).toThrow(/gate log/);
+    expect(() => assertRoleRead("runner", "state/gate.jsonl")).toThrow(/gate log/);
+    expect(() => assertRoleRead("orchestrator", "state/gate.jsonl")).not.toThrow();
     expect(() => assertRoleRead("gap-finder", "review.json")).toThrow(/cannot read/);
     expect(() => assertRoleRead("gap-finder", "traces/t1.json")).not.toThrow();
     expect(() => assertRoleTool("innovator", "bash")).toThrow(/cannot use tool/);

@@ -24,7 +24,7 @@ harness-opt/
   candidates/                          每个候选一份配置
   .pi/settings.json                    packages 为空，避免误加载
   src/orchestrator.ts                  确定性状态机（不是 LLM）
-  src/lineage.ts                       每节点一个 JSON + lineage.jsonl
+  src/lineage.ts                       每节点一个 JSON + lineage.jsonl；门分数在 gate.jsonl
   src/budget.ts                        本地次数、token、墙钟、日提交配额
   src/modules/selector.ts              Greedy / SoftmaxMix / ScoreChildProp / UCT
   src/modules/probe.ts                 题库探针：dev / held-out 切开
@@ -52,7 +52,9 @@ Orchestrator（`src/orchestrator.ts`）是确定性代码，工序跟 `design/or
 
 `select → gap → propose → dev_small（够格才 dev_full）→ review（含 held-out 回归）→ backprop →（accept 才）report writer`
 
-Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否决。重复的补丁摘要直接丢掉。评测器在里程碑读 held-out：候选 dev 上涨且 held-out 相对父节点下跌，就拒绝晋升。没读到 held-out 也拒绝晋升。这个读数不进 Gap Finder / Innovator，也不写进节点 JSON。
+Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否决。重复的补丁摘要直接丢掉。评测器在里程碑读 held-out：候选 dev 上涨且 held-out 相对父节点下跌，就拒绝晋升。没读到 held-out 也拒绝晋升。这个读数不进 Gap Finder / Innovator，也不写进节点 JSON。谱系事件里只留 `regressed` 这个结论，不留分数。
+
+选不到父节点、补丁摘要重复、runner 抛错、新节点 id 已存在，这几条都不消耗本地次数。连续发生 `maxConsecutiveStalls` 次（默认 3）且中间没有完成一次 review，`run()` 就停。runner 抛错时，已经标成 `running` 的子节点改成 `failed`。价值回传遇到自己指向自己的父节点会停，不会顺着环空转。
 
 ## 证据门
 
@@ -67,6 +69,8 @@ Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否�
 7. `playground submit --dry-run` 成功；CLI 不支持时显式标 `not-run` 并失败关闭
 
 `harnessopt_submit_gate` 的 handler 会跑这条全链路。门全绿时 Submitter stub 写回执，`submitted` 仍是 false。
+
+held-out 分数只写 `state/gate.jsonl`。`lineage.jsonl` 的 gate 事件只有节点 id 和是否通过。角色拿到的谱系视图会删掉任何 held-out / hidden 字段；Gap Finder 和 Innovator 的输入、输出都会过 `assertNoHeldOutLeak`。`run_state.json` 不保存这个分数。Gap Finder、Innovator、Reviewer、Runner 都不能读 `gate.jsonl`。
 
 主会话三步对应扩展命令：`harnessopt_select` → `subagent({workflow:'harnessopt.round'})` → `harnessopt_record`。`subagent` 调用本身还没接（见下面的 TODO）。`harnessopt_submit_gate` 是唯一允许读 held-out、也是唯一允许碰 playground submit 的入口；这一轮 live submit 不接线。
 
@@ -117,11 +121,13 @@ pi-subagents **没有安装，也没有被 import**。`UnverifiedPiSubagentsDele
 bun harness-opt/src/cli.ts empty --out /tmp/harness-opt-empty
 ```
 
-空跑种一个 dev 均值 0.4 的根节点，贪心扩展出一个 0.8 的子节点。里程碑 held-out 从 0.5 到 0.55，没有回归，Reviewer 收下，并写出 trace 包和变更说明。随后提交门用 0.1 的 held-out 对 0.5 的 TTS 基线，加上本机没有 playground CLI 时的 dry-run（标 not-run），`submit` 为 false。不调用模型，不把 held-out 题面交给 proposer。
+空跑种一个 dev 均值 0.4 的根节点，贪心扩展出一个 0.8 的子节点。里程碑 held-out 从 0.5 到 0.55，没有回归，Reviewer 收下，并写出 trace 包和变更说明。随后提交门用 0.1 的 held-out 对 0.5 的 TTS 基线，加上本机没有 playground CLI 时的 dry-run（标 not-run），`submit` 为 false。0.1 写在 `state/gate.jsonl`。标准输出仍给操作者这份结果。不调用模型，不把 held-out 题面交给 proposer。
 
 `run --dev <题库目录>` 会按 `split` 切开 dev / held-out，held-out 只留在密封库里，执行器仍是夹具分数。
 
+插件自己类型检查、自己跑测试。evoK 根 `tsconfig.json` 不包含 `harness-opt/`。根 `package.json` 的 `harness-opt` 脚本只是转去插件 CLI。
+
 ```bash
 bun test harness-opt
-bunx --package typescript@5.9.3 tsc --project tsconfig.json --pretty false
+bunx --package typescript@5.9.3 tsc --project harness-opt/tsconfig.json --pretty false
 ```

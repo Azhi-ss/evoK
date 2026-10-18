@@ -9,7 +9,25 @@ import {
   type TraceRecord,
 } from "../types";
 
-const LEAK_KEYS = ["heldout", "held-out", "held_out", "hidden"];
+/** Key names that must not cross into Gap Finder or Innovator context. */
+export function isHeldOutField(key: string): boolean {
+  const norm = key.toLowerCase().replace(/[_-]/g, "");
+  return norm.includes("heldout") || norm.includes("hidden");
+}
+
+/** Drop held-out keys anywhere in a JSON-like value. Role-facing views use this. */
+export function stripHeldOutFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => stripHeldOutFields(entry));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (isHeldOutField(key)) continue;
+      out[key] = stripHeldOutFields(child);
+    }
+    return out;
+  }
+  return value;
+}
 
 /**
  * Innovator input. There is no held-out field on purpose (PRD §2, §8).
@@ -100,7 +118,7 @@ function findLeak(value: unknown, path = "$"): string | null {
   }
   if (value !== null && typeof value === "object") {
     for (const [key, child] of Object.entries(value)) {
-      if (LEAK_KEYS.includes(key.toLowerCase())) return `${path}.${key}`;
+      if (isHeldOutField(key)) return `${path}.${key}`;
       const found = findLeak(child, `${path}.${key}`);
       if (found) return found;
     }

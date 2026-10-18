@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyParts, type HarnessConfig } from "../types";
-import { applyPatch, buildInnovatorInput } from "./proposer";
+import { applyPatch, assertNoHeldOutLeak, buildInnovatorInput, stripHeldOutFields } from "./proposer";
 import { loadTaskBank, splitBank } from "./probe";
 
 const base: HarnessConfig = {
@@ -22,6 +22,15 @@ describe("proposer boundary", () => {
       traces: [],
       heldOut: { score: 1 },
     })).toThrow(/held-out/);
+  });
+
+  test("role input drops nested held-out fields and still rejects a leftover key", () => {
+    const stripped = stripHeldOutFields({
+      events: [{ kind: "gate", held_out: 0.2, nested: { hiddenScore: 1, ok: true } }],
+      parent: { id: "base" },
+    }) as { events: Record<string, unknown>[] };
+    expect(stripped.events[0]).toEqual({ kind: "gate", nested: { ok: true } });
+    expect(() => assertNoHeldOutLeak({ parent: { heldOut: 0.2 } }, "gap finder input")).toThrow(/gap finder input/);
   });
 
   test("a patch may change TTS genes and may not drop the fixed model", () => {
