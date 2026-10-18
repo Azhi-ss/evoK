@@ -11,7 +11,7 @@
     "example:lifecycle": "bun examples/lifecycle/recovery-example.ts",
     "test": "bun test",
     "test:live": "bun test --path-ignore-patterns=\"\" ./src/newapi-live.live.test.ts",
-    "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json"
+    "typecheck": "npx -p typescript@5.9.3 tsc -p tsconfig.json"
   },
   "dependencies": {
     "@earendil-works/chord": "0.86.1",

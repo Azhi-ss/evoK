@@ -82,16 +82,16 @@ function machine(scores: number[], options?: {
 }
 
 describe("orchestrator", () => {
-  test("runs the full dev subset only after the small mean clears the parent bar", () => {
+  test("runs the full dev subset only after the small mean clears the parent bar", async () => {
     const good = machine([0.6]);
-    expect(good.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await good.orchestrator.step()).toBe(Phase.SELECT);
     expect(good.calls).toEqual(["dev_small", "dev_full"]);
     expect(good.lin.nodes.get("child")?.stage).toBe("full");
     expect(good.lin.nodes.get("child")?.status).toBe("evaluated");
     expect(good.lin.best().id).toBe("child");
 
     const split = machine([1], { fullScores: [0.1] });
-    split.orchestrator.step();
+    await split.orchestrator.step();
     const scored = split.lin.nodes.get("child");
     expect(scored?.devSmallScores).toEqual([1]);
     expect(scored?.devFullScores).toEqual([0.1]);
@@ -99,12 +99,12 @@ describe("orchestrator", () => {
     expect(scored?.devMean).toBeCloseTo(0.1);
 
     const weak = machine([0.2]);
-    weak.orchestrator.step();
+    await weak.orchestrator.step();
     expect(weak.calls).toEqual(["dev_small"]);
     expect(weak.lin.nodes.get("child")?.stage).toBe("small");
   });
 
-  test("a repeated patch summary is dropped and the parent lock is released", () => {
+  test("a repeated patch summary is dropped and the parent lock is released", async () => {
     const { lin, orchestrator } = machine([0.9], { summary: "same" });
     const root = lin.rootNode();
     const prior = new Node({
@@ -117,16 +117,16 @@ describe("orchestrator", () => {
     root.children.push("old");
     lin.put(root);
     lin.put(prior);
-    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(await orchestrator.step()).toBe(Phase.SELECT);
     expect(lin.nodes.has("child")).toBe(false);
     expect(lin.rootNode().locked).toBe(false);
     expect(lin.events().some((event) => event.kind === "dup_patch")).toBe(true);
   });
 
-  test("submit gate ANDs the evidence checklist, held-out, TTS, and dry-run", () => {
+  test("submit gate ANDs the evidence checklist, held-out, TTS, and dry-run", async () => {
     const { lin, orchestrator } = machine([0.2]);
-    orchestrator.step();
-    const low = orchestrator.submitGate(gateRequest(0.2));
+    await orchestrator.step();
+    const low = await orchestrator.submitGate(gateRequest(0.2));
     expect(low.submit).toBe(false);
     expect(low.heldout).toBe(0.2);
     expect(low.checks.map((check) => check.id)).toEqual([
@@ -137,21 +137,21 @@ describe("orchestrator", () => {
     expect(lin.events().some((event) => "heldout" in event || "heldOut" in event)).toBe(false);
     expect(lin.gateEvents()[0]).toMatchObject({ node: "root", heldout: 0.2, ok: false });
     expect(readFileSync(join(lin.root, "lineage.jsonl"), "utf8")).not.toContain("heldout");
-    const missing = orchestrator.submitGate(gateRequest(0.8));
+    const missing = await orchestrator.submitGate(gateRequest(0.8));
     expect(missing.submit).toBe(false);
     expect(missing.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
-    const zero = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0 }));
+    const zero = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0 }));
     expect(zero.submit).toBe(false);
     expect(zero.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
-    const open = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1 }));
+    const open = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1 }));
     expect(open.submit).toBe(true);
     expect(open.checks.every((check) => check.ok)).toBe(true);
-    const prefix = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, modelId: "qwen-max" }));
+    const prefix = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, modelId: "qwen-max" }));
     expect(prefix.submit).toBe(false);
     expect(prefix.checks.find((check) => check.id === "model")?.ok).toBe(false);
-    const unread = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "not-run" }));
+    const unread = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "not-run" }));
     expect(unread.submit).toBe(false);
-    const noDry = orchestrator.submitGate(gateRequest(0.8, {
+    const noDry = await orchestrator.submitGate(gateRequest(0.8, {
       minDelta: 0.1,
       dryRun: () => ({ status: "unsupported", detail: "not-run: playground submit --dry-run is unsupported" }),
     }));
@@ -160,7 +160,7 @@ describe("orchestrator", () => {
     expect(orchestrator.budget.canSubmit("2026-10-18")).toBe(true);
   });
 
-  test("a dev rise with a held-out drop is refused and stays out of the innovator", () => {
+  test("a dev rise with a held-out drop is refused and stays out of the innovator", async () => {
     let parentKeys: string[] = [];
     const run = machine([0.9], {
       heldOut: (configPath) => configPath.endsWith("child/config.json") ? 0.2 : 0.8,
@@ -168,7 +168,7 @@ describe("orchestrator", () => {
         parentKeys = Object.keys(parent.toJSON());
       },
     });
-    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.lin.nodes.get("child")?.status).toBe("rejected");
     expect(run.lin.events().some((event) => event.kind === "review" && event.regressed === true && event.reason === "regressed")).toBe(true);
     expect(JSON.stringify(run.lin.events())).not.toMatch(/heldout|held-out/i);
@@ -176,41 +176,41 @@ describe("orchestrator", () => {
     expect(run.lin.best().id).toBe("root");
   });
 
-  test("plateau, budget, and a gap-finder failure stay inside the state machine", () => {
+  test("plateau, budget, and a gap-finder failure stay inside the state machine", async () => {
     const plateau = machine([0.1], { patience: 1 });
-    expect(plateau.orchestrator.step()).toBe(Phase.STOP);
+    expect(await plateau.orchestrator.step()).toBe(Phase.STOP);
     expect(plateau.lin.events().some((event) => event.kind === "plateau")).toBe(true);
     expect(plateau.lin.nodes.get("child")?.status).toBe("rejected");
     expect(plateau.lin.rootNode().visits).toBe(1);
 
     const budget = new Budget({ maxLocalRuns: 0 });
     const stopped = machine([0.9], { budget });
-    expect(stopped.orchestrator.step()).toBe(Phase.STOP);
+    expect(await stopped.orchestrator.step()).toBe(Phase.STOP);
     expect(stopped.lin.events().some((event) => event.kind === "select")).toBe(false);
 
     const broken = machine([0.9], { throwAt: "gap" });
-    expect(broken.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await broken.orchestrator.step()).toBe(Phase.SELECT);
     expect(broken.lin.rootNode().locked).toBe(false);
     expect(broken.lin.nodes.has("child")).toBe(false);
     expect(broken.lin.events().some((event) => event.kind === "error")).toBe(true);
   });
 
-  test("held-out in gap output never reaches the innovator", () => {
+  test("held-out in gap output never reaches the innovator", async () => {
     const run = machine([0.9], { gap: { heldOut: [0.99] } });
-    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.innovatorCalls()).toBe(0);
     expect(run.lin.events().some((event) => event.kind === "error" && String(event.err).includes("held-out"))).toBe(true);
   });
 
-  test("an empty runner result is an error, not a divide by zero", () => {
+  test("an empty runner result is an error, not a divide by zero", async () => {
     const run = machine([0.5], { throwAt: "runner" });
-    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.lin.events().some((event) => String(event.err).includes("no scores"))).toBe(true);
     expect(run.lin.nodes.get("child")?.status).toBe("failed");
     expect(run.lin.rootNode().locked).toBe(false);
   });
 
-  test("a poisoned lineage line is stripped before the gap finder reads it", () => {
+  test("a poisoned lineage line is stripped before the gap finder reads it", async () => {
     let seen = "";
     const run = machine([0.9], {
       onGap: (_parent, view) => {
@@ -219,7 +219,7 @@ describe("orchestrator", () => {
       },
     });
     appendFileSync(join(run.lin.root, "lineage.jsonl"), `${JSON.stringify({ kind: "gate", heldout: 0.13131313, hiddenScore: 1, ok: false })}\n`);
-    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.innovatorCalls()).toBe(1);
     expect(seen).not.toContain("heldout");
     expect(seen).not.toContain("hiddenScore");
@@ -227,7 +227,7 @@ describe("orchestrator", () => {
     expect(readFileSync(join(run.lin.root, "lineage.jsonl"), "utf8")).toContain("0.13131313");
   });
 
-  test("duplicate patches, pick failures, and runner throws stop after the stall cap", () => {
+  test("duplicate patches, pick failures, and runner throws stop after the stall cap", async () => {
     const dup = machine([0.9], { summary: "same", maxConsecutiveStalls: 2 });
     const root = dup.lin.rootNode();
     const prior = new Node({
@@ -240,7 +240,7 @@ describe("orchestrator", () => {
     root.children.push("old");
     dup.lin.put(root);
     dup.lin.put(prior);
-    expect(dup.orchestrator.run().id).toBe("root");
+    expect((await dup.orchestrator.run()).id).toBe("root");
     expect(dup.orchestrator.phase).toBe(Phase.STOP);
     expect(dup.lin.events().filter((event) => event.kind === "dup_patch")).toHaveLength(2);
     expect(dup.lin.events().some((event) => event.kind === "stall" && event.stalls === 2)).toBe(true);
@@ -271,7 +271,7 @@ describe("orchestrator", () => {
         throw new Error("no parent");
       },
     }, new Budget(), { maxConsecutiveStalls: 2 });
-    expect(pick.run().id).toBe("root");
+    expect((await pick.run()).id).toBe("root");
     expect(picks).toBe(2);
     expect(pick.phase).toBe(Phase.STOP);
     expect(lin.events().filter((event) => event.kind === "error")).toHaveLength(2);
@@ -289,24 +289,24 @@ describe("orchestrator", () => {
       maxConsecutiveStalls: 2,
       ids: () => `c${seq++}`,
     });
-    expect(runner.run().id).toBe("root");
+    expect((await runner.run()).id).toBe("root");
     expect(failed.nodes.get("c0")?.status).toBe("failed");
     expect(failed.nodes.get("c1")?.status).toBe("failed");
     expect(runner.phase).toBe(Phase.STOP);
     expect(seq).toBe(2);
   });
 
-  test("reusing a child id is a stall, not a self-parent loop", () => {
+  test("reusing a child id is a stall, not a self-parent loop", async () => {
     const run = machine([0.9], { maxConsecutiveStalls: 1 });
-    expect(run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
     expect(run.lin.nodes.get("child")?.parentId).toBe("root");
-    expect(run.orchestrator.step()).toBe(Phase.STOP);
+    expect(await run.orchestrator.step()).toBe(Phase.STOP);
     expect(run.lin.nodes.get("child")?.parentId).toBe("root");
     expect(run.lin.events().some((event) => String(event.err).includes("already exists"))).toBe(true);
     expect(run.lin.nodes.get("child")?.visits).toBe(1);
   });
 
-  test("a completed review clears the stall counter", () => {
+  test("a completed review clears the stall counter", async () => {
     const lin = new Lineage(dir());
     const root = new Node({
       id: "root",
@@ -342,13 +342,13 @@ describe("orchestrator", () => {
       ids: () => "child",
       heldOutAtMilestone: () => 0.5,
     });
-    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(await orchestrator.step()).toBe(Phase.SELECT);
     expect(orchestrator.consecutiveStalls).toBe(1);
     n = 1;
-    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(await orchestrator.step()).toBe(Phase.SELECT);
     expect(orchestrator.consecutiveStalls).toBe(0);
     n = 0;
-    expect(orchestrator.step()).toBe(Phase.SELECT);
+    expect(await orchestrator.step()).toBe(Phase.SELECT);
     expect(orchestrator.consecutiveStalls).toBe(1);
     expect(orchestrator.phase).toBe(Phase.SELECT);
   });

@@ -1,7 +1,7 @@
 ---
 name: reviewer-gate
 description: Read-only accept or reject. Dev rise with a held-out drop is a reject.
-model: deepseek-v4.1-flash
+model: ai-modeling/deepseek-v4-1-flash-261017
 tools: read,grep,find,ls
 excludeTools: bash,write,edit,contact_supervisor
 systemPromptMode: replace

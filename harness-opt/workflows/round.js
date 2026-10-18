@@ -1,13 +1,15 @@
 /**
- * Fixed round once pi-subagents workflow resources are verified:
- * gap-finder → innovator with typed gate `bun bin/eval.ts --cand <id> --split dev` → reviewer-gate.
- *
- * TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7): a bare script
- * must not call `runs.host`. Whether `gate.command` may splice `args`, and
- * whether `import 'pi-subagents/workflow-resources'` resolves from this
- * package, are both unverified. The deterministic loop that tests run is
- * `src/orchestrator.ts`. Do not execute this file.
+ * Named-workflow script body for `harnessopt.round`.
+ * `registerWorkflowResource` returns this string from a synchronous resolve.
+ * The runtime provides `runs`. Importing this module does not start a round.
  */
-throw new Error(
-  "TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7): workflows/round.js is not executed until pi-subagents workflow resources are verified",
-);
+export const HARNESSOPT_ROUND_NAME = "harnessopt.round";
+
+export const HARNESSOPT_ROUND_SCRIPT = [
+  "const gapRun = await runs.all([{ key: \"gap\", agent: \"gap-finder\", task: \"Read traces and return gaps with id, failureClass, summary, traceIds.\" }]);",
+  "const gap = gapRun.map(function (child) { return child.output; }).join(\"\\n\");",
+  "const innovRun = await runs.all([{ key: \"innovate\", agent: \"innovator\", task: \"From the gap report, write one patch with part, motivation, expectedFailureClass, and summary.\\n\" + gap }]);",
+  "const patch = innovRun.map(function (child) { return child.output; }).join(\"\\n\");",
+  "const reviewRun = await runs.all([{ key: \"review\", agent: \"reviewer-gate\", task: \"Review the candidate against the parent. Return accept and reason.\\n\" + patch }]);",
+  "return { ok: true, gap: gap, patch: patch, review: reviewRun.map(function (child) { return child.output; }).join(\"\\n\") };",
+].join("\n");

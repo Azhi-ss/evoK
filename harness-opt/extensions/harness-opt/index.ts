@@ -1,34 +1,36 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { defineTool } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
+import { registerWorkflowResource, type WorkflowResourceRegistration } from "pi-subagents/workflow-resources";
+import { flag } from "../../src/args";
+import { selectParent } from "../../bin/select";
+import { recordEvent } from "../../bin/record";
 import { handleSubmitGate } from "../../src/submit-gate";
+import { dispatchHarnessCommand, formatCommandResult, type CommandResult } from "../../src/session";
+import { HARNESSOPT_ROUND_NAME, HARNESSOPT_ROUND_SCRIPT } from "../../workflows/round.js";
 
 /**
- * Pi extension factory. Same shape as evoK `createEvokTuiMirrorExtension`:
- * a function of `ExtensionAPI` that registers commands. Nothing is started
- * in the factory. `session_start` does not import pi-subagents.
- *
- * TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7):
- *   - `import 'pi-subagents/workflow-resources'` may not resolve when the
- *     package is installed separately. Do not add that import here.
- *   - Starting a structured `subagent({workflow})` call from a
- *     `registerCommand` handler is unverified.
- *   - `pi install -l ./` reading `pi.subagents.agents` is unverified.
- *   - `contact_supervisor` blocking timeout default is unverified.
+ * Pi extension. One slash command and one LLM tool share `harness-opt`.
+ * `session_start` registers the named workflow `harnessopt.round`.
+ * Delegation is emitted on `pi.events`. This file does not attach the
+ * sample bridge; pi-subagents is the listener. A missing listener times out
+ * and the UI names that failure.
  */
 
-/** Hard token cap for one named round. Setup §6, per-round `usageBudget.tokens.hard`. */
+/** Historical per-round token cap from setup §6. The run's real cap is `thresholds.json`. */
 export const ROUND_TOKEN_HARD = 200_000;
 
 export interface RoundWorkflow {
-  readonly name: "harnessopt.round";
+  readonly name: typeof HARNESSOPT_ROUND_NAME;
   readonly cand: string;
-  readonly gateCommand: string;
-  readonly hostCommands: readonly string[];
+  readonly script: string;
+  readonly hostCommands: readonly { readonly key: string; readonly command: string }[];
   readonly usageBudget: { readonly tokens: { readonly hard: number } };
 }
 
 /**
  * Synchronous check-and-string for the named workflow resource.
- * No filesystem and no child process. `gate` is set; `outputSchema` is not.
+ * No filesystem and no child process. `outputSchema` is not set.
  */
 export function resolveRoundWorkflow(args: { readonly cand?: string }): RoundWorkflow {
   const cand = args.cand ?? "";
@@ -37,42 +39,166 @@ export function resolveRoundWorkflow(args: { readonly cand?: string }): RoundWor
   }
   const gateCommand = `bun bin/eval.ts --cand ${cand} --split dev`;
   return {
-    name: "harnessopt.round",
+    name: HARNESSOPT_ROUND_NAME,
     cand,
-    gateCommand,
-    hostCommands: [gateCommand],
+    script: HARNESSOPT_ROUND_SCRIPT,
+    hostCommands: [{ key: "eval", command: gateCommand }],
     usageBudget: { tokens: { hard: ROUND_TOKEN_HARD } },
   };
 }
 
-export function createHarnessOptExtension(): (pi: Pick<ExtensionAPI, "registerCommand" | "on">) => void {
+const HARNESS_OPT_DESCRIPTION = "Required subcommand: start | step | status | gate | stop. start requires --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score unless thresholds.json and sealed/heldout-score.json already exist. Default run directory is .harness-opt/.";
+
+type Ui = {
+  notify(message: string, type?: "info" | "warning" | "error"): void;
+  setWidget?(key: string, content: string[] | undefined): void;
+  setStatus?(key: string, text: string | undefined): void;
+};
+
+function echo(ui: Ui, commandResult: CommandResult): void {
+  ui.notify(formatCommandResult(commandResult), commandResult.ok ? "info" : "error");
+  const panel = commandResult.panel.length > 0 ? [...commandResult.panel] : [formatCommandResult(commandResult)];
+  ui.setWidget?.("harness-opt", panel);
+  ui.setStatus?.("harness-opt", panel[0]);
+}
+
+async function runHarnessOpt(args: string, ctx: { readonly cwd: string; readonly ui: Ui }, events: ExtensionAPI["events"]): Promise<CommandResult> {
+  const argv = args.trim() === "" ? [] : args.trim().split(/\s+/);
+  const commandResult = await dispatchHarnessCommand(argv, {
+    cwd: ctx.cwd,
+    events,
+    sampleBridge: false,
+  });
+  echo(ctx.ui, commandResult);
+  return commandResult;
+}
+
+export function createHarnessOptExtension(): (pi: ExtensionAPI) => void {
   return (pi) => {
-    pi.registerCommand("harnessopt_select", {
-      description: "Pick the next parent from the lineage",
-      handler: async () => {
-        // Local entry is `bin/select.ts`. Delegating via subagent() is a §7 TODO.
+    let registration: WorkflowResourceRegistration | undefined;
+    pi.registerCommand("harness-opt", {
+      description: HARNESS_OPT_DESCRIPTION,
+      handler: async (args, ctx) => {
+        await runHarnessOpt(args, ctx, pi.events);
       },
     });
-    pi.registerCommand("harnessopt_record", {
-      description: "Append a lineage event and refresh run_state.json",
-      handler: async () => {
-        // Local entry is `bin/record.ts`.
+    pi.registerTool(defineTool({
+      name: "harness-opt",
+      label: "harness-opt",
+      description: HARNESS_OPT_DESCRIPTION,
+      parameters: Type.Object({
+        command: Type.String({ description: "start | step | status | gate | stop" }),
+        args: Type.Optional(Type.String({ description: "Flags. start needs the threshold flags and --heldout-score unless those files already exist." })),
+      }),
+      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+        const commandResult = await runHarnessOpt(
+          `${params.command}${params.args ? ` ${params.args}` : ""}`,
+          ctx,
+          pi.events,
+        );
+        return {
+          content: [{ type: "text", text: formatCommandResult(commandResult) }],
+          details: commandResult,
+          isError: !commandResult.ok,
+        };
+      },
+    }));
+    pi.registerCommand("harnessopt-select", {
+      description: "Pick the next parent. Required: --root <lineage dir>. Optional: --selector greedy|softmax-mix|uct. Unimplemented selectors fail closed.",
+      handler: async (args, ctx) => {
+        await selectCommand(args, ctx);
       },
     });
-    pi.registerCommand("harnessopt_submit_gate", {
-      description: "Evidence gate: pinned model, held-out, traces, change note, budget, TTS, and dry-run. Live submit stays off.",
-      handler: async (args) => {
-        await handleSubmitGate(args);
+    pi.registerCommand("harnessopt-record", {
+      description: "Append a lineage event. Required: --root <lineage dir> and --kind <event>. Optional: --json '{...}'.",
+      handler: async (args, ctx) => {
+        await recordCommand(args, ctx);
       },
     });
-    pi.on("session_start", async () => {
-      // Named resource `harnessopt.round` is `resolveRoundWorkflow`.
-      // Registering it through pi-subagents stays a §7 TODO.
+    pi.registerCommand("harnessopt-submit-gate", {
+      description: "Evidence gate for one run directory. Required: --root <run dir>. Live playground submit stays off.",
+      handler: async (args, ctx) => {
+        await gateCommand(args, ctx);
+      },
     });
-    pi.on("session_shutdown", async () => {
-      // The factory starts no process, socket, or timer.
+    pi.on("session_start", (_event, ctx) => {
+      registration?.dispose();
+      registration = registerWorkflow(ctx);
+    });
+    pi.on("session_shutdown", () => {
+      registration?.dispose();
+      registration = undefined;
     });
   };
+}
+
+function registerWorkflow(ctx: ExtensionContext): WorkflowResourceRegistration {
+  return registerWorkflowResource({
+    sessionId: ctx.sessionManager.getSessionId(),
+    definition: {
+      name: HARNESSOPT_ROUND_NAME,
+      version: 1,
+      resolve(args) {
+        try {
+          const cand = typeof args.cand === "string" ? args.cand : "";
+          const round = resolveRoundWorkflow({ cand });
+          return { script: round.script, hostCommands: round.hostCommands };
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+    },
+  });
+}
+
+async function selectCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const argv = args.trim() === "" ? [] : args.trim().split(/\s+/);
+  const root = flag(argv, "--root");
+  if (!root) {
+    ctx.ui.notify("harnessopt-select missing: --root", "error");
+    return;
+  }
+  try {
+    const parent = selectParent(root, flag(argv, "--selector") ?? "greedy");
+    ctx.ui.notify(JSON.stringify(parent), "info");
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+async function recordCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const argv = args.trim() === "" ? [] : args.trim().split(/\s+/);
+  const root = flag(argv, "--root");
+  const kind = flag(argv, "--kind");
+  const missing = [root ? "" : "--root", kind ? "" : "--kind"].filter(Boolean);
+  if (missing.length > 0) {
+    ctx.ui.notify(`harnessopt-record missing: ${missing.join(", ")}`, "error");
+    return;
+  }
+  const raw = flag(argv, "--json");
+  let fields: Record<string, unknown> = {};
+  if (raw) {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      ctx.ui.notify("harnessopt-record --json must be an object", "error");
+      return;
+    }
+    fields = parsed as Record<string, unknown>;
+  }
+  recordEvent(root as string, kind as string, fields);
+  ctx.ui.notify(`recorded ${kind} in ${root}`, "info");
+}
+
+async function gateCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  try {
+    const gate = await handleSubmitGate(args);
+    const failed = gate.checks.filter((check) => !check.ok).map((check) => `${check.id}: ${check.detail}`);
+    const text = `gate node ${gate.node} submit ${gate.submit}${failed.length > 0 ? `\nfailed: ${failed.join("; ")}` : ""}`;
+    ctx.ui.notify(text, gate.submit ? "info" : "error");
+    ctx.ui.setWidget?.("harness-opt", failed.length > 0 ? failed : [text]);
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 export default function harnessOptExtension(pi: ExtensionAPI): void {

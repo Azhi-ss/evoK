@@ -28,6 +28,8 @@ describe("evidence gate", () => {
 
   test("training ids and any id other than the pinned model fail closed", () => {
     expect(modelAllowed("deepseek-v4.1-flash")).toBe(true);
+    expect(modelAllowed("ai-modeling/deepseek-v4-1-flash-261017")).toBe(true);
+    expect(modelAllowed("deepseek-v4-1-flash-261017")).toBe(true);
     expect(modelAllowed("grpo-deepseek")).toBe(false);
     expect(modelAllowed("qwen-max")).toBe(false);
     expect(modelAllowed("qwen")).toBe(false);

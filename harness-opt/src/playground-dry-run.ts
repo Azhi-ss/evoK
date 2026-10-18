@@ -13,13 +13,19 @@ export interface DryRunProbe {
   readonly detail: string;
 }
 
-export function probePlaygroundDryRun(): DryRunProbe {
+export function probePlaygroundDryRun(artifactPath?: string): DryRunProbe {
+  if (!artifactPath || artifactPath.trim() === "") {
+    return {
+      status: "unsupported",
+      detail: "not-run: submission artifact path was not provided; playground submit --dry-run was not executed",
+    };
+  }
   const found = spawnSync("bash", ["-lc", "command -v playground"], { encoding: "utf8", timeout: 2000 });
   const bin = found.stdout.trim();
   if (found.status !== 0 || bin === "") {
     return {
       status: "unsupported",
-      detail: "not-run: playground CLI is not installed; playground submit --dry-run was not executed",
+      detail: `not-run: playground CLI is not installed; dry-run of ${artifactPath} was not executed`,
     };
   }
   const help = spawnSync(bin, ["submit", "--help"], { encoding: "utf8", timeout: 5000 });
@@ -27,10 +33,10 @@ export function probePlaygroundDryRun(): DryRunProbe {
   if (!text.includes("--dry-run")) {
     return {
       status: "unsupported",
-      detail: "not-run: playground submit has no --dry-run flag",
+      detail: `not-run: playground submit has no --dry-run flag; ${artifactPath} was not submitted`,
     };
   }
-  const ran = spawnSync(bin, ["submit", "--dry-run"], { encoding: "utf8", timeout: 15000 });
+  const ran = spawnSync(bin, ["submit", "--dry-run", artifactPath], { encoding: "utf8", timeout: 15000 });
   if (ran.status === 0) {
     return { status: "passed", detail: "playground submit --dry-run succeeded" };
   }

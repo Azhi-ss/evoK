@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FIXED_MODEL_ID } from "./fixed-model";
+import { FIXED_MODEL_ID, LOCAL_MODEL_ID } from "./fixed-model";
 import { Lineage, Node } from "./lineage";
 import { handleSubmitGate } from "./submit-gate";
 
@@ -45,12 +45,20 @@ describe("harnessopt_submit_gate", () => {
 
   test("the three agents pin the same model id", () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const pinned = JSON.parse(readFileSync(join(root, "fixed-model.json"), "utf8")) as { modelId: string };
+    const pinned = JSON.parse(readFileSync(join(root, "fixed-model.json"), "utf8")) as {
+      modelId: string;
+      localModelId: string;
+      contestModelId: string;
+      testModelId: string;
+    };
     expect(pinned.modelId).toBe(FIXED_MODEL_ID);
+    expect(pinned.contestModelId).toBe(FIXED_MODEL_ID);
+    expect(pinned.localModelId).toBe(LOCAL_MODEL_ID);
+    expect(pinned.testModelId).toBe("deepseek-v4-1-flash-261017");
     for (const name of ["gap-finder.md", "innovator.md", "reviewer-gate.md"]) {
       const text = readFileSync(join(root, "agents", name), "utf8");
       const model = text.match(/^model:\s*(\S+)/m)?.[1];
-      expect(model).toBe(pinned.modelId);
+      expect(model).toBe(pinned.localModelId);
     }
   });
 });

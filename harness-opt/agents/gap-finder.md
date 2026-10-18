@@ -1,7 +1,7 @@
 ---
 name: gap-finder
 description: Read traces and name shared failure modes. No patches and no file edits.
-model: deepseek-v4.1-flash
+model: ai-modeling/deepseek-v4-1-flash-261017
 tools: read,grep,find,ls,contact_supervisor
 excludeTools: bash,write,edit
 systemPromptMode: replace

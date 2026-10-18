@@ -1,7 +1,7 @@
 ---
 name: innovator
 description: Write one harness patch under candidates/<id>/ and patch.json. No eval and no submit.
-model: deepseek-v4.1-flash
+model: ai-modeling/deepseek-v4-1-flash-261017
 tools: read,grep,find,ls,write,contact_supervisor
 excludeTools: bash
 systemPromptMode: replace
@@ -12,7 +12,7 @@ defaultContext: fresh
 
 只读 `gaps.json`、`gaps.md`、`candidates/`、`state/nodes/`。只写 `candidates/<id>/` 和 `patch.json`。
 
-`patch.json` 必须包含 `part`、`motivation`、`expectedFailureClass`、`summary`。禁止读 `sealed/` 和 held-out，禁止跑评测，禁止提交。模型 id 保持 `deepseek-v4.1-flash`，补丁不能换模型。
+`patch.json` 必须包含 `part`、`motivation`、`expectedFailureClass`、`summary`。禁止读 `sealed/` 和 held-out，禁止跑评测，禁止提交。模型 id 用本地映射 `ai-modeling/deepseek-v4-1-flash-261017`（赛方 id `deepseek-v4.1-flash`，测试 id `deepseek-v4-1-flash-261017`），补丁不能换模型。三份角色文件和证据门读同一份 `fixed-model.json`。
 
 TTS 基因（samples / selfChecks / retries）写在候选配置里，是可搜项。长 brief 用文件路径，不要塞进 args。
 

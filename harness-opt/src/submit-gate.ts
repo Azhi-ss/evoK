@@ -3,11 +3,13 @@ import { join } from "node:path";
 import { flag } from "./args";
 import { Budget } from "./budget";
 import { FIXED_MODEL_ID } from "./fixed-model";
+import { readHeldOutScore } from "./heldout-file";
 import { Lineage } from "./lineage";
-import { runEval } from "../bin/eval";
 import { writeRunState } from "../bin/record";
-import { Orchestrator, type SubmitGateResult } from "./orchestrator";
+import { probePlaygroundDryRun } from "./playground-dry-run";
+import { Orchestrator, type SubmitGateRequest, type SubmitGateResult } from "./orchestrator";
 import { GreedySelector } from "./modules/selector";
+import { readThresholds, readTokensSpent } from "./thresholds";
 
 /**
  * `harnessopt_submit_gate` entry. Reads the run directory, then calls
@@ -21,7 +23,7 @@ export async function handleSubmitGate(args: string): Promise<SubmitGateResult> 
   const argv = args.trim() === "" ? [] : args.trim().split(/\s+/);
   const root = flag(argv, "--root");
   if (!root) throw new Error("harnessopt_submit_gate requires --root");
-  const result = runDirectorySubmitGate(root);
+  const result = await runDirectorySubmitGate(root);
   writeRunState(join(root, "state"), {
     phase: "gate",
     submit: result.submit,
@@ -31,26 +33,40 @@ export async function handleSubmitGate(args: string): Promise<SubmitGateResult> 
   return result;
 }
 
-export function runDirectorySubmitGate(root: string): SubmitGateResult {
+/** Gate inputs from the run directory. Missing files stay missing; nothing is filled in. */
+export function buildDirectoryGateRequest(root: string): SubmitGateRequest {
   const state = join(root, "state");
   const lineage = new Lineage(state);
-  const orchestrator = new Orchestrator(lineage, unusedRoles(), new GreedySelector(), new Budget());
   const best = lineage.best();
   const modelId = readModelId(root, best.configPath);
-  return orchestrator.submitGate({
-    heldoutEval: () => {
-      const scored = runEval({ root, cand: "heldout", split: "heldout", gate: true });
-      return scored.scores[0] ?? Number.NaN;
-    },
-    ttsBaseline: readNumber(join(state, "tts-baseline.json"), "score", 0.5),
-    baseHeldout: readNumber(join(state, "heldout-floor.json"), "score", 0.4),
+  const thresholds = readThresholds(root);
+  const usage = readTokensSpent(root);
+  const missing = [
+    ...(thresholds.ok ? [] : thresholds.missing),
+    ...(usage.ok ? [] : [usage.missing]),
+  ];
+  return {
+    heldoutEval: () => readHeldOutScore(root).score,
+    ttsBaseline: thresholds.ok ? thresholds.value.ttsBaseline : Number.NaN,
+    baseHeldout: thresholds.ok ? thresholds.value.heldOutFloor : Number.NaN,
+    ...(thresholds.ok ? { minDelta: thresholds.value.minDelta } : {}),
     day: new Date().toISOString().slice(0, 10),
     modelId,
     tracePackComplete: tracePackComplete(root),
     changeNotePresent: changeNotePresent(root),
-    tokenBudget: 5_000_000,
-    tokensSpent: 0,
-  });
+    tokenBudget: thresholds.ok ? thresholds.value.tokenBudget : Number.NaN,
+    tokensSpent: usage.ok ? usage.tokensSpent : Number.NaN,
+    maxSubmitsPerDay: thresholds.ok ? thresholds.value.maxOnlineSubmitsPerDay : Number.NaN,
+    dryRun: () => probePlaygroundDryRun(join(root, "evidence_pack", "pack.json")),
+    ...(missing.length > 0 ? { missingInputs: missing } : {}),
+  };
+}
+
+export async function runDirectorySubmitGate(root: string): Promise<SubmitGateResult> {
+  const state = join(root, "state");
+  const lineage = new Lineage(state);
+  const orchestrator = new Orchestrator(lineage, unusedRoles(), new GreedySelector(), new Budget());
+  return orchestrator.submitGate(buildDirectoryGateRequest(root));
 }
 
 function readModelId(root: string, configPath: string): string {
@@ -72,16 +88,6 @@ function changeNotePresent(root: string): boolean {
   const note = join(root, "evidence_pack", "change-note.md");
   if (!existsSync(note)) return false;
   return readFileSync(note, "utf8").trim() !== "";
-}
-
-function readNumber(path: string, key: string, fallback: number): number {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    const value = parsed[key];
-    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 function unusedRoles() {

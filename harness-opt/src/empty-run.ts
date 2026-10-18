@@ -5,6 +5,7 @@ import { writeRoleFile, writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
 import { writeRunState } from "../bin/record";
 import { FIXED_MODEL_ID } from "./fixed-model";
+import { HELD_OUT_SCORE_FILE, readHeldOutScore } from "./heldout-file";
 import { Lineage, Node } from "./lineage";
 import { HeldOutVault } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
@@ -24,7 +25,6 @@ export interface EmptyRunOptions {
   readonly day?: string;
   readonly dryRun?: DryRunStatus;
   readonly milestoneHeldOut?: Readonly<Record<string, number>>;
-  readonly devTasks?: readonly TaskRef[];
   readonly heldOutTasks?: readonly TaskRef[];
   readonly roles?: Partial<Roles>;
 }
@@ -44,10 +44,11 @@ const SECRET_HELD_OUT = "sealed-held-out-body";
 
 /**
  * One local step with fixture roles. Scores stay in [0, 1].
- * The submit gate sees a held-out number that is below the TTS baseline,
- * so `submit` is false and nothing is posted to the playground.
+ * Held-out is written to `sealed/heldout-score.json` and read back from that
+ * file. The numbers below are this fixture's inputs, not product-gate defaults.
+ * Omit `minDelta` and the held-out check stays shut.
  */
-export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
+export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult> {
   mkdirSync(options.out, { recursive: true });
   const state = join(options.out, "state");
   const modelId = options.modelId ?? FIXED_MODEL_ID;
@@ -63,12 +64,17 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
   };
   writeCandidate(options.out, "base", { ...base, fixtureScore: 0.4, tokens: 20 });
   writeFileSync(join(options.out, "sealed-note.txt"), `${SECRET_HELD_OUT}\n`);
+  const heldoutScore = options.heldout ?? 0.1;
+  mkdirSync(join(options.out, "sealed"), { recursive: true });
+  writeFileSync(
+    join(options.out, HELD_OUT_SCORE_FILE),
+    `${JSON.stringify({ score: heldoutScore, tokens: 0 }, null, 2)}\n`,
+  );
   const heldOut = new HeldOutVault(options.heldOutTasks ?? [{
     id: "h1",
     split: "held-out",
     path: "sealed-note.txt",
   }]);
-  void options.devTasks;
   void heldOut.size;
 
   const lineage = new Lineage(state);
@@ -190,7 +196,7 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
       return score;
     },
   });
-  const phase = orchestrator.step();
+  const phase = await orchestrator.step();
   const traceReady = readFileSync(join(options.out, "traces", "t1.json"), "utf8").includes("t1");
   let noteReady = false;
   try {
@@ -198,8 +204,8 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
   } catch {
     noteReady = false;
   }
-  const gate = orchestrator.submitGate({
-    heldoutEval: () => options.heldout ?? 0.1,
+  const gate = await orchestrator.submitGate({
+    heldoutEval: () => readHeldOutScore(options.out).score,
     ttsBaseline: options.ttsBaseline ?? 0.5,
     baseHeldout: options.baseHeldout ?? 0.4,
     ...(options.minDelta !== undefined ? { minDelta: options.minDelta } : {}),

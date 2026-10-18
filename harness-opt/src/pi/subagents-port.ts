@@ -1,19 +1,10 @@
 import type { RoleId } from "../roles";
 
 /**
- * Host port for pi-subagents. The empty run does not import that package.
- *
- * TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7): unverified,
- * leave as comments, do not invent a call. Do not install pi-intercom.
- *   1. Bare-script `gate.command` splicing `args`.
- *   2. `import 'pi-subagents/workflow-resources'` when this package is
- *      installed separately from pi-subagents.
- *   3. Structured delegation from a `registerCommand` handler.
- *   4. Default blocking timeout of `contact_supervisor`.
- *   5. `pi install -l ./` reading `pi.subagents.agents`.
- *
- * Node on this VM is below Pi's 22.19 line, so the loop under test is
- * `src/orchestrator.ts`.
+ * Retired scheduler. The product path is `src/pi/delegate.ts`: it emits
+ * pi-subagents delegation events and waits for the correlated response.
+ * This class still throws so an old caller cannot pretend the call ran.
+ * Do not install pi-intercom.
  */
 
 export const PI_SUBAGENTS_UNVERIFIED = [

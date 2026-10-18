@@ -1,0 +1,28 @@
+{
+  "taskId": "dev-1",
+  "reward": 0.8,
+  "tokens": 120,
+  "failed": false,
+  "labels": ["tool-misuse"],
+  "steps": [
+    {
+      "id": "s1",
+      "tool": "read",
+      "args": { "path": "task.md" },
+      "ok": true
+    },
+    {
+      "id": "s2",
+      "tool": "bash",
+      "args": { "cmd": "python check.py" },
+      "ok": false,
+      "error": "exit 1: assertion failed on the expected answer file"
+    },
+    {
+      "id": "s3",
+      "tool": "write",
+      "args": { "path": "answer.txt" },
+      "ok": true
+    }
+  ]
+}

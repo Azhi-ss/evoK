@@ -1,4 +1,4 @@
-import { FIXED_MODEL_ID, modelIdMatchesFixed } from "../fixed-model";
+import { acceptedModelIds, modelIdMatchesFixed } from "../fixed-model";
 import type { DryRunStatus } from "../playground-dry-run";
 
 /**
@@ -33,7 +33,11 @@ export interface EvidenceGateInput {
   readonly tokenBudget: number;
   /** `unsupported` is an explicit not-run and does not pass. */
   readonly dryRun: DryRunStatus;
+  /** Probe text. When set, the dry-run check shows this instead of a generic line. */
+  readonly dryRunDetail?: string;
   readonly consultEvok?: () => { readonly ok: boolean; readonly refusedGateIds: readonly string[] };
+  /** Named inputs the caller did not supply. Fail closed, and say which ones. */
+  readonly missingInputs?: readonly string[];
 }
 
 export interface EvidenceCheck {
@@ -49,21 +53,23 @@ export interface EvidenceGateResult {
 
 const TRAINING_MODEL = /sft|grpo|rlhf|finetune|fine-tune|\blora\b/i;
 
-export function modelAllowed(modelId: string, fixedModelId: string = FIXED_MODEL_ID): boolean {
+export function modelAllowed(modelId: string, fixedModelId?: string): boolean {
   if (TRAINING_MODEL.test(modelId)) return false;
   return modelIdMatchesFixed(modelId, fixedModelId);
 }
 
 export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResult {
-  const fixedModelId = input.fixedModelId ?? FIXED_MODEL_ID;
-  const modelOk = modelAllowed(input.modelId, fixedModelId);
+  const modelOk = input.fixedModelId === undefined
+    ? modelAllowed(input.modelId)
+    : modelAllowed(input.modelId, input.fixedModelId);
+  const expected = input.fixedModelId ?? acceptedModelIds().join(" | ");
   const checks: EvidenceCheck[] = [
     check(
       "model",
       modelOk,
       modelOk
-        ? `model ${input.modelId} matches the pinned id`
-        : `model ${input.modelId} is not the pinned id ${fixedModelId}`,
+        ? `model ${input.modelId} matches the pinned map`
+        : `model ${input.modelId} is not in ${expected}`,
     ),
     check(
       "held-out",
@@ -99,13 +105,17 @@ export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResu
     check(
       "playground-submit-dry-run",
       input.dryRun === "passed",
-      input.dryRun === "passed"
-        ? "playground submit --dry-run succeeded"
-        : input.dryRun === "unsupported"
-          ? "not-run: playground submit --dry-run is unsupported; fail-closed"
-          : "playground submit --dry-run failed",
+      input.dryRunDetail
+        ?? (input.dryRun === "passed"
+          ? "playground submit --dry-run succeeded"
+          : input.dryRun === "unsupported"
+            ? "not-run: playground submit --dry-run is unsupported; fail-closed"
+            : "playground submit --dry-run failed"),
     ),
   ];
+  if (input.missingInputs && input.missingInputs.length > 0) {
+    checks.push(check("inputs", false, `missing explicit input: ${input.missingInputs.join(", ")}`));
+  }
   if (input.consultEvok) {
     const consulted = input.consultEvok();
     checks.push(check(

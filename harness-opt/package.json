@@ -3,11 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Deterministic harness-optimizer Pi package. pi-subagents is a host dependency and is not imported.",
+    "description": "Deterministic harness optimizer. Depends on pi-subagents for delegation events and the named workflow harnessopt.round.",
   "keywords": ["pi-package"],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bunx --package typescript@5.9.3 tsc --project tsconfig.json --pretty false"
+    "typecheck": "npx -p typescript@5.9.3 tsc -p tsconfig.json --pretty false"
   },
   "bin": {
     "harness-opt": "./src/cli.ts",
@@ -25,5 +25,8 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
     "typebox": "*"
+  },
+  "dependencies": {
+    "pi-subagents": "0.79.1"
   }
 }

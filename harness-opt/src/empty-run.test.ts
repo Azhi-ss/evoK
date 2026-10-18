@@ -12,9 +12,9 @@ function out(): string {
 }
 
 describe("empty round", () => {
-  test("one greedy step keeps the better child and the baseline gate blocks submit", () => {
+  test("one greedy step keeps the better child and the baseline gate blocks submit", async () => {
     const dir = out();
-    const result = runEmpty({ out: dir });
+    const result = await runEmpty({ out: dir });
     expect(result.selector).toBe("GreedySelector");
     expect(result.submit).toBe(false);
     expect(result.heldout).toBe(0.1);
@@ -49,8 +49,8 @@ describe("empty round", () => {
     expect(readFileSync(join(dir, "evidence_pack", "change-note.md"), "utf8").trim().length).toBeGreaterThan(0);
   });
 
-  test("reviewer veto rejects the child and does not submit", () => {
-    const result = runEmpty({
+  test("reviewer veto rejects the child and does not submit", async () => {
+    const result = await runEmpty({
       out: out(),
       roles: {
         reviewer: () => ({ accept: false, reason: "veto" }),
@@ -61,8 +61,8 @@ describe("empty round", () => {
     expect(result.bestId).toBe("base");
   });
 
-  test("a green numeric gate still does not live-submit, and a missing dry-run stays shut", () => {
-    const blocked = runEmpty({
+  test("a green numeric gate still does not live-submit, and a missing dry-run stays shut", async () => {
+    const blocked = await runEmpty({
       out: out(),
       heldout: 0.9,
       ttsBaseline: 0.5,
@@ -73,7 +73,7 @@ describe("empty round", () => {
     expect(blocked.failedChecks).toContain("playground-submit-dry-run");
     expect(blocked.liveSubmitCalled).toBe(false);
     const greenDir = out();
-    const opened = runEmpty({
+    const opened = await runEmpty({
       out: greenDir,
       heldout: 0.9,
       ttsBaseline: 0.5,
@@ -88,11 +88,11 @@ describe("empty round", () => {
     expect(receipt.submitted).toBe(false);
   });
 
-  test("pi-subagents delegation stays an unverified stub", () => {
+  test("the retired unverified scheduler still throws", async () => {
     expect(() => new UnverifiedPiSubagentsDelegator().schedule("runner", "run", () => 1)).toThrow(/TODO\(pi-subagents\)/);
   });
 
-  test("a role cannot write another role's artifact", () => {
+  test("a role cannot write another role's artifact", async () => {
     expect(() => assertRoleWrite("innovator", "gaps.json")).toThrow(/cannot write/);
     expect(() => assertRoleWrite("runner", "traces/t1.json")).not.toThrow();
     expect(() => assertRoleWrite("innovator", "candidates/c1/config.json")).not.toThrow();
@@ -111,10 +111,10 @@ describe("empty round", () => {
     expect(() => assertRoleTool("reviewer-gate", "read")).not.toThrow();
   });
 
-  test("cli empty run completes with submit false", () => {
+  test("cli empty run completes with submit false", async () => {
     const dir = out();
-    expect(main(["empty", "--out", dir])).toBe(0);
-    expect(main(["nope"])).toBe(1);
+    expect(await main(["empty", "--out", dir])).toBe(0);
+    expect(await main(["nope"])).toBe(1);
     const state = JSON.parse(readFileSync(join(dir, "state", "run_state.json"), "utf8")) as { submit: boolean; selector: string };
     expect(state.submit).toBe(false);
     expect(state.selector).toBe("GreedySelector");

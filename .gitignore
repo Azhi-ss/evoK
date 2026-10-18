@@ -15,6 +15,7 @@ pi-session-*.html
 .pi/
 node_modules/
 dist/
+.harness-opt/
 *.log
 .env
 .env.*

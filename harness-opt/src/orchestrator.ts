@@ -73,15 +73,17 @@ export interface SubmitReceipt {
   readonly detail: string;
 }
 
+type Awaitable<T> = T | Promise<T>;
+
 export interface Roles {
-  gapFinder: (parent: Node, lin: RoleLineage) => Record<string, unknown>;
-  innovator: (parent: Node, gaps: Record<string, unknown>, tried: readonly string[]) => Proposal;
-  runner: (configPath: string, subset: "dev_small" | "dev_full") => number[];
-  reviewer: (input: ReviewInput) => ReviewVerdict;
+  gapFinder: (parent: Node, lin: RoleLineage) => Awaitable<Record<string, unknown>>;
+  innovator: (parent: Node, gaps: Record<string, unknown>, tried: readonly string[]) => Awaitable<Proposal>;
+  runner: (configPath: string, subset: "dev_small" | "dev_full") => Awaitable<number[]>;
+  reviewer: (input: ReviewInput) => Awaitable<ReviewVerdict>;
   /** Called after a dev+held-out accept. Stub may write `evidence_pack/`. */
-  reportWriter?: (input: { readonly child: Node; readonly parent: Node }) => EvidencePack;
+  reportWriter?: (input: { readonly child: Node; readonly parent: Node }) => Awaitable<EvidencePack>;
   /** Called only after the evidence gate is green. Live submit stays off. */
-  submitter?: (input: { readonly pack: EvidencePack | null; readonly gateGreen: boolean }) => SubmitReceipt;
+  submitter?: (input: { readonly pack: EvidencePack | null; readonly gateGreen: boolean }) => Awaitable<SubmitReceipt>;
 }
 
 export interface OrchestratorOptions {
@@ -107,6 +109,8 @@ export interface OrchestratorOptions {
    * fail-closed: the child is not promoted. Not visible to Gap Finder.
    */
   readonly heldOutAtMilestone?: (configPath: string) => number;
+  /** Per-stage report hook. The session writes one JSON file per call. */
+  readonly onStage?: (stage: string, output: unknown, explanation: string) => void;
 }
 
 export interface SubmitGateRequest {
@@ -131,6 +135,7 @@ export interface SubmitGateRequest {
   readonly tts?: TtsStatus;
   readonly dryRun?: () => { readonly status: DryRunStatus; readonly detail: string };
   readonly consultEvok?: () => { readonly ok: boolean; readonly refusedGateIds: readonly string[] };
+  readonly missingInputs?: readonly string[];
 }
 
 export interface SubmitGateResult {
@@ -148,6 +153,7 @@ export class Orchestrator {
   phase: Phase = Phase.SELECT;
   private readonly ids: () => string;
   private readonly heldOutAtMilestone: ((configPath: string) => number) | undefined;
+  private readonly onStage: ((stage: string, output: unknown, explanation: string) => void) | undefined;
   readonly maxConsecutiveStalls: number;
   consecutiveStalls = 0;
   lastPack: EvidencePack | null = null;
@@ -165,10 +171,11 @@ export class Orchestrator {
     this.patience = options.patience ?? 15;
     this.ids = options.ids ?? (() => randomBytes(4).toString("hex"));
     this.heldOutAtMilestone = options.heldOutAtMilestone;
+    this.onStage = options.onStage;
     this.maxConsecutiveStalls = options.maxConsecutiveStalls ?? 3;
   }
 
-  step(): Phase {
+  async step(): Promise<Phase> {
     if (!this.budget.canRun()) {
       this.phase = Phase.STOP;
       return this.phase;
@@ -182,16 +189,19 @@ export class Orchestrator {
     parent.locked = true;
     this.lin.put(parent);
     this.lin.log("select", { node: parent.id, selector: this.selector.name });
+    this.onStage?.("select", { node: parent.id, selector: this.selector.name }, `selected parent ${parent.id} with ${this.selector.name}`);
     let child: Node | undefined;
     try {
       const view = this.lin.roleView();
       assertNoHeldOutLeak({ parent: parent.toJSON(), events: view.events() }, "gap finder input");
-      const gaps = this.roles.gapFinder(parent, view);
+      const gaps = await this.roles.gapFinder(parent, view);
       assertNoHeldOutLeak(gaps, "gap finder output");
+      this.onStage?.("gap", gaps, "gap finder output was parsed by the orchestrator");
       const tried = parent.children.map((id) => this.lin.nodes.get(id)?.patchSummary ?? "");
       assertNoHeldOutLeak({ parent: parent.toJSON(), gaps, tried }, "innovator input");
-      const prop = this.roles.innovator(parent, gaps, tried);
+      const prop = await this.roles.innovator(parent, gaps, tried);
       assertNoHeldOutLeak(prop, "innovator output");
+      this.onStage?.("propose", prop, "innovator patch was parsed by the orchestrator");
       if (tried.includes(prop.summary)) {
         return this.noteStall("dup_patch", { node: parent.id });
       }
@@ -212,7 +222,7 @@ export class Orchestrator {
       this.budget.usedTokens += child.tokensUsed;
       child.status = "running";
       this.lin.put(child);
-      const small = assertScores(this.roles.runner(child.configPath, "dev_small"));
+      const small = assertScores(await this.roles.runner(child.configPath, "dev_small"));
       this.budget.usedRuns += 1;
       child.devSmallScores = [...small];
       child.devScores = [...small];
@@ -223,7 +233,7 @@ export class Orchestrator {
       // (often the full set). Those scales do not match. `stagedThreshold`
       // (default 0.9) is an arbitrary constant, only a cheap screen.
       if (parent.devMean !== null && smallMean >= this.stagedThreshold * parent.devMean) {
-        const full = assertScores(this.roles.runner(child.configPath, "dev_full"));
+        const full = assertScores(await this.roles.runner(child.configPath, "dev_full"));
         // dev_small and dev_full are not disjoint here. `bin/eval.ts` and the
         // empty-run fixture repeat the same candidate score; dev_full is a
         // longer copy of that measurement, not a remainder. Concatenating the
@@ -236,12 +246,13 @@ export class Orchestrator {
       }
       child.status = "evaluated";
       this.lin.put(child);
+      this.onStage?.("run", { id: child.id, devScores: child.devScores, stage: child.stage }, "runner returned one subset; dev_full replaces dev_small in the mean");
       const childMean = child.devMean ?? 0;
       const milestone = readMilestone(this.heldOutAtMilestone, child.configPath, parent.configPath);
       const devRose = parent.devMean !== null && childMean > parent.devMean;
       const heldOutFell = milestone !== null && milestone.child < milestone.parent;
       const devRoseHeldOutFell = milestone === null || (devRose && heldOutFell);
-      const verdict = this.roles.reviewer({ child, parent, heldOut: milestone, devRoseHeldOutFell });
+      const verdict = await this.roles.reviewer({ child, parent, heldOut: milestone, devRoseHeldOutFell });
       // Placeholder keep rule, not a statistical criterion. This is an unpaired
       // comparison, not a paired difference and not an LCB. `noiseLeeway`
       // (default 0.01) is a nominal constant; it is not an estimate of noise.
@@ -257,10 +268,11 @@ export class Orchestrator {
         child.status = "rejected";
         this.lin.put(child);
       } else {
-        const pack = this.roles.reportWriter?.({ child, parent }) ?? null;
+        const pack = this.roles.reportWriter ? await this.roles.reportWriter({ child, parent }) : null;
         this.lastPack = pack;
       }
       this.consecutiveStalls = 0;
+      this.onStage?.("review", { accept: child.status === "evaluated", reason, regressed: devRoseHeldOutFell }, reason);
       this.lin.log("review", {
         node: child.id,
         accept: child.status === "evaluated",
@@ -269,6 +281,7 @@ export class Orchestrator {
         reason,
       });
       backprop(this.lin, child, childMean);
+      this.onStage?.("backprop", { node: child.id, reward: childMean }, "value was added up the parent chain");
       const best = this.lin.best();
       this.sinceImprove = best.id === child.id ? 0 : this.sinceImprove + 1;
       if (this.sinceImprove >= this.patience) {
@@ -288,8 +301,8 @@ export class Orchestrator {
     }
   }
 
-  run(): Node {
-    while (this.step() !== Phase.STOP) {
+  async run(): Promise<Node> {
+    while (await this.step() !== Phase.STOP) {
       // The budget, plateau, and caller-injected roles decide when to stop.
     }
     return this.lin.best();
@@ -303,15 +316,17 @@ export class Orchestrator {
    * Submitter runs only when that conjunction is true, and it still does not
    * live-post.
    */
-  submitGate(request: SubmitGateRequest): SubmitGateResult {
+  async submitGate(request: SubmitGateRequest): Promise<SubmitGateResult> {
     const best = this.lin.best();
     const minDelta = positiveMinDelta(request.minDelta);
     let heldout: number | null = null;
+    let readError: string | undefined;
     try {
       const score = request.heldoutEval(best.configPath);
-      heldout = Number.isFinite(score) ? score : null;
-    } catch {
-      heldout = null;
+      if (!Number.isFinite(score)) readError = "held-out score is not a finite number";
+      else heldout = score;
+    } catch (error) {
+      readError = error instanceof Error ? error.message : String(error);
     }
     const dry = (request.dryRun ?? probePlaygroundDryRun)();
     const compared = heldout !== null && Number.isFinite(request.ttsBaseline);
@@ -325,7 +340,7 @@ export class Orchestrator {
       modelId: request.modelId,
       heldOutScore: heldout,
       heldOutFloor: minDelta === null ? Number.NaN : request.baseHeldout + minDelta,
-      ...(minDelta === null ? { heldOutRefusal: MIN_DELTA_REFUSAL } : {}),
+      ...(minDelta === null || readError ? { heldOutRefusal: [minDelta === null ? MIN_DELTA_REFUSAL : "", readError ?? ""].filter(Boolean).join("; ") } : {}),
       tracePackComplete: request.tracePackComplete,
       changeNotePresent: request.changeNotePresent,
       tts: ttsStatus,
@@ -334,7 +349,9 @@ export class Orchestrator {
       tokensSpent,
       tokenBudget: request.tokenBudget,
       dryRun: dry.status,
+      dryRunDetail: dry.detail,
       ...(request.consultEvok ? { consultEvok: request.consultEvok } : {}),
+      ...(request.missingInputs && request.missingInputs.length > 0 ? { missingInputs: request.missingInputs } : {}),
     });
     const heldOutGate = minDelta !== null && heldout !== null && heldout >= request.baseHeldout + minDelta;
     const ttsGate = ttsStatus === "passed" && heldout !== null && heldout >= request.ttsBaseline;
@@ -342,20 +359,23 @@ export class Orchestrator {
     const budgetGate = tokensSpent <= request.tokenBudget && this.budget.canSubmit(request.day);
     const submit = evidence.ok && heldOutGate && ttsGate && dryGate && budgetGate;
     if (submit) {
-      const receipt = (this.roles.submitter ?? defaultSubmitter)({ pack: this.lastPack, gateGreen: true });
+      const receipt = await (this.roles.submitter ?? defaultSubmitter)({ pack: this.lastPack, gateGreen: true });
       if (receipt.submitted) {
         throw new Error("live playground submit is off");
       }
     }
+    const failed = evidence.checks.filter((item) => !item.ok).map((item) => item.id);
     this.lin.gateLog({
       node: best.id,
       heldout,
       tts: request.ttsBaseline,
       base: request.baseHeldout,
       ok: submit,
-      failed: evidence.checks.filter((item) => !item.ok).map((item) => item.id),
+      failed,
+      ...(readError ? { readError } : {}),
     });
     this.lin.log("gate", { node: best.id, ok: submit });
+    this.onStage?.("gate", { node: best.id, ok: submit, failed }, submit ? "submit gate is green; live submit stays off" : `submit gate failed: ${failed.join(", ")}`);
     return { node: best.id, heldout, submit, checks: evidence.checks };
   }
 
