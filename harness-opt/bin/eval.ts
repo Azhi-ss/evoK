@@ -55,6 +55,8 @@ export function runEval(options: {
   const config = JSON.parse(readFileSync(configPath, "utf8")) as { fixtureScore?: unknown; tokens?: unknown };
   const score = typeof config.fixtureScore === "number" ? config.fixtureScore : 0.5;
   if (!Number.isFinite(score) || score < 0 || score > 1) throw new Error("fixtureScore must be in [0, 1]");
+  // Same fixture for both splits. dev_full is a longer repeat, not a disjoint
+  // remainder, and not a superset of separately scored tasks.
   const repeat = split === "dev_full" ? [score, score] : [score];
   return {
     ok: true,

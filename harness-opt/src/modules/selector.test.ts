@@ -77,25 +77,15 @@ describe("selectors", () => {
     expect(seen[1]).toBeCloseTo(weights[1] as number, 6);
   });
 
-  test("score-child-prop down-weights nodes that already have children", () => {
+  test("score-child-prop keeps the DGM expression and refuses to select with it", () => {
     const heavy = scoreChildPropWeight(0.8, 0);
     const light = scoreChildPropWeight(0.8, 2);
     expect(heavy).toBeCloseTo(1 / (1 + Math.exp(-3)), 6);
     expect(light).toBeCloseTo(heavy / 3, 6);
     const lin = new Lineage(dir());
-    const parent = evaluated(lin, "parent", 0.8, { children: ["a", "b"] });
     evaluated(lin, "fresh", 0.8);
-    let picked = "";
-    const rng: Rng = {
-      choices<T>(pool: readonly T[], weights: readonly number[]): T {
-        expect(weights[0]).toBeCloseTo(scoreChildPropWeight(0.8, parent.children.length), 6);
-        expect(weights[1]).toBeCloseTo(scoreChildPropWeight(0.8, 0), 6);
-        const chosen = pool[1] as T;
-        picked = (chosen as Node).id;
-        return chosen;
-      },
-    };
-    expect(new ScoreChildPropSelector(rng).pick(lin).id).toBe(picked);
+    expect(() => new ScoreChildPropSelector().pick(lin)).toThrow(/archive median/);
+    expect(() => getSelector("score-child-prop")).toThrow(/1\/sigma/);
   });
 
   test("UCT cap, unvisited infinity, and descent when the cap is full", () => {
@@ -122,7 +112,7 @@ describe("selectors", () => {
     expect(() => new ParetoArchive().consider()).toThrow(/TODO/);
     expect(() => new MapElitesArchive().consider()).toThrow(/TODO/);
     expect(() => new NoveltyFilter().allow()).toThrow(/TODO/);
-    for (const id of ["paired-lcb", "successive-halving", "map-elites", "novelty"]) {
+    for (const id of ["paired-lcb", "successive-halving", "map-elites", "novelty", "score-child-prop"]) {
       expect(() => getSelector(id)).toThrow(/TODO/);
     }
   });

@@ -22,6 +22,8 @@ export interface EvidenceGateInput {
   readonly fixedModelId?: string;
   readonly heldOutScore: number | null;
   readonly heldOutFloor: number;
+  /** When set, the held-out check fails closed with this detail. */
+  readonly heldOutRefusal?: string;
   readonly tracePackComplete: boolean;
   readonly changeNotePresent: boolean;
   readonly tts: TtsStatus;
@@ -65,10 +67,15 @@ export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResu
     ),
     check(
       "held-out",
-      input.heldOutScore !== null && Number.isFinite(input.heldOutScore) && input.heldOutScore >= input.heldOutFloor,
-      input.heldOutScore === null
-        ? "held-out score is missing; it is only read at this gate"
-        : `held-out ${input.heldOutScore} vs floor ${input.heldOutFloor}`,
+      input.heldOutRefusal === undefined
+        && input.heldOutScore !== null
+        && Number.isFinite(input.heldOutScore)
+        && Number.isFinite(input.heldOutFloor)
+        && input.heldOutScore >= input.heldOutFloor,
+      input.heldOutRefusal
+        ?? (input.heldOutScore === null
+          ? "held-out score is missing; it is only read at this gate"
+          : `held-out ${input.heldOutScore} vs floor ${input.heldOutFloor}`),
     ),
     check("trace-pack", input.tracePackComplete, input.tracePackComplete ? "trace pack present" : "trace pack incomplete"),
     check("change-note", input.changeNotePresent, input.changeNotePresent ? "change note present" : "change note missing"),

@@ -20,6 +20,10 @@ export interface NodeJson {
   readonly patchSummary: string;
   readonly status: NodeStatus;
   readonly devScores: number[];
+  /** dev_small sample. Not mixed into `devScores` once dev_full has run. */
+  readonly devSmallScores: number[];
+  /** dev_full sample. Same fixture as dev_small in this tree, so it replaces rather than extends the mean. */
+  readonly devFullScores: number[];
   readonly stage: EvalStage;
   readonly visits: number;
   readonly valueSum: number;
@@ -36,6 +40,8 @@ export class Node {
   patchSummary = "";
   status: NodeStatus = "pending";
   devScores: number[] = [];
+  devSmallScores: number[] = [];
+  devFullScores: number[] = [];
   stage: EvalStage = "none";
   visits = 0;
   valueSum = 0;
@@ -51,6 +57,8 @@ export class Node {
     if (init.patchSummary !== undefined) this.patchSummary = init.patchSummary;
     if (init.status !== undefined) this.status = init.status;
     if (init.devScores !== undefined) this.devScores = [...init.devScores];
+    if (init.devSmallScores !== undefined) this.devSmallScores = [...init.devSmallScores];
+    if (init.devFullScores !== undefined) this.devFullScores = [...init.devFullScores];
     if (init.stage !== undefined) this.stage = init.stage;
     if (init.visits !== undefined) this.visits = init.visits;
     if (init.valueSum !== undefined) this.valueSum = init.valueSum;
@@ -60,10 +68,19 @@ export class Node {
     if (init.createdAt !== undefined) this.createdAt = init.createdAt;
   }
 
-  /** Mean of normalised [0, 1] repeats. Empty until the runner returns scores. */
+  /**
+   * Equal-weight mean of one subset. `dev_full` wins once it exists, because
+   * in this tree that list already covers the small-set measurement.
+   * Concatenating the two lists is not the mean.
+   */
   get devMean(): number | null {
-    if (this.devScores.length === 0) return null;
-    return this.devScores.reduce((sum, score) => sum + score, 0) / this.devScores.length;
+    const scores = this.devFullScores.length > 0
+      ? this.devFullScores
+      : this.devSmallScores.length > 0
+        ? this.devSmallScores
+        : this.devScores;
+    if (scores.length === 0) return null;
+    return scores.reduce((sum, score) => sum + score, 0) / scores.length;
   }
 
   toJSON(): NodeJson {
@@ -74,6 +91,8 @@ export class Node {
       patchSummary: this.patchSummary,
       status: this.status,
       devScores: [...this.devScores],
+      devSmallScores: [...this.devSmallScores],
+      devFullScores: [...this.devFullScores],
       stage: this.stage,
       visits: this.visits,
       valueSum: this.valueSum,

@@ -90,6 +90,14 @@ describe("orchestrator", () => {
     expect(good.lin.nodes.get("child")?.status).toBe("evaluated");
     expect(good.lin.best().id).toBe("child");
 
+    const split = machine([1], { fullScores: [0.1] });
+    split.orchestrator.step();
+    const scored = split.lin.nodes.get("child");
+    expect(scored?.devSmallScores).toEqual([1]);
+    expect(scored?.devFullScores).toEqual([0.1]);
+    expect(scored?.devScores).toEqual([0.1]);
+    expect(scored?.devMean).toBeCloseTo(0.1);
+
     const weak = machine([0.2]);
     weak.orchestrator.step();
     expect(weak.calls).toEqual(["dev_small"]);
@@ -129,15 +137,22 @@ describe("orchestrator", () => {
     expect(lin.events().some((event) => "heldout" in event || "heldOut" in event)).toBe(false);
     expect(lin.gateEvents()[0]).toMatchObject({ node: "root", heldout: 0.2, ok: false });
     expect(readFileSync(join(lin.root, "lineage.jsonl"), "utf8")).not.toContain("heldout");
-    const open = orchestrator.submitGate(gateRequest(0.8));
+    const missing = orchestrator.submitGate(gateRequest(0.8));
+    expect(missing.submit).toBe(false);
+    expect(missing.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
+    const zero = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0 }));
+    expect(zero.submit).toBe(false);
+    expect(zero.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
+    const open = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1 }));
     expect(open.submit).toBe(true);
     expect(open.checks.every((check) => check.ok)).toBe(true);
-    const prefix = orchestrator.submitGate(gateRequest(0.8, { modelId: "qwen-max" }));
+    const prefix = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, modelId: "qwen-max" }));
     expect(prefix.submit).toBe(false);
     expect(prefix.checks.find((check) => check.id === "model")?.ok).toBe(false);
-    const unread = orchestrator.submitGate(gateRequest(0.8, { tts: "not-run" }));
+    const unread = orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "not-run" }));
     expect(unread.submit).toBe(false);
     const noDry = orchestrator.submitGate(gateRequest(0.8, {
+      minDelta: 0.1,
       dryRun: () => ({ status: "unsupported", detail: "not-run: playground submit --dry-run is unsupported" }),
     }));
     expect(noDry.submit).toBe(false);

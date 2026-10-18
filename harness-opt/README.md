@@ -61,7 +61,7 @@ Reject 把子节点标成 `rejected`，仍然回传价值。Reviewer 可以否�
 `Orchestrator.submitGate` 调用 `evaluateEvidenceGate`，再与另外三道相与。任一项不过就 fail-closed，不调用 live playground submit：
 
 1. 固定模型 ID 与 `fixed-model.json` 里的 `deepseek-v4.1-flash` 精确一致（`qwen-*` 这类前缀过不了）
-2. held-out 不低于基线 + Δ
+2. held-out 不低于基线 + Δ。Δ 必须是由实测 sigma 推出的正数。不传、传 0、或传非有限值，这道门失败关闭，没有默认 0
 3. 存在完整 trace 包
 4. 存在变更说明
 5. TTS matched-budget 对照已跑且 held-out 不低于 TTS 基线（未跑则禁止自动交）
@@ -82,15 +82,23 @@ held-out 分数只写 `state/gate.jsonl`。`lineage.jsonl` 的 gate 事件只有
 
 ## 选择器
 
-MVP 父节点选择器是 `GreedySelector`，提交门是 `BaselineGate`（`submitGate`：held-out ≥ 基线 + 余量，且 ≥ matched-budget TTS，且当天还有配额）。
+MVP 父节点选择器是 `GreedySelector`。提交门是 `submitGate`：held-out ≥ 基线 + 正的 Δ，且 ≥ matched-budget TTS，且当天还有配额。Δ 没有默认值。
 
-另外三个选择器按 `orchestrator.py` 移植，可以用 `getSelector` 换上：
+可以用 `getSelector` 换上的选择器：
 
 - `softmax-mix`：AFlow，top-k 上 `λ·uniform + (1-λ)·softmax(α·100·s)`，默认 k=4、α=0.2、λ=0.3
-- `score-child-prop`：DGM，`sigmoid(10·(s-0.5)) / (1+子节点数)`
 - `uct`：UCB1 加 progressive widening。这只是公式，不是完整 UCT 产品
 
-保留规则是 keep-better 加 0.01 噪声余量。小子集均值 ≥ 0.9 × 父均值才跑完整 dev。`PairedLcbKeep`、`SuccessiveHalvingStage`、`ParetoArchive`、`MapElitesArchive`、`NoveltyFilter` 调用时抛 TODO，指向选择器摘录里的 P0/P1/P2。
+`score-child-prop` 的 DGM 表达式 `sigmoid(10·(s-0.5)) / (1+子节点数)` 还在 `scoreChildPropWeight` 里，中心 0.5、斜率 10 没有按本档案标定。标定后的中心应取 archive 中位数，斜率约 `1/sigma`。`getSelector("score-child-prop")` 在标定前抛 TODO，失败关闭。
+
+两处比较是占位，不是统计判据：
+
+- 留下规则 `childMean ≥ parentMean − 0.01`：不配对，不是 LCB，0.01 是名义常数。
+- 分段预筛 `smallMean ≥ 0.9 × parent.devMean`：小子集均值对全集均值，尺度不配，0.9 是拍的，只当便宜预筛。
+
+`dev_small` 和 `dev_full` 在 `bin/eval.ts` 和空跑夹具里是同一夹具分的重复，不是不相交的题集。跑过 `dev_full` 之后，`devMean` 只用这份全量重复，不再把小集分数拼进去。
+
+`PairedLcbKeep`、`SuccessiveHalvingStage`、`ParetoArchive`、`MapElitesArchive`、`NoveltyFilter` 调用时抛 TODO，指向选择器摘录里的 P0/P1/P2。
 
 `samples` / `selfChecks` / `retries` 写在候选配置上，是可搜的 TTS 基因。
 

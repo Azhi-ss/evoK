@@ -19,6 +19,8 @@ export interface EmptyRunOptions {
   readonly heldout?: number;
   readonly ttsBaseline?: number;
   readonly baseHeldout?: number;
+  /** Positive margin from measured sigma. Omit it and the gate refuses. */
+  readonly minDelta?: number;
   readonly day?: string;
   readonly dryRun?: DryRunStatus;
   readonly milestoneHeldOut?: Readonly<Record<string, number>>;
@@ -140,6 +142,7 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
         failed: false,
         labels: [],
       });
+      // Same fixture. dev_full repeats it; it is not a disjoint task list.
       return subset === "dev_full" ? [score, score] : [score];
     },
     reviewer: (input: ReviewInput) => {
@@ -199,6 +202,7 @@ export function runEmpty(options: EmptyRunOptions): EmptyRunResult {
     heldoutEval: () => options.heldout ?? 0.1,
     ttsBaseline: options.ttsBaseline ?? 0.5,
     baseHeldout: options.baseHeldout ?? 0.4,
+    ...(options.minDelta !== undefined ? { minDelta: options.minDelta } : {}),
     day: options.day ?? "2026-10-18",
     modelId,
     tracePackComplete: traceReady,

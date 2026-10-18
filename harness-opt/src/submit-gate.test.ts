@@ -32,6 +32,7 @@ describe("harnessopt_submit_gate", () => {
       "change-note",
       "playground-submit-dry-run",
     ]));
+    expect(result.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
     const dry = result.checks.find((check) => check.id === "playground-submit-dry-run");
     expect(dry?.detail).toContain("not-run");
     const saved = JSON.parse(readFileSync(join(state, "run_state.json"), "utf8")) as { submit: boolean };

@@ -10,7 +10,9 @@ import type { Lineage, Node } from "../lineage";
  * TODOs, and it says not to build a full UCT product, CMA-ME, pure novelty
  * search, PBT, FunSearch-scale islands, or online-leaderboard feedback.
  * `UCTSelector` below is only the formula and progressive-widening cap
- * from the python skeleton.
+ * from the python skeleton. `score-child-prop` keeps the DGM expression,
+ * and `getSelector` refuses it until the center is the archive median and
+ * the slope is about 1/sigma.
  *
  * Scores are normalised to [0, 1]. Contest ×100 display stays in scoring.ts.
  */
@@ -87,20 +89,28 @@ export function softmaxMixWeights(scores: readonly number[], alpha: number, lam:
   return shifted.map((weight) => lam / scores.length + (1 - lam) * weight / z);
 }
 
-/** DGM score_child_prop: sigmoid(10*(s-0.5)) / (1+n_children). */
+/**
+ * DGM `score_child_prop` shape: sigmoid(slope * (s - center)) / (1 + n_children).
+ *
+ * The skeleton constants center=0.5 and slope=10 are not calibrated to this
+ * archive. A calibrated weight uses the archive median as the center and a
+ * slope of about 1/sigma. Until that sigma is measured, selecting with these
+ * weights is refused.
+ */
 export class ScoreChildPropSelector implements Selector {
   readonly name = "ScoreChildPropSelector";
 
   constructor(private readonly rng: Rng = mathRng()) {}
 
-  pick(lin: Lineage): Node {
-    const pool = lin.evaluated().filter((node) => !node.locked);
-    if (pool.length === 0) throw new Error("no evaluated unlocked node");
-    const weights = pool.map((node) => scoreChildPropWeight(node.devMean ?? 0, node.children.length));
-    return this.rng.choices(pool, weights);
+  pick(_lin: Lineage): Node {
+    void this.rng;
+    throw new Error(
+      `TODO(${SELECTOR_DOC}): score-child-prop is uncalibrated; center must be the archive median and slope about 1/sigma`,
+    );
   }
 }
 
+/** Uncalibrated DGM expression. Not a selection weight until sigma is measured. */
 export function scoreChildPropWeight(devMean: number, childCount: number): number {
   return (1 / (1 + Math.exp(-10 * (devMean - 0.5)))) / (1 + childCount);
 }
@@ -161,9 +171,14 @@ export function backprop(lin: Lineage, node: Node, reward: number): void {
   }
 }
 
-const TODO_IDS = ["paired-lcb", "successive-halving", "map-elites", "novelty"] as const;
+const TODO_IDS = ["paired-lcb", "successive-halving", "map-elites", "novelty", "score-child-prop"] as const;
 
 export function getSelector(id: string = DEFAULT_SELECTOR_ID, rng?: Rng): Selector {
+  if (id === "score-child-prop") {
+    throw new Error(
+      `TODO(${SELECTOR_DOC}): score-child-prop is uncalibrated; center must be the archive median and slope about 1/sigma`,
+    );
+  }
   if ((TODO_IDS as readonly string[]).includes(id)) {
     throw new Error(`TODO(${SELECTOR_DOC}): ${id} is an interface only in this round`);
   }
@@ -172,8 +187,6 @@ export function getSelector(id: string = DEFAULT_SELECTOR_ID, rng?: Rng): Select
       return new GreedySelector();
     case "softmax-mix":
       return new SoftmaxMixSelector(4, 0.2, 0.3, rng);
-    case "score-child-prop":
-      return new ScoreChildPropSelector(rng);
     case "uct":
       return new UCTSelector();
     default:

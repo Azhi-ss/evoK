@@ -69,6 +69,7 @@ describe("empty round", () => {
       baseHeldout: 0.4,
     });
     expect(blocked.submit).toBe(false);
+    expect(blocked.failedChecks).toContain("held-out");
     expect(blocked.failedChecks).toContain("playground-submit-dry-run");
     expect(blocked.liveSubmitCalled).toBe(false);
     const greenDir = out();
@@ -77,6 +78,7 @@ describe("empty round", () => {
       heldout: 0.9,
       ttsBaseline: 0.5,
       baseHeldout: 0.4,
+      minDelta: 0.1,
       dryRun: "passed",
     });
     expect(opened.submit).toBe(true);

@@ -15,8 +15,8 @@ import { backprop, type Selector } from "./modules/selector";
  * the node. Gap Finder receives `Lineage.roleView()`, which has already
  * dropped held-out keys. Gate scores go to `gate.jsonl`, not `lineage.jsonl`.
  *
- * Keep-better uses a noise leeway. Staged eval runs `dev_small` first and
- * `dev_full` only when the small mean clears `stagedThreshold * parent`.
+ * The 0.01 keep margin and the 0.9 staged ratio are placeholders, not
+ * statistical criteria. See the comments on those two comparisons.
  * A dev rise whose held-out fell versus the parent is refused (PRD §5.2).
  */
 
@@ -85,7 +85,15 @@ export interface Roles {
 }
 
 export interface OrchestratorOptions {
+  /**
+   * Placeholder keep margin. Not a paired difference and not an LCB.
+   * `0.01` is a nominal constant.
+   */
   readonly noiseLeeway?: number;
+  /**
+   * Placeholder pre-filter ratio. The small-subset mean and the parent's
+   * full-set mean are not on the same scale. `0.9` is an arbitrary constant.
+   */
   readonly stagedThreshold?: number;
   readonly patience?: number;
   readonly ids?: () => string;
@@ -106,6 +114,11 @@ export interface SubmitGateRequest {
   readonly ttsBaseline: number;
   readonly baseHeldout: number;
   readonly day: string;
+  /**
+   * Positive held-out margin over the baseline, derived from measured sigma.
+   * Omit it, or pass a non-positive value, and the gate refuses. There is
+   * no default of 0.
+   */
   readonly minDelta?: number;
   readonly modelId: string;
   readonly tracePackComplete: boolean;
@@ -146,6 +159,7 @@ export class Orchestrator {
     readonly budget: Budget,
     options: OrchestratorOptions = {},
   ) {
+    // Nominal placeholders. See the comparisons in `step`. Not sigma, not an LCB.
     this.noiseLeeway = options.noiseLeeway ?? 0.01;
     this.stagedThreshold = options.stagedThreshold ?? 0.9;
     this.patience = options.patience ?? 15;
@@ -200,12 +214,23 @@ export class Orchestrator {
       this.lin.put(child);
       const small = assertScores(this.roles.runner(child.configPath, "dev_small"));
       this.budget.usedRuns += 1;
+      child.devSmallScores = [...small];
       child.devScores = [...small];
       child.stage = "small";
       const smallMean = mean(small);
+      // Placeholder pre-filter, not a statistical criterion. `smallMean` is the
+      // small subset and `parent.devMean` is whatever subset the parent kept
+      // (often the full set). Those scales do not match. `stagedThreshold`
+      // (default 0.9) is an arbitrary constant, only a cheap screen.
       if (parent.devMean !== null && smallMean >= this.stagedThreshold * parent.devMean) {
         const full = assertScores(this.roles.runner(child.configPath, "dev_full"));
-        child.devScores = [...small, ...full];
+        // dev_small and dev_full are not disjoint here. `bin/eval.ts` and the
+        // empty-run fixture repeat the same candidate score; dev_full is a
+        // longer copy of that measurement, not a remainder. Concatenating the
+        // lists would count the small scores again and pull devMean toward
+        // the small subset. The mean uses dev_full alone once it has run.
+        child.devFullScores = [...full];
+        child.devScores = [...full];
         child.stage = "full";
         this.budget.usedRuns += 1;
       }
@@ -217,6 +242,9 @@ export class Orchestrator {
       const heldOutFell = milestone !== null && milestone.child < milestone.parent;
       const devRoseHeldOutFell = milestone === null || (devRose && heldOutFell);
       const verdict = this.roles.reviewer({ child, parent, heldOut: milestone, devRoseHeldOutFell });
+      // Placeholder keep rule, not a statistical criterion. This is an unpaired
+      // comparison, not a paired difference and not an LCB. `noiseLeeway`
+      // (default 0.01) is a nominal constant; it is not an estimate of noise.
       const keep = verdict.accept
         && childMean >= (parent.devMean ?? 0) - this.noiseLeeway
         && !devRoseHeldOutFell;
@@ -277,7 +305,7 @@ export class Orchestrator {
    */
   submitGate(request: SubmitGateRequest): SubmitGateResult {
     const best = this.lin.best();
-    const minDelta = request.minDelta ?? 0;
+    const minDelta = positiveMinDelta(request.minDelta);
     let heldout: number | null = null;
     try {
       const score = request.heldoutEval(best.configPath);
@@ -296,7 +324,8 @@ export class Orchestrator {
     const evidence = evaluateEvidenceGate({
       modelId: request.modelId,
       heldOutScore: heldout,
-      heldOutFloor: request.baseHeldout + minDelta,
+      heldOutFloor: minDelta === null ? Number.NaN : request.baseHeldout + minDelta,
+      ...(minDelta === null ? { heldOutRefusal: MIN_DELTA_REFUSAL } : {}),
       tracePackComplete: request.tracePackComplete,
       changeNotePresent: request.changeNotePresent,
       tts: ttsStatus,
@@ -307,7 +336,7 @@ export class Orchestrator {
       dryRun: dry.status,
       ...(request.consultEvok ? { consultEvok: request.consultEvok } : {}),
     });
-    const heldOutGate = heldout !== null && heldout >= request.baseHeldout + minDelta;
+    const heldOutGate = minDelta !== null && heldout !== null && heldout >= request.baseHeldout + minDelta;
     const ttsGate = ttsStatus === "passed" && heldout !== null && heldout >= request.ttsBaseline;
     const dryGate = dry.status === "passed";
     const budgetGate = tokensSpent <= request.tokenBudget && this.budget.canSubmit(request.day);
@@ -367,6 +396,14 @@ function defaultSubmitter(_input: { readonly pack: EvidencePack | null; readonly
     detail: "evidence gate is green; live playground submit is off",
   };
 }
+
+/** A measured-sigma margin. Missing, non-finite, and non-positive values stay shut. */
+export function positiveMinDelta(value: number | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+const MIN_DELTA_REFUSAL = "minDelta must be a positive threshold derived from measured sigma; unknown sigma fails closed";
 
 export function assertScores(scores: readonly number[]): number[] {
   if (scores.length === 0) throw new Error("runner returned no scores");
