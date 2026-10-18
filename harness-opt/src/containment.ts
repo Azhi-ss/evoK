@@ -3,37 +3,17 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Path relative to the real run root. Every existing component is resolved
- * through symlinks, including links in the middle of the path. A link or
- * lexical step that lands outside the root throws.
+ * through symlinks, including links in the middle of a link target and a
+ * chain of links. A hop whose real path lands outside the root throws.
  */
 export function runRelative(root: string, rawPath: string): string {
   const rootReal = realpathSync(resolve(root));
   const trimmed = rawPath.trim();
   if (trimmed === "" || trimmed === ".") return ".";
-  const lexical = isAbsolute(trimmed) ? resolve(trimmed) : resolve(rootReal, trimmed);
-  if (!isInside(rootReal, lexical)) throw new Error(`path escapes the run root: ${rawPath}`);
-  const segments = relative(rootReal, lexical).split(sep).filter(Boolean);
-  let current = rootReal;
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index];
-    if (segment === "..") throw new Error(`path escapes the run root: ${rawPath}`);
-    const next = join(current, segment);
-    let linked = false;
-    try {
-      const info = lstatSync(next);
-      if (info.isSymbolicLink()) {
-        linked = true;
-        current = resolveLink(next, rootReal, rawPath);
-      }
-    } catch (error) {
-      if (!isEnoent(error)) throw error;
-      const rest = segments.slice(index);
-      if (rest.some((part) => part === "..")) throw new Error(`path escapes the run root: ${rawPath}`);
-      return finish(rootReal, join(current, ...rest), rawPath);
-    }
-    if (!linked) current = next;
-  }
-  return finish(rootReal, current, rawPath);
+  const landed = isAbsolute(trimmed)
+    ? walkTarget(resolve(sep), trimmed, rootReal, rawPath, new Set())
+    : walkTarget(rootReal, trimmed, rootReal, rawPath, new Set());
+  return finish(rootReal, landed, rawPath);
 }
 
 /** Open a real directory. A symlink at this path is refused. */
@@ -174,26 +154,67 @@ function writeAll(fd: number, body: string): void {
   }
 }
 
-function resolveLink(linkPath: string, rootReal: string, rawPath: string): string {
-  const seen = new Set<string>();
-  let current = linkPath;
-  for (let hop = 0; hop < 32; hop += 1) {
-    if (seen.has(current)) throw new Error(`path escapes the run root: ${rawPath}`);
-    seen.add(current);
-    let info;
-    try {
-      info = lstatSync(current);
-    } catch (error) {
-      if (isEnoent(error)) return finishAbsolute(rootReal, current, rawPath);
-      throw error;
+/**
+ * Follow one symlink, then walk every segment of its target.
+ * An intermediate link is resolved before the next segment, so link1 -> link2/file
+ * cannot hide a hop to /etc, sealed/, or another directory outside the run.
+ */
+function resolveLink(linkPath: string, rootReal: string, rawPath: string, seen: Set<string>): string {
+  if (seen.has(linkPath) || seen.size >= 32) throw new Error(`path escapes the run root: ${rawPath}`);
+  seen.add(linkPath);
+  const from = realpathOrEscape(dirname(linkPath), rawPath);
+  if (!isInside(rootReal, from)) throw new Error(`path escapes the run root: ${rawPath}`);
+  const target = readlinkSync(linkPath);
+  return walkTarget(from, target, rootReal, rawPath, seen);
+}
+
+/**
+ * Walk `target` one segment at a time from a real directory.
+ * `..` is applied after a symlink hop, and a missing tail cannot climb back out.
+ * An absolute target may pass through directories outside the run; the landed
+ * path still has to finish inside it.
+ */
+function walkTarget(fromReal: string, target: string, rootReal: string, rawPath: string, seen: Set<string>): string {
+  const parts = target.split(/[/\\]/).filter((part) => part.length > 0 && part !== ".");
+  let base = isAbsolute(target) ? resolve(sep) : fromReal;
+  let inside = isInside(rootReal, base);
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index] as string;
+    if (part === "..") {
+      base = dirname(base);
+    } else {
+      const next = join(base, part);
+      let info;
+      try {
+        info = lstatSync(next);
+      } catch (error) {
+        if (!isEnoent(error)) throw error;
+        const rest = parts.slice(index);
+        if (rest.includes("..")) throw new Error(`path escapes the run root: ${rawPath}`);
+        base = join(base, ...rest);
+        break;
+      }
+      if (info.isSymbolicLink()) {
+        base = resolveLink(next, rootReal, rawPath, seen);
+        inside = true;
+        continue;
+      }
+      base = realpathOrEscape(next, rawPath);
     }
-    if (!info.isSymbolicLink()) return finishAbsolute(rootReal, current, rawPath);
-    const target = readlinkSync(current);
-    const next = isAbsolute(target) ? resolve(target) : resolve(dirname(current), target);
-    if (!isInside(rootReal, next)) throw new Error(`path escapes the run root: ${rawPath}`);
-    current = next;
+    if (isInside(rootReal, base)) inside = true;
+    else if (inside) throw new Error(`path escapes the run root: ${rawPath}`);
   }
-  throw new Error(`path escapes the run root: ${rawPath}`);
+  if (!isInside(rootReal, base)) throw new Error(`path escapes the run root: ${rawPath}`);
+  return base;
+}
+
+function realpathOrEscape(abs: string, rawPath: string): string {
+  try {
+    return realpathSync(abs);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new Error(`path escapes the run root: ${rawPath}`);
+    throw error;
+  }
 }
 
 function finish(rootReal: string, abs: string, rawPath: string): string {

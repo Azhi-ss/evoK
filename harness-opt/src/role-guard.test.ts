@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { roleGuardExtension } from "../extensions/harness-opt/role-guard";
+import { writeRoleJson } from "./artifacts";
 import { Lineage } from "./lineage";
 import { FILE_IO_TOOLS, FRAMEWORK_TOOLS, guardSubagentToolCall } from "./role-guard";
 
@@ -231,6 +232,78 @@ describe("subagent role guard", () => {
     expect(events.map((event) => event.tool)).toEqual(["read", "ls", "read", "write", "bash"]);
     expect(events.every((event) => event.kind === "contract" && typeof event.err === "string")).toBe(true);
     expect(JSON.stringify(events)).not.toContain("\"score\":0.1");
+  });
+
+  test("a chained symlink read of /etc or sealed is blocked", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    mkdirSync(join(root, "sealed"), { recursive: true });
+    mkdirSync(join(root, "tests"), { recursive: true });
+    writeFileSync(join(root, "sealed", "heldout-score.json"), "{\"score\":0.1}\n");
+    writeFileSync(join(root, "tests", "secret.ts"), "secret\n");
+    symlinkSync("/etc/hostname", join(root, "traces", "host2"));
+    symlinkSync("host2", join(root, "traces", "host1"));
+    symlinkSync("/etc", join(root, "traces", "etc2"));
+    symlinkSync("etc2/hostname", join(root, "traces", "etc1"));
+    symlinkSync(join(root, "sealed"), join(root, "traces", "seal2"));
+    symlinkSync("seal2/heldout-score.json", join(root, "traces", "seal1"));
+    symlinkSync(join(root, "tests"), join(root, "traces", "deny2"));
+    symlinkSync("deny2/secret.ts", join(root, "traces", "deny1"));
+
+    for (const path of ["traces/host1", "traces/etc1"]) {
+      expect(() => guardSubagentToolCall({
+        root,
+        prompt: prompt("gap-finder"),
+        tool: "read",
+        input: { path },
+      })).toThrow(/escapes the run root/);
+    }
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/seal1" },
+    })).toThrow(/held-out/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/deny1" },
+    })).toThrow(/forbidden path/);
+    const events = contractEvents(root);
+    expect(events).toHaveLength(4);
+    expect(events.every((event) => event.kind === "contract" && event.tool === "read")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("\"score\":0.1");
+  });
+
+  test("a chained symlink write outside the run root is blocked", () => {
+    const root = runRoot();
+    const outside = mkdtempSync(join(tmpdir(), "harness-opt-out-"));
+    mkdirSync(join(root, "candidates"), { recursive: true });
+    symlinkSync(join(outside, "pwned.json"), join(root, "candidates", "file2"));
+    symlinkSync("file2", join(root, "candidates", "file1"));
+    symlinkSync(outside, join(root, "candidates", "dir2"));
+    symlinkSync("dir2/pwned.json", join(root, "candidates", "dir1"));
+
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "write",
+      input: { path: "candidates/file1", content: "{\"summary\":\"must-not-land\"}" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "write",
+      input: { path: "candidates/dir1", content: "{\"summary\":\"must-not-land\"}" },
+    })).toThrow(/escapes the run root/);
+    expect(() => writeRoleJson(root, "innovator", "candidates/dir1", { summary: "must-not-land" })).toThrow(/escapes the run root/);
+    expect(existsSync(join(outside, "pwned.json"))).toBe(false);
+    expect(readdirSync(outside)).toEqual([]);
+    const events = contractEvents(root);
+    expect(events.length).toBeGreaterThanOrEqual(3);
+    expect(events.every((event) => event.kind === "contract" && event.tool === "write")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("must-not-land");
   });
 
   test("framework tools pass and filesystem tools stay on the contract", () => {
