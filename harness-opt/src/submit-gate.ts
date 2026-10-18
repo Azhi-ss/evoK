@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { flag } from "./args";
 import { Budget } from "./budget";
 import { FIXED_MODEL_ID } from "./fixed-model";
-import { readHeldOutScore } from "./heldout-file";
+import { readEvaluatedHeldOut } from "./heldout-file";
+import { readMatchedBudgetTts } from "./tts-file";
 import { Lineage } from "./lineage";
 import { writeRunState } from "../bin/record";
 import { probePlaygroundDryRun } from "./playground-dry-run";
@@ -45,9 +46,11 @@ export function buildDirectoryGateRequest(root: string): SubmitGateRequest {
     ...(thresholds.ok ? [] : thresholds.missing),
     ...(usage.ok ? [] : [usage.missing]),
   ];
+  const matchedTts = readMatchedBudgetTts(root);
   return {
-    heldoutEval: () => readHeldOutScore(root).score,
+    heldoutEval: (configPath) => readEvaluatedHeldOut(root, configPath),
     ttsBaseline: thresholds.ok ? thresholds.value.ttsBaseline : Number.NaN,
+    ...(matchedTts ? { tts: matchedTts } : {}),
     baseHeldout: thresholds.ok ? thresholds.value.heldOutFloor : Number.NaN,
     ...(thresholds.ok ? { minDelta: thresholds.value.minDelta } : {}),
     day: new Date().toISOString().slice(0, 10),

@@ -14,4 +14,6 @@ defaultContext: fresh
 
 输出 `gaps.json` 和字段对齐的 `gaps.md`。每条缺口都有 `id`、`failureClass`、`summary`、`traceIds`。
 
+`failureClass` 只能是这六个归因标签：timeout、idle-loop、tool-misuse、context-overflow、skill-not-triggered、format-invalid。
+
 `contact_supervisor` 可以用来问阻塞决定。全自动打榜时优先把疑问写进输出，而不是等人答。

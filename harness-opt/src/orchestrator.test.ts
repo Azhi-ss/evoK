@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Budget } from "./budget";
 import { FIXED_MODEL_ID } from "./fixed-model";
+import { readEvaluatedHeldOut, recordEvaluatedHeldOut, writeHandFilledHeldOut } from "./heldout-file";
 import { Lineage, Node, type RoleLineage } from "./lineage";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator, Phase, type Roles, type SubmitGateRequest } from "./orchestrator";
@@ -143,21 +144,46 @@ describe("orchestrator", () => {
     const zero = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0 }));
     expect(zero.submit).toBe(false);
     expect(zero.checks.find((check) => check.id === "held-out")?.detail).toContain("sigma");
-    const open = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1 }));
+    const inferred = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1 }));
+    expect(inferred.submit).toBe(false);
+    expect(inferred.checks.find((check) => check.id === "tts")?.detail).toContain("not-run");
+    const open = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "passed" }));
     expect(open.submit).toBe(true);
     expect(open.checks.every((check) => check.ok)).toBe(true);
-    const prefix = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, modelId: "qwen-max" }));
+    const prefix = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "passed", modelId: "qwen-max" }));
     expect(prefix.submit).toBe(false);
     expect(prefix.checks.find((check) => check.id === "model")?.ok).toBe(false);
     const unread = await orchestrator.submitGate(gateRequest(0.8, { minDelta: 0.1, tts: "not-run" }));
     expect(unread.submit).toBe(false);
     const noDry = await orchestrator.submitGate(gateRequest(0.8, {
       minDelta: 0.1,
+      tts: "passed",
       dryRun: () => ({ status: "unsupported", detail: "not-run: playground submit --dry-run is unsupported" }),
     }));
     expect(noDry.submit).toBe(false);
     expect(noDry.checks.find((check) => check.id === "playground-submit-dry-run")?.detail).toContain("not-run");
     expect(orchestrator.budget.canSubmit("2026-10-18")).toBe(true);
+  });
+
+  test("milestone scores are read per config path and a hand-filled file is not a measurement", async () => {
+    const scored = dir();
+    recordEvaluatedHeldOut(scored, "candidates/root/config.json", 0.8);
+    recordEvaluatedHeldOut(scored, "candidates/child/config.json", 0.2);
+    const seen: string[] = [];
+    const run = machine([0.9], {
+      heldOut: (configPath) => {
+        seen.push(configPath);
+        return readEvaluatedHeldOut(scored, configPath);
+      },
+    });
+    expect(await run.orchestrator.step()).toBe(Phase.SELECT);
+    expect(seen).toEqual(["candidates/child/config.json", "candidates/root/config.json"]);
+    expect(run.lin.nodes.get("child")?.status).toBe("rejected");
+    expect(run.lin.events().some((event) => event.kind === "review" && event.reason === "regressed")).toBe(true);
+    const hand = dir();
+    writeHandFilledHeldOut(hand, 0.55);
+    expect(() => readEvaluatedHeldOut(hand, "candidates/child/config.json")).toThrow(/手填/);
+    expect(() => readEvaluatedHeldOut(hand, "candidates/root/config.json")).toThrow(/手填/);
   });
 
   test("a dev rise with a held-out drop is refused and stays out of the innovator", async () => {

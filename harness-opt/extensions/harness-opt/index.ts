@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { registerWorkflowResource, type WorkflowResourceRegistration } from "pi-subagents/workflow-resources";
-import { flag } from "../../src/args";
+import { flag, splitArgsPreservingJson } from "../../src/args";
+import { DEFAULT_DELEGATION_TIMEOUT_MS } from "../../src/pi/delegate";
 import { selectParent } from "../../bin/select";
 import { recordEvent } from "../../bin/record";
 import { handleSubmitGate } from "../../src/submit-gate";
@@ -68,6 +69,7 @@ async function runHarnessOpt(args: string, ctx: { readonly cwd: string; readonly
     cwd: ctx.cwd,
     events,
     sampleBridge: false,
+    timeoutMs: DEFAULT_DELEGATION_TIMEOUT_MS,
   });
   echo(ctx.ui, commandResult);
   return commandResult;
@@ -167,7 +169,7 @@ async function selectCommand(args: string, ctx: ExtensionCommandContext): Promis
 }
 
 async function recordCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-  const argv = args.trim() === "" ? [] : args.trim().split(/\s+/);
+  const argv = splitArgsPreservingJson(args);
   const root = flag(argv, "--root");
   const kind = flag(argv, "--kind");
   const missing = [root ? "" : "--root", kind ? "" : "--kind"].filter(Boolean);
@@ -178,7 +180,14 @@ async function recordCommand(args: string, ctx: ExtensionCommandContext): Promis
   const raw = flag(argv, "--json");
   let fields: Record<string, unknown> = {};
   if (raw) {
-    const parsed = JSON.parse(raw) as unknown;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`harnessopt-record --json is not valid JSON: ${detail}`, "error");
+      return;
+    }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       ctx.ui.notify("harnessopt-record --json must be an object", "error");
       return;

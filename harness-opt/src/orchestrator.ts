@@ -329,10 +329,8 @@ export class Orchestrator {
       readError = error instanceof Error ? error.message : String(error);
     }
     const dry = (request.dryRun ?? probePlaygroundDryRun)();
-    const compared = heldout !== null && Number.isFinite(request.ttsBaseline);
-    const ttsStatus: TtsStatus = request.tts ?? (compared
-      ? (heldout as number) >= request.ttsBaseline ? "passed" : "failed"
-      : "not-run");
+    // Held-out versus ttsBaseline is not a matched-budget comparison.
+    const ttsStatus: TtsStatus = request.tts ?? "not-run";
     const submitCountToday = request.submitCountToday ?? this.budget.submits[request.day] ?? 0;
     const maxSubmitsPerDay = request.maxSubmitsPerDay ?? this.budget.maxOnlineSubmitsPerDay;
     const tokensSpent = request.tokensSpent ?? this.budget.usedTokens;
@@ -354,7 +352,7 @@ export class Orchestrator {
       ...(request.missingInputs && request.missingInputs.length > 0 ? { missingInputs: request.missingInputs } : {}),
     });
     const heldOutGate = minDelta !== null && heldout !== null && heldout >= request.baseHeldout + minDelta;
-    const ttsGate = ttsStatus === "passed" && heldout !== null && heldout >= request.ttsBaseline;
+    const ttsGate = ttsStatus === "passed";
     const dryGate = dry.status === "passed";
     const budgetGate = tokensSpent <= request.tokenBudget && this.budget.canSubmit(request.day);
     const submit = evidence.ok && heldOutGate && ttsGate && dryGate && budgetGate;

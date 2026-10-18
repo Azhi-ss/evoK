@@ -10,6 +10,7 @@ import { Lineage, Node } from "./lineage";
 import { HeldOutVault } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
+import type { TtsStatus } from "./modules/evidence-gate";
 import type { DryRunStatus } from "./playground-dry-run";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
 import { emptyParts, type HarnessConfig, type TaskRef } from "./types";
@@ -24,6 +25,8 @@ export interface EmptyRunOptions {
   readonly minDelta?: number;
   readonly day?: string;
   readonly dryRun?: DryRunStatus;
+  /** Explicit matched-budget result. Omit it and the gate stays not-run. */
+  readonly tts?: TtsStatus;
   readonly milestoneHeldOut?: Readonly<Record<string, number>>;
   readonly heldOutTasks?: readonly TaskRef[];
   readonly roles?: Partial<Roles>;
@@ -207,6 +210,7 @@ export async function runEmpty(options: EmptyRunOptions): Promise<EmptyRunResult
   const gate = await orchestrator.submitGate({
     heldoutEval: () => readHeldOutScore(options.out).score,
     ttsBaseline: options.ttsBaseline ?? 0.5,
+    ...(options.tts ? { tts: options.tts } : {}),
     baseHeldout: options.baseHeldout ?? 0.4,
     ...(options.minDelta !== undefined ? { minDelta: options.minDelta } : {}),
     day: options.day ?? "2026-10-18",

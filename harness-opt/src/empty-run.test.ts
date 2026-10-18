@@ -80,6 +80,7 @@ describe("empty round", () => {
       baseHeldout: 0.4,
       minDelta: 0.1,
       dryRun: "passed",
+      tts: "passed",
     });
     expect(opened.submit).toBe(true);
     expect(opened.liveSubmitCalled).toBe(false);

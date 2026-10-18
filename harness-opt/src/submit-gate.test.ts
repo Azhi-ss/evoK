@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FIXED_MODEL_ID, LOCAL_MODEL_ID } from "./fixed-model";
+import { ATTRIBUTION_LABELS, HARNESS_PARTS } from "./types";
+import { GAP_FINDER_TASK, INNOVATOR_TASK_PREFIX, REVIEWER_TASK_PREFIX } from "./live-round";
 import { Lineage, Node } from "./lineage";
 import { handleSubmitGate } from "./submit-gate";
 
@@ -59,6 +61,19 @@ describe("harnessopt_submit_gate", () => {
       const text = readFileSync(join(root, "agents", name), "utf8");
       const model = text.match(/^model:\s*(\S+)/m)?.[1];
       expect(model).toBe(pinned.localModelId);
+      for (const label of ATTRIBUTION_LABELS) expect(text).toContain(label);
     }
+    const innovator = readFileSync(join(root, "agents", "innovator.md"), "utf8");
+    for (const part of HARNESS_PARTS) expect(innovator).toContain(part);
+    const reviewer = readFileSync(join(root, "agents", "reviewer-gate.md"), "utf8");
+    expect(reviewer).toContain("布尔");
+    expect(reviewer).toContain("字符串");
+    for (const label of ATTRIBUTION_LABELS) {
+      expect(GAP_FINDER_TASK).toContain(label);
+      expect(INNOVATOR_TASK_PREFIX).toContain(label);
+    }
+    for (const part of HARNESS_PARTS) expect(INNOVATOR_TASK_PREFIX).toContain(part);
+    expect(REVIEWER_TASK_PREFIX).toContain("boolean");
+    expect(REVIEWER_TASK_PREFIX).toContain("string");
   });
 });

@@ -5,14 +5,20 @@ import { writeRoleJson } from "./artifacts";
 import { flag } from "./args";
 import { Budget } from "./budget";
 import { LOCAL_MODEL_ID } from "./fixed-model";
-import { HELD_OUT_SCORE_FILE, readHeldOutScore } from "./heldout-file";
+import { HELD_OUT_SCORE_FILE, readEvaluatedHeldOut, readHeldOutScore, writeHandFilledHeldOut } from "./heldout-file";
 import { Lineage, Node } from "./lineage";
 import { liveRoles, stageWriter } from "./live-round";
 import { createExecutor } from "./modules/executor";
 import { LocalJsonTaskSource, PlaygroundTaskSource } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator } from "./orchestrator";
-import { attachSampleBridge, createMemoryBus, eventBusDelegate, type EventBus } from "./pi/delegate";
+import {
+  attachSampleBridge,
+  createMemoryBus,
+  DEFAULT_DELEGATION_TIMEOUT_MS,
+  eventBusDelegate,
+  type EventBus,
+} from "./pi/delegate";
 import { listStageReports, reviewRoundE2E, writeStageReport } from "./reports";
 import { buildDirectoryGateRequest, runDirectorySubmitGate } from "./submit-gate";
 import {
@@ -100,6 +106,7 @@ export interface DispatchOptions {
    */
   readonly sampleBridge?: boolean;
   readonly timeoutMs?: number;
+  readonly graceMs?: number;
 }
 
 interface SavedSession {
@@ -108,6 +115,7 @@ interface SavedSession {
   stopped: boolean;
   executor: string;
   bridge: string;
+  taskSource: "local" | "playground";
   taskDir: string;
   usedRuns: number;
   startedAt: number;
@@ -200,8 +208,7 @@ async function startRun(root: string, argv: readonly string[], options: Dispatch
   const executor = createExecutor(executorKind);
   mkdirSync(root, { recursive: true });
   writeThresholds(root, thresholds.value);
-  mkdirSync(join(root, "sealed"), { recursive: true });
-  writeFileSync(join(root, HELD_OUT_SCORE_FILE), `${JSON.stringify({ score: held.score, tokens: 0 }, null, 2)}\n`);
+  writeHandFilledHeldOut(root, held.score);
 
   const configPath = "candidates/base/config.json";
   writeRoleJson(root, "innovator", configPath, {
@@ -231,13 +238,14 @@ async function startRun(root: string, argv: readonly string[], options: Dispatch
     tokensUsed: tokens,
   }));
   writeTokensSpent(root, tokens);
-  const bridge = bridgeLabel(options);
+  const bridge = "none";
   const saved: SavedSession = {
     round: 0,
     phase: "ready",
     stopped: false,
     executor: executor.name,
     bridge,
+    taskSource: taskSourceName === "playground" ? "playground" : "local",
     taskDir,
     usedRuns: tasks.length,
     startedAt: Date.now() / 1000,
@@ -266,7 +274,9 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
   if (!thresholds.ok) return result(false, "step", root, "step refused: explicit thresholds are missing", [], thresholds.missing);
   const usage = readTokensSpent(root);
   if (!usage.ok) return result(false, "step", root, "step refused: token count is missing", [], [usage.missing]);
-  const tasks = await new LocalJsonTaskSource(saved.taskDir).list();
+  const tasks = saved.taskSource === "playground"
+    ? await new PlaygroundTaskSource().list()
+    : await new LocalJsonTaskSource(saved.taskDir).list();
   if (tasks.length === 0) return result(false, "step", root, "step refused: task source returned no dev tasks", [], ["dev tasks"]);
 
   const round = saved.round + 1;
@@ -274,9 +284,14 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
   const useSample = options.sampleBridge ?? !options.events;
   const bus = options.events ?? createMemoryBus();
   if (useSample) attachSampleBridge(bus);
+  let answered = false;
   const delegate = eventBusDelegate(bus, {
     cwd: root,
-    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    timeoutMs: options.timeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS,
+    ...(options.graceMs !== undefined ? { graceMs: options.graceMs } : {}),
+    onSettled: (info) => {
+      if (info.responded) answered = true;
+    },
   });
   const budget = new Budget({
     maxLocalRuns: thresholds.value.maxLocalRuns,
@@ -299,7 +314,7 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
   }), new GreedySelector(), budget, {
     ids: () => candidateId,
     onStage: stageWriter(root, round),
-    heldOutAtMilestone: () => readHeldOutScore(root).score,
+    heldOutAtMilestone: (configPath) => readEvaluatedHeldOut(root, configPath),
   });
   const phase = await orchestrator.step();
   writeTokensSpent(root, budget.usedTokens);
@@ -310,7 +325,7 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
     ...saved,
     round,
     phase,
-    bridge: useSample ? "sample" : "pi-subagents",
+    bridge: answered ? (useSample ? "sample" : "pi-subagents") : "none",
     usedRuns: budget.usedRuns,
     checks: [...gate.checks],
   };
@@ -441,10 +456,6 @@ function collectHeldOut(root: string, argv: readonly string[]): { ok: true; scor
     const detail = error instanceof Error ? error.message : String(error);
     return { ok: false, missing: [`heldout-score (--heldout-score) ${detail}`] };
   }
-}
-
-function bridgeLabel(options: DispatchOptions): string {
-  return (options.sampleBridge ?? !options.events) ? "sample" : "pi-subagents";
 }
 
 function renderPanel(root: string, saved: SavedSession, bestId: string): string[] {

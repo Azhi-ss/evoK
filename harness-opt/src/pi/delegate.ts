@@ -1,11 +1,15 @@
 import { randomBytes } from "node:crypto";
 import {
+  SUBAGENT_DELEGATION_CANCEL_EVENT,
   SUBAGENT_DELEGATION_REQUEST_EVENT,
   SUBAGENT_DELEGATION_RESPONSE_EVENT,
+  SUBAGENT_DELEGATION_UPDATE_EVENT,
   type SubagentDelegationRequest,
   type SubagentDelegationResponse,
+  type SubagentDelegationUpdate,
 } from "pi-subagents/delegation";
 import { LOCAL_MODEL_ID } from "../fixed-model";
+import { ATTRIBUTION_LABELS, HARNESS_PARTS } from "../types";
 
 export interface EventBus {
   emit(channel: string, data: unknown): void;
@@ -22,18 +26,75 @@ export interface RoleDelegate {
   (input: { readonly agent: string; readonly task: string; readonly schema: Record<string, unknown> }): Promise<DelegationValue>;
 }
 
+/** Covers a real local model. The 15s default timed out gap-finder past 15s. */
+export const DEFAULT_DELEGATION_TIMEOUT_MS = 300_000;
+
+/** Window after cancel for a terminal usage snapshot to arrive. */
+export const DEFAULT_CANCEL_GRACE_MS = 2_000;
+
+export class DelegationError extends Error {
+  readonly tokens: number;
+  readonly agent: string;
+  readonly responded: boolean;
+
+  constructor(message: string, fields: { readonly tokens: number; readonly agent: string; readonly responded: boolean }) {
+    super(message);
+    this.name = "DelegationError";
+    this.tokens = fields.tokens;
+    this.agent = fields.agent;
+    this.responded = fields.responded;
+  }
+}
+
+export interface DelegateOptions {
+  readonly cwd?: string;
+  readonly timeoutMs?: number;
+  readonly graceMs?: number;
+  readonly onSettled?: (info: { readonly agent: string; readonly responded: boolean; readonly tokens: number }) => void;
+}
+
+const GAP_ITEM_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "failureClass", "summary", "traceIds"],
+  properties: {
+    id: { type: "string" },
+    failureClass: { type: "string", enum: [...ATTRIBUTION_LABELS] },
+    summary: { type: "string" },
+    traceIds: { type: "array", items: { type: "string" } },
+  },
+};
+
 const GAP_SCHEMA = {
   type: "object",
+  additionalProperties: false,
   required: ["gaps"],
-  properties: { gaps: { type: "array" } },
+  properties: {
+    gaps: { type: "array", items: GAP_ITEM_SCHEMA },
+  },
 };
+
 const PATCH_SCHEMA = {
   type: "object",
+  additionalProperties: false,
   required: ["part", "motivation", "expectedFailureClass", "summary"],
+  properties: {
+    part: { type: "string", enum: [...HARNESS_PARTS] },
+    motivation: { type: "string" },
+    expectedFailureClass: { type: "string", enum: [...ATTRIBUTION_LABELS] },
+    summary: { type: "string" },
+    changes: { type: "object" },
+  },
 };
+
 const REVIEW_SCHEMA = {
   type: "object",
+  additionalProperties: false,
   required: ["accept", "reason"],
+  properties: {
+    accept: { type: "boolean" },
+    reason: { type: "string" },
+  },
 };
 
 export function schemaFor(agent: string): Record<string, unknown> {
@@ -46,8 +107,12 @@ export function schemaFor(agent: string): Record<string, unknown> {
 /**
  * Structured delegation on pi-subagents' event bus.
  * Emits `prompt-template:subagent:request` and waits for the correlated response.
+ * On timeout it emits cancel with only the attempt identity, then keeps the
+ * tokens already observed on update or on a late terminal response.
  */
-export function eventBusDelegate(events: EventBus, options?: { readonly cwd?: string; readonly timeoutMs?: number }): RoleDelegate {
+export function eventBusDelegate(events: EventBus, options?: DelegateOptions): RoleDelegate {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS;
+  const graceMs = options?.graceMs ?? DEFAULT_CANCEL_GRACE_MS;
   return (input) => new Promise((resolve, reject) => {
     const requestId = randomBytes(8).toString("hex");
     const ownerRunId = "harness-opt";
@@ -61,31 +126,58 @@ export function eventBusDelegate(events: EventBus, options?: { readonly cwd?: st
       context: "fresh",
       cwd: options?.cwd ?? process.cwd(),
       model: LOCAL_MODEL_ID,
-      timeoutMs: options?.timeoutMs ?? 15000,
+      timeoutMs,
       result: { kind: "structured", schema: input.schema },
     };
     let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      off();
-      reject(new Error(`delegation to ${input.agent} timed out`));
-    }, request.timeoutMs);
-    const off = events.on(SUBAGENT_DELEGATION_RESPONSE_EVENT, (data) => {
-      const response = data as SubagentDelegationResponse;
-      if (response.requestId !== requestId) return;
+    let observed = 0;
+    let responded = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const note = (tokens: number) => {
+      if (Number.isFinite(tokens) && tokens > observed) observed = tokens;
+    };
+    const finish = (error?: DelegationError, value?: DelegationValue) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      off();
+      if (graceTimer) clearTimeout(graceTimer);
+      offResponse();
+      offUpdate();
+      options?.onSettled?.({ agent: input.agent, responded, tokens: observed });
+      if (error) reject(error);
+      else resolve(value as DelegationValue);
+    };
+    const offUpdate = events.on(SUBAGENT_DELEGATION_UPDATE_EVENT, (data) => {
+      const update = data as SubagentDelegationUpdate;
+      if (update.requestId !== requestId) return;
+      const fromUsage = update.usage ? update.usage.input + update.usage.output : 0;
+      const fromTokens = typeof update.tokens === "number" ? update.tokens : 0;
+      note(Math.max(fromUsage, fromTokens));
+    });
+    const offResponse = events.on(SUBAGENT_DELEGATION_RESPONSE_EVENT, (data) => {
+      const response = data as SubagentDelegationResponse;
+      if (response.requestId !== requestId) return;
+      responded = true;
+      const usage = "usage" in response ? response.usage : undefined;
+      note(usage ? usage.input + usage.output : 0);
       if (response.status !== "completed" || response.result?.kind !== "structured") {
-        reject(new Error(response.error ?? `delegation to ${input.agent} ${response.status}`));
+        const detail = response.error ?? `delegation to ${input.agent} ${response.status}`;
+        finish(new DelegationError(detail, { tokens: observed, agent: input.agent, responded }));
         return;
       }
-      const usage = "usage" in response ? response.usage : undefined;
-      const tokens = usage ? usage.input + usage.output : 0;
-      resolve({ value: response.result.value, tokens, agent: input.agent });
+      finish(undefined, { value: response.result.value, tokens: observed, agent: input.agent });
     });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      events.emit(SUBAGENT_DELEGATION_CANCEL_EVENT, { requestId, ownerRunId, nodeId });
+      graceTimer = setTimeout(() => {
+        finish(new DelegationError(`delegation to ${input.agent} timed out`, {
+          tokens: observed,
+          agent: input.agent,
+          responded,
+        }));
+      }, graceMs);
+    }, timeoutMs);
     events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, request);
   });
 }
@@ -94,7 +186,7 @@ export function createMemoryBus(): EventBus {
   const handlers = new Map<string, Set<(data: unknown) => void>>();
   return {
     emit(channel, data) {
-      for (const handler of handlers.get(channel) ?? []) handler(data);
+      for (const handler of [...(handlers.get(channel) ?? [])]) handler(data);
     },
     on(channel, handler) {
       const set = handlers.get(channel) ?? new Set();

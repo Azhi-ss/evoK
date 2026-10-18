@@ -89,7 +89,7 @@ export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResu
       "tts",
       input.tts === "passed",
       input.tts === "not-run"
-        ? "matched-budget TTS comparison was not run; automatic submit is forbidden"
+        ? "not-run: matched-budget TTS comparison was not run; automatic submit is forbidden"
         : `TTS comparison ${input.tts}`,
     ),
     check(

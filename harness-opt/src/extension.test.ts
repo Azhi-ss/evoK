@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHarnessOptExtension, resolveRoundWorkflow, ROUND_TOKEN_HARD } from "../extensions/harness-opt/index";
+import { DEFAULT_DELEGATION_TIMEOUT_MS } from "./pi/delegate";
+import { ATTRIBUTION_LABELS } from "./types";
 import { HARNESSOPT_ROUND_SCRIPT } from "../workflows/round.js";
 import { Lineage, Node } from "./lineage";
 import { recordEvent } from "../bin/record";
@@ -15,6 +17,8 @@ describe("pi extension", () => {
     expect(round.name).toBe("harnessopt.round");
     expect(round.script).toContain("gap-finder");
     expect(round.script).toContain("reviewer-gate");
+    expect(round.script).toContain("agent-loop");
+    for (const label of ATTRIBUTION_LABELS) expect(round.script).toContain(label);
     expect(round.hostCommands).toEqual([{ key: "eval", command: "bun bin/eval.ts --cand abc --split dev" }]);
     expect(round.usageBudget.tokens.hard).toBe(ROUND_TOKEN_HARD);
     expect(round).not.toHaveProperty("outputSchema");
@@ -48,6 +52,9 @@ describe("pi extension", () => {
     expect(commands.get("harness-opt")?.description).toContain("--min-delta");
     expect(commands.get("harnessopt-select")?.description).toContain("--root");
     expect(tool?.name).toBe("harness-opt");
+    const extensionSource = readFileSync(new URL("../extensions/harness-opt/index.ts", import.meta.url), "utf8");
+    expect(extensionSource).toContain("timeoutMs: DEFAULT_DELEGATION_TIMEOUT_MS");
+    expect(DEFAULT_DELEGATION_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000);
     const sessionId = "session-test";
     await events.get("session_start")?.({}, {
       sessionManager: { getSessionId: () => sessionId },
@@ -93,6 +100,14 @@ describe("pi extension", () => {
     expect(notices.at(-1)).toContain("missing: --root");
     await commands.get("harnessopt-record")?.handler(`--root ${lineageDir} --kind note`, { ui, cwd: "/tmp" });
     expect(notices.at(-1)).toContain("recorded note");
+    await commands.get("harnessopt-record")?.handler(
+      `--root ${lineageDir} --kind note --json {"message": "has space"}`,
+      { ui, cwd: "/tmp" },
+    );
+    expect(notices.at(-1)).toContain("recorded note");
+    expect(new Lineage(lineageDir).events().some((event) => event.message === "has space")).toBe(true);
+    await commands.get("harnessopt-record")?.handler(`--root ${lineageDir} --kind note --json {`, { ui, cwd: "/tmp" });
+    expect(notices.at(-1)).toContain("not valid JSON");
     recordEvent(lineageDir, "seen", {});
     expect(new Lineage(lineageDir).events().some((event) => event.kind === "note")).toBe(true);
 

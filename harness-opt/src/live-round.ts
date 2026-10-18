@@ -2,11 +2,20 @@ import { writeRoleFile, writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
 import { LOCAL_MODEL_ID } from "./fixed-model";
 import { createExecutor, type HarnessExecutor } from "./modules/executor";
-import { schemaFor, type RoleDelegate } from "./pi/delegate";
+import { DelegationError, schemaFor, type DelegationValue, type RoleDelegate } from "./pi/delegate";
 import { writeStageReport } from "./reports";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
 import type { EvidencePack, Proposal, ReviewInput, Roles, SubmitReceipt } from "./orchestrator";
-import type { TaskRef } from "./types";
+import { ATTRIBUTION_LABELS, HARNESS_PARTS, type TaskRef } from "./types";
+
+const LABEL_LIST = ATTRIBUTION_LABELS.join(", ");
+const PART_LIST = HARNESS_PARTS.join(", ");
+
+export const GAP_FINDER_TASK = `Read traces and return gaps with id, failureClass, summary, traceIds. failureClass must be exactly one of: ${LABEL_LIST}.`;
+
+export const INNOVATOR_TASK_PREFIX = `Write one patch. part must be exactly one of: ${PART_LIST}. expectedFailureClass must be exactly one of: ${LABEL_LIST}. Required fields are part, motivation, expectedFailureClass, and summary.`;
+
+export const REVIEWER_TASK_PREFIX = "Return one JSON object. accept is a boolean. reason is a string.";
 
 /**
  * Roles whose outputs are parsed. Gap finder, innovator, and reviewer-gate
@@ -26,9 +35,9 @@ export function liveRoles(options: {
   const candidateId = options.candidateId ?? "c1";
   return {
     gapFinder: async () => {
-      const delegated = await options.delegate({
+      const delegated = await delegateOrCharge(options, {
         agent: "gap-finder",
-        task: "Read traces and return gaps with id, failureClass, summary, traceIds.",
+        task: GAP_FINDER_TASK,
         schema: schemaFor("gap-finder"),
       });
       options.budget.usedTokens += delegated.tokens;
@@ -38,12 +47,18 @@ export function liveRoles(options: {
       return gaps as unknown as Record<string, unknown>;
     },
     innovator: async (_parent, gaps, tried) => {
-      const delegated = await options.delegate({
+      const delegated = await delegateOrCharge(options, {
         agent: "innovator",
-        task: `Write one patch. Gaps: ${JSON.stringify(gaps)}. Already tried: ${tried.join(",")}`,
+        task: `${INNOVATOR_TASK_PREFIX} Gaps: ${JSON.stringify(gaps)}. Already tried: ${tried.join(",")}`,
         schema: schemaFor("innovator"),
       });
-      const patch = parsePatchFile(delegated.value);
+      let patch: ReturnType<typeof parsePatchFile>;
+      try {
+        patch = parsePatchFile(delegated.value);
+      } catch (error) {
+        options.budget.usedTokens += delegated.tokens;
+        throw error;
+      }
       const config = {
         id: candidateId,
         modelId: LOCAL_MODEL_ID,
@@ -72,9 +87,9 @@ export function liveRoles(options: {
       return scores;
     },
     reviewer: async (input: ReviewInput) => {
-      const delegated = await options.delegate({
+      const delegated = await delegateOrCharge(options, {
         agent: "reviewer-gate",
-        task: `Child dev ${input.child.devMean ?? "unread"} parent dev ${input.parent.devMean ?? "unread"}. devRoseHeldOutFell=${input.devRoseHeldOutFell}. Return accept and reason.`,
+        task: `${REVIEWER_TASK_PREFIX} Child dev ${input.child.devMean ?? "unread"} parent dev ${input.parent.devMean ?? "unread"}. devRoseHeldOutFell=${input.devRoseHeldOutFell}.`,
         schema: schemaFor("reviewer-gate"),
       });
       options.budget.usedTokens += delegated.tokens;
@@ -109,6 +124,18 @@ export function liveRoles(options: {
       return receipt;
     },
   };
+}
+
+async function delegateOrCharge(
+  options: { readonly delegate: RoleDelegate; readonly budget: Budget },
+  input: { readonly agent: string; readonly task: string; readonly schema: Record<string, unknown> },
+): Promise<DelegationValue> {
+  try {
+    return await options.delegate(input);
+  } catch (error) {
+    if (error instanceof DelegationError) options.budget.usedTokens += error.tokens;
+    throw error;
+  }
 }
 
 export function stageWriter(root: string, round: number): (stage: string, output: unknown, explanation: string) => void {
