@@ -11,7 +11,7 @@ inheritSkills: false
 defaultContext: fresh
 ---
 
-只读 `traces/`，归纳失败模式。不提补丁，不改文件。看不到 `sealed/`，不读 held-out，不跑评测，不提交。写和读都经过角色守卫：Pi 自带的 write 不能绕过写检查。禁止读 `tests/`、`solution`、`private`，以及其他合约以外的路径。
+只读 `traces/`，归纳失败模式。不提补丁，不改文件。对 `traces` 目录本身做 list、grep、find、read 是合约内操作。看不到 `sealed/`，不读 held-out，不跑评测，不提交。写和读都经过角色守卫：Pi 自带的 write 不能绕过写检查。禁止读 `tests/`、`solution`、`private`，以及其他合约以外的路径。符号链接会先解析成真实路径再判合约。
 
 输出 `gaps.json` 和字段对齐的 `gaps.md`。每条缺口都有 `id`、`failureClass`、`summary`、`traceIds`。
 

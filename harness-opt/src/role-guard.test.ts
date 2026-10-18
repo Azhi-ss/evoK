@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { roleGuardExtension } from "../extensions/harness-opt/role-guard";
@@ -123,6 +123,114 @@ describe("subagent role guard", () => {
       input: { path: "traces/t1.json" },
     })).toThrow(/role is missing/);
     expect(contractEvents(root)).toHaveLength(1);
+  });
+
+  test("list and grep of a contract directory are allowed", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    mkdirSync(join(root, "candidates", "c1"), { recursive: true });
+    mkdirSync(join(root, "state", "nodes"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    for (const tool of ["ls", "grep", "find", "read"]) {
+      for (const path of ["traces", "traces/", "traces/t1.json"]) {
+        expect(() => guardSubagentToolCall({
+          root,
+          prompt: prompt("gap-finder"),
+          tool,
+          input: { path },
+        })).not.toThrow();
+      }
+    }
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "ls",
+      input: { path: "candidates" },
+    })).not.toThrow();
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "grep",
+      input: { path: "state/nodes" },
+    })).not.toThrow();
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("reviewer-gate"),
+      tool: "find",
+      input: { path: "candidates/" },
+    })).not.toThrow();
+    expect(contractEvents(root)).toHaveLength(0);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "ls",
+      input: { path: "traces-other" },
+    })).toThrow(/cannot read/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "grep",
+      input: { path: "." },
+    })).toThrow(/cannot read/);
+  });
+
+  test("symlinks to /etc, sealed, and outside the run root are blocked", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    mkdirSync(join(root, "sealed"), { recursive: true });
+    mkdirSync(join(root, "candidates"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    writeFileSync(join(root, "sealed", "heldout-score.json"), "{\"score\":0.1}\n");
+    symlinkSync("/etc/passwd", join(root, "traces", "host"));
+    symlinkSync("../sealed/heldout-score.json", join(root, "traces", "via-sealed"));
+    symlinkSync("/etc", join(root, "traces", "hop"));
+    symlinkSync("t1.json", join(root, "traces", "alias"));
+    const outside = mkdtempSync(join(tmpdir(), "harness-opt-out-"));
+    symlinkSync(outside, join(root, "candidates", "escape"));
+
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/alias" },
+    })).not.toThrow();
+
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/host" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "ls",
+      input: { path: "traces/hop/passwd" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/via-sealed" },
+    })).toThrow(/held-out/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "write",
+      input: { path: "candidates/escape/pwned.txt", content: "x" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "bash",
+      input: { command: "cat traces/host" },
+    })).toThrow(/escapes the run root/);
+
+    const events = contractEvents(root);
+    expect(events).toHaveLength(5);
+    expect(events.map((event) => event.tool)).toEqual(["read", "ls", "read", "write", "bash"]);
+    expect(events.every((event) => event.kind === "contract" && typeof event.err === "string")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("\"score\":0.1");
   });
 
   test("the child tool_call hook blocks the built-in write and read", () => {

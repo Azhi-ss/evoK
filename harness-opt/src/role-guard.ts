@@ -1,5 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { join } from "node:path";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { assertRoleRead, assertRoleTool, assertRoleWrite } from "./artifacts";
 import { Lineage } from "./lineage";
 import { ROLE_IDS } from "./roles";
@@ -44,9 +44,7 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
       assertRoleTool(role, call.tool);
       return;
     }
-    const forbidden = forbiddenSegment(raw);
-    if (forbidden) throw new Error(`${role} cannot access forbidden path ${raw}`);
-    const rel = runRelative(call.root, raw);
+    const rel = canonicalRelative(call.root, role, raw);
     assertRoleTool(role, call.tool);
     if (WRITE_TOOLS.has(call.tool)) assertRoleWrite(role, rel);
     else assertRoleRead(role, rel);
@@ -80,10 +78,47 @@ function isSubagentRole(value: string | null): value is SubagentRole {
 function guardCommand(root: string, role: SubagentRole, tool: string, input: Record<string, unknown>): void {
   const command = typeof input.command === "string" ? input.command : "";
   const outputPath = typeof input.full_output_path === "string" ? input.full_output_path : "";
-  const forbidden = forbiddenSegment(`${command}\n${outputPath}`);
-  if (forbidden) throw new Error(`${role} cannot access forbidden path ${command || outputPath}`);
-  if (outputPath) runRelative(root, outputPath);
+  const mentioned = `${command}\n${outputPath}`;
+  if (forbiddenSegment(mentioned)) {
+    throw new Error(`${role} cannot access forbidden path ${command || outputPath}`);
+  }
+  for (const token of pathTokens(command, outputPath)) {
+    const rel = canonicalRelative(root, role, token);
+    assertCommandTarget(role, rel);
+  }
   assertRoleTool(role, tool);
+}
+
+/** Real path, then the contest denylist. The caller applies the role allowlist. */
+function canonicalRelative(root: string, role: SubagentRole, raw: string): string {
+  const rel = runRelative(root, raw);
+  if (forbiddenSegment(rel) || forbiddenSegment(raw)) {
+    throw new Error(`${role} cannot access forbidden path ${raw}`);
+  }
+  return rel;
+}
+
+function assertCommandTarget(role: SubagentRole, rel: string): void {
+  let readError: unknown;
+  try {
+    assertRoleRead(role, rel);
+    return;
+  } catch (error) {
+    readError = error;
+  }
+  try {
+    assertRoleWrite(role, rel);
+  } catch {
+    throw readError;
+  }
+}
+
+function pathTokens(command: string, outputPath: string): string[] {
+  const tokens = command.split(/[\s"'`|&;<>()]+/).filter((token) =>
+    token === "." || token.startsWith("./") || token.startsWith("../") || token.startsWith("/") || token.includes("/"),
+  );
+  if (outputPath.trim() !== "") tokens.push(outputPath.trim());
+  return tokens;
 }
 
 function filesystemPath(tool: string, input: Record<string, unknown>): string | undefined {
@@ -113,19 +148,81 @@ export function forbiddenSegment(raw: string): string | null {
   return null;
 }
 
-/** Path relative to the run root. `..` and a path outside the root throw. */
+/**
+ * Path relative to the real run root. Every existing component is resolved
+ * through symlinks, including links in the middle of the path. A link or
+ * lexical step that lands outside the root throws.
+ */
 export function runRelative(root: string, rawPath: string): string {
+  const rootReal = realpathSync(resolve(root));
   const trimmed = rawPath.trim();
   if (trimmed === "" || trimmed === ".") return ".";
-  const rootAbs = resolve(root);
-  const abs = isAbsolute(trimmed) ? resolve(trimmed) : resolve(rootAbs, trimmed);
-  const rel = relative(rootAbs, abs);
-  if (rel === "") return ".";
-  const portable = rel.split(sep).join("/");
-  if (portable === ".." || portable.startsWith("../") || isAbsolute(rel)) {
-    throw new Error(`path escapes the run root: ${rawPath}`);
+  const lexical = isAbsolute(trimmed) ? resolve(trimmed) : resolve(rootReal, trimmed);
+  if (!isInside(rootReal, lexical)) throw new Error(`path escapes the run root: ${rawPath}`);
+  const segments = relative(rootReal, lexical).split(sep).filter(Boolean);
+  let current = rootReal;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment === "..") throw new Error(`path escapes the run root: ${rawPath}`);
+    const next = join(current, segment);
+    let linked = false;
+    try {
+      const info = lstatSync(next);
+      if (info.isSymbolicLink()) {
+        linked = true;
+        current = resolveLink(next, rootReal, rawPath);
+      }
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+      const rest = segments.slice(index);
+      if (rest.some((part) => part === "..")) throw new Error(`path escapes the run root: ${rawPath}`);
+      return finish(rootReal, join(current, ...rest), rawPath);
+    }
+    if (!linked) current = next;
   }
-  return portable;
+  return finish(rootReal, current, rawPath);
+}
+
+function resolveLink(linkPath: string, rootReal: string, rawPath: string): string {
+  const seen = new Set<string>();
+  let current = linkPath;
+  for (let hop = 0; hop < 32; hop += 1) {
+    if (seen.has(current)) throw new Error(`path escapes the run root: ${rawPath}`);
+    seen.add(current);
+    let info;
+    try {
+      info = lstatSync(current);
+    } catch (error) {
+      if (isEnoent(error)) return finishAbsolute(rootReal, current, rawPath);
+      throw error;
+    }
+    if (!info.isSymbolicLink()) return finishAbsolute(rootReal, current, rawPath);
+    const target = readlinkSync(current);
+    const next = isAbsolute(target) ? resolve(target) : resolve(dirname(current), target);
+    if (!isInside(rootReal, next)) throw new Error(`path escapes the run root: ${rawPath}`);
+    current = next;
+  }
+  throw new Error(`path escapes the run root: ${rawPath}`);
+}
+
+function finish(rootReal: string, abs: string, rawPath: string): string {
+  const real = finishAbsolute(rootReal, abs, rawPath);
+  const rel = relative(rootReal, real);
+  return rel.split(sep).join("/") || ".";
+}
+
+function finishAbsolute(rootReal: string, abs: string, rawPath: string): string {
+  if (!isInside(rootReal, abs)) throw new Error(`path escapes the run root: ${rawPath}`);
+  return abs;
+}
+
+function isInside(rootReal: string, candidate: string): boolean {
+  const rel = relative(rootReal, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function isEnoent(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }
 
 function clip(value: string): string {

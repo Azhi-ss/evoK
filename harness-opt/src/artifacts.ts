@@ -32,10 +32,20 @@ export function assertRoleWrite(role: RoleId, relativeName: string): void {
   }
 }
 
+/**
+ * A directory entry `traces/` covers the directory itself (`traces`, `traces/`)
+ * and everything under it. A file entry covers that file only.
+ * `traces-other` does not match `traces/`.
+ */
 function covers(allowed: readonly string[], relativeName: string): boolean {
-  return allowed.some((entry) =>
-    entry.endsWith("/") ? relativeName.startsWith(entry) : relativeName === entry,
-  );
+  const name = relativeName.replace(/\/+$/, "");
+  return allowed.some((entry) => {
+    if (entry.endsWith("/")) {
+      const dir = entry.replace(/\/+$/, "");
+      return name === dir || name.startsWith(`${dir}/`);
+    }
+    return name === entry.replace(/\/+$/, "");
+  });
 }
 
 function isGateLog(relativeName: string): boolean {
