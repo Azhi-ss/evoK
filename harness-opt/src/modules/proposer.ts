@@ -99,7 +99,7 @@ export function buildInnovatorInput(input: InnovatorInput & { readonly heldOut?:
  * - `search` and `search.samples` / `selfChecks` / `retries` update the
  *   top-level search genes.
  * - After that normalization, the full path must be a leaf of the config
- *   whitelist (`toolchain.tools.check.id`, `skills.selector.weight`,
+ *   whitelist (`toolchain.checker`, `skills.selector.weight`,
  *   `search.samples`). Anything else, including `foo.bar`, top-level `notes`,
  *   and `candidateId`, is recorded and skipped. A segment named `id` is not
  *   a reason by itself.

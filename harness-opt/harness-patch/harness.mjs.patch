@@ -1,0 +1,461 @@
+--- a/harness.mjs
++++ b/harness.mjs
+@@ -24,6 +24,7 @@
+ } from "node:fs";
+ import path from "node:path";
+ import { fileURLToPath } from "node:url";
++import { createHash } from "node:crypto";
+ import zlib from "node:zlib";
+ 
+ import {
+@@ -77,12 +78,103 @@
+ const outputDir = process.env.OUTPUT_DIR || "/app/outputs";
+ const runDir = process.env.RUN_DIR || codeDir;
+ const tracePath = process.env.TRACE_PATH || path.join(runDir, "trace.jsonl");
+-const maxTokens = Number.parseInt(process.env.MODEL_MAX_TOKENS || "8192", 10);
+-const contextWindow = Number.parseInt(process.env.HARNESS_CONTEXT_WINDOW || "131072", 10);
+ const timeoutSec = Number.parseInt(process.env.HARNESS_TIMEOUT_SECONDS || "0", 10);
+ const agentDir = process.env.HARNESS_AGENT_DIR || path.join(runDir, ".pi-agent");
+ const sessionDir = process.env.HARNESS_SESSION_DIR || path.join(runDir, ".pi-sessions");
+ 
++// Optional candidate config. With HARNESS_CANDIDATE_CONFIG unset, every knob
++// below is the historical constant and no extra trace fields are written.
++const CANDIDATE_CONFIG_PATH = process.env.HARNESS_CANDIDATE_CONFIG || "";
++const candidateActive = CANDIDATE_CONFIG_PATH !== "";
++let candidateConfigHash = "";
++let candidateParts = {};
++if (candidateActive) {
++	let raw;
++	try {
++		raw = readFileSync(CANDIDATE_CONFIG_PATH);
++	} catch (err) {
++		console.error(`HARNESS_CANDIDATE_CONFIG is not readable: ${err instanceof Error ? err.message : String(err)}`);
++		process.exit(2);
++	}
++	candidateConfigHash = createHash("sha256").update(raw).digest("hex");
++	let parsed;
++	try {
++		parsed = JSON.parse(raw.toString("utf8"));
++	} catch (err) {
++		console.error(`HARNESS_CANDIDATE_CONFIG is not JSON: ${err instanceof Error ? err.message : String(err)}`);
++		process.exit(2);
++	}
++	candidateParts = parsed && typeof parsed === "object" && parsed.parts && typeof parsed.parts === "object" ? parsed.parts : {};
++}
++
++function candidateValue(part, leaf) {
++	const node = candidateParts[part];
++	if (!node || typeof node !== "object") return undefined;
++	let cur = node;
++	for (const key of leaf.split(".")) {
++		if (!cur || typeof cur !== "object" || !Object.prototype.hasOwnProperty.call(cur, key)) return undefined;
++		cur = cur[key];
++	}
++	return cur;
++}
++
++function positiveInt(value, fallback, max = Number.MAX_SAFE_INTEGER) {
++	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max ? value : fallback;
++}
++function nonNegativeInt(value, fallback) {
++	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
++}
++function finiteNumber(value, fallback) {
++	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
++}
++
++const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
++function enabledTools(value) {
++	if (!Array.isArray(value)) return DEFAULT_TOOLS.slice();
++	const allowed = new Set(DEFAULT_TOOLS);
++	const tools = value.filter((item) => typeof item === "string" && allowed.has(item));
++	for (const required of ["read", "write"]) {
++		if (!tools.includes(required)) tools.push(required);
++	}
++	return tools;
++}
++function skillPack(value) {
++	if (Array.isArray(value)) return value.filter((item) => typeof item === "string" && item.trim() !== "");
++	if (typeof value === "string" && value.trim() !== "") return [value.trim()];
++	return [];
++}
++function textOr(value, fallback) {
++	return typeof value === "string" && value.trim() !== "" ? value : fallback;
++}
++
++const envMaxTokens = Number.parseInt(process.env.MODEL_MAX_TOKENS || "8192", 10);
++const envContextWindow = Number.parseInt(process.env.HARNESS_CONTEXT_WINDOW || "131072", 10);
++const effective = {
++	"agent-loop.maxSteps": positiveInt(candidateValue("agent-loop", "maxSteps"), 25),
++	"agent-loop.noProgressTurns": positiveInt(candidateValue("agent-loop", "noProgressTurns"), 3),
++	"agent-loop.maxNudges": nonNegativeInt(candidateValue("agent-loop", "maxNudges"), 2),
++	"agent-loop.requireWrite": typeof candidateValue("agent-loop", "requireWrite") === "boolean" ? candidateValue("agent-loop", "requireWrite") : true,
++	"context.window": positiveInt(candidateValue("context", "window"), envContextWindow),
++	"context.maxTokens": positiveInt(candidateValue("context", "maxTokens"), envMaxTokens),
++	"context.compaction.enabled": typeof candidateValue("context", "compaction.enabled") === "boolean" ? candidateValue("context", "compaction.enabled") : true,
++	"context.compaction.reserveTokens": nonNegativeInt(candidateValue("context", "compaction.reserveTokens"), 16384),
++	"context.compaction.keepRecentTokens": nonNegativeInt(candidateValue("context", "compaction.keepRecentTokens"), 16000),
++	"toolchain.tools.enabled": enabledTools(candidateActive ? candidateValue("toolchain", "tools.enabled") : undefined),
++	"toolchain.bashTimeoutSec": positiveInt(candidateValue("toolchain", "bashTimeoutSec"), 300, 1800),
++	"toolchain.subagents": typeof candidateValue("toolchain", "subagents") === "boolean" ? candidateValue("toolchain", "subagents") : true,
++	"toolchain.checker": candidateValue("toolchain", "checker") === "none" ? "none" : "contract",
++	"skills.maxChars": positiveInt(candidateValue("skills", "maxChars"), 24000),
++	"skills.pack": skillPack(candidateValue("skills", "pack")),
++	"skills.selector.weight": finiteNumber(candidateValue("skills", "selector.weight"), 1),
++	"skills.selector.bias": finiteNumber(candidateValue("skills", "selector.bias"), 0),
++	"memory.enabled": candidateValue("memory", "enabled") === true,
++	"memory.scope": textOr(candidateValue("memory", "scope"), "all"),
++	"memory.recall": textOr(candidateValue("memory", "recall"), "recent"),
++	"memory.maxItems": nonNegativeInt(candidateValue("memory", "maxItems"), 8),
++};
++const maxTokens = effective["context.maxTokens"];
++const contextWindow = effective["context.window"];
++
+ process.env.PI_CODING_AGENT_DIR = agentDir;
+ 
+ mkdirSync(agentDir, { recursive: true });
+@@ -101,8 +193,8 @@
+ 	path.join(agentDir, "pi-goal.json"),
+ 	`${JSON.stringify({
+ 		continuationLimits: {
+-			automaticTurns: 25,
+-			noProgressTurns: 3,
++			automaticTurns: effective["agent-loop.maxSteps"],
++			noProgressTurns: effective["agent-loop.noProgressTurns"],
+ 		},
+ 		rpc: {
+ 			enabled: true,
+@@ -299,7 +391,10 @@
+ 	return Array.from(new Set(tokens));
+ }
+ 
+-function selectRelevantSkills(instructionText, allSkills, maxChars = PROMPT_SKILL_CHARS) {
++function selectRelevantSkills(instructionText, allSkills, maxChars = PROMPT_SKILL_CHARS, selector = undefined) {
++	const weight = selector && typeof selector.weight === "number" && Number.isFinite(selector.weight) ? selector.weight : 1;
++	const bias = selector && typeof selector.bias === "number" && Number.isFinite(selector.bias) ? selector.bias : 0;
++	const pack = selector && Array.isArray(selector.pack) ? selector.pack : [];
+ 	const tokens = tokenize(instructionText);
+ 	const tokenSet = new Set(tokens);
+ 	const tokenCounts = {};
+@@ -490,6 +585,7 @@
+ 		}
+ 
+ 		if (skill.hasScript && score > 0) score += 5;
++		if (weight !== 1) score *= weight;
+ 
+ 		return { skill, score };
+ 	});
+@@ -503,8 +599,22 @@
+ 	const seenNames = new Set();
+ 	let totalChars = 0;
+ 
++	if (pack.length > 0) {
++		const byName = new Map(allSkills.map((skill) => [skill.name, skill]));
++		for (const name of pack) {
++			const s = byName.get(name);
++			if (!s || !s.name || seenNames.has(s.name)) continue;
++			const line = `- ${s.name}: ${s.description || ""}`;
++			const addedLength = line.length + (selected.length > 0 ? 1 : 0);
++			if (totalChars + addedLength > maxChars) continue;
++			seenNames.add(s.name);
++			selected.push(s);
++			totalChars += addedLength;
++		}
++	}
++
+ 	for (const item of scored) {
+-		if (item.score <= 0) break; // Strictly eliminate zero-score fallback pollution!
++		if (item.score <= bias) break; // Strictly eliminate zero-score fallback pollution!
+ 		const s = item.skill;
+ 		if (!s.name || seenNames.has(s.name)) continue;
+ 		const line = `- ${s.name}: ${s.description || ""}`;
+@@ -635,7 +745,7 @@
+ 	...packageExtensionPaths("@narumitw/pi-goal"),
+ ].find((p) => existsSync(p));
+ const extensionPaths = [
+-	...subagentExtensions,
++	...(effective["toolchain.subagents"] ? subagentExtensions : []),
+ 	...processExtensions,
+ 	...(existsSync(solPiExtension) ? [solPiExtension] : []),
+ 	...(goalExtension ? [goalExtension] : []),
+@@ -760,7 +870,12 @@
+ const { selected: promptSkills, totalChars: promptSkillChars } = selectRelevantSkills(
+ 	instruction,
+ 	discoveredAllSkills.skills,
+-	PROMPT_SKILL_CHARS,
++	effective["skills.maxChars"],
++	{
++		weight: effective["skills.selector.weight"],
++		bias: effective["skills.selector.bias"],
++		pack: effective["skills.pack"],
++	},
+ );
+ 
+ const activeSkillsResource = {
+@@ -818,7 +933,7 @@
+ const runtimeGuidance = `
+ 
+ ### Runtime limits
+-- Every \`bash\` call is killed after 300 seconds unless you pass \`timeout\` (hard maximum 1800). A killed command returns empty output; that is a timeout, not missing data. Split long analyses, or run long jobs through the \`process\` tool.
++- Every \`bash\` call is killed after ${effective["toolchain.bashTimeoutSec"]} seconds unless you pass \`timeout\` (hard maximum 1800). A killed command returns empty output; that is a timeout, not missing data. Split long analyses, or run long jobs through the \`process\` tool.
+ - Write your first required artifact as soon as the primary method is fixed; do not wait until the end.
+ 
+ ### Grader-visible details (a passing public validator is not enough)
+@@ -836,7 +951,38 @@
+ 
+ const skillsSection = `\n\n### Recommended Method Skills\n${skillsCatalog}\n`;
+ const leadSystemTemplate = readFileSync(path.join(HARNESS_HOME, "prompts", "lead-system.md"), "utf8");
+-const leadSystem = render(leadSystemTemplate, {
++
++function readMemoryNotes(filePath, scope, recall, maxItems) {
++	let raw = "";
++	try {
++		raw = readFileSync(filePath, "utf8");
++	} catch {
++		return { text: "", count: 0, hash: "" };
++	}
++	const entries = [];
++	for (const line of raw.split("\n")) {
++		const trimmed = line.trim();
++		if (!trimmed) continue;
++		try {
++			const obj = JSON.parse(trimmed);
++			if (!obj || typeof obj.text !== "string" || obj.text.trim() === "") continue;
++			entries.push(obj);
++		} catch {
++			/* skip a bad notes line; the file stays untouched */
++		}
++	}
++	let filtered = entries;
++	if (scope && scope !== "all") filtered = filtered.filter((entry) => entry.scope === scope);
++	if (recall && recall !== "recent" && recall !== "all") filtered = filtered.filter((entry) => entry.recall === recall);
++	const cap = maxItems > 0 ? maxItems : 0;
++	const chosen = recall === "all" ? filtered.slice(0, cap) : filtered.slice(-cap);
++	if (chosen.length === 0) return { text: "", count: 0, hash: "" };
++	const body = chosen.map((entry) => `- ${entry.text.trim()}`).join("\n");
++	const text = `\n\n### Harness notes (read-only)\n${body}\n`;
++	return { text, count: chosen.length, hash: createHash("sha256").update(text).digest("hex") };
++}
++
++let leadSystem = render(leadSystemTemplate, {
+ 	CODE_DIR: codeDir,
+ 	OUTPUT_DIR: outputDir,
+ 	TASK_PATH: taskPath,
+@@ -844,6 +990,21 @@
+ 	CONTRACT_FIRST_GATE: contractFirstGate,
+ }) + outputContractGuidance + runtimeGuidance + skillsSection;
+ 
++
++let memoryInjected = 0;
++let memoryNotesHash = "";
++if (effective["memory.enabled"] === true) {
++	const memoryPath = process.env.HARNESS_MEMORY_PATH || "";
++	if (memoryPath) {
++		const notes = readMemoryNotes(memoryPath, effective["memory.scope"], effective["memory.recall"], effective["memory.maxItems"]);
++		if (notes.text) {
++			leadSystem += notes.text;
++			memoryInjected = notes.count;
++			memoryNotesHash = notes.hash;
++		}
++	}
++}
++
+ const teamTemplate = readFileSync(path.join(HARNESS_HOME, "prompts", "team.md"), "utf8");
+ const teamPrompt = render(teamTemplate, {
+ 	CODE_DIR: codeDir,
+@@ -911,12 +1072,16 @@
+ }
+ 
+ const settingsManager = SettingsManager.inMemory({
+-	defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+-	compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 16000 },
++	defaultTools: effective["toolchain.tools.enabled"],
++	compaction: {
++		enabled: effective["context.compaction.enabled"],
++		reserveTokens: effective["context.compaction.reserveTokens"],
++		keepRecentTokens: effective["context.compaction.keepRecentTokens"],
++	},
+ 	retry: { enabled: true, maxRetries: 3 },
+ });
+ 
+-const DEFAULT_BASH_TIMEOUT_SEC = 300;
++const DEFAULT_BASH_TIMEOUT_SEC = effective["toolchain.bashTimeoutSec"];
+ const baseBashDef = createBashToolDefinition(codeDir);
+ const safeBashTool = {
+ 	...baseBashDef,
+@@ -939,7 +1104,7 @@
+ 	resourceLoader: leadLoader,
+ 	settingsManager,
+ 	sessionManager,
+-	customTools: [safeBashTool],
++	customTools: effective["toolchain.tools.enabled"].includes("bash") ? [safeBashTool] : [],
+ });
+ await session.bindExtensions({});
+ 
+@@ -948,6 +1113,23 @@
+ const startedAt = Date.now();
+ const deadline = timeoutSec > 0 ? startedAt + timeoutSec * 1000 : 0;
+ const stats = { assistant_text: 0, tool_calls: 0, tool_errors: 0, turns: 0, retries: 0, usage: null };
++let goalRunActive = false;
++let goalTurnEnds = 0;
++let goalContinuationTurns = 0;
++let goalContinuationFromGoal = false;
++function noteGoalContinuation(ev) {
++	if (!ev || typeof ev !== "object") return;
++	if (typeof ev.automaticModelTurns === "number" && Number.isFinite(ev.automaticModelTurns)) {
++		goalContinuationTurns = Math.max(goalContinuationTurns, ev.automaticModelTurns);
++		goalContinuationFromGoal = true;
++	}
++	const reason = typeof ev.reason === "string" ? ev.reason : "";
++	const match = /(\d+) of \d+ automatic model responses/.exec(reason);
++	if (match) {
++		goalContinuationTurns = Math.max(goalContinuationTurns, Number(match[1]));
++		goalContinuationFromGoal = true;
++	}
++}
+ const subagentLaunches = [];
+ const processCalls = [];
+ let leadText = "";
+@@ -988,6 +1170,9 @@
+ 				result: event.result,
+ 			});
+ 			return;
++		case "turn_end":
++			if (goalRunActive) goalTurnEnds++;
++			return;
+ 		case "agent_end":
+ 			stats.turns++;
+ 			return;
+@@ -1027,7 +1212,7 @@
+ 	}
+ });
+ 
+-trace({
++const runStart = {
+ 	ts: Date.now(),
+ 	type: "run_start",
+ 	model: `harness/${modelName}`,
+@@ -1042,7 +1227,14 @@
+ 	skills: promptSkills.map((s) => s.name),
+ 	skillDiagnostics: activeSkillsResource.diagnostics,
+ 	expectedContracts: { ...contracts, expectedFiles: Array.from(contracts.expectedFiles) },
+-});
++};
++if (candidateActive) {
++	runStart.candidateConfigHash = candidateConfigHash;
++	runStart.effective = effective;
++	runStart.memoryInjected = memoryInjected;
++	runStart.memoryNotesHash = memoryNotesHash;
++}
++trace(runStart);
+ 
+ function listArtifacts(root) {
+ 	const out = [];
+@@ -1094,6 +1286,11 @@
+ 	};
+ }
+ 
++function outputContractBlocks(verificationOk) {
++	if (effective["toolchain.checker"] === "none") return false;
++	return !verificationOk;
++}
++
+ async function runPrompt(prompt, label) {
+ 	const toolCallsBefore = stats.tool_calls;
+ 	const remainingMs = deadline > 0 ? deadline - Date.now() : 0;
+@@ -1119,7 +1316,7 @@
+ 		if (phaseToolCalls === 0) {
+ 			return { ok: false, error: "phase completed without tool calls" };
+ 		}
+-		if (!verification.ok) {
++		if (outputContractBlocks(verification.ok)) {
+ 			return { ok: false, error: verification.issues.join("; ") };
+ 		}
+ 		return { ok: true };
+@@ -1212,11 +1409,13 @@
+ 		: null;
+ 
+ 	try {
++		goalRunActive = true;
+ 		if (deadline > 0 && remainingMs <= 0) return { ok: false, error: "deadline already exceeded" };
+ 
+ 		const terminalPromise = new Promise((resolve) => {
+ 			const onEvent = (ev) => {
+ 				trace({ ts: Date.now(), type: "goal_event", role: "lead", ...ev });
++				noteGoalContinuation(ev);
+ 				if (ev.type === "state" && ["complete", "blocked", "paused", "usage_limited", "budget_limited", "cleared"].includes(ev.status)) {
+ 					terminalEvent = ev;
+ 					resolve({ ok: ev.status === "complete", event: ev });
+@@ -1241,7 +1440,7 @@
+ 		const phaseToolCalls = stats.tool_calls - toolCallsBefore;
+ 		const verification = verifyArtifacts(contracts, outputDir, codeDir);
+ 
+-		if (terminalEvent?.status === "complete" && verification.ok) {
++		if (terminalEvent?.status === "complete" && !outputContractBlocks(verification.ok)) {
+ 			return { ok: true, status: "complete" };
+ 		}
+ 		if (terminalEvent?.status === "blocked") {
+@@ -1250,13 +1449,15 @@
+ 		if (phaseToolCalls === 0) {
+ 			return { ok: false, error: terminalEvent?.reason || "phase completed without tool calls" };
+ 		}
+-		if (!verification.ok) {
++		if (outputContractBlocks(verification.ok)) {
+ 			return { ok: false, error: verification.issues.join("; ") };
+ 		}
+ 		return { ok: true };
+ 	} catch (err) {
+ 		return { ok: false, error: String(err && err.stack ? err.stack : err) };
+ 	} finally {
++		if (!goalContinuationFromGoal) goalContinuationTurns = goalTurnEnds;
++		goalRunActive = false;
+ 		if (typeof unsubscribe === "function") unsubscribe();
+ 		if (timer) clearTimeout(timer);
+ 		if (checkpointTimer) clearTimeout(checkpointTimer);
+@@ -1281,7 +1482,7 @@
+ 
+ let verification = verifyArtifacts(contracts, outputDir, codeDir);
+ let nudges = 0;
+-const MAX_NUDGES = 2;
++const MAX_NUDGES = effective["agent-loop.maxNudges"];
+ 
+ // A missing artifact that carries the graded answer blocks scoring; a missing
+ // QC/manifest/decision-log does not. Rank the missing files so the nudge asks for
+@@ -1318,7 +1519,7 @@
+ 	}
+ }
+ 
+-while (!verification.ok && nudges < MAX_NUDGES && first.status !== "blocked") {
++while (!verification.ok && effective["agent-loop.requireWrite"] !== false && nudges < MAX_NUDGES && first.status !== "blocked") {
+ 	nudges++;
+ 	const lengthStopped = contracts.expectedFiles.size > 0 && /(?:length|max[_ -]?tokens?)/i.test(lastStopReason);
+ 	const { critical, advisory } = splitMissingArtifacts(verification.issues);
+@@ -1357,7 +1558,7 @@
+ }
+ 
+ const artifacts = listArtifacts(outputDir);
+-const finalOk = verification.ok || (artifacts.length > 0 && contracts.expectedFiles.size === 0);
++const finalOk = !outputContractBlocks(verification.ok) || (artifacts.length > 0 && contracts.expectedFiles.size === 0);
+ const status = finalOk ? "ok" : "failed";
+ 
+ const launchedRoles = [...new Set(subagentLaunches.map((l) => l.agent))];
+@@ -1389,7 +1590,7 @@
+ };
+ writeFileSync(path.join(runDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+ 
+-trace({
++const runEnd = {
+ 	ts: Date.now(),
+ 	type: "run_end",
+ 	status,
+@@ -1397,7 +1598,9 @@
+ 	artifact_count: artifacts.length,
+ 	subagent_calls: subagentLaunches.length,
+ 	verification_ok: verification.ok,
+-});
++};
++if (candidateActive) runEnd.goalContinuationTurns = goalContinuationTurns;
++trace(runEnd);
+ unsubscribe();
+ session.dispose();
+ 

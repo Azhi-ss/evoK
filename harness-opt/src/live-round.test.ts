@@ -137,8 +137,8 @@ describe("live round", () => {
       "\"agent-loop\":{\"maxSteps\":8,\"notes\":\"tamper\",\"candidateId\":\"evil\"},",
       "\"context\":{\"window\":4},",
       "\"memory\":{\"policy\":\"leak\"},",
-      "\"toolchain\":{\"checker\":\"keep\",\"tools\":{\"check\":{\"id\":\"fmt\",\"notes\":\"nested\"}},\"search\":{\"samples\":9},\"search.retries\":4,\"context.window\":2},",
-      "\"skills\":{\"pack\":\"base\",\"selector\":{\"weight\":0.2,\"candidateId\":\"hidden\"},\"__proto__\":{\"admin\":true}},",
+      "\"toolchain\":{\"checker\":\"keep\",\"bashTimeoutSec\":120,\"tools\":{\"enabled\":[\"read\",\"write\"],\"notes\":\"nested\"},\"search\":{\"samples\":9},\"search.retries\":4,\"context.window\":2},",
+      "\"skills\":{\"pack\":\"base\",\"trigger\":\"format\",\"selector\":{\"weight\":0.2,\"candidateId\":\"hidden\"},\"__proto__\":{\"admin\":true}},",
       "\"extra\":{\"trigger\":\"nope\"}",
       "},",
       "\"search\":{\"samples\":3,\"selfChecks\":1,\"retries\":2,\"temperature\":9}",
@@ -180,10 +180,10 @@ describe("live round", () => {
         tokens: 3,
         value: {
           part: "skills",
-          motivation: "add the format trigger on the inherited parent",
+          motivation: "cap the skill catalog on the inherited parent",
           expectedFailureClass: "skill-not-triggered",
-          summary: "add a trigger",
-          changes: { trigger: "format", "foo.bar": 1 },
+          summary: "cap skill chars",
+          changes: { maxChars: 8000, "foo.bar": 1 },
         },
       }),
     });
@@ -197,8 +197,8 @@ describe("live round", () => {
     expect(config.parts["agent-loop"]).toEqual({ maxSteps: 8 });
     expect(config.parts.context).toEqual({ window: 4 });
     expect(config.parts.memory).toEqual({});
-    expect(config.parts.toolchain).toEqual({ checker: "keep", tools: { check: { id: "fmt" } } });
-    expect(config.parts.skills).toEqual({ pack: "base", trigger: "format", selector: { weight: 0.2 } });
+    expect(config.parts.toolchain).toEqual({ checker: "keep", bashTimeoutSec: 120, tools: { enabled: ["read", "write"] } });
+    expect(config.parts.skills).toEqual({ pack: "base", maxChars: 8000, selector: { weight: 0.2 } });
     expect(config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
     const stored = JSON.stringify(config);
     expect(stored).not.toContain("scratch");
@@ -223,7 +223,8 @@ describe("live round", () => {
     expect(keys).toContain("agent-loop.notes");
     expect(keys).toContain("agent-loop.candidateId");
     expect(keys).toContain("memory.policy");
-    expect(keys).toContain("toolchain.tools.check.notes");
+    expect(keys).toContain("toolchain.tools.notes");
+    expect(keys).toContain("skills.trigger");
     expect(keys).toContain("skills.selector.candidateId");
     expect(keys).toContain("skills.__proto__");
     expect(keys).toContain("parts.extra");
@@ -420,6 +421,7 @@ describe("live round", () => {
           steps: [{ id: "s", tool: "read", args: {}, ok: true }],
           reward: configPath.includes("/base/") ? 0.4 : 0.8,
           tokens: 1,
+          usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0 },
           failed: false,
           labels: [],
           executor: "fake",

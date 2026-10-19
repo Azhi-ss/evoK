@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EMPTY_USAGE, type UsageParts } from "../pi/usage";
 import type { TaskRef } from "../types";
+import { DeviiExecutor } from "./devii-executor";
 
 export interface TraceStep {
   readonly id: string;
@@ -17,6 +19,8 @@ export interface ExecutionTrace {
   readonly steps: readonly TraceStep[];
   readonly reward: number;
   readonly tokens: number;
+  /** input + output + cacheRead + cacheWrite. `tokens` is the sum of these four. */
+  readonly usage: UsageParts;
   readonly failed: boolean;
   readonly labels: readonly string[];
   readonly executor: string;
@@ -68,6 +72,7 @@ export class SampleTraceExecutor implements HarnessExecutor {
       steps: sample.steps,
       reward: baseline ? 0.4 : 0.8,
       tokens: baseline ? 40 : sample.tokens,
+      usage: { ...EMPTY_USAGE, output: baseline ? 40 : sample.tokens },
       failed: false,
       labels: sample.labels,
       executor: this.name,
@@ -75,7 +80,16 @@ export class SampleTraceExecutor implements HarnessExecutor {
   }
 }
 
-export function createExecutor(kind: "sample" | "bohr" = "sample"): HarnessExecutor {
+export type ExecutorKind = "sample" | "bohr" | "devii";
+
+export function executorKindFromSaved(name: string): ExecutorKind {
+  if (name === "bohr-sandbox" || name === "bohr") return "bohr";
+  if (name === "devii") return "devii";
+  return "sample";
+}
+
+export function createExecutor(kind: ExecutorKind = "sample"): HarnessExecutor {
   if (kind === "bohr") return new BohrSandboxExecutor();
+  if (kind === "devii") return new DeviiExecutor();
   return new SampleTraceExecutor();
 }

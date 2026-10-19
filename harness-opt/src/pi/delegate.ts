@@ -10,6 +10,7 @@ import {
 } from "pi-subagents/delegation";
 import { LOCAL_MODEL_ID } from "../fixed-model";
 import { ATTRIBUTION_LABELS, HARNESS_PARTS } from "../types";
+import { EMPTY_USAGE, usageParts, usageTokens, type UsageParts } from "./usage";
 
 export interface EventBus {
   emit(channel: string, data: unknown): void;
@@ -19,6 +20,7 @@ export interface EventBus {
 export interface DelegationValue {
   readonly value: unknown;
   readonly tokens: number;
+  readonly usage?: UsageParts;
   readonly agent: string;
 }
 
@@ -132,10 +134,15 @@ export function eventBusDelegate(events: EventBus, options?: DelegateOptions): R
     };
     let settled = false;
     let observed = 0;
+    let observedUsage: UsageParts = EMPTY_USAGE;
     let responded = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
-    const note = (tokens: number) => {
-      if (Number.isFinite(tokens) && tokens > observed) observed = tokens;
+    const note = (parts: UsageParts) => {
+      const tokens = usageTokens(parts);
+      if (tokens > observed) {
+        observed = tokens;
+        observedUsage = parts;
+      }
     };
     const finish = (error?: DelegationError, value?: DelegationValue) => {
       if (settled) return;
@@ -151,22 +158,25 @@ export function eventBusDelegate(events: EventBus, options?: DelegateOptions): R
     const offUpdate = events.on(SUBAGENT_DELEGATION_UPDATE_EVENT, (data) => {
       const update = data as SubagentDelegationUpdate;
       if (update.requestId !== requestId) return;
-      const fromUsage = update.usage ? update.usage.input + update.usage.output : 0;
-      const fromTokens = typeof update.tokens === "number" ? update.tokens : 0;
-      note(Math.max(fromUsage, fromTokens));
+      const parts = usageParts(update.usage);
+      const fromUsage = usageTokens(parts);
+      const fromTokens = typeof update.tokens === "number" && Number.isFinite(update.tokens) ? update.tokens : 0;
+      // Update `tokens` is input+output only. Prefer the four-part usage snapshot when it is present.
+      if (update.usage && fromUsage >= fromTokens) note(parts);
+      else if (fromTokens > observed) note({ input: 0, output: fromTokens, cacheRead: 0, cacheWrite: 0 });
     });
     const offResponse = events.on(SUBAGENT_DELEGATION_RESPONSE_EVENT, (data) => {
       const response = data as SubagentDelegationResponse;
       if (response.requestId !== requestId) return;
       responded = true;
       const usage = "usage" in response ? response.usage : undefined;
-      note(usage ? usage.input + usage.output : 0);
+      note(usageParts(usage));
       if (response.status !== "completed" || response.result?.kind !== "structured") {
         const detail = response.error ?? `delegation to ${input.agent} ${response.status}`;
         finish(new DelegationError(detail, { tokens: observed, agent: input.agent, responded }));
         return;
       }
-      finish(undefined, { value: response.result.value, tokens: observed, agent: input.agent });
+      finish(undefined, { value: response.result.value, tokens: observed, usage: observedUsage, agent: input.agent });
     });
     const timer = setTimeout(() => {
       if (settled) return;

@@ -86,4 +86,23 @@ describe("delegation schema and timeout", () => {
     expect(cancels).toHaveLength(1);
     expect(Object.keys(cancels[0] as object).sort()).toEqual(["nodeId", "ownerRunId", "requestId"]);
   });
+
+  test("token totals add input, output, cacheRead, and cacheWrite", async () => {
+    const events = createMemoryBus();
+    events.on(SUBAGENT_DELEGATION_REQUEST_EVENT, (data) => {
+      const request = data as { requestId: string; ownerRunId: string; nodeId: string; agent: string };
+      events.emit(SUBAGENT_DELEGATION_RESPONSE_EVENT, {
+        requestId: request.requestId,
+        ownerRunId: request.ownerRunId,
+        nodeId: request.nodeId,
+        status: "completed",
+        agent: request.agent,
+        result: { kind: "structured", value: { accept: true, reason: "kept" } },
+        usage: { input: 59004, output: 51481, cacheRead: 326912, cacheWrite: 0, cost: 0, turns: 1, toolCalls: 0, durationMs: 1 },
+      });
+    });
+    const value = await eventBusDelegate(events)({ agent: "reviewer-gate", task: "review", schema: schemaFor("reviewer-gate") });
+    expect(value.tokens).toBe(437397);
+    expect(value.usage).toEqual({ input: 59004, output: 51481, cacheRead: 326912, cacheWrite: 0 });
+  });
 });

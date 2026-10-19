@@ -9,7 +9,7 @@ import { LOCAL_MODEL_ID } from "./fixed-model";
 import { HELD_OUT_SCORE_FILE, readEvaluatedHeldOut, readHeldOutScore, writeHandFilledHeldOut } from "./heldout-file";
 import { Lineage, Node } from "./lineage";
 import { liveRoles, stageWriter } from "./live-round";
-import { createExecutor } from "./modules/executor";
+import { createExecutor, executorKindFromSaved } from "./modules/executor";
 import { LocalJsonTaskSource, PlaygroundTaskSource } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator } from "./orchestrator";
@@ -204,7 +204,7 @@ async function startRun(root: string, argv: readonly string[], options: Dispatch
   if (tasks.length === 0) return result(false, "start", root, "task source returned no dev tasks", [], ["dev tasks"]);
 
   const executorKind = flag(argv, "--executor") ?? "sample";
-  if (executorKind !== "sample" && executorKind !== "bohr") {
+  if (executorKind !== "sample" && executorKind !== "bohr" && executorKind !== "devii") {
     return result(false, "start", root, `unknown executor ${executorKind}`, [], ["--executor"]);
   }
   const executor = createExecutor(executorKind);
@@ -309,7 +309,7 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
     root,
     round,
     delegate,
-    executor: createExecutor(saved.executor === "bohr-sandbox" ? "bohr" : "sample"),
+    executor: createExecutor(executorKindFromSaved(saved.executor)),
     tasks,
     budget,
     candidateId,

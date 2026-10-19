@@ -39,13 +39,13 @@ describe("proposer boundary", () => {
       part: "skills",
       motivation: "trigger the format skill before answering",
       expectedFailureClass: "format-invalid",
-      changes: { trigger: "format" },
+      changes: { maxChars: 24000 },
       search: { samples: 3, selfChecks: 1, retries: 2 },
     });
     expect(next.rejected).toEqual([]);
     expect(next.config.modelId).toBe(base.modelId);
     expect(next.config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
-    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ maxChars: 24000 });
   });
 
   test("a dotted patch key expands into a nested path", () => {
@@ -53,19 +53,21 @@ describe("proposer boundary", () => {
       ...base,
       parts: {
         ...emptyParts(),
-        toolchain: { tools: { check: { name: "keep" } }, checker: "stay" },
+        toolchain: { checker: "stay", bashTimeoutSec: 10, extra: { name: "keep" } },
       },
     };
     const next = applyPatch(parent, {
       part: "toolchain",
-      motivation: "set the nested checker",
+      motivation: "set the nested tool list",
       expectedFailureClass: "tool-misuse",
-      changes: { "tools.check.id": "fmt" },
+      changes: { "tools.enabled": ["read", "write"] },
     });
     expect(next.rejected).toEqual([]);
     expect(next.config.parts.toolchain).toEqual({
       checker: "stay",
-      tools: { check: { name: "keep", id: "fmt" } },
+      bashTimeoutSec: 10,
+      extra: { name: "keep" },
+      tools: { enabled: ["read", "write"] },
     });
   });
 
@@ -77,23 +79,23 @@ describe("proposer boundary", () => {
       changes: {
         "skills/search.md": { content: "body", metadata: { name: "search" } },
         metadata: { name: "search" },
-        trigger: "format",
+        maxChars: 24000,
       },
     });
     const file = next.rejected.find((item) => item.key === "skills/search.md");
     expect(file?.reason).toContain("skills/search.md");
     expect(next.rejected.find((item) => item.key === "metadata")?.reason).toContain("不在白名单");
-    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ maxChars: 24000 });
     expect(JSON.stringify(next.config)).not.toContain("search.md");
     const dottedFile = applyPatch(base, {
       part: "skills",
       motivation: "add the search skill file",
       expectedFailureClass: "skill-not-triggered",
-      changes: { "search.md": "body", trigger: "format" },
+      changes: { "search.md": "body", maxChars: 24000 },
     });
     expect(dottedFile.rejected.map((item) => item.key)).toEqual(["search.md"]);
     expect(dottedFile.rejected[0]?.reason).toContain("search.md");
-    expect(dottedFile.config.parts.skills).toEqual({ trigger: "format" });
+    expect(dottedFile.config.parts.skills).toEqual({ maxChars: 24000 });
   });
 
   test("a repeated part prefix is stripped once", () => {
@@ -127,12 +129,12 @@ describe("proposer boundary", () => {
       motivation: "keep the checker on its own part",
       expectedFailureClass: "tool-misuse",
       changes: {
-        trigger: "format",
+        maxChars: 24000,
         "toolchain.checker": "strict",
         "agent-loop": { maxSteps: 1 },
       },
     });
-    expect(next.config.parts.skills).toEqual({ pack: "base", trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ pack: "base", maxChars: 24000 });
     expect(next.config.parts.toolchain).toEqual({ checker: "keep" });
     expect(next.config.parts["agent-loop"]).toEqual({});
     expect(next.rejected.map((item) => item.key)).toEqual(["toolchain.checker", "agent-loop"]);
@@ -148,11 +150,11 @@ describe("proposer boundary", () => {
         "search.samples": 4,
         search: { retries: 3, selfChecks: 1 },
         "skills.search.temperature": 0.2,
-        skills: { trigger: "format", search: { samples: 5 } },
+        skills: { maxChars: 24000, search: { samples: 5 } },
       },
     });
     expect(next.config.search).toEqual({ samples: 5, selfChecks: 1, retries: 3 });
-    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ maxChars: 24000 });
     expect(next.config.parts.skills).not.toHaveProperty("search");
     expect(next.rejected.map((item) => item.key)).toEqual(["skills.search.temperature"]);
     expect(next.rejected[0]?.reason).toContain("temperature");
@@ -168,12 +170,12 @@ describe("proposer boundary", () => {
         modelId: "other-model",
         "selector.modelId.weight": 0.4,
         selector: { weight: 0.2, id: "hidden" },
-        trigger: "format",
+        maxChars: 24000,
       },
     });
     expect(next.config.modelId).toBe(base.modelId);
     expect(next.config.id).toBe("base+skills");
-    expect(next.config.parts.skills).toEqual({ trigger: "format", selector: { weight: 0.2 } });
+    expect(next.config.parts.skills).toEqual({ maxChars: 24000, selector: { weight: 0.2 } });
     expect(JSON.stringify(next.config)).not.toContain("c9");
     expect(JSON.stringify(next.config)).not.toContain("other-model");
     expect(JSON.stringify(next.config)).not.toContain("hidden");
@@ -185,45 +187,45 @@ describe("proposer boundary", () => {
     ]);
   });
 
-  test("foo.bar and top-level notes are rejected and tools.check.id is kept", () => {
+  test("foo.bar and top-level notes are rejected and bashTimeoutSec is kept", () => {
     const parsed = parsePatchFile({
       part: "toolchain",
-      motivation: "name the check and drop the scratch keys",
+      motivation: "name the timeout and drop the scratch keys",
       expectedFailureClass: "tool-misuse",
-      summary: "set the check id",
+      summary: "set the bash timeout",
       notes: "scratch",
-      changes: { "foo.bar": 1, "tools.check.id": "fmt", id: "hidden" },
+      changes: { "foo.bar": 1, bashTimeoutSec: 120, id: "hidden", "tools.check.id": "fmt" },
     });
     const next = applyPatch(base, parsed);
-    expect(next.config.parts.toolchain).toEqual({ tools: { check: { id: "fmt" } } });
-    expect(next.rejected.map((item) => item.key).sort()).toEqual(["foo.bar", "id", "notes"]);
+    expect(next.config.parts.toolchain).toEqual({ bashTimeoutSec: 120 });
+    expect(next.rejected.map((item) => item.key).sort()).toEqual(["foo.bar", "id", "notes", "tools.check.id"]);
     expect(next.rejected.every((item) => item.reason.includes("不在白名单"))).toBe(true);
     const stored = JSON.stringify(next.config);
     expect(stored).not.toContain("scratch");
     expect(stored).not.toContain("foo");
     expect(stored).not.toContain("hidden");
-    expect(stored).toContain("fmt");
+    expect(stored).not.toContain("fmt");
   });
 
   test("notes and candidateId inside an object value are rejected and a legal nested key stays", () => {
     const next = applyPatch(base, {
-      part: "toolchain",
-      motivation: "keep the check id and drop the nested scratch keys",
-      expectedFailureClass: "tool-misuse",
+      part: "context",
+      motivation: "keep compaction enabled and drop the nested scratch keys",
+      expectedFailureClass: "context-overflow",
       changes: {
-        tools: { check: { id: "fmt", notes: "scratch", candidateId: "c9" } },
-        checker: { notes: "also", candidateId: "c8" },
-        "tools.check.id": { notes: "deeper", candidateId: "c7" },
+        compaction: { enabled: true, notes: "scratch", candidateId: "c9" },
+        window: { notes: "also", candidateId: "c8" },
+        "compaction.reserveTokens": { notes: "deeper", candidateId: "c7" },
       },
     });
-    expect(next.config.parts.toolchain).toEqual({ tools: { check: { id: "fmt" } } });
+    expect(next.config.parts.context).toEqual({ compaction: { enabled: true } });
     expect(next.rejected.map((item) => item.key)).toEqual([
-      "tools.check.notes",
-      "tools.check.candidateId",
-      "checker.notes",
-      "checker.candidateId",
-      "tools.check.id.notes",
-      "tools.check.id.candidateId",
+      "compaction.notes",
+      "compaction.candidateId",
+      "window.notes",
+      "window.candidateId",
+      "compaction.reserveTokens.notes",
+      "compaction.reserveTokens.candidateId",
     ]);
     expect(next.rejected.every((item) => item.reason.includes("不在白名单"))).toBe(true);
     const stored = JSON.stringify(next.config);
@@ -233,21 +235,21 @@ describe("proposer boundary", () => {
     expect(stored).not.toContain("c9");
     expect(stored).not.toContain("c8");
     expect(stored).not.toContain("c7");
-    expect(stored).toContain("fmt");
+    expect(stored).toContain("true");
   });
 
   test("an empty object on a whitelist leaf or prefix is rejected and not stored", () => {
     const next = applyPatch(base, {
       part: "toolchain",
-      motivation: "refuse an empty checker and an empty check id",
+      motivation: "refuse an empty checker and an empty tool list",
       expectedFailureClass: "tool-misuse",
       changes: {
         checker: {},
-        tools: { check: { id: {} } },
+        tools: { enabled: {} },
       },
     });
     expect(next.config.parts.toolchain).toEqual({});
-    expect(next.rejected.map((item) => item.key)).toEqual(["checker", "tools.check.id"]);
+    expect(next.rejected.map((item) => item.key)).toEqual(["checker", "tools.enabled"]);
     expect(next.rejected.every((item) => item.reason.includes("空对象"))).toBe(true);
     const skills = applyPatch(base, {
       part: "skills",
@@ -312,19 +314,19 @@ describe("proposer boundary", () => {
       search: { samples: 4, selfChecks: 1 },
       "search.retries": 2,
       "selector.weight": 0.3,
-      changes: { trigger: "format" },
+      changes: { maxChars: 24000 },
       rejected: [{ key: "old", reason: "stale" }],
     };
     const parsed = parsePatchFile(raw);
     expect(parsed.search).toEqual({ samples: 4, selfChecks: 1, retries: 2 });
-    expect(parsed.changes).toEqual({ trigger: "format", "selector.weight": 0.3 });
+    expect(parsed.changes).toEqual({ maxChars: 24000, "selector.weight": 0.3 });
     const again = parsePatchFile(JSON.parse(JSON.stringify(parsed)));
     expect(again.search).toEqual(parsed.search);
     expect(again.changes).toEqual(parsed.changes);
     const applied = applyPatch(base, parsed);
     expect(applied.rejected).toEqual([]);
     expect(applied.config.search).toEqual({ samples: 4, selfChecks: 1, retries: 2 });
-    expect(applied.config.parts.skills).toEqual({ trigger: "format", selector: { weight: 0.3 } });
+    expect(applied.config.parts.skills).toEqual({ maxChars: 24000, selector: { weight: 0.3 } });
 
     const invalid = parsePatchFile({
       part: "skills",
@@ -332,17 +334,17 @@ describe("proposer boundary", () => {
       expectedFailureClass: "timeout",
       summary: "raise samples",
       search: { samples: 0, retries: 2 },
-      changes: { trigger: "format" },
+      changes: { maxChars: 24000 },
     });
     const refused = applyPatch(base, invalid);
     expect(invalid.search).toEqual({ retries: 2 });
     expect(refused.config.search).toEqual({ samples: 1, selfChecks: 0, retries: 2 });
-    expect(refused.config.parts.skills).toEqual({ trigger: "format" });
+    expect(refused.config.parts.skills).toEqual({ maxChars: 24000 });
     expect(refused.rejected.map((item) => item.key)).toEqual(["search.samples"]);
   });
 
   test("a top-level __proto__ key is an explicit rejection", () => {
-    const parsed = JSON.parse('{"__proto__":{"admin":true},"constructor":{"x":1},"trigger":"format"}') as Record<string, unknown>;
+    const parsed = JSON.parse('{"__proto__":{"admin":true},"constructor":{"x":1},"maxChars":24000}') as Record<string, unknown>;
     const next = applyPatch(base, {
       part: "skills",
       motivation: "refuse a prototype key",
@@ -352,11 +354,11 @@ describe("proposer boundary", () => {
     expect(next.rejected.map((item) => item.key)).toEqual(["__proto__", "constructor"]);
     expect(next.rejected[0]?.reason).toBe("危险键 __proto__ 被拒绝");
     expect(next.rejected[1]?.reason).toBe("危险键 constructor 被拒绝");
-    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ maxChars: 24000 });
     expect(JSON.stringify(next.config)).not.toContain("admin");
     expect(Object.getPrototypeOf(next.config.parts.skills)).toBe(Object.prototype);
 
-    const literal = { __proto__: { admin: true }, trigger: "format" } as Record<string, unknown>;
+    const literal = { __proto__: { admin: true }, maxChars: 24000 } as Record<string, unknown>;
     const viaProto = applyPatch(base, {
       part: "skills",
       motivation: "refuse a prototype key",
@@ -364,7 +366,7 @@ describe("proposer boundary", () => {
       changes: literal,
     });
     expect(viaProto.rejected).toEqual([{ key: "__proto__", reason: "危险键 __proto__ 被拒绝", source: "this-round" }]);
-    expect(viaProto.config.parts.skills).toEqual({ trigger: "format" });
+    expect(viaProto.config.parts.skills).toEqual({ maxChars: 24000 });
     expect(JSON.stringify(viaProto.config)).not.toContain("admin");
   });
 
@@ -401,10 +403,10 @@ describe("proposer boundary", () => {
       part: "toolchain",
       motivation: "refuse an empty check id array",
       expectedFailureClass: "tool-misuse",
-      changes: { "tools.check.id": [] },
+      changes: { "tools.enabled": [] },
     });
     expect(id.config.parts.toolchain).toEqual({});
-    expect(id.rejected.map((item) => item.key)).toEqual(["tools.check.id"]);
+    expect(id.rejected.map((item) => item.key)).toEqual(["tools.enabled"]);
     expect(id.rejected[0]?.reason).toContain("空数组");
     const selector = applyPatch(base, {
       part: "skills",
