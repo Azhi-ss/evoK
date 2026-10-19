@@ -91,15 +91,17 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 ## 角色守卫
 
-子代理的 read、write、edit、grep、find、ls、bash 在执行前过合约。`structured_output`、`contact_supervisor` 这些框架工具在白名单里，按名字放行，用来把角色结果交回父会话。不在这份白名单里的工具默认拒绝。文件工具上，参数名不在路径清单或载荷清单里的，也默认拒绝。
+子代理的 read、write、edit、grep、find、ls、bash 在执行前过合约。`structured_output`、`contact_supervisor` 这些框架工具按名字放行，用来把角色结果交回父会话。reviewer-gate 的合约不含 `contact_supervisor`，守卫对这个角色拒绝该工具。不在框架白名单里的工具默认拒绝。文件工具的参数名从已安装的 pi-coding-agent 工具 schema 枚举：grep 的 `ignoreCase`、`literal`、`context` 在 schema 里，放行；schema 里没有的参数拒绝。`Path`、`FilePath` 这类路径别名会先把值送进 `resolveLink`，指向运行根外、`sealed/` 或 `tests/` 时记 `kind: contract` 并拒绝。别名如果不是该工具 schema 上的参数，值核查通过之后仍按表外参数拒绝。
 
 守卫在 Pi 打开文件之前解析符号链接。Pi 自带的 read/write 不接受 `O_NOFOLLOW`，守卫也拿不到它们随后打开的那个 fd，所以检查和真正打开之间仍有一段窗口，链接可能在这中间被换掉。这是已知限制。
 
-宿主自己的落盘走同一套解析：`writeRoleFile`，以及 `state/`、`reports/`、`candidates/`、`traces/`、阈值、held-out 和 `run_state.json`。held-out 评分文件和 `state/tts-comparison.json` 的读取也走这一套：逐段解析，最终用 `O_NOFOLLOW` 打开。解析后的位置必须仍是请求的那条相对路径，并且留在运行根里。跑到运行根外，或被链接改到另一条路径（包括 `sealed/`、`tests/`、`solution`、`private`），就拒绝，并在 `state/lineage.jsonl` 记一条 `kind: contract`，文件内容不读入。链接目标按每一段再解析：link1 指向 link2、link2 再指向 `/etc`、`sealed/`、`tests/`、`solution`、`private`、合约外或运行根外，读和写都拒绝。符号链接这一跳落地后必须仍在运行根内，才继续看后面的段。read、write、edit、grep、find、ls、bash 上的 `path`、`file_path`、`paths` 以及其它路径参数都过同一条解析。中间目录在检查和创建之间被换成链接的窗口还在。
+宿主自己的落盘走同一套解析：`writeRoleFile`，以及 `state/`、`reports/`、`candidates/`、`traces/`、阈值、held-out 和 `run_state.json`。held-out 评分文件和 `state/tts-comparison.json` 的读取也走这一套：逐段解析，最终用 `O_NOFOLLOW` 打开。解析后的位置必须仍是请求的那条相对路径，并且留在运行根里。跑到运行根外，或被链接改到另一条路径（包括 `sealed/`、`tests/`、`solution`、`private`），就拒绝，并在 `state/lineage.jsonl` 记一条 `kind: contract`，文件内容不读入。链接目标按每一段再解析：link1 指向 link2、link2 再指向 `/etc`、`sealed/`、`tests/`、`solution`、`private`、合约外或运行根外，读和写都拒绝。符号链接这一跳落地后必须仍在运行根内，才继续看后面的段。read、write、edit、grep、find、ls、bash 上的 `path`、`file_path`、`paths`、`Path`、`FilePath`、`location`、`locations` 以及其它路径别名都过同一条解析，查的是解析后的值。中间目录在检查和创建之间被换成链接的窗口还在。
 
 `review.json` 里的 `reason` 是编排器用的判定理由。reviewer 模型自己写的原文另存在 `modelReason`。
 
-innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用同一条补丁链路把补丁叠上去：`parsePatchFile` 保留顶层 `search`、`search.samples` 和 `changes`，`applyPatch` 再归一化、路由、校验。改动只写进 `patch.part`。带这个 part 前缀的键只剥一层，`skills.skills.x` 不会再剥成 `x`。指向别的 part 的键记入 `rejected`，不跨 part 写入。`search.samples` 这类参数改顶层 search。`candidateId` 这类元数据键在路径开头、中段和对象值里都拒入配。文件路径和 `__proto__` 同样记入 `patch.json` 的 `rejected`（带原因）并跳过，propose 继续走到 gate。父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用同一条补丁链路把补丁叠上去：`parsePatchFile` 保留顶层 `search`、`search.samples` 和 `changes`，`applyPatch` 再归一化、路由、校验。改动只写进 `patch.part`。带这个 part 前缀的键只剥一层，`skills.skills.selector.weight` 不会再剥成 `selector.weight`。剥完的全路径必须落在配置白名单上（按 part 的叶子，加上顶层 `search.samples` / `selfChecks` / `retries`）。`toolchain.tools.check.id` 在白名单里，会写入；`foo.bar`、顶层 `notes`、`candidateId` 不在白名单里，记入 `rejected`。不再因为段名是 `id` 就拒绝。指向别的 part 的键记入 `rejected`，不跨 part 写入。`search.samples` 这类参数改顶层 search。文件路径和 `__proto__` 同样记入 `patch.json` 的 `rejected`（带原因）并跳过，propose 继续走到 gate。父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+
+pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时，`applyIntercomBridgeToAgent` 会把 `contact_supervisor` 追加进子代理的工具列表，并把 `DEFAULT_INTERCOM_BRIDGE_TEMPLATE` 接到系统提示后面，其中有一句 `Use contact_supervisor first.`。reviewer-gate 自己的文件不包含这句，frontmatter 也不再点这个工具的名字；角色合约禁止它联系主管。产品委派 reviewer-gate 时带 `intercomBridge: { mode: "off" }`，桥不激活，这句话不会注入，工具也不会被桥加回去。子代理扩展在 `before_agent_start` 里如果仍看到这段桥文本，会从 reviewer-gate 的系统提示里切掉。守卫同时拒绝 reviewer-gate 调用该工具。gap-finder 和 innovator 的合约仍包含它，桥和守卫对这两个角色保持放行。
 
 ## 证据门
 

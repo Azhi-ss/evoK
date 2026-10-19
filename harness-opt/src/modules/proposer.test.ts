@@ -53,17 +53,20 @@ describe("proposer boundary", () => {
       ...base,
       parts: {
         ...emptyParts(),
-        "agent-loop": { a: { b: { d: 2 } }, keep: true },
+        toolchain: { tools: { check: { name: "keep" } }, checker: "stay" },
       },
     };
     const next = applyPatch(parent, {
-      part: "agent-loop",
+      part: "toolchain",
       motivation: "set the nested checker",
       expectedFailureClass: "tool-misuse",
-      changes: { "a.b.c": 1 },
+      changes: { "tools.check.id": "fmt" },
     });
-    expect(next.config.parts["agent-loop"]).toEqual({ a: { b: { d: 2, c: 1 } }, keep: true });
-    expect(Object.keys(next.config.parts["agent-loop"])).toEqual(["a", "keep"]);
+    expect(next.rejected).toEqual([]);
+    expect(next.config.parts.toolchain).toEqual({
+      checker: "stay",
+      tools: { check: { name: "keep", id: "fmt" } },
+    });
   });
 
   test("an illegal change key is recorded and the other keys still apply", () => {
@@ -79,7 +82,7 @@ describe("proposer boundary", () => {
     });
     const file = next.rejected.find((item) => item.key === "skills/search.md");
     expect(file?.reason).toContain("skills/search.md");
-    expect(next.rejected.find((item) => item.key === "metadata")?.reason).toContain("元数据键");
+    expect(next.rejected.find((item) => item.key === "metadata")?.reason).toContain("不在白名单");
     expect(next.config.parts.skills).toEqual({ trigger: "format" });
     expect(JSON.stringify(next.config)).not.toContain("search.md");
     const dottedFile = applyPatch(base, {
@@ -103,12 +106,11 @@ describe("proposer boundary", () => {
         "skills.skills.selector.bias": 0.1,
       },
     });
-    expect(next.rejected).toEqual([]);
-    expect(next.config.parts.skills).toEqual({
-      selector: { weight: 0.2 },
-      skills: { selector: { bias: 0.1 } },
-    });
+    expect(next.config.parts.skills).toEqual({ selector: { weight: 0.2 } });
     expect(next.config.parts["agent-loop"]).toEqual({});
+    expect(next.rejected.map((item) => item.key)).toEqual(["skills.skills.selector.bias"]);
+    expect(next.rejected[0]?.reason).toContain("不在白名单");
+    expect(next.config.parts.skills).not.toHaveProperty("skills");
   });
 
   test("a change cannot write into another part", () => {
@@ -176,11 +178,31 @@ describe("proposer boundary", () => {
     expect(JSON.stringify(next.config)).not.toContain("other-model");
     expect(JSON.stringify(next.config)).not.toContain("hidden");
     expect(next.rejected.map((item) => item.reason)).toEqual([
-      "元数据键 candidateId 不能写入配置",
-      "元数据键 modelId 不能写入配置",
-      "元数据键 selector.modelId.weight 不能写入配置",
-      "元数据键 selector.id 不能写入配置",
+      "配置路径 candidateId 不在白名单",
+      "配置路径 modelId 不在白名单",
+      "配置路径 selector.modelId.weight 不在白名单",
+      "配置路径 selector.id 不在白名单",
     ]);
+  });
+
+  test("foo.bar and top-level notes are rejected and tools.check.id is kept", () => {
+    const parsed = parsePatchFile({
+      part: "toolchain",
+      motivation: "name the check and drop the scratch keys",
+      expectedFailureClass: "tool-misuse",
+      summary: "set the check id",
+      notes: "scratch",
+      changes: { "foo.bar": 1, "tools.check.id": "fmt", id: "hidden" },
+    });
+    const next = applyPatch(base, parsed);
+    expect(next.config.parts.toolchain).toEqual({ tools: { check: { id: "fmt" } } });
+    expect(next.rejected.map((item) => item.key).sort()).toEqual(["foo.bar", "id", "notes"]);
+    expect(next.rejected.every((item) => item.reason.includes("不在白名单"))).toBe(true);
+    const stored = JSON.stringify(next.config);
+    expect(stored).not.toContain("scratch");
+    expect(stored).not.toContain("foo");
+    expect(stored).not.toContain("hidden");
+    expect(stored).toContain("fmt");
   });
 
   test("parse keeps a top-level search object and dotted search genes", () => {

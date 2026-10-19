@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isReviewerGatePrompt, reviewerGateSystemPrompt } from "../../src/reviewer-prompt";
 import { guardSubagentToolCall } from "../../src/role-guard";
 
 /**
@@ -8,6 +9,13 @@ import { guardSubagentToolCall } from "../../src/role-guard";
  * before Pi's built-in tool runs.
  */
 export function roleGuardExtension(pi: ExtensionAPI): void {
+  pi.on("before_agent_start", (_event, ctx) => {
+    const prompt = ctx.getSystemPrompt();
+    if (!isReviewerGatePrompt(prompt)) return;
+    const next = reviewerGateSystemPrompt(prompt);
+    if (next === prompt) return;
+    return { systemPrompt: next };
+  });
   pi.on("tool_call", (event, ctx) => {
     try {
       guardSubagentToolCall({

@@ -1,3 +1,4 @@
+import { isWhitelistedConfigPath, isWhitelistedConfigPrefix } from "../config-paths";
 import {
   HARNESS_PARTS,
   isAttributionLabel,
@@ -81,19 +82,20 @@ export function buildInnovatorInput(input: InnovatorInput & { readonly heldOut?:
  *
  * Each change is judged once, against `patch.part` only:
  * - A leading part prefix is removed one time. `skills.selector.weight` becomes
- *   `selector.weight` on skills. `skills.skills.x` becomes `skills.x` on skills
- *   and stays nested. The second `skills` is not stripped.
+ *   `selector.weight` on skills. `skills.skills.selector.weight` becomes
+ *   `skills.selector.weight` and is not stripped again.
  * - A key whose first part name is a different part is a cross-part write and
  *   is rejected. Nothing is written to that other part.
  * - `search` and `search.samples` / `selfChecks` / `retries` update the
  *   top-level search genes.
- * - `candidateId`, `modelId`, `id`, and the other metadata names are rejected
- *   the same way at the head of a path, in a middle segment, and inside an
- *   object value. The key is recorded and left out of the config.
+ * - After that normalization, the full path must be a leaf of the config
+ *   whitelist (`toolchain.tools.check.id`, `skills.selector.weight`,
+ *   `search.samples`). Anything else, including `foo.bar`, top-level `notes`,
+ *   and `candidateId`, is recorded and skipped. A segment named `id` is not
+ *   a reason by itself.
  * - `__proto__`, `constructor`, and `prototype` are recorded and skipped.
  *   They do not throw.
- * - Any other illegal key is recorded and skipped. One rejection does not
- *   stop the round.
+ * - One rejection does not stop the round.
  */
 const PATCH_DOCUMENT_KEYS = new Set(["part", "motivation", "expectedFailureClass", "summary", "changes", "rejected"]);
 const SEARCH_FIELDS = ["samples", "selfChecks", "retries"] as const;
@@ -175,24 +177,11 @@ export function applyPatch(
 }
 
 const DANGEROUS_SEGMENT = new Set(["__proto__", "constructor", "prototype"]);
-const METADATA_KEY = new Set([
-  "candidateId",
-  "id",
-  "modelId",
-  "part",
-  "motivation",
-  "expectedFailureClass",
-  "summary",
-  "configPath",
-  "parentId",
-  "metadata",
-]);
 const FILE_EXTENSION = new Set([
   "md", "markdown", "json", "jsonl", "ts", "tsx", "js", "jsx", "mjs", "cjs",
   "py", "txt", "yaml", "yml", "toml", "xml", "html", "htm", "css", "sh", "bash",
   "rs", "go", "java", "kt", "rb", "php", "csv", "tsv", "ini", "env", "lock",
 ]);
-const IDENT = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
 function applyChange(
   parts: { -readonly [K in keyof HarnessConfig["parts"]]: Record<string, unknown> },
@@ -206,10 +195,6 @@ function applyChange(
 ): SearchGenes {
   if (isDangerousKey(key)) {
     rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
-    return search;
-  }
-  if (metadataSegment(key)) {
-    rejected.push({ key: shown, reason: `元数据键 ${shown} 不能写入配置` });
     return search;
   }
   if (isFilePath(key)) {
@@ -237,18 +222,26 @@ function applyChange(
     rejected.push({ key: shown, reason: `跨 part 键 ${shown} 不能写入 ${foreign}` });
     return search;
   }
-  if (!isConfigPath(key)) {
-    rejected.push({ key: shown, reason: `非法键 ${shown} 不是配置路径或 part 名` });
+  if (isWhitelistedConfigPath(home, key)) {
+    const cleaned = sanitizeValue(value, shown, rejected);
+    if (!cleaned.ok) return search;
+    const placed = assignPath(parts[home], key, cleaned.value);
+    if (!placed.ok) {
+      rejected.push({ key: shown, reason: placed.reason });
+      return search;
+    }
+    parts[home] = placed.value;
     return search;
   }
-  const cleaned = sanitizeValue(value, shown, rejected);
-  if (!cleaned.ok) return search;
-  const placed = assignPath(parts[home], key, cleaned.value);
-  if (!placed.ok) {
-    rejected.push({ key: shown, reason: placed.reason });
-    return search;
+  if (isRecord(value) && isWhitelistedConfigPrefix(home, key)) {
+    notePrototype(value, rejected, shown);
+    let genes = search;
+    for (const child of ownKeys(value)) {
+      genes = applyChange(parts, genes, home, `${key}.${child}`, value[child], rejected, false, `${shown}.${child}`);
+    }
+    return genes;
   }
-  parts[home] = placed.value;
+  rejected.push({ key: shown, reason: `配置路径 ${shown} 不在白名单` });
   return search;
 }
 
@@ -336,10 +329,6 @@ function foreignPart(key: string, home: HarnessPart): HarnessPart | null {
   return null;
 }
 
-function metadataSegment(key: string): boolean {
-  return key.split(".").some((segment) => METADATA_KEY.has(segment));
-}
-
 function isDangerousKey(key: string): boolean {
   return key.split(".").some((segment) => DANGEROUS_SEGMENT.has(segment));
 }
@@ -349,11 +338,6 @@ function isFilePath(key: string): boolean {
   const segments = key.split(".");
   const last = segments[segments.length - 1] ?? "";
   return segments.length >= 2 && FILE_EXTENSION.has(last);
-}
-
-function isConfigPath(key: string): boolean {
-  if (key === "" || isFilePath(key)) return false;
-  return key.split(".").every((segment) => IDENT.test(segment) && !DANGEROUS_SEGMENT.has(segment) && !METADATA_KEY.has(segment));
 }
 
 function sanitizeValue(
@@ -381,10 +365,6 @@ function sanitizeValue(
     const childShown = `${shown}.${key}`;
     if (isDangerousKey(key)) {
       rejected.push({ key: childShown, reason: `危险键 ${key} 被拒绝` });
-      continue;
-    }
-    if (METADATA_KEY.has(key) || metadataSegment(key)) {
-      rejected.push({ key: childShown, reason: `元数据键 ${childShown} 不能写入配置` });
       continue;
     }
     const cleaned = sanitizeValue((value as Record<string, unknown>)[key], childShown, rejected);

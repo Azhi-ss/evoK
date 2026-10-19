@@ -128,6 +128,7 @@ export function eventBusDelegate(events: EventBus, options?: DelegateOptions): R
       model: LOCAL_MODEL_ID,
       timeoutMs,
       result: { kind: "structured", schema: input.schema },
+      ...(input.agent === "reviewer-gate" ? { intercomBridge: { mode: "off" as const } } : {}),
     };
     let settled = false;
     let observed = 0;

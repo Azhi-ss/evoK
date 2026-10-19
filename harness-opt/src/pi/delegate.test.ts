@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   SUBAGENT_DELEGATION_CANCEL_EVENT,
   SUBAGENT_DELEGATION_REQUEST_EVENT,
+  SUBAGENT_DELEGATION_RESPONSE_EVENT,
   SUBAGENT_DELEGATION_UPDATE_EVENT,
 } from "pi-subagents/delegation";
 import { ATTRIBUTION_LABELS, HARNESS_PARTS } from "../types";
@@ -27,6 +28,29 @@ describe("delegation schema and timeout", () => {
     const review = schemaFor("reviewer-gate") as { properties: { accept: { type: string }; reason: { type: string } } };
     expect(review.properties.accept.type).toBe("boolean");
     expect(review.properties.reason.type).toBe("string");
+  });
+
+  test("reviewer-gate delegation turns the intercom bridge off", async () => {
+    const events = createMemoryBus();
+    const seen: { agent?: string; intercomBridge?: { mode?: string } }[] = [];
+    events.on(SUBAGENT_DELEGATION_REQUEST_EVENT, (data) => {
+      const request = data as { agent: string; intercomBridge?: { mode?: string }; requestId: string; ownerRunId: string; nodeId: string };
+      seen.push({ agent: request.agent, intercomBridge: request.intercomBridge });
+      events.emit(SUBAGENT_DELEGATION_RESPONSE_EVENT, {
+        requestId: request.requestId,
+        ownerRunId: request.ownerRunId,
+        nodeId: request.nodeId,
+        status: "completed",
+        agent: request.agent,
+        result: { kind: "structured", value: { accept: true, reason: "kept" } },
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1, toolCalls: 0, durationMs: 1 },
+      });
+    });
+    const delegate = eventBusDelegate(events);
+    await delegate({ agent: "reviewer-gate", task: "review", schema: schemaFor("reviewer-gate") });
+    await delegate({ agent: "gap-finder", task: "gaps", schema: schemaFor("gap-finder") });
+    expect(seen[0]?.intercomBridge).toEqual({ mode: "off" });
+    expect(seen[1]?.intercomBridge).toBeUndefined();
   });
 
   test("the default timeout is at least 300s and a timeout cancels with the tokens already seen", async () => {

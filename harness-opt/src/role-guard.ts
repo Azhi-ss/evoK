@@ -2,6 +2,7 @@ import { assertRoleRead, assertRoleTool, assertRoleWrite } from "./artifacts";
 import { ensureRealDir, runRelative } from "./containment";
 import { Lineage } from "./lineage";
 import { ROLE_IDS } from "./roles";
+import { isPathAlias, TOOL_PARAMETERS } from "./tool-params";
 
 /**
  * Child-tool gate for filesystem tools only.
@@ -37,43 +38,9 @@ export const FRAMEWORK_TOOLS = [
 
 const FILE_IO_TOOL_SET = new Set<string>(FILE_IO_TOOLS);
 const FRAMEWORK_TOOL_SET = new Set<string>(FRAMEWORK_TOOLS);
-const PATH_ARGUMENT_KEYS = new Set([
-  "path",
-  "paths",
-  "file",
-  "files",
-  "file_path",
-  "filePath",
-  "full_output_path",
-  "directory",
-  "dir",
-  "cwd",
-  "target",
-  "location",
-  "locations",
-  "command",
-]);
-
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const COMMAND_TOOLS = new Set(["bash", "powershell"]);
-/** Non-path arguments a file tool may carry. Anything else is refused. */
-const PAYLOAD_ARGUMENT_KEYS = new Set([
-  "content",
-  "pattern",
-  "query",
-  "glob",
-  "offset",
-  "limit",
-  "encoding",
-  "oldText",
-  "newText",
-  "old_string",
-  "new_string",
-  "edits",
-  "replace_all",
-  "timeout",
-]);
 const FORBIDDEN_SEGMENT = /^(tests|solution|private)(\..+)?$/i;
 
 export interface SubagentToolCall {
@@ -90,17 +57,24 @@ export function activeAgentName(prompt: string): string | null {
 
 /**
  * Refuse a filesystem call, record it, and throw.
- * Framework tools are an explicit whitelist. Every other tool is checked.
- * An argument name that is not a path key and not a payload key is refused.
+ * Framework tools are allowed by name, except contact_supervisor on
+ * reviewer-gate, which the role contract forbids.
+ * File-tool argument names come from the installed tool schemas. A path
+ * alias such as Path or FilePath has its value resolved first; if that
+ * exact name is not on the schema, the call is then refused.
  */
 export function guardSubagentToolCall(call: SubagentToolCall): void {
-  if (FRAMEWORK_TOOL_SET.has(call.tool)) return;
+  if (FRAMEWORK_TOOL_SET.has(call.tool) && call.tool !== "contact_supervisor") return;
   const roleName = activeAgentName(call.prompt);
   const loggedPath = clip(pathForLog(call.tool, call.input));
   try {
     const role = requireSubagentRole(roleName, call.tool);
-    const unknown = unknownArgument(call.input);
-    if (unknown) throw new Error(`argument ${unknown} is not allowed`);
+    if (call.tool === "contact_supervisor") {
+      assertRoleTool(role, call.tool);
+      return;
+    }
+    for (const raw of collectPathValues(call.input)) canonicalRelative(call.root, role, raw);
+    refuseUnknownArguments(call.tool, call.input);
     if (!FILE_IO_TOOL_SET.has(call.tool)) {
       for (const raw of collectPathValues(call.input)) canonicalRelative(call.root, role, raw);
       throw new Error(`tool ${call.tool} is not allowed`);
@@ -133,12 +107,18 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
   }
 }
 
-function unknownArgument(input: Record<string, unknown>): string | null {
-  for (const key of Object.keys(input)) {
-    if (PATH_ARGUMENT_KEYS.has(key) || PAYLOAD_ARGUMENT_KEYS.has(key)) continue;
-    return key;
+function refuseUnknownArguments(tool: string, input: Record<string, unknown>): void {
+  const allowed = TOOL_PARAMETERS.get(tool);
+  if (allowed) {
+    for (const key of Object.keys(input)) {
+      if (!allowed.has(key)) throw new Error(`argument ${key} is not allowed`);
+    }
+    return;
   }
-  return null;
+  for (const key of Object.keys(input)) {
+    if (key === "command" || isPathAlias(key)) continue;
+    throw new Error(`argument ${key} is not allowed`);
+  }
 }
 
 function requireSubagentRole(roleName: string | null, tool: string): SubagentRole {
@@ -211,11 +191,11 @@ function filesystemPaths(tool: string, input: Record<string, unknown>): string[]
   return found;
 }
 
-/** Every path-like argument, including `file_path` and a `paths` array. `command` stays with the shell check. */
+/** Every path-like argument, including Path and FilePath. `command` stays with the shell check. */
 function collectPathValues(input: Record<string, unknown>): string[] {
   const found: string[] = [];
   for (const [key, value] of Object.entries(input)) {
-    if (key === "command" || !PATH_ARGUMENT_KEYS.has(key)) continue;
+    if (!isPathAlias(key)) continue;
     pushPathValues(found, value);
   }
   return found;

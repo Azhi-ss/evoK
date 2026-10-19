@@ -311,12 +311,14 @@ describe("subagent role guard", () => {
     mkdirSync(join(root, "traces"), { recursive: true });
     for (const role of ["gap-finder", "innovator", "reviewer-gate"]) {
       for (const tool of FRAMEWORK_TOOLS) {
-        expect(() => guardSubagentToolCall({
+        const call = () => guardSubagentToolCall({
           root,
           prompt: prompt(role),
           tool,
           input: { value: { accept: true, reason: "kept" }, path: "should-not-matter" },
-        })).not.toThrow();
+        });
+        if (role === "reviewer-gate" && tool === "contact_supervisor") expect(call).toThrow(/cannot use tool/);
+        else expect(call).not.toThrow();
       }
       expect(() => guardSubagentToolCall({
         root,
@@ -325,7 +327,7 @@ describe("subagent role guard", () => {
         input: { value: { gaps: [] } },
       })).not.toThrow();
     }
-    expect(contractEvents(root)).toHaveLength(0);
+    expect(contractEvents(root).map((event) => event.tool)).toEqual(["contact_supervisor"]);
     expect(FILE_IO_TOOLS).toContain("read");
     expect(FILE_IO_TOOLS).toContain("write");
     expect(() => guardSubagentToolCall({
@@ -417,6 +419,55 @@ describe("subagent role guard", () => {
     expect(events.every((event) => event.kind === "contract")).toBe(true);
     expect(events.some((event) => event.tool === "contact_supervisor")).toBe(false);
     expect(existsSync(join(root, "traces", "t1.json"))).toBe(true);
+  });
+
+  test("grep schema arguments pass and an unknown argument is refused", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "grep",
+      input: { pattern: "reward", path: "traces", ignoreCase: true, literal: true, context: 2 },
+    })).not.toThrow();
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "grep",
+      input: { pattern: "reward", path: "traces", ignoreCase: true, side: true },
+    })).toThrow(/argument side is not allowed/);
+    expect(contractEvents(root)).toHaveLength(1);
+  });
+
+  test("a path alias value outside the run root is resolved", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/t1.json", Path: "/etc/hostname" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "grep",
+      input: { pattern: "reward", path: "traces", FilePath: "/etc/hostname" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/t1.json", Path: "traces/t1.json" },
+    })).toThrow(/argument Path is not allowed/);
+    const events = contractEvents(root);
+    expect(events).toHaveLength(3);
+    expect(events.every((event) => event.kind === "contract")).toBe(true);
+    expect(JSON.stringify(events)).toContain("/etc/hostname");
+    expect(String(events[0]?.err)).not.toContain("argument Path is not allowed");
+    expect(String(events[1]?.err)).not.toContain("argument FilePath is not allowed");
+    expect(String(events[2]?.err)).toContain("argument Path is not allowed");
   });
 
   test("location is contained and contact_supervisor stays on the whitelist", () => {

@@ -291,7 +291,7 @@ describe("live round", () => {
     };
     expect(patch.rejected.map((item) => item.key)).toEqual(["skills/search.md", "candidateId", "__proto__"]);
     expect(patch.rejected.find((item) => item.key === "__proto__")?.reason).toBe("危险键 __proto__ 被拒绝");
-    expect(patch.rejected.find((item) => item.key === "candidateId")?.reason).toContain("元数据键");
+    expect(patch.rejected.find((item) => item.key === "candidateId")?.reason).toContain("不在白名单");
   });
 
   test("parent and child traces stay in separate files", async () => {
