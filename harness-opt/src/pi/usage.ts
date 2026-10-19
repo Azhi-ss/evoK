@@ -1,4 +1,4 @@
-/** Four usage counters. A missing counter is zero; it is not dropped from the sum. */
+/** Four usage counters. A missing counter is zero. The total counts input, output, and cacheRead. */
 export interface UsageParts {
   readonly input: number;
   readonly output: number;
@@ -21,10 +21,10 @@ export function usageParts(usage: Partial<UsageParts> | null | undefined): Usage
   };
 }
 
-/** input + output + cacheRead + cacheWrite. */
+/** input + output + cacheRead. cacheWrite stays on the record and is not added. */
 export function usageTokens(usage: Partial<UsageParts> | null | undefined): number {
   const parts = usageParts(usage);
-  return parts.input + parts.output + parts.cacheRead + parts.cacheWrite;
+  return parts.input + parts.output + parts.cacheRead;
 }
 
 export function addUsage(total: UsageParts, usage: Partial<UsageParts> | null | undefined): UsageParts {

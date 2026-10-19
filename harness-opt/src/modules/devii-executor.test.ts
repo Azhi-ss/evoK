@@ -58,7 +58,7 @@ print(key)
     expect(JSON.stringify(trace)).not.toContain(SECRET);
   });
 
-  test("cacheWrite is part of the token sum", async () => {
+  test("cacheWrite stays on the usage record and is left out of the token sum", async () => {
     const dir = mkdtempSync(join(tmpdir(), "devii-cache-"));
     const script = fakeScript(dir, `
 import json, sys
@@ -85,7 +85,7 @@ run = Path(get("--run-root")) / get("--task-id") / get("--seed") / get("--arm")
     const trace = await executor.run(task, join(dir, "config.json"));
     expect(trace.reward).toBe(0);
     expect(trace.failed).toBe(false);
-    expect(trace.tokens).toBe(437407);
+    expect(trace.tokens).toBe(437397);
     expect(trace.usage.cacheWrite).toBe(10);
   });
 

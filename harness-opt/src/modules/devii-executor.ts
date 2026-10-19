@@ -98,7 +98,7 @@ function labelsFor(failed: boolean, lines: readonly TraceLine[]): string[] {
 
 /**
  * One dev-II task through scripts/devii_one.py.
- * Reward comes from reward.txt. Tokens are the sum of assistant_message usage.
+ * Reward comes from reward.txt. Tokens are input + output + cacheRead on assistant_message usage.
  */
 export class DeviiExecutor implements HarnessExecutor {
   readonly name = "devii";

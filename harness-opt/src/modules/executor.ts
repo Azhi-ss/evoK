@@ -19,7 +19,7 @@ export interface ExecutionTrace {
   readonly steps: readonly TraceStep[];
   readonly reward: number;
   readonly tokens: number;
-  /** input + output + cacheRead + cacheWrite. `tokens` is the sum of these four. */
+  /** input, output, cacheRead, and cacheWrite. `tokens` is input + output + cacheRead. */
   readonly usage: UsageParts;
   readonly failed: boolean;
   readonly labels: readonly string[];

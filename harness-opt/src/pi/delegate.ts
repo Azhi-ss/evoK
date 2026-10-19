@@ -161,7 +161,7 @@ export function eventBusDelegate(events: EventBus, options?: DelegateOptions): R
       const parts = usageParts(update.usage);
       const fromUsage = usageTokens(parts);
       const fromTokens = typeof update.tokens === "number" && Number.isFinite(update.tokens) ? update.tokens : 0;
-      // Update `tokens` is input+output only. Prefer the four-part usage snapshot when it is present.
+      // Update `tokens` is input+output only. Prefer the usage snapshot when it is present. The total counts input, output, and cacheRead.
       if (update.usage && fromUsage >= fromTokens) note(parts);
       else if (fromTokens > observed) note({ input: 0, output: fromTokens, cacheRead: 0, cacheWrite: 0 });
     });
