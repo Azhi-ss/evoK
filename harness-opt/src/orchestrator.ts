@@ -264,11 +264,12 @@ export class Orchestrator {
       // (default 0.9) is an arbitrary constant, only a cheap screen.
       if (parent.devMean !== null && smallMean >= this.stagedThreshold * parent.devMean) {
         const full = assertScores(await this.roles.runner(child.configPath, "dev_full"));
-        // dev_small and dev_full are not disjoint here. `bin/eval.ts` and the
-        // empty-run fixture repeat the same candidate score; dev_full is a
-        // longer copy of that measurement, not a remainder. Concatenating the
-        // lists would count the small scores again and pull devMean toward
-        // the small subset. The mean uses dev_full alone once it has run.
+        // dev_small and dev_full are not disjoint here. The empty-run fixture
+        // repeats one candidate score; dev_full is a longer copy of that
+        // measurement, not a remainder. Concatenating the lists would count
+        // the small scores again and pull devMean toward the small subset.
+        // The mean uses dev_full alone once it has run. `bin/eval.ts` does not
+        // invent that repeat from fixtureScore.
         child.devFullScores = [...full];
         child.devScores = [...full];
         child.stage = "full";

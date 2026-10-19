@@ -18,19 +18,31 @@ describe("host commands", () => {
     expect(() => runEval({ root: dir, cand: "../c1", split: "dev", gate: false })).toThrow(/relative id/);
   });
 
-  test("held-out with --gate reads the sealed score, and dev reads the candidate", () => {
+  test("held-out with --gate reads the sealed score, and dev refuses a self-reported fixtureScore", () => {
     const dir = root();
     mkdirSync(join(dir, "sealed"), { recursive: true });
     writeFileSync(join(dir, "sealed", "heldout-score.json"), JSON.stringify({ score: 0.7, tokens: 3 }));
     mkdirSync(join(dir, "candidates", "c1"), { recursive: true });
-    writeFileSync(join(dir, "candidates", "c1", "config.json"), JSON.stringify({ fixtureScore: 0.4, tokens: 8 }));
+    writeFileSync(join(dir, "candidates", "c1", "config.json"), JSON.stringify({ fixtureScore: 0.99, tokens: 8 }));
     expect(runEval({ root: dir, cand: "c1", split: "heldout", gate: true })).toMatchObject({
       scores: [0.7],
       split: "heldout",
       tokens: 3,
     });
-    expect(runEval({ root: dir, cand: "c1", split: "dev_small", gate: false }).scores).toEqual([0.4]);
-    expect(runEval({ root: dir, cand: "c1", split: "dev_full", gate: false }).scores).toEqual([0.4, 0.4]);
+    expect(() => runEval({ root: dir, cand: "c1", split: "dev", gate: false })).toThrow(/executor traces/);
+    expect(() => runEval({ root: dir, cand: "c1", split: "dev_small", gate: false })).toThrow(/executor traces/);
+    expect(() => runEval({ root: dir, cand: "c1", split: "dev_full", gate: false })).toThrow(/executor traces/);
+    mkdirSync(join(dir, "traces", "c1"), { recursive: true });
+    writeFileSync(join(dir, "traces", "c1", "dev-1.json"), JSON.stringify({
+      reward: 0.8,
+      tokens: 40,
+      taskId: "dev-1",
+    }));
+    expect(runEval({ root: dir, cand: "c1", split: "dev_small", gate: false })).toMatchObject({
+      scores: [0.8],
+      tokens: 40,
+    });
+    expect(runEval({ root: dir, cand: "c1", split: "dev_full", gate: false }).scores).toEqual([0.8]);
   });
 
   test("select and record use the lineage directory", () => {

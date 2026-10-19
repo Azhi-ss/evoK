@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeRoleJson } from "./artifacts";
@@ -120,6 +120,113 @@ describe("live round", () => {
     expect(loopConfig.parts["agent-loop"]).toEqual({ maxSteps: 4 });
     expect(loopConfig.parts.toolchain).toEqual({ checker: "keep" });
     expect(loopConfig.search.retries).toBe(2);
+  });
+
+  test("a tampered evaluated parent is selected and does not infect the child", async () => {
+    const dir = root();
+    mkdirSync(join(dir, "candidates", "scored"), { recursive: true });
+    writeFileSync(join(dir, "candidates", "scored", "config.json"), [
+      "{",
+      "\"id\":\"scored\",",
+      "\"modelId\":\"parent-model\",",
+      "\"fixtureScore\":0.99,",
+      "\"tokens\":999,",
+      "\"notes\":\"scratch\",",
+      "\"__proto__\":{\"admin\":true},",
+      "\"parts\":{",
+      "\"agent-loop\":{\"maxSteps\":8,\"notes\":\"tamper\",\"candidateId\":\"evil\"},",
+      "\"context\":{\"window\":4},",
+      "\"memory\":{\"policy\":\"leak\"},",
+      "\"toolchain\":{\"checker\":\"keep\",\"tools\":{\"check\":{\"id\":\"fmt\",\"notes\":\"nested\"}}},",
+      "\"skills\":{\"pack\":\"base\",\"selector\":{\"weight\":0.2,\"candidateId\":\"hidden\"},\"__proto__\":{\"admin\":true}},",
+      "\"extra\":{\"trigger\":\"nope\"}",
+      "},",
+      "\"search\":{\"samples\":3,\"selfChecks\":1,\"retries\":2,\"temperature\":9}",
+      "}",
+    ].join(""));
+    mkdirSync(join(dir, "candidates", "weak"), { recursive: true });
+    writeFileSync(join(dir, "candidates", "weak", "config.json"), JSON.stringify({
+      id: "weak",
+      modelId: "parent-model",
+      parts: { "agent-loop": { maxSteps: 1 }, context: {}, memory: {}, toolchain: {}, skills: {} },
+      search: { samples: 1, selfChecks: 0, retries: 0 },
+    }));
+    const lineage = new Lineage(dir);
+    lineage.put(new Node({
+      id: "weak",
+      parentId: null,
+      configPath: "candidates/weak/config.json",
+      status: "evaluated",
+      devScores: [0.2],
+      stage: "full",
+    }));
+    lineage.put(new Node({
+      id: "scored",
+      parentId: null,
+      configPath: "candidates/scored/config.json",
+      status: "evaluated",
+      devScores: [0.9],
+      stage: "full",
+    }));
+    const parent = new GreedySelector().pick(lineage);
+    expect(parent.id).toBe("scored");
+    const roles = liveRoles({
+      root: dir,
+      round: 2,
+      budget: new Budget(),
+      tasks: [],
+      delegate: async (input) => ({
+        agent: input.agent,
+        tokens: 3,
+        value: {
+          part: "skills",
+          motivation: "add the format trigger on the inherited parent",
+          expectedFailureClass: "skill-not-triggered",
+          summary: "add a trigger",
+          changes: { trigger: "format" },
+        },
+      }),
+    });
+    await roles.innovator(parent, { gaps: [] }, []);
+    const config = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
+      modelId: string;
+      parts: Record<string, Record<string, unknown>>;
+      search: Record<string, unknown>;
+    };
+    expect(config.modelId).toBe("parent-model");
+    expect(config.parts["agent-loop"]).toEqual({ maxSteps: 8 });
+    expect(config.parts.context).toEqual({ window: 4 });
+    expect(config.parts.memory).toEqual({});
+    expect(config.parts.toolchain).toEqual({ checker: "keep", tools: { check: { id: "fmt" } } });
+    expect(config.parts.skills).toEqual({ pack: "base", trigger: "format", selector: { weight: 0.2 } });
+    expect(config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
+    const stored = JSON.stringify(config);
+    expect(stored).not.toContain("scratch");
+    expect(stored).not.toContain("tamper");
+    expect(stored).not.toContain("evil");
+    expect(stored).not.toContain("leak");
+    expect(stored).not.toContain("nested");
+    expect(stored).not.toContain("hidden");
+    expect(stored).not.toContain("admin");
+    expect(stored).not.toContain("temperature");
+    expect(stored).not.toContain("0.99");
+    expect(stored).not.toContain("extra");
+    const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as {
+      rejected: { key: string; reason: string }[];
+    };
+    const keys = patch.rejected.map((item) => item.key);
+    expect(keys).toContain("fixtureScore");
+    expect(keys).toContain("tokens");
+    expect(keys).toContain("notes");
+    expect(keys).toContain("__proto__");
+    expect(keys).toContain("search.temperature");
+    expect(keys).toContain("agent-loop.notes");
+    expect(keys).toContain("agent-loop.candidateId");
+    expect(keys).toContain("memory.policy");
+    expect(keys).toContain("toolchain.tools.check.notes");
+    expect(keys).toContain("skills.selector.candidateId");
+    expect(keys).toContain("skills.__proto__");
+    expect(keys).toContain("parts.extra");
   });
 
   test("a child candidate refuses to invent a config when the parent file is missing", async () => {

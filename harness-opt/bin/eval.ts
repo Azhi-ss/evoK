@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { SandboxBoundary } from "../../src/execution/security-boundary";
 import { flag, hasFlag } from "../src/args";
+import { listTraceFiles } from "../src/traces";
 
 /**
  * Host eval command for the typed gate and the submit gate.
@@ -9,6 +10,11 @@ import { flag, hasFlag } from "../src/args";
  * Held-out is readable only with `--gate`, and only `harnessopt_submit_gate`
  * is supposed to pass that flag. Agent tool lists do not include bash, so
  * a child cannot invoke this binary itself.
+ *
+ * `workflows/round.js` does not call this binary. `resolveRoundWorkflow`
+ * only registers `bun bin/eval.ts --cand <id> --split dev` as a host command.
+ * Dev scores still fail closed: they come from executor traces under
+ * `traces/<cand>/`, never from `fixtureScore` or `tokens` on the candidate.
  *
  * TODO(harness-opt/design/2026-10-18-pi-subagents-setup.md §7): whether a
  * bare workflow script may splice `args` into `gate.command` is unverified.
@@ -51,19 +57,43 @@ export function runEval(options: {
     if (typeof score !== "number" || !Number.isFinite(score)) throw new Error("held-out score file has no numeric score");
     return { ok: true, scores: [score], split, tokens: typeof body.tokens === "number" ? body.tokens : 0 };
   }
-  const configPath = boundary.assertPath(`candidates/${options.cand}/config.json`, "read");
-  const config = JSON.parse(readFileSync(configPath, "utf8")) as { fixtureScore?: unknown; tokens?: unknown };
-  const score = typeof config.fixtureScore === "number" ? config.fixtureScore : 0.5;
-  if (!Number.isFinite(score) || score < 0 || score > 1) throw new Error("fixtureScore must be in [0, 1]");
-  // Same fixture for both splits. dev_full is a longer repeat, not a disjoint
-  // remainder, and not a superset of separately scored tasks.
-  const repeat = split === "dev_full" ? [score, score] : [score];
-  return {
-    ok: true,
-    scores: repeat,
-    split,
-    tokens: typeof config.tokens === "number" ? config.tokens : 0,
-  };
+  return readTraceScores(boundary, options.cand, split);
+}
+
+function readTraceScores(
+  boundary: SandboxBoundary,
+  cand: string,
+  split: EvalSplit,
+): EvalResult {
+  let files: readonly string[];
+  try {
+    const traceDir = boundary.assertPath(`traces/${cand}`, "read");
+    files = listTraceFiles(traceDir);
+  } catch {
+    throw new Error(`dev score requires executor traces for ${cand}`);
+  }
+  if (files.length === 0) throw new Error(`dev score requires executor traces for ${cand}`);
+  const scores: number[] = [];
+  let tokens = 0;
+  for (const rel of files) {
+    const tracePath = boundary.assertPath(`traces/${cand}/${rel}`, "read");
+    let body: { reward?: unknown; tokens?: unknown };
+    try {
+      body = JSON.parse(readFileSync(tracePath, "utf8")) as { reward?: unknown; tokens?: unknown };
+    } catch {
+      throw new Error(`dev score requires executor traces for ${cand}`);
+    }
+    const reward = body.reward;
+    if (typeof reward !== "number" || !Number.isFinite(reward) || reward < 0 || reward > 1) {
+      throw new Error(`dev score requires executor traces for ${cand}`);
+    }
+    if (typeof body.tokens !== "number" || !Number.isFinite(body.tokens) || body.tokens < 0) {
+      throw new Error(`dev score requires executor traces for ${cand}`);
+    }
+    scores.push(reward);
+    tokens += body.tokens;
+  }
+  return { ok: true, scores, split, tokens };
 }
 
 function isCandId(cand: string): boolean {

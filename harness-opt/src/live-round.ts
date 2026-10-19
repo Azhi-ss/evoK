@@ -3,13 +3,13 @@ import { Budget } from "./budget";
 import { readContained } from "./containment";
 import { LOCAL_MODEL_ID } from "./fixed-model";
 import { createExecutor, type HarnessExecutor } from "./modules/executor";
-import { applyPatch } from "./modules/proposer";
+import { applyPatch, sanitizeStoredConfig } from "./modules/proposer";
 import { DelegationError, schemaFor, type DelegationValue, type RoleDelegate } from "./pi/delegate";
 import { writeStageReport } from "./reports";
 import { parseGapReport, parsePatchFile, renderGapsMarkdown } from "./schemas";
 import { forcedReviewVerdict, type EvidencePack, type Proposal, type ReviewInput, type Roles, type SubmitReceipt } from "./orchestrator";
 import { traceRelPath } from "./traces";
-import { ATTRIBUTION_LABELS, emptyParts, HARNESS_PARTS, type HarnessConfig, type HarnessParts, type SearchGenes, type TaskRef } from "./types";
+import { ATTRIBUTION_LABELS, HARNESS_PARTS, type SearchGenes, type TaskRef } from "./types";
 
 const LABEL_LIST = ATTRIBUTION_LABELS.join(", ");
 const PART_LIST = HARNESS_PARTS.join(", ");
@@ -72,9 +72,13 @@ export function liveRoles(options: {
         options.budget.usedTokens += delegated.tokens;
         throw error;
       }
-      const applied = applyPatch(readParentConfig(options.root, parent.configPath), patch);
+      const parentConfig = readParentConfig(options.root, parent.configPath);
+      const applied = applyPatch(parentConfig.config, patch);
       const config = { ...applied.config, id: candidateId };
-      writeRoleJson(options.root, "innovator", "patch.json", { ...patch, rejected: applied.rejected });
+      writeRoleJson(options.root, "innovator", "patch.json", {
+        ...patch,
+        rejected: [...parentConfig.rejected, ...applied.rejected],
+      });
       writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
       const proposal: Proposal = {
         summary: patch.summary,
@@ -138,7 +142,7 @@ export function liveRoles(options: {
   };
 }
 
-function readParentConfig(root: string, configPath: string): HarnessConfig {
+function readParentConfig(root: string, configPath: string): ReturnType<typeof sanitizeStoredConfig> {
   let raw: string;
   try {
     raw = readContained(root, configPath);
@@ -160,13 +164,7 @@ function readParentConfig(root: string, configPath: string): HarnessConfig {
     throw new Error(`parent config is missing: ${configPath}`);
   }
   const genes: SearchGenes = { samples: search.samples, selfChecks: search.selfChecks, retries: search.retries };
-  const parts = { ...emptyParts(), ...parsed.parts } as HarnessParts;
-  return {
-    id: typeof parsed.id === "string" && parsed.id !== "" ? parsed.id : "parent",
-    modelId: parsed.modelId,
-    parts,
-    search: genes,
-  };
+  return sanitizeStoredConfig(parsed, genes);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

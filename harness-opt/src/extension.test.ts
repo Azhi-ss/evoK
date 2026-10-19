@@ -20,6 +20,7 @@ describe("pi extension", () => {
     expect(round.script).toContain("agent-loop");
     for (const label of ATTRIBUTION_LABELS) expect(round.script).toContain(label);
     expect(round.hostCommands).toEqual([{ key: "eval", command: "bun bin/eval.ts --cand abc --split dev" }]);
+    expect(round.script).not.toContain("bin/eval");
     expect(round.usageBudget.tokens.hard).toBe(ROUND_TOKEN_HARD);
     expect(round).not.toHaveProperty("outputSchema");
     expect(HARNESSOPT_ROUND_SCRIPT).toBe(round.script);

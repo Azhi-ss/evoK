@@ -236,6 +236,73 @@ describe("proposer boundary", () => {
     expect(stored).toContain("fmt");
   });
 
+  test("an empty object on a whitelist leaf or prefix is rejected and not stored", () => {
+    const next = applyPatch(base, {
+      part: "toolchain",
+      motivation: "refuse an empty checker and an empty check id",
+      expectedFailureClass: "tool-misuse",
+      changes: {
+        checker: {},
+        tools: { check: { id: {} } },
+      },
+    });
+    expect(next.config.parts.toolchain).toEqual({});
+    expect(next.rejected.map((item) => item.key)).toEqual(["checker", "tools.check.id"]);
+    expect(next.rejected.every((item) => item.reason.includes("空对象"))).toBe(true);
+    const skills = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse an empty selector",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { selector: {} },
+    });
+    expect(skills.config.parts.skills).toEqual({});
+    expect(skills.rejected).toEqual([{ key: "selector", reason: "配置路径 selector 是空对象" }]);
+  });
+
+  test("an object inside an array is walked, and a fully rejected object is not stored", () => {
+    const next = applyPatch(base, {
+      part: "toolchain",
+      motivation: "drop scratch keys inside an array value",
+      expectedFailureClass: "tool-misuse",
+      changes: {
+        checker: [{ notes: "scratch", candidateId: "c9", nested: { foo: 1 } }, {}],
+      },
+    });
+    expect(next.config.parts.toolchain).toEqual({});
+    expect(next.rejected.map((item) => item.key)).toEqual([
+      "checker[0].notes",
+      "checker[0].candidateId",
+      "checker[0].nested",
+      "checker[0].nested.foo",
+      "checker[1]",
+    ]);
+    expect(next.rejected.filter((item) => item.key !== "checker[1]").every((item) => item.reason.includes("不在白名单"))).toBe(true);
+    expect(next.rejected.find((item) => item.key === "checker[1]")?.reason).toContain("空对象");
+    const stored = JSON.stringify(next.config);
+    expect(stored).not.toContain("scratch");
+    expect(stored).not.toContain("c9");
+    expect(stored).not.toContain("foo");
+  });
+
+  test("a subtree whose only leaf is rejected still records the rejection", () => {
+    const next = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse an empty weight leaf",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { selector: { weight: {} } },
+    });
+    expect(next.config.parts.skills).toEqual({});
+    expect(next.rejected).toEqual([{ key: "selector.weight", reason: "配置路径 selector.weight 是空对象" }]);
+    const array = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse a prefix stored as an array of objects",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { selector: [{ weight: 0.2, notes: "scratch" }] },
+    });
+    expect(array.config.parts.skills).toEqual({});
+    expect(array.rejected.map((item) => item.key)).toEqual(["selector", "selector[0].notes"]);
+  });
+
   test("parse keeps a top-level search object and dotted search genes", () => {
     const raw = {
       part: "skills",
