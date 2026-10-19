@@ -47,6 +47,41 @@ describe("harnessopt_submit_gate", () => {
     expect(readFileSync(join(state, "lineage.jsonl"), "utf8")).not.toContain("heldout");
     expect(readFileSync(join(state, "gate.jsonl"), "utf8")).toContain("\"heldout\":null");
     expect(FIXED_MODEL_ID).toBe("deepseek-v4.1-flash");
+    expect(buildDirectoryGateRequest(root).modelId).toBe("qwen-max");
+  });
+
+  test("a candidate modelId outside the contest families is not adopted", () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-opt-gate-"));
+    const state = join(root, "state");
+    const lineage = new Lineage(state);
+    lineage.put(new Node({
+      id: "best",
+      parentId: null,
+      configPath: "candidates/best/config.json",
+      status: "evaluated",
+      devScores: [0.8],
+      stage: "full",
+    }));
+    mkdirSync(join(root, "candidates", "best"), { recursive: true });
+    writeFileSync(join(root, "candidates", "best", "config.json"), JSON.stringify({ modelId: "gpt-4o" }));
+    const request = buildDirectoryGateRequest(root);
+    expect(request.modelId).toBe("");
+    expect(request.modelId).not.toBe("gpt-4o");
+    const pinned = mkdtempSync(join(tmpdir(), "harness-opt-gate-"));
+    const pinnedState = join(pinned, "state");
+    new Lineage(pinnedState).put(new Node({
+      id: "best",
+      parentId: null,
+      configPath: "candidates/best/config.json",
+      status: "evaluated",
+      devScores: [0.8],
+      stage: "full",
+    }));
+    mkdirSync(join(pinned, "candidates", "best"), { recursive: true });
+    writeFileSync(join(pinned, "candidates", "best", "config.json"), JSON.stringify({ modelId: "  GLM-4.6  " }));
+    expect(buildDirectoryGateRequest(pinned).modelId).toBe("GLM-4.6");
+    writeFileSync(join(pinned, "candidates", "best", "config.json"), JSON.stringify({ modelId: FIXED_MODEL_ID }));
+    expect(buildDirectoryGateRequest(pinned).modelId).toBe(FIXED_MODEL_ID);
   });
 
   test("a refused tts symlink marks tts red and still writes gate.json and e2e.json", async () => {

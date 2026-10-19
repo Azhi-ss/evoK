@@ -137,7 +137,7 @@ describe("live round", () => {
       "\"agent-loop\":{\"maxSteps\":8,\"notes\":\"tamper\",\"candidateId\":\"evil\"},",
       "\"context\":{\"window\":4},",
       "\"memory\":{\"policy\":\"leak\"},",
-      "\"toolchain\":{\"checker\":\"keep\",\"tools\":{\"check\":{\"id\":\"fmt\",\"notes\":\"nested\"}}},",
+      "\"toolchain\":{\"checker\":\"keep\",\"tools\":{\"check\":{\"id\":\"fmt\",\"notes\":\"nested\"}},\"search\":{\"samples\":9},\"search.retries\":4,\"context.window\":2},",
       "\"skills\":{\"pack\":\"base\",\"selector\":{\"weight\":0.2,\"candidateId\":\"hidden\"},\"__proto__\":{\"admin\":true}},",
       "\"extra\":{\"trigger\":\"nope\"}",
       "},",
@@ -183,7 +183,7 @@ describe("live round", () => {
           motivation: "add the format trigger on the inherited parent",
           expectedFailureClass: "skill-not-triggered",
           summary: "add a trigger",
-          changes: { trigger: "format" },
+          changes: { trigger: "format", "foo.bar": 1 },
         },
       }),
     });
@@ -212,7 +212,7 @@ describe("live round", () => {
     expect(stored).not.toContain("0.99");
     expect(stored).not.toContain("extra");
     const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as {
-      rejected: { key: string; reason: string }[];
+      rejected: { key: string; reason: string; source: string }[];
     };
     const keys = patch.rejected.map((item) => item.key);
     expect(keys).toContain("fixtureScore");
@@ -227,6 +227,15 @@ describe("live round", () => {
     expect(keys).toContain("skills.selector.candidateId");
     expect(keys).toContain("skills.__proto__");
     expect(keys).toContain("parts.extra");
+    expect(keys).toContain("toolchain.search");
+    expect(keys).toContain("toolchain.search.samples");
+    expect(keys).toContain("toolchain.search.retries");
+    expect(keys).toContain("toolchain.context.window");
+    expect(keys.filter((key) => key === "foo.bar")).toEqual(["foo.bar"]);
+    expect(patch.rejected.find((item) => item.key === "fixtureScore")?.source).toBe("parent-clean");
+    expect(patch.rejected.find((item) => item.key === "toolchain.search.samples")?.source).toBe("parent-clean");
+    expect(patch.rejected.find((item) => item.key === "foo.bar")?.source).toBe("this-round");
+    expect(config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
   });
 
   test("a child candidate refuses to invent a config when the parent file is missing", async () => {
@@ -279,7 +288,7 @@ describe("live round", () => {
     };
     expect(patch.changes["skills/search.md"]).toEqual({ content: "body", metadata: { name: "search" } });
     expect(patch.rejected).toEqual([
-      { key: "skills/search.md", reason: "非法键 skills/search.md 不是配置路径或 part 名" },
+      { key: "skills/search.md", reason: "非法键 skills/search.md 不是配置路径或 part 名", source: "this-round" },
     ]);
     const config = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
       parts: { skills: Record<string, unknown> };

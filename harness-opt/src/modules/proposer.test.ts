@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyParts, type HarnessConfig } from "../types";
 import { parsePatchFile } from "../schemas";
-import { applyPatch, assertNoHeldOutLeak, buildInnovatorInput, stripHeldOutFields } from "./proposer";
+import { applyPatch, assertNoHeldOutLeak, buildInnovatorInput, sanitizeStoredConfig, stripHeldOutFields } from "./proposer";
 import { loadTaskBank, splitBank } from "./probe";
 
 const base: HarnessConfig = {
@@ -256,7 +256,7 @@ describe("proposer boundary", () => {
       changes: { selector: {} },
     });
     expect(skills.config.parts.skills).toEqual({});
-    expect(skills.rejected).toEqual([{ key: "selector", reason: "配置路径 selector 是空对象" }]);
+    expect(skills.rejected).toEqual([{ key: "selector", reason: "配置路径 selector 是空对象", source: "this-round" }]);
   });
 
   test("an object inside an array is walked, and a fully rejected object is not stored", () => {
@@ -292,7 +292,7 @@ describe("proposer boundary", () => {
       changes: { selector: { weight: {} } },
     });
     expect(next.config.parts.skills).toEqual({});
-    expect(next.rejected).toEqual([{ key: "selector.weight", reason: "配置路径 selector.weight 是空对象" }]);
+    expect(next.rejected).toEqual([{ key: "selector.weight", reason: "配置路径 selector.weight 是空对象", source: "this-round" }]);
     const array = applyPatch(base, {
       part: "skills",
       motivation: "refuse a prefix stored as an array of objects",
@@ -363,9 +363,84 @@ describe("proposer boundary", () => {
       expectedFailureClass: "format-invalid",
       changes: literal,
     });
-    expect(viaProto.rejected).toEqual([{ key: "__proto__", reason: "危险键 __proto__ 被拒绝" }]);
+    expect(viaProto.rejected).toEqual([{ key: "__proto__", reason: "危险键 __proto__ 被拒绝", source: "this-round" }]);
     expect(viaProto.config.parts.skills).toEqual({ trigger: "format" });
     expect(JSON.stringify(viaProto.config)).not.toContain("admin");
+  });
+
+  test("foo.bar is recorded once when it arrives as a dotted key and as a nested object", () => {
+    const next = applyPatch(base, {
+      part: "toolchain",
+      motivation: "drop the scratch key once",
+      expectedFailureClass: "tool-misuse",
+      changes: { foo: { bar: 1 }, "foo.bar": 1 },
+    });
+    expect(next.rejected.filter((item) => item.key === "foo.bar")).toEqual([
+      { key: "foo.bar", reason: "配置路径 foo.bar 不在白名单", source: "this-round" },
+    ]);
+    const empty = applyPatch(base, {
+      part: "toolchain",
+      motivation: "drop the empty scratch key once",
+      expectedFailureClass: "tool-misuse",
+      changes: { "foo.bar": {} },
+    });
+    expect(empty.rejected.filter((item) => item.key === "foo.bar")).toHaveLength(1);
+    expect(next.config.parts.toolchain).toEqual({});
+  });
+
+  test("an empty array is checked against the whitelist and recorded", () => {
+    const pack = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse an empty pack array",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { pack: [] },
+    });
+    expect(pack.config.parts.skills).toEqual({});
+    expect(pack.rejected).toEqual([{ key: "pack", reason: "配置路径 pack 是空数组", source: "this-round" }]);
+    const id = applyPatch(base, {
+      part: "toolchain",
+      motivation: "refuse an empty check id array",
+      expectedFailureClass: "tool-misuse",
+      changes: { "tools.check.id": [] },
+    });
+    expect(id.config.parts.toolchain).toEqual({});
+    expect(id.rejected.map((item) => item.key)).toEqual(["tools.check.id"]);
+    expect(id.rejected[0]?.reason).toContain("空数组");
+    const selector = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse an empty selector array",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { selector: [] },
+    });
+    expect(selector.config.parts.skills).toEqual({});
+    expect(selector.rejected).toEqual([{ key: "selector", reason: "配置路径 selector 不在白名单", source: "this-round" }]);
+  });
+
+  test("search nested under a stored part is stripped and does not change search genes", () => {
+    const stored = sanitizeStoredConfig({
+      id: "parent",
+      modelId: "parent-model",
+      parts: {
+        toolchain: {
+          checker: "keep",
+          search: { samples: 9 },
+          "search.retries": 4,
+          "context.window": 2,
+        },
+      },
+      search: { samples: 1, selfChecks: 0, retries: 0 },
+    }, { samples: 1, selfChecks: 0, retries: 0 });
+    expect(stored.config.search).toEqual({ samples: 1, selfChecks: 0, retries: 0 });
+    expect(stored.config.parts.toolchain).toEqual({ checker: "keep" });
+    expect(stored.config.parts.context).toEqual({});
+    expect(stored.rejected.map((item) => item.key)).toEqual([
+      "toolchain.search",
+      "toolchain.search.samples",
+      "toolchain.search.retries",
+      "toolchain.context.window",
+    ]);
+    expect(stored.rejected.every((item) => item.reason.includes("不在白名单"))).toBe(true);
+    expect(stored.rejected.every((item) => item.source === "parent-clean")).toBe(true);
   });
 
   test("an unmotivated patch is rejected", () => {

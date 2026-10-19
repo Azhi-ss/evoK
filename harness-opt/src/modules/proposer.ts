@@ -13,9 +13,17 @@ import {
   type TraceRecord,
 } from "../types";
 
+export type RejectionSource = "parent-clean" | "this-round";
+
 export interface ChangeRejection {
   readonly key: string;
   readonly reason: string;
+  readonly source: RejectionSource;
+}
+
+function reject(rejected: ChangeRejection[], source: RejectionSource, key: string, reason: string): void {
+  if (rejected.some((item) => item.key === key)) return;
+  rejected.push({ key, reason, source });
 }
 
 /** Key names that must not cross into Gap Finder or Innovator context. */
@@ -160,7 +168,7 @@ export function applyPatch(
 ): { readonly config: HarnessConfig; readonly rejected: readonly ChangeRejection[] } {
   validatePatch(patch);
   const rejected: ChangeRejection[] = [];
-  notePrototype(patch.changes, rejected);
+  notePrototype(patch.changes, rejected, "", "this-round");
   let search = base.search;
   const parts: { -readonly [K in keyof HarnessConfig["parts"]]: Record<string, unknown> } = { ...base.parts };
   const home = patch.part;
@@ -170,7 +178,7 @@ export function applyPatch(
   if (patch.search) {
     for (const field of SEARCH_FIELDS) {
       if (patch.search[field] !== undefined) {
-        search = applySearchChange(search, `search.${field}`, patch.search[field], rejected);
+        search = applySearchChange(search, `search.${field}`, patch.search[field], rejected, `search.${field}`, "this-round");
       }
     }
   }
@@ -197,45 +205,45 @@ export function sanitizeStoredConfig(
   genes: SearchGenes,
 ): { readonly config: HarnessConfig; readonly rejected: readonly ChangeRejection[] } {
   const rejected: ChangeRejection[] = [];
-  notePrototype(parsed, rejected);
+  const source: RejectionSource = "parent-clean";
+  notePrototype(parsed, rejected, "", source);
   for (const key of ownKeys(parsed)) {
     if (key === "id" || key === "modelId" || key === "parts" || key === "search") continue;
     if (isDangerousKey(key)) {
-      if (!rejected.some((item) => item.key === key)) rejected.push({ key, reason: `危险键 ${key} 被拒绝` });
+      reject(rejected, source, key, `危险键 ${key} 被拒绝`);
       continue;
     }
-    rejected.push({ key, reason: `配置路径 ${key} 不在白名单` });
+    reject(rejected, source, key, `配置路径 ${key} 不在白名单`);
   }
   const searchRaw = parsed.search;
   if (isRecord(searchRaw)) {
-    notePrototype(searchRaw, rejected, "search");
+    notePrototype(searchRaw, rejected, "search", source);
     for (const key of ownKeys(searchRaw)) {
       if ((SEARCH_FIELDS as readonly string[]).includes(key)) continue;
       const shown = `search.${key}`;
       if (isDangerousKey(key)) {
-        if (!rejected.some((item) => item.key === shown)) rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
+        reject(rejected, source, shown, `危险键 ${key} 被拒绝`);
         continue;
       }
-      rejected.push({ key: shown, reason: `search 没有参数 ${key}` });
+      reject(rejected, source, shown, `search 没有参数 ${key}`);
     }
   }
   const partsRaw = parsed.parts;
   const parts: { -readonly [K in keyof HarnessParts]: Record<string, unknown> } = { ...emptyParts() };
   let search = genes;
   if (isRecord(partsRaw)) {
-    notePrototype(partsRaw, rejected, "parts");
+    notePrototype(partsRaw, rejected, "parts", source);
     for (const key of ownKeys(partsRaw)) {
       if (isDangerousKey(key)) {
-        const shown = `parts.${key}`;
-        if (!rejected.some((item) => item.key === shown)) rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
+        reject(rejected, source, `parts.${key}`, `危险键 ${key} 被拒绝`);
         continue;
       }
       if (!isHarnessPart(key)) {
-        rejected.push({ key: `parts.${key}`, reason: `配置路径 ${key} 不在白名单` });
-        noteClosed(partsRaw[key], `parts.${key}`, rejected, "skills", key);
+        reject(rejected, source, `parts.${key}`, `配置路径 ${key} 不在白名单`);
+        noteClosed(partsRaw[key], `parts.${key}`, rejected, "skills", key, source);
         continue;
       }
-      search = applyChange(parts, search, key, key, partsRaw[key], rejected, true, key);
+      search = applyChange(parts, search, key, key, partsRaw[key], rejected, true, key, true, { n: 0 }, source);
     }
   }
   const modelId = typeof parsed.modelId === "string" ? parsed.modelId : "";
@@ -259,76 +267,92 @@ function applyChange(
   rejected: ChangeRejection[],
   strip: boolean,
   shown = key,
+  inherit = false,
   wrote: { n: number } = { n: 0 },
+  source: RejectionSource = "this-round",
 ): SearchGenes {
   if (isDangerousKey(key)) {
-    rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
+    reject(rejected, source, shown, `危险键 ${key} 被拒绝`);
     return search;
   }
   if (isFilePath(key)) {
-    rejected.push({ key: shown, reason: `非法键 ${shown} 不是配置路径或 part 名` });
+    reject(rejected, source, shown, `非法键 ${shown} 不是配置路径或 part 名`);
     return search;
   }
   if (isSearchPath(key)) {
-    const next = applySearchChange(search, key, value, rejected, shown);
+    if (inherit) {
+      reject(rejected, source, shown, `配置路径 ${shown} 不在白名单`);
+      noteClosed(value, shown, rejected, home, key, source);
+      return search;
+    }
+    const next = applySearchChange(search, key, value, rejected, shown, source);
     if (next !== search) wrote.n += 1;
     return next;
   }
   if (strip && (key === home || key.startsWith(`${home}.`))) {
     if (key === home) {
       if (!isRecord(value)) {
-        rejected.push({ key: shown, reason: `part 键 ${shown} 的值必须是对象` });
+        reject(rejected, source, shown, `part 键 ${shown} 的值必须是对象`);
         return search;
       }
-      notePrototype(value, rejected, shown);
+      notePrototype(value, rejected, shown, source);
       let genes = search;
       for (const child of ownKeys(value)) {
-        genes = applyChange(parts, genes, home, `${home}.${child}`, value[child], rejected, true, `${shown}.${child}`, wrote);
+        genes = applyChange(parts, genes, home, `${home}.${child}`, value[child], rejected, true, `${shown}.${child}`, inherit, wrote, source);
       }
       return genes;
     }
-    return applyChange(parts, search, home, key.slice(home.length + 1), value, rejected, false, shown, wrote);
+    return applyChange(parts, search, home, key.slice(home.length + 1), value, rejected, false, shown, inherit, wrote, source);
   }
   const foreign = foreignPart(key, home);
   if (foreign) {
-    rejected.push({ key: shown, reason: `跨 part 键 ${shown} 不能写入 ${foreign}` });
+    if (inherit) {
+      reject(rejected, source, shown, `配置路径 ${shown} 不在白名单`);
+      noteClosed(value, shown, rejected, home, key, source);
+    } else {
+      reject(rejected, source, shown, `跨 part 键 ${shown} 不能写入 ${foreign}`);
+    }
     return search;
   }
   if (isRecord(value) && (isWhitelistedConfigPath(home, key) || isWhitelistedConfigPrefix(home, key))) {
-    notePrototype(value, rejected, shown);
+    notePrototype(value, rejected, shown, source);
     const children = ownKeys(value);
     if (children.length === 0) {
-      rejected.push({ key: shown, reason: `配置路径 ${shown} 是空对象` });
+      reject(rejected, source, shown, `配置路径 ${shown} 是空对象`);
       return search;
     }
     const mark = rejected.length;
     const before = wrote.n;
     let genes = search;
     for (const child of children) {
-      genes = applyChange(parts, genes, home, `${key}.${child}`, value[child], rejected, false, `${shown}.${child}`, wrote);
+      genes = applyChange(parts, genes, home, `${key}.${child}`, value[child], rejected, false, `${shown}.${child}`, inherit, wrote, source);
     }
     if (wrote.n === before && rejected.length === mark) {
-      rejected.push({ key: shown, reason: `配置路径 ${shown} 的叶子全部被拒绝` });
+      reject(rejected, source, shown, `配置路径 ${shown} 的叶子全部被拒绝`);
     }
     return genes;
   }
   if (isWhitelistedConfigPath(home, key)) {
-    const cleaned = sanitizeValue(value, shown, rejected, home, key);
+    if (Array.isArray(value) && value.length === 0) {
+      reject(rejected, source, shown, `配置路径 ${shown} 是空数组`);
+      return search;
+    }
+    const cleaned = sanitizeValue(value, shown, rejected, home, key, source);
     if (!cleaned.ok) return search;
     if (Array.isArray(value) && value.length > 0 && Array.isArray(cleaned.value) && cleaned.value.length === 0) {
       return search;
     }
     const placed = assignPath(parts[home], key, cleaned.value);
     if (!placed.ok) {
-      rejected.push({ key: shown, reason: placed.reason });
+      reject(rejected, source, shown, placed.reason);
       return search;
     }
     parts[home] = placed.value;
     wrote.n += 1;
     return search;
   }
-  rejected.push({ key: shown, reason: `配置路径 ${shown} 不在白名单` });
-  noteClosed(value, shown, rejected, home, key);
+  reject(rejected, source, shown, `配置路径 ${shown} 不在白名单`);
+  noteClosed(value, shown, rejected, home, key, source);
   return search;
 }
 
@@ -364,26 +388,27 @@ function applySearchChange(
   value: unknown,
   rejected: ChangeRejection[],
   shown = key,
+  source: RejectionSource = "this-round",
 ): SearchGenes {
   if (key === "search") {
     if (!isRecord(value)) {
-      rejected.push({ key: shown, reason: "search 的值必须是对象" });
+      reject(rejected, source, shown, "search 的值必须是对象");
       return search;
     }
-    notePrototype(value, rejected, shown);
+    notePrototype(value, rejected, shown, source);
     let next = search;
     for (const child of ownKeys(value)) {
-      next = applySearchChange(next, `search.${child}`, value[child], rejected, `${shown}.${child}`);
+      next = applySearchChange(next, `search.${child}`, value[child], rejected, `${shown}.${child}`, source);
     }
     return next;
   }
   const field = key.slice("search.".length);
   if (!isSearchField(field)) {
-    rejected.push({ key: shown, reason: `search 没有参数 ${field}` });
+    reject(rejected, source, shown, `search 没有参数 ${field}`);
     return search;
   }
   if (!isValidGene(field, value)) {
-    rejected.push({ key: shown, reason: `search.${field} 不是合法整数` });
+    reject(rejected, source, shown, `search.${field} 不是合法整数`);
     return search;
   }
   return { ...search, [field]: value };
@@ -433,39 +458,48 @@ function sanitizeValue(
   rejected: ChangeRejection[],
   home?: HarnessPart,
   path?: string,
+  source: RejectionSource = "this-round",
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || typeof value !== "object") return { ok: true, value };
   if (Array.isArray(value)) {
+    if (value.length === 0) {
+      reject(rejected, source, shown, `配置路径 ${shown} 是空数组`);
+      return { ok: true, value: [] };
+    }
     const items: unknown[] = [];
     for (let index = 0; index < value.length; index += 1) {
       const item = value[index];
       const itemShown = `${shown}[${index}]`;
+      if (Array.isArray(item) && item.length === 0) {
+        reject(rejected, source, itemShown, `配置路径 ${itemShown} 是空数组`);
+        continue;
+      }
       if (isRecord(item)) {
         if (home === undefined || path === undefined) {
           items.push(item);
           continue;
         }
-        const cleaned = sanitizeObject(item, itemShown, rejected, home, path);
+        const cleaned = sanitizeObject(item, itemShown, rejected, home, path, source);
         if (!cleaned.ok) return cleaned;
         if (cleaned.kept) items.push(cleaned.value);
         continue;
       }
-      const cleaned = sanitizeValue(item, itemShown, rejected, home, path);
+      const cleaned = sanitizeValue(item, itemShown, rejected, home, path, source);
       if (!cleaned.ok) return cleaned;
-      if (Array.isArray(item) && item.length > 0 && Array.isArray(cleaned.value) && cleaned.value.length === 0) continue;
+      if (Array.isArray(item) && Array.isArray(cleaned.value) && cleaned.value.length === 0) continue;
       items.push(cleaned.value);
     }
     return { ok: true, value: items };
   }
   if (home !== undefined && path !== undefined && isRecord(value)) {
-    const cleaned = sanitizeObject(value, shown, rejected, home, path);
+    const cleaned = sanitizeObject(value, shown, rejected, home, path, source);
     if (!cleaned.ok) return cleaned;
     return { ok: true, value: cleaned.kept ? cleaned.value : {} };
   }
   if (isRecord(value)) {
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) {
-      rejected.push({ key: `${shown}.__proto__`, reason: "危险键 __proto__ 被拒绝" });
+      reject(rejected, source, `${shown}.__proto__`, "危险键 __proto__ 被拒绝");
       return { ok: false };
     }
   }
@@ -478,15 +512,16 @@ function sanitizeObject(
   rejected: ChangeRejection[],
   home: HarnessPart,
   path: string,
+  source: RejectionSource = "this-round",
 ): { readonly ok: true; readonly kept: boolean; readonly value: Record<string, unknown> } | { readonly ok: false } {
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) {
-    rejected.push({ key: `${shown}.__proto__`, reason: "危险键 __proto__ 被拒绝" });
+    reject(rejected, source, `${shown}.__proto__`, "危险键 __proto__ 被拒绝");
     return { ok: false };
   }
   const keys = ownKeys(value);
   if (keys.length === 0) {
-    rejected.push({ key: shown, reason: `配置路径 ${shown} 是空对象` });
+    reject(rejected, source, shown, `配置路径 ${shown} 是空对象`);
     return { ok: true, kept: false, value: {} };
   }
   const mark = rejected.length;
@@ -496,30 +531,34 @@ function sanitizeObject(
     const childPath = `${path}.${key}`;
     const child = (value as Record<string, unknown>)[key];
     if (isDangerousKey(key)) {
-      rejected.push({ key: childShown, reason: `危险键 ${key} 被拒绝` });
-      noteClosed(child, childShown, rejected, home, childPath);
+      reject(rejected, source, childShown, `危险键 ${key} 被拒绝`);
+      noteClosed(child, childShown, rejected, home, childPath, source);
       continue;
     }
     const legal = isWhitelistedConfigPath(home, childPath) || isWhitelistedConfigPrefix(home, childPath);
     if (!legal) {
-      rejected.push({ key: childShown, reason: `配置路径 ${childShown} 不在白名单` });
-      noteClosed(child, childShown, rejected, home, childPath);
+      reject(rejected, source, childShown, `配置路径 ${childShown} 不在白名单`);
+      noteClosed(child, childShown, rejected, home, childPath, source);
+      continue;
+    }
+    if (Array.isArray(child) && child.length === 0) {
+      reject(rejected, source, childShown, `配置路径 ${childShown} 是空数组`);
       continue;
     }
     if (isRecord(child)) {
-      const nested = sanitizeObject(child, childShown, rejected, home, childPath);
+      const nested = sanitizeObject(child, childShown, rejected, home, childPath, source);
       if (!nested.ok) return nested;
       if (nested.kept) out[key] = nested.value;
       continue;
     }
-    const cleaned = sanitizeValue(child, childShown, rejected, home, childPath);
+    const cleaned = sanitizeValue(child, childShown, rejected, home, childPath, source);
     if (!cleaned.ok) return cleaned;
-    if (Array.isArray(child) && child.length > 0 && Array.isArray(cleaned.value) && cleaned.value.length === 0) continue;
+    if (Array.isArray(child) && Array.isArray(cleaned.value) && cleaned.value.length === 0) continue;
     out[key] = cleaned.value;
   }
   const kept = ownKeys(out).length > 0;
   if (!kept && rejected.length === mark) {
-    rejected.push({ key: shown, reason: `配置路径 ${shown} 的叶子全部被拒绝` });
+    reject(rejected, source, shown, `配置路径 ${shown} 的叶子全部被拒绝`);
   }
   return { ok: true, kept, value: out };
 }
@@ -531,37 +570,41 @@ function noteClosed(
   rejected: ChangeRejection[],
   home: HarnessPart,
   path: string,
+  source: RejectionSource = "this-round",
 ): void {
   if (Array.isArray(value)) {
+    if (value.length === 0) {
+      reject(rejected, source, shown, `配置路径 ${shown} 是空数组`);
+      return;
+    }
     for (let index = 0; index < value.length; index += 1) {
-      noteClosed(value[index], `${shown}[${index}]`, rejected, home, path);
+      noteClosed(value[index], `${shown}[${index}]`, rejected, home, path, source);
     }
     return;
   }
   if (!isRecord(value)) return;
   const keys = ownKeys(value);
   if (keys.length === 0) {
-    rejected.push({ key: shown, reason: `配置路径 ${shown} 是空对象` });
+    reject(rejected, source, shown, `配置路径 ${shown} 是空对象`);
     return;
   }
   for (const key of keys) {
     const childShown = `${shown}.${key}`;
     const childPath = `${path}.${key}`;
     const child = value[key];
-    if (isDangerousKey(key)) rejected.push({ key: childShown, reason: `危险键 ${key} 被拒绝` });
+    if (isDangerousKey(key)) reject(rejected, source, childShown, `危险键 ${key} 被拒绝`);
     else if (!isWhitelistedConfigPath(home, childPath) && !isWhitelistedConfigPrefix(home, childPath)) {
-      rejected.push({ key: childShown, reason: `配置路径 ${childShown} 不在白名单` });
+      reject(rejected, source, childShown, `配置路径 ${childShown} 不在白名单`);
     }
-    noteClosed(child, childShown, rejected, home, childPath);
+    noteClosed(child, childShown, rejected, home, childPath, source);
   }
 }
 
-function notePrototype(value: object, rejected: ChangeRejection[], prefix = ""): void {
+function notePrototype(value: object, rejected: ChangeRejection[], prefix = "", source: RejectionSource = "this-round"): void {
   const proto = Object.getPrototypeOf(value);
   if (proto === Object.prototype || proto === null) return;
   const key = prefix === "" ? "__proto__" : `${prefix}.__proto__`;
-  if (rejected.some((item) => item.key === key)) return;
-  rejected.push({ key, reason: "危险键 __proto__ 被拒绝" });
+  reject(rejected, source, key, "危险键 __proto__ 被拒绝");
 }
 
 function ownKeys(value: object): string[] {

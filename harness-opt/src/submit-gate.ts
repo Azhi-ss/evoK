@@ -13,6 +13,7 @@ import { probePlaygroundDryRun } from "./playground-dry-run";
 import { Orchestrator, type SubmitGateRequest, type SubmitGateResult } from "./orchestrator";
 import { GreedySelector } from "./modules/selector";
 import { readThresholds, readTokensSpent } from "./thresholds";
+import { DEFAULT_MODEL_ALLOWLIST } from "./types";
 
 /**
  * `harnessopt_submit_gate` entry. Reads the run directory, then calls
@@ -76,10 +77,28 @@ export async function runDirectorySubmitGate(root: string): Promise<SubmitGateRe
 function readModelId(root: string, configPath: string): string {
   try {
     const parsed = JSON.parse(readHostFile(root, configPath)) as { modelId?: unknown };
-    return typeof parsed.modelId === "string" ? parsed.modelId : "";
+    if (typeof parsed.modelId !== "string") return "";
+    const modelId = parsed.modelId.trim();
+    if (!isContestModelFamily(modelId)) return "";
+    return modelId;
   } catch {
     return "";
   }
+}
+
+/** DeepSeek / GLM / MiMo / MiniMax / Qwen. A candidate id outside this list is not adopted. */
+function isContestModelFamily(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  if (lower === "") return false;
+  return DEFAULT_MODEL_ALLOWLIST.some((family) => {
+    return lower === family
+      || lower.startsWith(`${family}-`)
+      || lower.startsWith(`${family}.`)
+      || lower.startsWith(`${family}/`)
+      || lower.includes(`/${family}-`)
+      || lower.includes(`/${family}.`)
+      || lower.includes(`/${family}/`);
+  });
 }
 
 function tracePackComplete(root: string): boolean {
