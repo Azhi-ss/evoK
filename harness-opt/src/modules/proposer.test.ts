@@ -205,6 +205,37 @@ describe("proposer boundary", () => {
     expect(stored).toContain("fmt");
   });
 
+  test("notes and candidateId inside an object value are rejected and a legal nested key stays", () => {
+    const next = applyPatch(base, {
+      part: "toolchain",
+      motivation: "keep the check id and drop the nested scratch keys",
+      expectedFailureClass: "tool-misuse",
+      changes: {
+        tools: { check: { id: "fmt", notes: "scratch", candidateId: "c9" } },
+        checker: { notes: "also", candidateId: "c8" },
+        "tools.check.id": { notes: "deeper", candidateId: "c7" },
+      },
+    });
+    expect(next.config.parts.toolchain).toEqual({ tools: { check: { id: "fmt" } } });
+    expect(next.rejected.map((item) => item.key)).toEqual([
+      "tools.check.notes",
+      "tools.check.candidateId",
+      "checker.notes",
+      "checker.candidateId",
+      "tools.check.id.notes",
+      "tools.check.id.candidateId",
+    ]);
+    expect(next.rejected.every((item) => item.reason.includes("不在白名单"))).toBe(true);
+    const stored = JSON.stringify(next.config);
+    expect(stored).not.toContain("scratch");
+    expect(stored).not.toContain("also");
+    expect(stored).not.toContain("deeper");
+    expect(stored).not.toContain("c9");
+    expect(stored).not.toContain("c8");
+    expect(stored).not.toContain("c7");
+    expect(stored).toContain("fmt");
+  });
+
   test("parse keeps a top-level search object and dotted search genes", () => {
     const raw = {
       part: "skills",

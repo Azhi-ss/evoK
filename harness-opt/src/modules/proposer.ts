@@ -93,6 +93,9 @@ export function buildInnovatorInput(input: InnovatorInput & { readonly heldOut?:
  *   `search.samples`). Anything else, including `foo.bar`, top-level `notes`,
  *   and `candidateId`, is recorded and skipped. A segment named `id` is not
  *   a reason by itself.
+ * - An object value is not stored as a blob. Each nested key continues the
+ *   path and is checked the same way, at every depth. `notes` or
+ *   `candidateId` inside a leaf object is rejected and left out.
  * - `__proto__`, `constructor`, and `prototype` are recorded and skipped.
  *   They do not throw.
  * - One rejection does not stop the round.
@@ -222,8 +225,16 @@ function applyChange(
     rejected.push({ key: shown, reason: `跨 part 键 ${shown} 不能写入 ${foreign}` });
     return search;
   }
+  if (isRecord(value) && (isWhitelistedConfigPath(home, key) || isWhitelistedConfigPrefix(home, key))) {
+    notePrototype(value, rejected, shown);
+    let genes = search;
+    for (const child of ownKeys(value)) {
+      genes = applyChange(parts, genes, home, `${key}.${child}`, value[child], rejected, false, `${shown}.${child}`);
+    }
+    return genes;
+  }
   if (isWhitelistedConfigPath(home, key)) {
-    const cleaned = sanitizeValue(value, shown, rejected);
+    const cleaned = sanitizeValue(value, shown, rejected, home, key);
     if (!cleaned.ok) return search;
     const placed = assignPath(parts[home], key, cleaned.value);
     if (!placed.ok) {
@@ -232,14 +243,6 @@ function applyChange(
     }
     parts[home] = placed.value;
     return search;
-  }
-  if (isRecord(value) && isWhitelistedConfigPrefix(home, key)) {
-    notePrototype(value, rejected, shown);
-    let genes = search;
-    for (const child of ownKeys(value)) {
-      genes = applyChange(parts, genes, home, `${key}.${child}`, value[child], rejected, false, `${shown}.${child}`);
-    }
-    return genes;
   }
   rejected.push({ key: shown, reason: `配置路径 ${shown} 不在白名单` });
   return search;
@@ -344,12 +347,14 @@ function sanitizeValue(
   value: unknown,
   shown: string,
   rejected: ChangeRejection[],
+  home?: HarnessPart,
+  path?: string,
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || typeof value !== "object") return { ok: true, value };
   if (Array.isArray(value)) {
     const items: unknown[] = [];
     for (let index = 0; index < value.length; index += 1) {
-      const cleaned = sanitizeValue(value[index], `${shown}[${index}]`, rejected);
+      const cleaned = sanitizeValue(value[index], `${shown}[${index}]`, rejected, home, path);
       if (!cleaned.ok) return cleaned;
       items.push(cleaned.value);
     }
@@ -363,11 +368,16 @@ function sanitizeValue(
   const out: Record<string, unknown> = {};
   for (const key of ownKeys(value)) {
     const childShown = `${shown}.${key}`;
+    const childPath = path === undefined ? key : `${path}.${key}`;
     if (isDangerousKey(key)) {
       rejected.push({ key: childShown, reason: `危险键 ${key} 被拒绝` });
       continue;
     }
-    const cleaned = sanitizeValue((value as Record<string, unknown>)[key], childShown, rejected);
+    if (home !== undefined && !isWhitelistedConfigPath(home, childPath) && !isWhitelistedConfigPrefix(home, childPath)) {
+      rejected.push({ key: childShown, reason: `配置路径 ${childShown} 不在白名单` });
+      continue;
+    }
+    const cleaned = sanitizeValue((value as Record<string, unknown>)[key], childShown, rejected, home, childPath);
     if (!cleaned.ok) return cleaned;
     out[key] = cleaned.value;
   }
