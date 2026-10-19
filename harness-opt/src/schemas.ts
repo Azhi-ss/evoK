@@ -1,4 +1,4 @@
-import { isAttributionLabel, type GapReport, type HarnessPart, isHarnessPart, type PatchProposal } from "./types";
+import { isAttributionLabel, type GapReport } from "./types";
 
 /** Gap Finder output. `gaps.md` is this object rendered with the same fields. */
 export function parseGapReport(value: unknown): GapReport {
@@ -33,28 +33,7 @@ export function renderGapsMarkdown(report: GapReport): string {
   return `${lines.join("\n")}\n`;
 }
 
-/** Innovator output. Fields are the part, the motivation, and the failure class it expects to fix. */
-export function parsePatchFile(value: unknown): PatchProposal & { readonly summary: string } {
-  if (!isRecord(value)) throw new Error("patch.json must be an object");
-  const part = value.part;
-  const motivation = value.motivation;
-  const expectedFailureClass = value.expectedFailureClass;
-  const summary = value.summary;
-  if (typeof part !== "string" || !isHarnessPart(part)) throw new Error("patch.json part is not a harness part");
-  if (typeof motivation !== "string" || motivation.trim() === "") throw new Error("patch.json motivation is missing");
-  if (typeof expectedFailureClass !== "string" || !isAttributionLabel(expectedFailureClass)) {
-    throw new Error("patch.json expectedFailureClass is not an attribution label");
-  }
-  if (typeof summary !== "string" || summary.trim() === "") throw new Error("patch.json summary is missing");
-  const patch: PatchProposal & { readonly summary: string } = {
-    part: part as HarnessPart,
-    motivation,
-    expectedFailureClass,
-    summary,
-    changes: isRecord(value.changes) ? value.changes : {},
-  };
-  return patch;
-}
+export { parsePatchFile } from "./modules/proposer";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

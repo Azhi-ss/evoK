@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyParts, type HarnessConfig } from "../types";
+import { parsePatchFile } from "../schemas";
 import { applyPatch, assertNoHeldOutLeak, buildInnovatorInput, stripHeldOutFields } from "./proposer";
 import { loadTaskBank, splitBank } from "./probe";
 
@@ -92,21 +93,48 @@ describe("proposer boundary", () => {
     expect(dottedFile.config.parts.skills).toEqual({ trigger: "format" });
   });
 
-  test("a part-prefixed key is written once onto that part", () => {
+  test("a repeated part prefix is stripped once", () => {
     const next = applyPatch(base, {
-      part: "agent-loop",
+      part: "skills",
       motivation: "weight the skill selector",
       expectedFailureClass: "skill-not-triggered",
       changes: {
         "skills.selector.weight": 0.2,
         "skills.skills.selector.bias": 0.1,
-        skills: { trigger: "format" },
       },
     });
     expect(next.rejected).toEqual([]);
-    expect(next.config.parts.skills).toEqual({ selector: { weight: 0.2, bias: 0.1 }, trigger: "format" });
-    expect(next.config.parts.skills).not.toHaveProperty("skills");
+    expect(next.config.parts.skills).toEqual({
+      selector: { weight: 0.2 },
+      skills: { selector: { bias: 0.1 } },
+    });
     expect(next.config.parts["agent-loop"]).toEqual({});
+  });
+
+  test("a change cannot write into another part", () => {
+    const parent: HarnessConfig = {
+      ...base,
+      parts: {
+        ...emptyParts(),
+        skills: { pack: "base" },
+        toolchain: { checker: "keep" },
+      },
+    };
+    const next = applyPatch(parent, {
+      part: "skills",
+      motivation: "keep the checker on its own part",
+      expectedFailureClass: "tool-misuse",
+      changes: {
+        trigger: "format",
+        "toolchain.checker": "strict",
+        "agent-loop": { maxSteps: 1 },
+      },
+    });
+    expect(next.config.parts.skills).toEqual({ pack: "base", trigger: "format" });
+    expect(next.config.parts.toolchain).toEqual({ checker: "keep" });
+    expect(next.config.parts["agent-loop"]).toEqual({});
+    expect(next.rejected.map((item) => item.key)).toEqual(["toolchain.checker", "agent-loop"]);
+    expect(next.rejected.every((item) => item.reason.includes("跨 part"))).toBe(true);
   });
 
   test("search parameters land on the top-level search genes", () => {
@@ -128,22 +156,69 @@ describe("proposer boundary", () => {
     expect(next.rejected[0]?.reason).toContain("temperature");
   });
 
-  test("a metadata key is refused and stays out of the config", () => {
+  test("metadata keys are refused at the head, the middle, and inside a value", () => {
     const next = applyPatch(base, {
       part: "skills",
       motivation: "keep the candidate id out of the config",
       expectedFailureClass: "format-invalid",
-      changes: { candidateId: "c9", modelId: "other-model", trigger: "format" },
+      changes: {
+        candidateId: "c9",
+        modelId: "other-model",
+        "selector.modelId.weight": 0.4,
+        selector: { weight: 0.2, id: "hidden" },
+        trigger: "format",
+      },
     });
     expect(next.config.modelId).toBe(base.modelId);
     expect(next.config.id).toBe("base+skills");
-    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).toEqual({ trigger: "format", selector: { weight: 0.2 } });
     expect(JSON.stringify(next.config)).not.toContain("c9");
     expect(JSON.stringify(next.config)).not.toContain("other-model");
+    expect(JSON.stringify(next.config)).not.toContain("hidden");
     expect(next.rejected.map((item) => item.reason)).toEqual([
       "元数据键 candidateId 不能写入配置",
       "元数据键 modelId 不能写入配置",
+      "元数据键 selector.modelId.weight 不能写入配置",
+      "元数据键 selector.id 不能写入配置",
     ]);
+  });
+
+  test("parse keeps a top-level search object and dotted search genes", () => {
+    const raw = {
+      part: "skills",
+      motivation: "sample more than once",
+      expectedFailureClass: "timeout",
+      summary: "raise samples",
+      search: { samples: 4, selfChecks: 1 },
+      "search.retries": 2,
+      "selector.weight": 0.3,
+      changes: { trigger: "format" },
+      rejected: [{ key: "old", reason: "stale" }],
+    };
+    const parsed = parsePatchFile(raw);
+    expect(parsed.search).toEqual({ samples: 4, selfChecks: 1, retries: 2 });
+    expect(parsed.changes).toEqual({ trigger: "format", "selector.weight": 0.3 });
+    const again = parsePatchFile(JSON.parse(JSON.stringify(parsed)));
+    expect(again.search).toEqual(parsed.search);
+    expect(again.changes).toEqual(parsed.changes);
+    const applied = applyPatch(base, parsed);
+    expect(applied.rejected).toEqual([]);
+    expect(applied.config.search).toEqual({ samples: 4, selfChecks: 1, retries: 2 });
+    expect(applied.config.parts.skills).toEqual({ trigger: "format", selector: { weight: 0.3 } });
+
+    const invalid = parsePatchFile({
+      part: "skills",
+      motivation: "sample more than once",
+      expectedFailureClass: "timeout",
+      summary: "raise samples",
+      search: { samples: 0, retries: 2 },
+      changes: { trigger: "format" },
+    });
+    const refused = applyPatch(base, invalid);
+    expect(invalid.search).toEqual({ retries: 2 });
+    expect(refused.config.search).toEqual({ samples: 1, selfChecks: 0, retries: 2 });
+    expect(refused.config.parts.skills).toEqual({ trigger: "format" });
+    expect(refused.rejected.map((item) => item.key)).toEqual(["search.samples"]);
   });
 
   test("a top-level __proto__ key is an explicit rejection", () => {

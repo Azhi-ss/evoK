@@ -76,7 +76,6 @@ const GAP_SCHEMA = {
 
 const PATCH_SCHEMA = {
   type: "object",
-  additionalProperties: false,
   required: ["part", "motivation", "expectedFailureClass", "summary"],
   properties: {
     part: { type: "string", enum: [...HARNESS_PARTS] },
@@ -84,6 +83,7 @@ const PATCH_SCHEMA = {
     expectedFailureClass: { type: "string", enum: [...ATTRIBUTION_LABELS] },
     summary: { type: "string" },
     changes: { type: "object" },
+    search: { type: "object" },
   },
 };
 

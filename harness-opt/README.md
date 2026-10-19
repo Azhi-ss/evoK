@@ -91,7 +91,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 ## 角色守卫
 
-子代理的 read、write、edit、grep、find、ls、bash 在执行前过合约。`structured_output` 以及其它不带文件路径参数的委派框架工具直接放行，用来把角色结果交回父会话。
+子代理的 read、write、edit、grep、find、ls、bash 在执行前过合约。`structured_output`、`contact_supervisor` 这些框架工具在白名单里，按名字放行，用来把角色结果交回父会话。不在这份白名单里的工具默认拒绝。文件工具上，参数名不在路径清单或载荷清单里的，也默认拒绝。
 
 守卫在 Pi 打开文件之前解析符号链接。Pi 自带的 read/write 不接受 `O_NOFOLLOW`，守卫也拿不到它们随后打开的那个 fd，所以检查和真正打开之间仍有一段窗口，链接可能在这中间被换掉。这是已知限制。
 
@@ -99,7 +99,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 `review.json` 里的 `reason` 是编排器用的判定理由。reviewer 模型自己写的原文另存在 `modelReason`。
 
-innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。`patch.changes` 的合法键只有两类：配置路径（`selector.weight`、`trigger`）按点号展开到 `part`；part 名且值为对象时整组写到该 part。带 part 前缀的键只写一层。`search.samples` 这类参数改顶层 search，不进 part。文件路径、`candidateId` 这类元数据、以及 `__proto__` 记入 `patch.json` 的 `rejected` 并跳过，propose 继续走到 gate。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用同一条补丁链路把补丁叠上去：`parsePatchFile` 保留顶层 `search`、`search.samples` 和 `changes`，`applyPatch` 再归一化、路由、校验。改动只写进 `patch.part`。带这个 part 前缀的键只剥一层，`skills.skills.x` 不会再剥成 `x`。指向别的 part 的键记入 `rejected`，不跨 part 写入。`search.samples` 这类参数改顶层 search。`candidateId` 这类元数据键在路径开头、中段和对象值里都拒入配。文件路径和 `__proto__` 同样记入 `patch.json` 的 `rejected`（带原因）并跳过，propose 继续走到 gate。父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
 
 ## 证据门
 

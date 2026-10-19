@@ -325,12 +325,6 @@ describe("subagent role guard", () => {
         input: { value: { gaps: [] } },
       })).not.toThrow();
     }
-    expect(() => guardSubagentToolCall({
-      root,
-      prompt: prompt("gap-finder"),
-      tool: "clock",
-      input: { now: 1 },
-    })).not.toThrow();
     expect(contractEvents(root)).toHaveLength(0);
     expect(FILE_IO_TOOLS).toContain("read");
     expect(FILE_IO_TOOLS).toContain("write");
@@ -394,6 +388,35 @@ describe("subagent role guard", () => {
     expect(events.every((event) => event.kind === "contract")).toBe(true);
     expect(JSON.stringify(events)).toContain("/etc/hostname");
     expect(JSON.stringify(events)).toContain("tests/hidden.ts");
+  });
+
+  test("an argument key outside the list is refused and framework tools stay allowed", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/t1.json", note: "side channel" },
+    })).toThrow(/argument note is not allowed/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "clock",
+      input: { now: 1 },
+    })).toThrow(/argument now is not allowed/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "contact_supervisor",
+      input: { message: "blocked", extra: "kept", location: "/etc/hostname" },
+    })).not.toThrow();
+    const events = contractEvents(root);
+    expect(events).toHaveLength(2);
+    expect(events.every((event) => event.kind === "contract")).toBe(true);
+    expect(events.some((event) => event.tool === "contact_supervisor")).toBe(false);
+    expect(existsSync(join(root, "traces", "t1.json"))).toBe(true);
   });
 
   test("location is contained and contact_supervisor stays on the whitelist", () => {

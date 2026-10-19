@@ -57,6 +57,23 @@ const PATH_ARGUMENT_KEYS = new Set([
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const COMMAND_TOOLS = new Set(["bash", "powershell"]);
+/** Non-path arguments a file tool may carry. Anything else is refused. */
+const PAYLOAD_ARGUMENT_KEYS = new Set([
+  "content",
+  "pattern",
+  "query",
+  "glob",
+  "offset",
+  "limit",
+  "encoding",
+  "oldText",
+  "newText",
+  "old_string",
+  "new_string",
+  "edits",
+  "replace_all",
+  "timeout",
+]);
 const FORBIDDEN_SEGMENT = /^(tests|solution|private)(\..+)?$/i;
 
 export interface SubagentToolCall {
@@ -71,13 +88,23 @@ export function activeAgentName(prompt: string): string | null {
   return match?.[1] ?? null;
 }
 
-/** Refuse a filesystem call, record it, and throw. Non-file tools return without a log line. */
+/**
+ * Refuse a filesystem call, record it, and throw.
+ * Framework tools are an explicit whitelist. Every other tool is checked.
+ * An argument name that is not a path key and not a payload key is refused.
+ */
 export function guardSubagentToolCall(call: SubagentToolCall): void {
-  if (isUngatedTool(call.tool, call.input)) return;
+  if (FRAMEWORK_TOOL_SET.has(call.tool)) return;
   const roleName = activeAgentName(call.prompt);
   const loggedPath = clip(pathForLog(call.tool, call.input));
   try {
     const role = requireSubagentRole(roleName, call.tool);
+    const unknown = unknownArgument(call.input);
+    if (unknown) throw new Error(`argument ${unknown} is not allowed`);
+    if (!FILE_IO_TOOL_SET.has(call.tool)) {
+      for (const raw of collectPathValues(call.input)) canonicalRelative(call.root, role, raw);
+      throw new Error(`tool ${call.tool} is not allowed`);
+    }
     if (COMMAND_TOOLS.has(call.tool)) {
       guardCommand(call.root, role, call.tool, call.input);
       return;
@@ -106,15 +133,12 @@ export function guardSubagentToolCall(call: SubagentToolCall): void {
   }
 }
 
-function isUngatedTool(tool: string, input: Record<string, unknown>): boolean {
-  if (FRAMEWORK_TOOL_SET.has(tool)) return true;
-  if (FILE_IO_TOOL_SET.has(tool)) return false;
-  return !hasFilePathArgument(input);
-}
-
-function hasFilePathArgument(input: Record<string, unknown>): boolean {
-  return collectPathValues(input).length > 0
-    || (typeof input.command === "string" && input.command.trim() !== "");
+function unknownArgument(input: Record<string, unknown>): string | null {
+  for (const key of Object.keys(input)) {
+    if (PATH_ARGUMENT_KEYS.has(key) || PAYLOAD_ARGUMENT_KEYS.has(key)) continue;
+    return key;
+  }
+  return null;
 }
 
 function requireSubagentRole(roleName: string | null, tool: string): SubagentRole {

@@ -71,6 +71,67 @@ export function buildInnovatorInput(input: InnovatorInput & { readonly heldOut?:
   return safe;
 }
 
+/**
+ * Patch pipeline. Parse, normalize, route, and check are one pass.
+ *
+ * patch.json carries the four required fields, an optional top-level `search`
+ * object, optional top-level `search.samples` / `search.selfChecks` /
+ * `search.retries`, and `changes`. `parsePatchFile` keeps every one of those.
+ * A later `rejected` array is ignored on the way back in.
+ *
+ * Each change is judged once, against `patch.part` only:
+ * - A leading part prefix is removed one time. `skills.selector.weight` becomes
+ *   `selector.weight` on skills. `skills.skills.x` becomes `skills.x` on skills
+ *   and stays nested. The second `skills` is not stripped.
+ * - A key whose first part name is a different part is a cross-part write and
+ *   is rejected. Nothing is written to that other part.
+ * - `search` and `search.samples` / `selfChecks` / `retries` update the
+ *   top-level search genes.
+ * - `candidateId`, `modelId`, `id`, and the other metadata names are rejected
+ *   the same way at the head of a path, in a middle segment, and inside an
+ *   object value. The key is recorded and left out of the config.
+ * - `__proto__`, `constructor`, and `prototype` are recorded and skipped.
+ *   They do not throw.
+ * - Any other illegal key is recorded and skipped. One rejection does not
+ *   stop the round.
+ */
+const PATCH_DOCUMENT_KEYS = new Set(["part", "motivation", "expectedFailureClass", "summary", "changes", "rejected"]);
+const SEARCH_FIELDS = ["samples", "selfChecks", "retries"] as const;
+type SearchField = (typeof SEARCH_FIELDS)[number];
+
+export function parsePatchFile(value: unknown): PatchProposal & { readonly summary: string } {
+  if (!isRecord(value)) throw new Error("patch.json must be an object");
+  const part = value.part;
+  const motivation = value.motivation;
+  const expectedFailureClass = value.expectedFailureClass;
+  const summary = value.summary;
+  if (typeof part !== "string" || !isHarnessPart(part)) throw new Error("patch.json part is not a harness part");
+  if (typeof motivation !== "string" || motivation.trim() === "") throw new Error("patch.json motivation is missing");
+  if (typeof expectedFailureClass !== "string" || !isAttributionLabel(expectedFailureClass)) {
+    throw new Error("patch.json expectedFailureClass is not an attribution label");
+  }
+  if (typeof summary !== "string" || summary.trim() === "") throw new Error("patch.json summary is missing");
+  const changes = isRecord(value.changes) ? copyOwn(value.changes) : {};
+  let search: Partial<SearchGenes> | undefined;
+  for (const key of ownKeys(value)) {
+    if (PATCH_DOCUMENT_KEYS.has(key)) continue;
+    if (key === "search" || isDottedSearchKey(key)) {
+      search = takeSearch(search, key, value[key], changes);
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(changes, key)) defineOwn(changes, key, value[key]);
+  }
+  const patch: PatchProposal & { readonly summary: string } = {
+    part,
+    motivation,
+    expectedFailureClass,
+    summary,
+    changes,
+    ...(search ? { search } : {}),
+  };
+  return patch;
+}
+
 export function validatePatch(patch: PatchProposal): void {
   if (!isHarnessPart(patch.part)) throw new Error(`patch part is not a harness part: ${patch.part}`);
   if (typeof patch.motivation !== "string" || patch.motivation.trim() === "") {
@@ -82,13 +143,6 @@ export function validatePatch(patch: PatchProposal): void {
   assertNoHeldOutLeak(patch, "patch");
 }
 
-/**
- * Apply one patch.
- * Legal `changes` keys are a config path (`selector.weight`, `trigger`) or a
- * part name whose value is an object. `search` and `search.samples` update the
- * top-level search genes. Anything else is listed in `rejected` and skipped.
- * A dangerous key such as `__proto__` is an explicit rejection, not a silent drop.
- */
 export function applyPatch(
   base: HarnessConfig,
   patch: PatchProposal,
@@ -98,59 +152,23 @@ export function applyPatch(
   notePrototype(patch.changes, rejected);
   let search = base.search;
   const parts: { -readonly [K in keyof HarnessConfig["parts"]]: Record<string, unknown> } = { ...base.parts };
+  const home = patch.part;
   for (const key of ownKeys(patch.changes)) {
-    const value = (patch.changes as Record<string, unknown>)[key];
-    if (isDangerousKey(key)) {
-      rejected.push({ key, reason: `危险键 ${key} 被拒绝` });
-      continue;
-    }
-    if (isMetadataKey(key)) {
-      rejected.push({ key, reason: `元数据键 ${key} 不能写入配置` });
-      continue;
-    }
-    if (isSearchPath(key)) {
-      search = applySearchChange(search, key, value, rejected);
-      continue;
-    }
-    const prefixed = partPrefix(key);
-    if (prefixed) {
-      if (prefixed.rest === "") {
-        if (!isRecord(value)) {
-          rejected.push({ key, reason: `part 键 ${key} 的值必须是对象` });
-          continue;
-        }
-        notePrototype(value, rejected, key);
-        const grouped = applyGroup(parts[prefixed.part], value, prefixed.part, rejected, key, search);
-        parts[prefixed.part] = grouped.part;
-        search = grouped.search;
-        continue;
+    search = applyChange(parts, search, home, key, (patch.changes as Record<string, unknown>)[key], rejected, true);
+  }
+  if (patch.search) {
+    for (const field of SEARCH_FIELDS) {
+      if (patch.search[field] !== undefined) {
+        search = applySearchChange(search, `search.${field}`, patch.search[field], rejected);
       }
-      const rest = stripPartPrefix(prefixed.rest, prefixed.part);
-      if (isSearchPath(rest)) {
-        search = applySearchChange(search, rest, value, rejected, key);
-        continue;
-      }
-      const placed = placeConfig(parts[prefixed.part], rest, value, key);
-      if (!placed.ok) {
-        rejected.push({ key, reason: placed.reason });
-        continue;
-      }
-      parts[prefixed.part] = placed.value;
-      continue;
     }
-    const placed = placeConfig(parts[patch.part], key, value, key);
-    if (!placed.ok) {
-      rejected.push({ key, reason: placed.reason });
-      continue;
-    }
-    parts[patch.part] = placed.value;
   }
   return {
     config: {
-      id: `${base.id}+${patch.part}`,
+      id: `${base.id}+${home}`,
       modelId: base.modelId,
       parts,
-      search: mergeGenes(search, patch.search),
+      search,
     },
     rejected,
   };
@@ -176,44 +194,88 @@ const FILE_EXTENSION = new Set([
 ]);
 const IDENT = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 
-function applyGroup(
-  base: Readonly<Record<string, unknown>>,
-  group: Readonly<Record<string, unknown>>,
-  part: HarnessPart,
-  rejected: ChangeRejection[],
-  prefix: string,
+function applyChange(
+  parts: { -readonly [K in keyof HarnessConfig["parts"]]: Record<string, unknown> },
   search: SearchGenes,
-): { readonly part: Record<string, unknown>; readonly search: SearchGenes } {
-  let out: Record<string, unknown> = { ...base };
-  let genes = search;
-  for (const key of ownKeys(group)) {
-    const shown = `${prefix}.${key}`;
-    const value = group[key];
-    if (isDangerousKey(key)) {
-      rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
-      continue;
-    }
-    if (isMetadataKey(key)) {
-      rejected.push({ key: shown, reason: `元数据键 ${key} 不能写入配置` });
-      continue;
-    }
-    if (isSearchPath(key)) {
-      genes = applySearchChange(genes, key, value, rejected, shown);
-      continue;
-    }
-    const rest = stripPartPrefix(key, part);
-    if (isSearchPath(rest)) {
-      genes = applySearchChange(genes, rest, value, rejected, shown);
-      continue;
-    }
-    const placed = placeConfig(out, rest, value, shown);
-    if (!placed.ok) {
-      rejected.push({ key: shown, reason: placed.reason });
-      continue;
-    }
-    out = placed.value;
+  home: HarnessPart,
+  key: string,
+  value: unknown,
+  rejected: ChangeRejection[],
+  strip: boolean,
+  shown = key,
+): SearchGenes {
+  if (isDangerousKey(key)) {
+    rejected.push({ key: shown, reason: `危险键 ${key} 被拒绝` });
+    return search;
   }
-  return { part: out, search: genes };
+  if (metadataSegment(key)) {
+    rejected.push({ key: shown, reason: `元数据键 ${shown} 不能写入配置` });
+    return search;
+  }
+  if (isFilePath(key)) {
+    rejected.push({ key: shown, reason: `非法键 ${shown} 不是配置路径或 part 名` });
+    return search;
+  }
+  if (isSearchPath(key)) return applySearchChange(search, key, value, rejected, shown);
+  if (strip && (key === home || key.startsWith(`${home}.`))) {
+    if (key === home) {
+      if (!isRecord(value)) {
+        rejected.push({ key: shown, reason: `part 键 ${shown} 的值必须是对象` });
+        return search;
+      }
+      notePrototype(value, rejected, shown);
+      let genes = search;
+      for (const child of ownKeys(value)) {
+        genes = applyChange(parts, genes, home, `${home}.${child}`, value[child], rejected, true, `${shown}.${child}`);
+      }
+      return genes;
+    }
+    return applyChange(parts, search, home, key.slice(home.length + 1), value, rejected, false, shown);
+  }
+  const foreign = foreignPart(key, home);
+  if (foreign) {
+    rejected.push({ key: shown, reason: `跨 part 键 ${shown} 不能写入 ${foreign}` });
+    return search;
+  }
+  if (!isConfigPath(key)) {
+    rejected.push({ key: shown, reason: `非法键 ${shown} 不是配置路径或 part 名` });
+    return search;
+  }
+  const cleaned = sanitizeValue(value, shown, rejected);
+  if (!cleaned.ok) return search;
+  const placed = assignPath(parts[home], key, cleaned.value);
+  if (!placed.ok) {
+    rejected.push({ key: shown, reason: placed.reason });
+    return search;
+  }
+  parts[home] = placed.value;
+  return search;
+}
+
+function takeSearch(
+  search: Partial<SearchGenes> | undefined,
+  key: string,
+  value: unknown,
+  changes: Record<string, unknown>,
+): Partial<SearchGenes> | undefined {
+  if (key === "search") {
+    if (!isRecord(value)) {
+      defineOwn(changes, key, value);
+      return search;
+    }
+    let next = search;
+    const bad: Record<string, unknown> = {};
+    for (const child of ownKeys(value)) {
+      if (isSearchField(child) && isValidGene(child, value[child])) next = { ...next, [child]: value[child] };
+      else defineOwn(bad, child, value[child]);
+    }
+    if (ownKeys(bad).length > 0) defineOwn(changes, "search", bad);
+    return next;
+  }
+  const field = key.slice("search.".length);
+  if (isSearchField(field) && isValidGene(field, value)) return { ...search, [field]: value };
+  defineOwn(changes, key, value);
+  return search;
 }
 
 function applySearchChange(
@@ -236,87 +298,100 @@ function applySearchChange(
     return next;
   }
   const field = key.slice("search.".length);
-  if (field !== "samples" && field !== "selfChecks" && field !== "retries") {
+  if (!isSearchField(field)) {
     rejected.push({ key: shown, reason: `search 没有参数 ${field}` });
     return search;
   }
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || (field === "samples" && value < 1)) {
+  if (!isValidGene(field, value)) {
     rejected.push({ key: shown, reason: `search.${field} 不是合法整数` });
     return search;
   }
   return { ...search, [field]: value };
 }
 
+function isSearchField(field: string): field is SearchField {
+  return (SEARCH_FIELDS as readonly string[]).includes(field);
+}
+
+function isValidGene(field: SearchField, value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && (field !== "samples" || value >= 1);
+}
+
+function isDottedSearchKey(key: string): boolean {
+  return key.startsWith("search.") && !key.includes("/") && !key.includes("\\");
+}
+
 function isSearchPath(key: string): boolean {
   if (key === "search") return true;
-  if (!key.startsWith("search.") || key.includes("/") || key.includes("\\")) return false;
+  if (!isDottedSearchKey(key)) return false;
   const last = key.split(".").at(-1) ?? "";
   return !FILE_EXTENSION.has(last);
 }
 
-function placeConfig(
-  base: Readonly<Record<string, unknown>>,
-  key: string,
-  value: unknown,
-  shown: string,
-): { readonly ok: true; readonly value: Record<string, unknown> } | { readonly ok: false; readonly reason: string } {
-  const danger = dangerousData(value);
-  if (danger) return { ok: false, reason: `危险键 ${shown}.${danger} 被拒绝` };
-  if (!isConfigPath(key) || !isPlainData(value)) return { ok: false, reason: `非法键 ${shown} 不是配置路径或 part 名` };
-  return assignPath(base, key, value);
-}
-
-/** Own `__proto__` / `constructor` / `prototype`, or a value whose prototype was replaced. */
-function dangerousData(value: unknown): string | null {
-  if (value === null || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = dangerousData(entry);
-      if (found) return found;
-    }
-    return null;
-  }
-  const proto = Object.getPrototypeOf(value);
-  if (proto !== Object.prototype && proto !== null) return "__proto__";
-  for (const key of ownKeys(value)) {
-    if (isDangerousKey(key)) return key;
-    const found = dangerousData((value as Record<string, unknown>)[key]);
-    if (found) return found;
-  }
-  return null;
-}
-
-function partPrefix(key: string): { readonly part: HarnessPart; readonly rest: string } | null {
+function foreignPart(key: string, home: HarnessPart): HarnessPart | null {
   for (const part of HARNESS_PARTS) {
-    if (key === part) return { part, rest: "" };
-    if (key.startsWith(`${part}.`)) return { part, rest: key.slice(part.length + 1) };
+    if (part === home) continue;
+    if (key === part || key.startsWith(`${part}.`)) return part;
   }
   return null;
 }
 
-function stripPartPrefix(key: string, part: HarnessPart): string {
-  if (key === part) return "";
-  if (key.startsWith(`${part}.`)) return key.slice(part.length + 1);
-  return key;
+function metadataSegment(key: string): boolean {
+  return key.split(".").some((segment) => METADATA_KEY.has(segment));
 }
 
 function isDangerousKey(key: string): boolean {
   return key.split(".").some((segment) => DANGEROUS_SEGMENT.has(segment));
 }
 
-function isMetadataKey(key: string): boolean {
-  const head = key.split(".")[0] ?? key;
-  return METADATA_KEY.has(head);
+function isFilePath(key: string): boolean {
+  if (key.includes("/") || key.includes("\\")) return true;
+  const segments = key.split(".");
+  const last = segments[segments.length - 1] ?? "";
+  return segments.length >= 2 && FILE_EXTENSION.has(last);
 }
 
 function isConfigPath(key: string): boolean {
-  if (key === "" || key.includes("/") || key.includes("\\")) return false;
-  const segments = key.split(".");
-  if (segments.some((segment) => !IDENT.test(segment) || DANGEROUS_SEGMENT.has(segment) || METADATA_KEY.has(segment))) {
-    return false;
+  if (key === "" || isFilePath(key)) return false;
+  return key.split(".").every((segment) => IDENT.test(segment) && !DANGEROUS_SEGMENT.has(segment) && !METADATA_KEY.has(segment));
+}
+
+function sanitizeValue(
+  value: unknown,
+  shown: string,
+  rejected: ChangeRejection[],
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (value === null || typeof value !== "object") return { ok: true, value };
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const cleaned = sanitizeValue(value[index], `${shown}[${index}]`, rejected);
+      if (!cleaned.ok) return cleaned;
+      items.push(cleaned.value);
+    }
+    return { ok: true, value: items };
   }
-  const last = segments[segments.length - 1] ?? "";
-  return !(segments.length >= 2 && FILE_EXTENSION.has(last));
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    rejected.push({ key: `${shown}.__proto__`, reason: "危险键 __proto__ 被拒绝" });
+    return { ok: false };
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of ownKeys(value)) {
+    const childShown = `${shown}.${key}`;
+    if (isDangerousKey(key)) {
+      rejected.push({ key: childShown, reason: `危险键 ${key} 被拒绝` });
+      continue;
+    }
+    if (METADATA_KEY.has(key) || metadataSegment(key)) {
+      rejected.push({ key: childShown, reason: `元数据键 ${childShown} 不能写入配置` });
+      continue;
+    }
+    const cleaned = sanitizeValue((value as Record<string, unknown>)[key], childShown, rejected);
+    if (!cleaned.ok) return cleaned;
+    out[key] = cleaned.value;
+  }
+  return { ok: true, value: out };
 }
 
 function notePrototype(value: object, rejected: ChangeRejection[], prefix = ""): void {
@@ -331,11 +406,14 @@ function ownKeys(value: object): string[] {
   return Object.getOwnPropertyNames(value);
 }
 
-function isPlainData(value: unknown): boolean {
-  if (value === null || typeof value !== "object") return true;
-  if (Array.isArray(value)) return value.every((entry) => isPlainData(entry));
-  if (Object.getPrototypeOf(value) !== Object.prototype) return false;
-  return ownKeys(value).every((key) => !isDangerousKey(key) && isPlainData((value as Record<string, unknown>)[key]));
+function copyOwn(value: object): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ownKeys(value)) defineOwn(out, key, (value as Record<string, unknown>)[key]);
+  return out;
+}
+
+function defineOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 function assignPath(
@@ -362,21 +440,6 @@ function assignPath(
   }
   cursor[segments[segments.length - 1] as string] = value;
   return { ok: true, value: root };
-}
-
-export function mergeGenes(base: SearchGenes, overlay: Partial<SearchGenes> | undefined): SearchGenes {
-  const next: SearchGenes = {
-    samples: overlay?.samples ?? base.samples,
-    selfChecks: overlay?.selfChecks ?? base.selfChecks,
-    retries: overlay?.retries ?? base.retries,
-  };
-  for (const [key, value] of Object.entries(next) as [keyof SearchGenes, number][]) {
-    if (!Number.isInteger(value) || value < 0) {
-      throw new Error(`search gene ${key} must be a non-negative integer`);
-    }
-  }
-  if (next.samples < 1) throw new Error("search gene samples must be at least 1");
-  return next;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
