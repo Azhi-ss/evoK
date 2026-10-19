@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeRoleJson } from "./artifacts";
@@ -139,6 +139,34 @@ describe("live round", () => {
       }),
     });
     await expect(roles.innovator(pair().parent, { gaps: [] }, [])).rejects.toThrow(/parent config is missing/);
+  });
+
+  test("a file-path change key is kept on the patch and is not merged into the config", async () => {
+    const dir = root();
+    plantParent(dir);
+    const roles = liveRoles({
+      root: dir,
+      round: 1,
+      budget: new Budget(),
+      tasks: [],
+      delegate: async (input) => ({
+        agent: input.agent,
+        tokens: 1,
+        value: {
+          part: "skills",
+          motivation: "add the search skill file",
+          expectedFailureClass: "skill-not-triggered",
+          summary: "search skill",
+          changes: { "skills/search.md": { content: "body", metadata: { name: "search" } } },
+        },
+      }),
+    });
+    await expect(roles.innovator(pair().parent, { gaps: [] }, [])).rejects.toThrow(/skills\/search\.md/);
+    const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as {
+      changes: Record<string, unknown>;
+    };
+    expect(patch.changes["skills/search.md"]).toEqual({ content: "body", metadata: { name: "search" } });
+    expect(existsSync(join(dir, "candidates", "c1", "config.json"))).toBe(false);
   });
 
   test("parent and child traces stay in separate files", async () => {

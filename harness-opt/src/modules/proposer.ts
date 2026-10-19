@@ -79,38 +79,69 @@ export function validatePatch(patch: PatchProposal): void {
 export function applyPatch(base: HarnessConfig, patch: PatchProposal): HarnessConfig {
   validatePatch(patch);
   const search = mergeGenes(base.search, patch.search);
+  const parts: { -readonly [K in keyof HarnessConfig["parts"]]: Record<string, unknown> } = { ...base.parts };
+  const direct: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch.changes)) {
+    if (isHarnessPart(key) && isRecord(value)) {
+      parts[key] = applyChanges(base.parts[key], value);
+      continue;
+    }
+    direct[key] = value;
+  }
+  const declared = parts[patch.part];
+  parts[patch.part] = applyChanges(declared, direct);
   return {
     id: `${base.id}+${patch.part}`,
     modelId: base.modelId,
-    parts: {
-      ...base.parts,
-      [patch.part]: applyChanges(base.parts[patch.part], patch.changes),
-    },
+    parts,
     search,
   };
 }
 
 const REJECTED_SEGMENT = new Set(["__proto__", "constructor", "prototype"]);
 
-/** A dotted key such as `a.b.c` is a nested path. A key without a dot stays flat. */
+/** Filename suffixes. A trailing one means the key is a file path, not a config path. */
+const FILE_EXTENSION = new Set([
+  "md", "markdown", "json", "jsonl", "ts", "tsx", "js", "jsx", "mjs", "cjs",
+  "py", "txt", "yaml", "yml", "toml", "xml", "html", "htm", "css", "sh", "bash",
+  "rs", "go", "java", "kt", "rb", "php", "csv", "tsv", "ini", "env", "lock",
+]);
+
+/**
+ * A dotted key such as `a.b.c` is a nested config path.
+ * A file path or any other non-config key throws, so it is not merged.
+ * A key that is a harness part, with an object value, is applied to that part.
+ */
 function applyChanges(
   base: Readonly<Record<string, unknown>>,
   changes: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(changes)) {
-    if (REJECTED_SEGMENT.has(key)) throw new Error(`patch change key is not a nested path: ${key}`);
+    assertConfigKey(key);
     if (key.includes(".")) assignNested(out, key, value);
     else out[key] = value;
   }
   return out;
 }
 
+function assertConfigKey(key: string): void {
+  if (key.includes("/") || key.includes("\\")) {
+    throw new Error(`patch change key is not a config path: ${key}`);
+  }
+  const segments = key.split(".");
+  const ident = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+  if (segments.length === 0 || segments.some((segment) => !ident.test(segment) || REJECTED_SEGMENT.has(segment))) {
+    throw new Error(`patch change key is not a config path: ${key}`);
+  }
+  const last = segments[segments.length - 1] as string;
+  if (segments.length >= 2 && FILE_EXTENSION.has(last)) {
+    throw new Error(`patch change key is not a config path: ${key}`);
+  }
+}
+
 function assignNested(out: Record<string, unknown>, key: string, value: unknown): void {
   const segments = key.split(".");
-  if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || REJECTED_SEGMENT.has(segment))) {
-    throw new Error(`patch change key is not a nested path: ${key}`);
-  }
   let cursor = out;
   for (let index = 0; index < segments.length - 1; index += 1) {
     const segment = segments[index] as string;

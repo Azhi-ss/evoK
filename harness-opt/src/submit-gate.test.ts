@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Budget } from "./budget";
 import { FIXED_MODEL_ID, LOCAL_MODEL_ID } from "./fixed-model";
 import { ATTRIBUTION_LABELS, HARNESS_PARTS } from "./types";
-import { GAP_FINDER_TASK, INNOVATOR_TASK_PREFIX, REVIEWER_TASK_PREFIX } from "./live-round";
+import { GAP_FINDER_TASK, INNOVATOR_TASK_PREFIX, REVIEWER_TASK_PREFIX, stageWriter } from "./live-round";
 import { Lineage, Node } from "./lineage";
-import { handleSubmitGate } from "./submit-gate";
+import { GreedySelector } from "./modules/selector";
+import { Orchestrator } from "./orchestrator";
+import { reviewRoundE2E } from "./reports";
+import { buildDirectoryGateRequest, handleSubmitGate } from "./submit-gate";
 
 describe("harnessopt_submit_gate", () => {
   test("the command runs the full checklist and fails closed", async () => {
@@ -43,6 +47,47 @@ describe("harnessopt_submit_gate", () => {
     expect(readFileSync(join(state, "lineage.jsonl"), "utf8")).not.toContain("heldout");
     expect(readFileSync(join(state, "gate.jsonl"), "utf8")).toContain("\"heldout\":null");
     expect(FIXED_MODEL_ID).toBe("deepseek-v4.1-flash");
+  });
+
+  test("a refused tts symlink marks tts red and still writes gate.json and e2e.json", async () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-opt-gate-"));
+    const outside = mkdtempSync(join(tmpdir(), "harness-opt-outside-"));
+    const state = join(root, "state");
+    const lineage = new Lineage(state);
+    lineage.put(new Node({
+      id: "best",
+      parentId: null,
+      configPath: "candidates/best/config.json",
+      status: "evaluated",
+      devScores: [0.8],
+      stage: "full",
+    }));
+    writeFileSync(join(outside, "tts.json"), JSON.stringify({ source: "matched-budget", status: "passed" }));
+    symlinkSync(join(outside, "tts.json"), join(state, "link2"));
+    symlinkSync("link2", join(state, "tts-comparison.json"));
+    const refuse = () => {
+      throw new Error("unused");
+    };
+    const orchestrator = new Orchestrator(lineage, {
+      gapFinder: refuse,
+      innovator: refuse,
+      runner: refuse,
+      reviewer: refuse,
+    }, new GreedySelector(), new Budget(), { onStage: stageWriter(root, 1) });
+    const result = await orchestrator.submitGate(buildDirectoryGateRequest(root));
+    const e2e = reviewRoundE2E(root, 1);
+    const tts = result.checks.find((check) => check.id === "tts");
+    expect(tts?.ok).toBe(false);
+    expect(tts?.detail).toContain("escapes the run root");
+    expect(result.submit).toBe(false);
+    const gate = JSON.parse(readFileSync(join(root, "reports", "round-1", "gate.json"), "utf8")) as {
+      output: { ok: boolean; failed: string[] };
+    };
+    expect(gate.output.ok).toBe(false);
+    expect(gate.output.failed).toContain("tts");
+    expect(existsSync(join(root, "reports", "round-1", "e2e.json"))).toBe(true);
+    expect(e2e.ok).toBe(false);
+    expect(JSON.stringify(gate)).not.toContain("matched-budget");
   });
 
   test("the three agents pin the same model id", () => {

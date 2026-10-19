@@ -72,9 +72,15 @@ export function liveRoles(options: {
         options.budget.usedTokens += delegated.tokens;
         throw error;
       }
-      const config = { ...applyPatch(readParentConfig(options.root, parent.configPath), patch), id: candidateId };
-      writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
       writeRoleJson(options.root, "innovator", "patch.json", patch);
+      let config: HarnessConfig;
+      try {
+        config = { ...applyPatch(readParentConfig(options.root, parent.configPath), patch), id: candidateId };
+      } catch (error) {
+        options.budget.usedTokens += delegated.tokens;
+        throw error;
+      }
+      writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
       const proposal: Proposal = {
         summary: patch.summary,
         configPath: `candidates/${candidateId}/config.json`,

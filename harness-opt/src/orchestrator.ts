@@ -155,8 +155,14 @@ export interface SubmitGateRequest {
   readonly tokensSpent?: number;
   readonly submitCountToday?: number;
   readonly maxSubmitsPerDay?: number;
-  /** Omit to derive passed/failed from the numeric TTS comparison. `not-run` always fails. */
+  /**
+   * Explicit status. When omitted, `ttsEval` is read inside the gate.
+   * A throw, an unreadable file, or a missing file fails the tts check and
+   * the gate still finishes. `not-run` and `failed` both fail closed.
+   */
   readonly tts?: TtsStatus;
+  /** Deferred TTS read. Same fail-closed timing as `heldoutEval`. */
+  readonly ttsEval?: () => Exclude<TtsStatus, "not-run"> | undefined;
   readonly dryRun?: () => { readonly status: DryRunStatus; readonly detail: string };
   readonly consultEvok?: () => { readonly ok: boolean; readonly refusedGateIds: readonly string[] };
   readonly missingInputs?: readonly string[];
@@ -363,7 +369,7 @@ export class Orchestrator {
     }
     const dry = (request.dryRun ?? probePlaygroundDryRun)();
     // Held-out versus ttsBaseline is not a matched-budget comparison.
-    const ttsStatus: TtsStatus = request.tts ?? "not-run";
+    const ttsRead = readTtsStatus(request);
     const submitCountToday = request.submitCountToday ?? this.budget.submits[request.day] ?? 0;
     const maxSubmitsPerDay = request.maxSubmitsPerDay ?? this.budget.maxOnlineSubmitsPerDay;
     const tokensSpent = request.tokensSpent ?? this.budget.usedTokens;
@@ -374,7 +380,8 @@ export class Orchestrator {
       ...(minDelta === null || readError ? { heldOutRefusal: [minDelta === null ? MIN_DELTA_REFUSAL : "", readError ?? ""].filter(Boolean).join("; ") } : {}),
       tracePackComplete: request.tracePackComplete,
       changeNotePresent: request.changeNotePresent,
-      tts: ttsStatus,
+      tts: ttsRead.status,
+      ...(ttsRead.refusal ? { ttsRefusal: ttsRead.refusal } : {}),
       submitCountToday,
       maxSubmitsPerDay,
       tokensSpent,
@@ -385,7 +392,7 @@ export class Orchestrator {
       ...(request.missingInputs && request.missingInputs.length > 0 ? { missingInputs: request.missingInputs } : {}),
     });
     const heldOutGate = minDelta !== null && heldout !== null && heldout >= request.baseHeldout + minDelta;
-    const ttsGate = ttsStatus === "passed";
+    const ttsGate = ttsRead.status === "passed" && ttsRead.refusal === undefined;
     const dryGate = dry.status === "passed";
     const budgetGate = tokensSpent <= request.tokenBudget && this.budget.canSubmit(request.day);
     const submit = evidence.ok && heldOutGate && ttsGate && dryGate && budgetGate;
@@ -420,6 +427,19 @@ export class Orchestrator {
       return Phase.STOP;
     }
     return Phase.SELECT;
+  }
+}
+
+function readTtsStatus(request: SubmitGateRequest): { readonly status: TtsStatus; readonly refusal?: string } {
+  if (request.tts !== undefined) return { status: request.tts };
+  if (!request.ttsEval) return { status: "not-run" };
+  try {
+    return { status: request.ttsEval() ?? "not-run" };
+  } catch (error) {
+    return {
+      status: "failed",
+      refusal: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 

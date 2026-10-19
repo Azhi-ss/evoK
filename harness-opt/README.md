@@ -87,7 +87,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 每一轮写 `reports/round-N/<stage>.json`：`round`、`stage`、`output`、`explanation`。阶段是 select、gap、propose、run、review、backprop、gate。
 
-`reviewRoundE2E` 在 step 末尾检查这七份报告的 `stage`、非空 `explanation` 和非空 `output`，并按阶段核对内容（gap 要能被 `parseGapReport` 接受且至少一条，propose 要有 summary 和 configPath，review 要有布尔 `accept` 和非空 `reason`）。产物同样用 `parseGapReport` / `parsePatchFile` 校验，`{}` 不能过。候选被留下时，`evidence_pack/pack.json` 必须有 model、变更说明和 trace 索引；没被留下且目录不存在则记一笔「未晋升」。结果写 `reports/round-N/e2e.json`。缺阶段或内容不符则 E2E 失败。gate 报告里的 `ok` 不是 true 时，e2e 的 gate 项也是 false，整份 e2e 因此不通过。dry-run、手填 held-out、TTS not-run 都会让这项为 false。
+`reviewRoundE2E` 在 step 末尾检查这七份报告的 `stage`、非空 `explanation` 和非空 `output`，并按阶段核对内容（gap 要能被 `parseGapReport` 接受且至少一条，propose 要有 summary 和 configPath，review 要有布尔 `accept` 和非空 `reason`）。产物同样用 `parseGapReport` / `parsePatchFile` 校验，`{}` 不能过。候选被留下时，`evidence_pack/pack.json` 必须有 model、变更说明和 trace 索引；没被留下且目录不存在则记一笔「未晋升」。结果写 `reports/round-N/e2e.json`。缺阶段或内容不符则 E2E 失败。gate 报告里的 `ok` 不是 true 时，e2e 的 gate 项也是 false，整份 e2e 因此不通过。dry-run、手填 held-out、TTS not-run 都会让这项为 false。TTS 文件缺失、读不出来、或链接被 containment 拒绝时，tts 项记红，`reports/round-N/gate.json` 和 `e2e.json` 仍会写出。
 
 ## 角色守卫
 
@@ -99,7 +99,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 `review.json` 里的 `reason` 是编排器用的判定理由。reviewer 模型自己写的原文另存在 `modelReason`。
 
-innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。`patch.changes` 里只有配置路径键会按点号展开，例如 `a.b.c`。文件路径（含 `/` 或以 `.md` 这类后缀结尾）和其它非法键直接报错，不写进配置；补丁原文先落在 `patch.json`。键本身是某个 part、值又是对象时，这组改动写到那个 part。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
 
 ## 证据门
 

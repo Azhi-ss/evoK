@@ -64,6 +64,33 @@ describe("proposer boundary", () => {
     expect(Object.keys(next.parts["agent-loop"])).toEqual(["a", "keep"]);
   });
 
+  test("a file-path change key is rejected instead of being merged", () => {
+    expect(() => applyPatch(base, {
+      part: "skills",
+      motivation: "add the search skill file",
+      expectedFailureClass: "skill-not-triggered",
+      changes: {
+        "skills/search.md": { content: "body", metadata: { name: "search" } },
+        metadata: { name: "search" },
+      },
+    })).toThrow(/skills\/search\.md/);
+    expect(() => applyPatch(base, {
+      part: "skills",
+      motivation: "add the search skill file",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { "search.md": "body" },
+    })).toThrow(/search\.md/);
+    const routed = applyPatch(base, {
+      part: "agent-loop",
+      motivation: "route the skill trigger to the skills part",
+      expectedFailureClass: "skill-not-triggered",
+      changes: { skills: { trigger: "format" } },
+    });
+    expect(routed.parts.skills).toEqual({ trigger: "format" });
+    expect(routed.parts["agent-loop"]).toEqual({});
+    expect(JSON.stringify(routed.parts)).not.toContain("search.md");
+  });
+
   test("an unmotivated patch is rejected", () => {
     expect(() => applyPatch(base, {
       part: "memory",

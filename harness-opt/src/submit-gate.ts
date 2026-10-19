@@ -48,11 +48,10 @@ export function buildDirectoryGateRequest(root: string): SubmitGateRequest {
     ...(thresholds.ok ? [] : thresholds.missing),
     ...(usage.ok ? [] : [usage.missing]),
   ];
-  const matchedTts = readMatchedBudgetTts(root);
   return {
     heldoutEval: (configPath) => readEvaluatedHeldOut(root, configPath),
+    ttsEval: () => readMatchedBudgetTts(root),
     ttsBaseline: thresholds.ok ? thresholds.value.ttsBaseline : Number.NaN,
-    ...(matchedTts ? { tts: matchedTts } : {}),
     baseHeldout: thresholds.ok ? thresholds.value.heldOutFloor : Number.NaN,
     ...(thresholds.ok ? { minDelta: thresholds.value.minDelta } : {}),
     day: new Date().toISOString().slice(0, 10),

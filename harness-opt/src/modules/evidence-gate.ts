@@ -27,6 +27,8 @@ export interface EvidenceGateInput {
   readonly tracePackComplete: boolean;
   readonly changeNotePresent: boolean;
   readonly tts: TtsStatus;
+  /** When set, the TTS check fails closed with this detail. The gate still returns. */
+  readonly ttsRefusal?: string;
   readonly submitCountToday: number;
   readonly maxSubmitsPerDay: number;
   readonly tokensSpent: number;
@@ -87,10 +89,11 @@ export function evaluateEvidenceGate(input: EvidenceGateInput): EvidenceGateResu
     check("change-note", input.changeNotePresent, input.changeNotePresent ? "change note present" : "change note missing"),
     check(
       "tts",
-      input.tts === "passed",
-      input.tts === "not-run"
-        ? "not-run: matched-budget TTS comparison was not run; automatic submit is forbidden"
-        : `TTS comparison ${input.tts}`,
+      input.tts === "passed" && input.ttsRefusal === undefined,
+      input.ttsRefusal
+        ?? (input.tts === "not-run"
+          ? "not-run: matched-budget TTS comparison was not run; automatic submit is forbidden"
+          : `TTS comparison ${input.tts}`),
     ),
     check(
       "quota",
