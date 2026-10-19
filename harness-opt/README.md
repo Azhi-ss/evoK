@@ -99,7 +99,7 @@ TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `statu
 
 `review.json` 里的 `reason` 是编排器用的判定理由。reviewer 模型自己写的原文另存在 `modelReason`。
 
-innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。`patch.changes` 里只有配置路径键会按点号展开，例如 `a.b.c`。文件路径（含 `/` 或以 `.md` 这类后缀结尾）和其它非法键直接报错，不写进配置；补丁原文先落在 `patch.json`。键本身是某个 part、值又是对象时，这组改动写到那个 part。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
+innovator 不能写 `candidates/base/`。基线由 orchestrator 写入。子候选读取父节点的 `configPath`，用 `applyPatch` 把补丁叠上去，父配置里没被补丁改到的 part 和 TTS 基因留在子配置里。`patch.changes` 的合法键只有两类：配置路径（`selector.weight`、`trigger`）按点号展开到 `part`；part 名且值为对象时整组写到该 part。带 part 前缀的键只写一层。`search.samples` 这类参数改顶层 search，不进 part。文件路径、`candidateId` 这类元数据、以及 `__proto__` 记入 `patch.json` 的 `rejected` 并跳过，propose 继续走到 gate。trace 写到 `traces/<candidateId>/<taskId>.json`，子节点和父节点各有自己的文件。
 
 ## 证据门
 

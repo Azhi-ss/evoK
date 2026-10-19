@@ -4,10 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeRoleJson } from "./artifacts";
 import { Budget } from "./budget";
-import { Node } from "./lineage";
-import { liveRoles, reviewerTask } from "./live-round";
+import { FIXED_MODEL_ID } from "./fixed-model";
+import { Lineage, Node } from "./lineage";
+import { liveRoles, reviewerTask, stageWriter } from "./live-round";
 import type { HarnessExecutor } from "./modules/executor";
-import type { ReviewInput } from "./orchestrator";
+import { GreedySelector } from "./modules/selector";
+import { Orchestrator, Phase, type ReviewInput } from "./orchestrator";
+import { reviewRoundE2E } from "./reports";
 
 function root(): string {
   return mkdtempSync(join(tmpdir(), "harness-opt-live-"));
@@ -161,12 +164,134 @@ describe("live round", () => {
         },
       }),
     });
-    await expect(roles.innovator(pair().parent, { gaps: [] }, [])).rejects.toThrow(/skills\/search\.md/);
+    const proposal = await roles.innovator(pair().parent, { gaps: [] }, []);
+    expect(proposal.configPath).toBe("candidates/c1/config.json");
     const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as {
       changes: Record<string, unknown>;
+      rejected: { key: string; reason: string }[];
     };
     expect(patch.changes["skills/search.md"]).toEqual({ content: "body", metadata: { name: "search" } });
-    expect(existsSync(join(dir, "candidates", "c1", "config.json"))).toBe(false);
+    expect(patch.rejected).toEqual([
+      { key: "skills/search.md", reason: "非法键 skills/search.md 不是配置路径或 part 名" },
+    ]);
+    const config = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
+      parts: { skills: Record<string, unknown> };
+    };
+    expect(config.parts.skills).toEqual({ pack: "base" });
+    expect(JSON.stringify(config)).not.toContain("search.md");
+    expect(JSON.stringify(config)).not.toContain("body");
+  });
+
+  test("one illegal change key does not stop the round before the gate", async () => {
+    const dir = root();
+    plantParent(dir);
+    const lineage = new Lineage(dir);
+    lineage.put(new Node({
+      id: "base",
+      parentId: null,
+      configPath: "candidates/base/config.json",
+      status: "evaluated",
+      devScores: [0.4],
+      stage: "full",
+    }));
+    const budget = new Budget();
+    const stages: string[] = [];
+    const roles = liveRoles({
+      root: dir,
+      round: 1,
+      budget,
+      tasks: [{ id: "dev-1", split: "dev", path: "tasks/dev-1.md" }],
+      delegate: async (input) => {
+        if (input.agent === "gap-finder") {
+          return {
+            agent: input.agent,
+            tokens: 1,
+            value: {
+              gaps: [{ id: "g1", failureClass: "tool-misuse", summary: "search missed", traceIds: ["dev-1"] }],
+            },
+          };
+        }
+        if (input.agent === "innovator") {
+          return {
+            agent: input.agent,
+            tokens: 2,
+            value: {
+              part: "skills",
+              motivation: "weight the selector and keep the illegal keys out",
+              expectedFailureClass: "skill-not-triggered",
+              summary: "tune selector",
+              changes: JSON.parse(`{
+                "skills/search.md": {"content":"body"},
+                "selector.weight": 0.2,
+                "skills.selector.bias": 0.1,
+                "search.samples": 5,
+                "candidateId": "c9",
+                "__proto__": {"admin": true}
+              }`) as Record<string, unknown>,
+            },
+          };
+        }
+        if (input.agent === "reviewer-gate") {
+          return { agent: input.agent, tokens: 1, value: { accept: true, reason: "keep" } };
+        }
+        throw new Error(`unexpected agent ${input.agent}`);
+      },
+    });
+    const orchestrator = new Orchestrator(lineage, roles, new GreedySelector(), budget, {
+      ids: () => "c1",
+      heldOutAtMilestone: () => {
+        throw new Error("unread");
+      },
+      onStage: (stage, output, explanation) => {
+        stages.push(stage);
+        stageWriter(dir, 1)(stage, output, explanation);
+      },
+    });
+    expect(await orchestrator.step()).toBe(Phase.SELECT);
+    const gate = await orchestrator.submitGate({
+      heldoutEval: () => {
+        throw new Error("held-out unread");
+      },
+      tts: "not-run",
+      ttsBaseline: 0.5,
+      baseHeldout: 0.4,
+      day: "2026-10-18",
+      modelId: FIXED_MODEL_ID,
+      tracePackComplete: true,
+      changeNotePresent: false,
+      tokenBudget: 1000,
+      tokensSpent: budget.usedTokens,
+      dryRun: () => ({ status: "unsupported", detail: "playground dry-run was not executed" }),
+    });
+    const e2e = reviewRoundE2E(dir, 1);
+    expect(stages).toEqual(["select", "gap", "propose", "run", "review", "backprop", "gate"]);
+    expect(existsSync(join(dir, "reports", "round-1", "gate.json"))).toBe(true);
+    expect(existsSync(join(dir, "reports", "round-1", "e2e.json"))).toBe(true);
+    expect(lineage.events().some((event) => event.kind === "error")).toBe(false);
+    expect(gate.submit).toBe(false);
+    expect(e2e.ok).toBe(false);
+    expect(e2e.findings.find((item) => item.stage === "propose")?.ok).toBe(true);
+    expect(e2e.findings.find((item) => item.stage === "run")?.ok).toBe(true);
+    const config = JSON.parse(readFileSync(join(dir, "candidates", "c1", "config.json"), "utf8")) as {
+      id: string;
+      search: { samples: number; selfChecks: number; retries: number };
+      parts: { skills: { pack?: string; selector?: { weight?: number; bias?: number }; search?: unknown } };
+    };
+    expect(config.id).toBe("c1");
+    expect(config.search).toEqual({ samples: 5, selfChecks: 1, retries: 2 });
+    expect(config.parts.skills.pack).toBe("base");
+    expect(config.parts.skills.selector).toEqual({ weight: 0.2, bias: 0.1 });
+    expect(config.parts.skills.search).toBeUndefined();
+    const stored = JSON.stringify(config);
+    expect(stored).not.toContain("c9");
+    expect(stored).not.toContain("admin");
+    expect(stored).not.toContain("search.md");
+    const patch = JSON.parse(readFileSync(join(dir, "patch.json"), "utf8")) as {
+      rejected: { key: string; reason: string }[];
+    };
+    expect(patch.rejected.map((item) => item.key)).toEqual(["skills/search.md", "candidateId", "__proto__"]);
+    expect(patch.rejected.find((item) => item.key === "__proto__")?.reason).toBe("危险键 __proto__ 被拒绝");
+    expect(patch.rejected.find((item) => item.key === "candidateId")?.reason).toContain("元数据键");
   });
 
   test("parent and child traces stay in separate files", async () => {

@@ -396,6 +396,35 @@ describe("subagent role guard", () => {
     expect(JSON.stringify(events)).toContain("tests/hidden.ts");
   });
 
+  test("location is contained and contact_supervisor stays on the whitelist", () => {
+    const root = runRoot();
+    mkdirSync(join(root, "traces"), { recursive: true });
+    writeFileSync(join(root, "traces", "t1.json"), "{}\n");
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "read",
+      input: { path: "traces/t1.json", location: "/etc/hostname" },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("gap-finder"),
+      tool: "custom_reader",
+      input: { locations: ["/etc/hostname"] },
+    })).toThrow(/escapes the run root/);
+    expect(() => guardSubagentToolCall({
+      root,
+      prompt: prompt("innovator"),
+      tool: "contact_supervisor",
+      input: { location: "/etc/hostname", message: "blocked on the skill file" },
+    })).not.toThrow();
+    const events = contractEvents(root);
+    expect(events).toHaveLength(2);
+    expect(events.every((event) => event.kind === "contract")).toBe(true);
+    expect(events.some((event) => event.tool === "contact_supervisor")).toBe(false);
+    expect(JSON.stringify(events)).toContain("/etc/hostname");
+  });
+
   test("the child tool_call hook blocks the built-in write and read", () => {
     const handlers = new Map<string, (event: { toolName: string; input: Record<string, unknown> }, ctx: { cwd: string; getSystemPrompt: () => string }) => { block?: boolean; reason?: string } | undefined>();
     roleGuardExtension({

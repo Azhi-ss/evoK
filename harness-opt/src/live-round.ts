@@ -16,7 +16,7 @@ const PART_LIST = HARNESS_PARTS.join(", ");
 
 export const GAP_FINDER_TASK = `Read traces and return gaps with id, failureClass, summary, traceIds. failureClass must be exactly one of: ${LABEL_LIST}.`;
 
-export const INNOVATOR_TASK_PREFIX = `Write one patch. part must be exactly one of: ${PART_LIST}. expectedFailureClass must be exactly one of: ${LABEL_LIST}. Required fields are part, motivation, expectedFailureClass, and summary.`;
+export const INNOVATOR_TASK_PREFIX = `Write one patch. part must be exactly one of: ${PART_LIST}. expectedFailureClass must be exactly one of: ${LABEL_LIST}. Required fields are part, motivation, expectedFailureClass, and summary. changes keys are only two kinds: (1) a config path such as selector.weight or trigger, expanded under part; (2) a part name (${PART_LIST}) whose value is an object written onto that part. A key that already starts with the part, such as skills.selector.weight, is written once and must not become skills.skills.selector.weight. search.samples, search.selfChecks, and search.retries update the top-level search genes, not a part. File paths, metadata keys such as candidateId, and dangerous keys __proto__, constructor, and prototype are recorded on patch.json and skipped. One rejected key does not stop the round.`;
 
 export const REVIEWER_TASK_PREFIX = "Return one JSON object. accept is a boolean. reason is a string.";
 
@@ -72,14 +72,9 @@ export function liveRoles(options: {
         options.budget.usedTokens += delegated.tokens;
         throw error;
       }
-      writeRoleJson(options.root, "innovator", "patch.json", patch);
-      let config: HarnessConfig;
-      try {
-        config = { ...applyPatch(readParentConfig(options.root, parent.configPath), patch), id: candidateId };
-      } catch (error) {
-        options.budget.usedTokens += delegated.tokens;
-        throw error;
-      }
+      const applied = applyPatch(readParentConfig(options.root, parent.configPath), patch);
+      const config = { ...applied.config, id: candidateId };
+      writeRoleJson(options.root, "innovator", "patch.json", { ...patch, rejected: applied.rejected });
       writeRoleJson(options.root, "innovator", `candidates/${candidateId}/config.json`, config);
       const proposal: Proposal = {
         summary: patch.summary,

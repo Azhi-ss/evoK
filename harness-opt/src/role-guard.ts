@@ -49,6 +49,8 @@ const PATH_ARGUMENT_KEYS = new Set([
   "dir",
   "cwd",
   "target",
+  "location",
+  "locations",
   "command",
 ]);
 

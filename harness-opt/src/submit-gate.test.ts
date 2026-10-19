@@ -118,6 +118,10 @@ describe("harnessopt_submit_gate", () => {
       expect(INNOVATOR_TASK_PREFIX).toContain(label);
     }
     for (const part of HARNESS_PARTS) expect(INNOVATOR_TASK_PREFIX).toContain(part);
+    for (const phrase of ["selector.weight", "skills.skills.selector.weight", "search.samples", "candidateId", "__proto__"]) {
+      expect(innovator).toContain(phrase);
+      expect(INNOVATOR_TASK_PREFIX).toContain(phrase);
+    }
     expect(REVIEWER_TASK_PREFIX).toContain("boolean");
     expect(REVIEWER_TASK_PREFIX).toContain("string");
   });

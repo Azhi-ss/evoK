@@ -41,9 +41,10 @@ describe("proposer boundary", () => {
       changes: { trigger: "format" },
       search: { samples: 3, selfChecks: 1, retries: 2 },
     });
-    expect(next.modelId).toBe(base.modelId);
-    expect(next.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
-    expect(next.parts.skills).toEqual({ trigger: "format" });
+    expect(next.rejected).toEqual([]);
+    expect(next.config.modelId).toBe(base.modelId);
+    expect(next.config.search).toEqual({ samples: 3, selfChecks: 1, retries: 2 });
+    expect(next.config.parts.skills).toEqual({ trigger: "format" });
   });
 
   test("a dotted patch key expands into a nested path", () => {
@@ -60,35 +61,116 @@ describe("proposer boundary", () => {
       expectedFailureClass: "tool-misuse",
       changes: { "a.b.c": 1 },
     });
-    expect(next.parts["agent-loop"]).toEqual({ a: { b: { d: 2, c: 1 } }, keep: true });
-    expect(Object.keys(next.parts["agent-loop"])).toEqual(["a", "keep"]);
+    expect(next.config.parts["agent-loop"]).toEqual({ a: { b: { d: 2, c: 1 } }, keep: true });
+    expect(Object.keys(next.config.parts["agent-loop"])).toEqual(["a", "keep"]);
   });
 
-  test("a file-path change key is rejected instead of being merged", () => {
-    expect(() => applyPatch(base, {
+  test("an illegal change key is recorded and the other keys still apply", () => {
+    const next = applyPatch(base, {
       part: "skills",
       motivation: "add the search skill file",
       expectedFailureClass: "skill-not-triggered",
       changes: {
         "skills/search.md": { content: "body", metadata: { name: "search" } },
         metadata: { name: "search" },
+        trigger: "format",
       },
-    })).toThrow(/skills\/search\.md/);
-    expect(() => applyPatch(base, {
+    });
+    const file = next.rejected.find((item) => item.key === "skills/search.md");
+    expect(file?.reason).toContain("skills/search.md");
+    expect(next.rejected.find((item) => item.key === "metadata")?.reason).toContain("元数据键");
+    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(JSON.stringify(next.config)).not.toContain("search.md");
+    const dottedFile = applyPatch(base, {
       part: "skills",
       motivation: "add the search skill file",
       expectedFailureClass: "skill-not-triggered",
-      changes: { "search.md": "body" },
-    })).toThrow(/search\.md/);
-    const routed = applyPatch(base, {
-      part: "agent-loop",
-      motivation: "route the skill trigger to the skills part",
-      expectedFailureClass: "skill-not-triggered",
-      changes: { skills: { trigger: "format" } },
+      changes: { "search.md": "body", trigger: "format" },
     });
-    expect(routed.parts.skills).toEqual({ trigger: "format" });
-    expect(routed.parts["agent-loop"]).toEqual({});
-    expect(JSON.stringify(routed.parts)).not.toContain("search.md");
+    expect(dottedFile.rejected.map((item) => item.key)).toEqual(["search.md"]);
+    expect(dottedFile.rejected[0]?.reason).toContain("search.md");
+    expect(dottedFile.config.parts.skills).toEqual({ trigger: "format" });
+  });
+
+  test("a part-prefixed key is written once onto that part", () => {
+    const next = applyPatch(base, {
+      part: "agent-loop",
+      motivation: "weight the skill selector",
+      expectedFailureClass: "skill-not-triggered",
+      changes: {
+        "skills.selector.weight": 0.2,
+        "skills.skills.selector.bias": 0.1,
+        skills: { trigger: "format" },
+      },
+    });
+    expect(next.rejected).toEqual([]);
+    expect(next.config.parts.skills).toEqual({ selector: { weight: 0.2, bias: 0.1 }, trigger: "format" });
+    expect(next.config.parts.skills).not.toHaveProperty("skills");
+    expect(next.config.parts["agent-loop"]).toEqual({});
+  });
+
+  test("search parameters land on the top-level search genes", () => {
+    const next = applyPatch(base, {
+      part: "skills",
+      motivation: "sample the search more than once",
+      expectedFailureClass: "timeout",
+      changes: {
+        "search.samples": 4,
+        search: { retries: 3, selfChecks: 1 },
+        "skills.search.temperature": 0.2,
+        skills: { trigger: "format", search: { samples: 5 } },
+      },
+    });
+    expect(next.config.search).toEqual({ samples: 5, selfChecks: 1, retries: 3 });
+    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(next.config.parts.skills).not.toHaveProperty("search");
+    expect(next.rejected.map((item) => item.key)).toEqual(["skills.search.temperature"]);
+    expect(next.rejected[0]?.reason).toContain("temperature");
+  });
+
+  test("a metadata key is refused and stays out of the config", () => {
+    const next = applyPatch(base, {
+      part: "skills",
+      motivation: "keep the candidate id out of the config",
+      expectedFailureClass: "format-invalid",
+      changes: { candidateId: "c9", modelId: "other-model", trigger: "format" },
+    });
+    expect(next.config.modelId).toBe(base.modelId);
+    expect(next.config.id).toBe("base+skills");
+    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(JSON.stringify(next.config)).not.toContain("c9");
+    expect(JSON.stringify(next.config)).not.toContain("other-model");
+    expect(next.rejected.map((item) => item.reason)).toEqual([
+      "元数据键 candidateId 不能写入配置",
+      "元数据键 modelId 不能写入配置",
+    ]);
+  });
+
+  test("a top-level __proto__ key is an explicit rejection", () => {
+    const parsed = JSON.parse('{"__proto__":{"admin":true},"constructor":{"x":1},"trigger":"format"}') as Record<string, unknown>;
+    const next = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse a prototype key",
+      expectedFailureClass: "format-invalid",
+      changes: parsed,
+    });
+    expect(next.rejected.map((item) => item.key)).toEqual(["__proto__", "constructor"]);
+    expect(next.rejected[0]?.reason).toBe("危险键 __proto__ 被拒绝");
+    expect(next.rejected[1]?.reason).toBe("危险键 constructor 被拒绝");
+    expect(next.config.parts.skills).toEqual({ trigger: "format" });
+    expect(JSON.stringify(next.config)).not.toContain("admin");
+    expect(Object.getPrototypeOf(next.config.parts.skills)).toBe(Object.prototype);
+
+    const literal = { __proto__: { admin: true }, trigger: "format" } as Record<string, unknown>;
+    const viaProto = applyPatch(base, {
+      part: "skills",
+      motivation: "refuse a prototype key",
+      expectedFailureClass: "format-invalid",
+      changes: literal,
+    });
+    expect(viaProto.rejected).toEqual([{ key: "__proto__", reason: "危险键 __proto__ 被拒绝" }]);
+    expect(viaProto.config.parts.skills).toEqual({ trigger: "format" });
+    expect(JSON.stringify(viaProto.config)).not.toContain("admin");
   });
 
   test("an unmotivated patch is rejected", () => {
