@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,30 @@ function fakeScript(dir: string, body: string): string {
 }
 
 const task = { id: "dev-1", split: "dev" as const, path: "tasks/dev-1.md" };
+
+const SHARED_LIMITS = `
+[agent]
+timeout_sec = 90
+
+[verifier]
+timeout_sec = 30
+
+[environment]
+allow_internet = true
+`;
+
+const SHARED_LABELS = [
+  "agent-timeout-sec:90",
+  "checker-timeout-sec:30",
+  "timed_out:false",
+  "network:shared",
+];
+
+function writeLimits(taskRoot: string, body = SHARED_LIMITS): void {
+  const dir = join(taskRoot, "tasks");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "task.toml"), body);
+}
 
 describe("devii executor", () => {
   test("sums assistant usage, reads reward.txt, and redacts the key", async () => {
@@ -47,13 +72,14 @@ print(key)
       env: { ...process.env, API_KEY: SECRET },
     });
     mkdirSync(join(dir, "harness"));
+    writeLimits(dir);
     const trace = await executor.run(task, join(dir, "config.json"));
     expect(trace.reward).toBe(1);
     expect(trace.failed).toBe(false);
     expect(trace.tokens).toBe(437397);
     expect(trace.usage).toEqual({ input: 59004, output: 51481, cacheRead: 326912, cacheWrite: 0 });
     expect(trace.steps).toEqual([{ id: "s1", tool: "read", args: { path: "[REDACTED]" }, ok: true }]);
-    expect(trace.labels).toEqual([]);
+    expect(trace.labels).toEqual(SHARED_LABELS);
     expect(trace.executor).toBe("devii");
     expect(JSON.stringify(trace)).not.toContain(SECRET);
   });
@@ -74,10 +100,12 @@ run = Path(get("--run-root")) / get("--task-id") / get("--seed") / get("--arm")
     "usage": {"input": 59004, "output": 51481, "cacheRead": 326912, "cacheWrite": 10},
 }) + "\\n")
 `);
+    writeLimits(dir);
     const executor = new DeviiExecutor({
       scriptPath: script,
       runRoot: join(dir, "runs"),
       harnessHome: dir,
+      taskRoot: dir,
       seed: 1,
       arm: "treatment",
       env: process.env,
@@ -101,16 +129,18 @@ run = Path(get("--run-root")) / get("--task-id") / get("--seed") / get("--arm")
 run.mkdir(parents=True)
 print("no reward")
 `);
+    writeLimits(dir);
     const executor = new DeviiExecutor({
       scriptPath: missing,
       runRoot: join(dir, "runs"),
       harnessHome: dir,
+      taskRoot: dir,
       env: process.env,
     });
     const trace = await executor.run(task, join(dir, "config.json"));
     expect(trace.failed).toBe(true);
     expect(trace.reward).toBe(0);
-    expect(trace.labels).toEqual(["format-invalid"]);
+    expect(trace.labels).toEqual(["format-invalid", ...SHARED_LABELS]);
 
     const timeout = fakeScript(dir, `
 import json, sys
@@ -126,11 +156,106 @@ run.mkdir(parents=True, exist_ok=True)
       scriptPath: timeout,
       runRoot: join(dir, "runs-timeout"),
       harnessHome: dir,
+      taskRoot: dir,
       env: process.env,
     });
     const again = await timed.run(task, join(dir, "config.json"));
     expect(again.failed).toBe(true);
-    expect(again.labels).toEqual(["timeout"]);
+    expect(again.labels).toEqual([
+      "timeout",
+      "agent-timeout-sec:90",
+      "checker-timeout-sec:30",
+      "timed_out:true",
+      "network:shared",
+    ]);
+  });
+
+  test("a missing task.toml fails before the runner starts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devii-no-toml-"));
+    let spawned = false;
+    const executor = new DeviiExecutor({
+      scriptPath: fakeScript(dir, "raise SystemExit('should not run')\n"),
+      runRoot: join(dir, "runs"),
+      harnessHome: dir,
+      taskRoot: dir,
+      env: process.env,
+      spawn: () => {
+        spawned = true;
+        throw new Error("should not spawn");
+      },
+    });
+    await expect(executor.run(task, join(dir, "config.json"))).rejects.toThrow(/task.toml/);
+    expect(spawned).toBe(false);
+  });
+
+  test("spawn timeout is the task limits plus a 30s margin, and labels record the network mode", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devii-limits-"));
+    writeLimits(dir, `
+[agent]
+timeout_sec = 90
+
+[verifier]
+timeout_sec = 30
+
+[environment]
+allow_internet = false
+`);
+    const script = fakeScript(dir, `
+import json, sys
+from pathlib import Path
+args = sys.argv[1:]
+def get(flag):
+    return args[args.index(flag) + 1]
+run = Path(get("--run-root")) / get("--task-id") / get("--seed") / get("--arm")
+run.mkdir(parents=True)
+(run / "result.json").write_text(json.dumps({"timed_out": True}) + "\\n")
+`);
+    let seenTimeout: number | undefined;
+    const executor = new DeviiExecutor({
+      scriptPath: script,
+      runRoot: join(dir, "runs"),
+      harnessHome: dir,
+      taskRoot: dir,
+      env: process.env,
+      spawn: (command, args, options) => {
+        seenTimeout = options.timeout;
+        return spawnSync(command, [...args], options);
+      },
+    });
+    const trace = await executor.run(task, join(dir, "config.json"));
+    expect(seenTimeout).toBe(150_000);
+    expect(trace.failed).toBe(true);
+    expect(trace.labels).toEqual([
+      "timeout",
+      "agent-timeout-sec:90",
+      "checker-timeout-sec:30",
+      "timed_out:true",
+      "network:unshare-net",
+    ]);
+  });
+
+  test("an outer spawn timeout is labeled timed_out and stays a trace", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devii-outer-timeout-"));
+    writeLimits(dir);
+    const error = Object.assign(new Error("spawnSync python3 ETIMEDOUT"), { code: "ETIMEDOUT" });
+    const executor = new DeviiExecutor({
+      scriptPath: fakeScript(dir, "raise SystemExit('should be killed')\n"),
+      runRoot: join(dir, "runs"),
+      harnessHome: dir,
+      taskRoot: dir,
+      env: process.env,
+      spawn: () => ({ error, status: null }),
+    });
+    const trace = await executor.run(task, join(dir, "config.json"));
+    expect(trace.failed).toBe(true);
+    expect(trace.reward).toBe(0);
+    expect(trace.labels).toEqual([
+      "timeout",
+      "agent-timeout-sec:90",
+      "checker-timeout-sec:30",
+      "timed_out:true",
+      "network:shared",
+    ]);
   });
 
   test("held-out is refused and bohr still throws", async () => {

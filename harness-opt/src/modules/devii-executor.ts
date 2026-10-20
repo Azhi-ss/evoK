@@ -6,6 +6,17 @@ import { addUsage, EMPTY_USAGE, usageTokens, type UsageParts } from "../pi/usage
 import type { TaskRef } from "../types";
 import { ExecutorUnavailable, type ExecutionTrace, type HarnessExecutor, type TraceStep } from "./executor";
 
+interface RunSpawnOptions {
+  readonly encoding: "utf8";
+  readonly env: NodeJS.ProcessEnv;
+  readonly timeout: number;
+}
+
+interface RunSpawnResult {
+  readonly error?: Error;
+  readonly status: number | null;
+}
+
 export interface DeviiExecutorOptions {
   readonly python?: string;
   readonly scriptPath?: string;
@@ -18,6 +29,18 @@ export interface DeviiExecutorOptions {
   readonly testsDir?: string;
   readonly modelName?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** Test seam. Production uses spawnSync. */
+  readonly spawn?: (command: string, args: readonly string[], options: RunSpawnOptions) => RunSpawnResult;
+}
+
+/** Agent plus checker seconds, plus 30s so the checker can finish after an agent timeout. */
+const SPAWN_MARGIN_MS = 30_000;
+
+interface TaskLimits {
+  readonly agent_timeout_sec: number;
+  readonly checker_timeout_sec: number;
+  readonly allow_internet: boolean;
+  readonly network_mode: "unshare-net" | "shared";
 }
 
 const defaultScript = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/devii_one.py");
@@ -90,15 +113,77 @@ function readTrace(file: string, env: NodeJS.ProcessEnv): { readonly lines: Trac
   return { lines, usage };
 }
 
-function labelsFor(failed: boolean, lines: readonly TraceLine[]): string[] {
-  if (!failed) return [];
-  if (lines.some((line) => line.type === "timeout_abort")) return ["timeout"];
-  return ["format-invalid"];
+function limitsDirectory(taskPath: string): string {
+  return taskPath.endsWith(".md") ? dirname(taskPath) : taskPath;
+}
+
+function isPositive(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function readTaskLimits(python: string, script: string, taskDir: string): TaskLimits {
+  const child = spawnSync(python, [script, "--dump-limits", "--task-dir", taskDir], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  const detail = `${child.stderr ?? ""}${child.stdout ?? ""}`.trim();
+  if (child.error || child.status !== 0) {
+    throw new Error(detail || child.error?.message || `task.toml limits failed: ${taskDir}`);
+  }
+  let parsed: Partial<TaskLimits>;
+  try {
+    parsed = JSON.parse(child.stdout) as Partial<TaskLimits>;
+  } catch {
+    throw new Error(`task.toml limits were not readable: ${taskDir}`);
+  }
+  if (!isPositive(parsed.agent_timeout_sec) || !isPositive(parsed.checker_timeout_sec)) {
+    throw new Error(detail || `task.toml is missing a timeout: ${taskDir}`);
+  }
+  if (typeof parsed.allow_internet !== "boolean" || (parsed.network_mode !== "unshare-net" && parsed.network_mode !== "shared")) {
+    throw new Error(`task.toml network mode is missing: ${taskDir}`);
+  }
+  return {
+    agent_timeout_sec: parsed.agent_timeout_sec,
+    checker_timeout_sec: parsed.checker_timeout_sec,
+    allow_internet: parsed.allow_internet,
+    network_mode: parsed.network_mode,
+  };
+}
+
+function spawnTimeoutMs(limits: TaskLimits): number {
+  return Math.ceil((limits.agent_timeout_sec + limits.checker_timeout_sec) * 1000) + SPAWN_MARGIN_MS;
+}
+
+function limitLabels(limits: TaskLimits, timedOut: boolean): string[] {
+  return [
+    `agent-timeout-sec:${limits.agent_timeout_sec}`,
+    `checker-timeout-sec:${limits.checker_timeout_sec}`,
+    `timed_out:${timedOut ? "true" : "false"}`,
+    `network:${limits.network_mode}`,
+  ];
+}
+
+function readTimedOut(file: string): boolean {
+  if (!existsSync(file)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { timed_out?: unknown };
+    return parsed.timed_out === true;
+  } catch {
+    return false;
+  }
+}
+
+function labelsFor(failed: boolean, lines: readonly TraceLine[], limits: TaskLimits, timedOut: boolean): string[] {
+  const info = limitLabels(limits, timedOut);
+  if (!failed) return info;
+  if (timedOut || lines.some((line) => line.type === "timeout_abort")) return ["timeout", ...info];
+  return ["format-invalid", ...info];
 }
 
 /**
  * One dev-II task through scripts/devii_one.py.
  * Reward comes from reward.txt. Tokens are input + output + cacheRead on assistant_message usage.
+ * The spawn timeout is that task's agent and checker limits plus a 30s margin.
  */
 export class DeviiExecutor implements HarnessExecutor {
   readonly name = "devii";
@@ -119,7 +204,10 @@ export class DeviiExecutor implements HarnessExecutor {
     const arm = this.options.arm ?? env.HARNESS_OPT_ARM ?? "default";
     const taskRoot = this.options.taskRoot ?? env.HARNESS_OPT_TASK_ROOT ?? "";
     const taskPath = taskRoot ? join(taskRoot, task.path) : task.path;
-    const taskDir = taskPath.endsWith("instruction.md") ? dirname(taskPath) : taskPath;
+    const taskDir = limitsDirectory(taskPath);
+    const python = this.options.python ?? "python3";
+    if (!existsSync(defaultScript)) throw new Error(`task limit reader is missing: ${defaultScript}`);
+    const limits = readTaskLimits(python, defaultScript, taskDir);
     const memoryPath = this.options.memoryPath ?? env.HARNESS_MEMORY_PATH;
     const testsDir = this.options.testsDir ?? env.HARNESS_OPT_TESTS_DIR;
     const args = [
@@ -135,25 +223,33 @@ export class DeviiExecutor implements HarnessExecutor {
     ];
     if (memoryPath) args.push("--memory", memoryPath);
     if (testsDir) args.push("--tests", testsDir);
-    const child = spawnSync(this.options.python ?? "python3", args, {
+    const spawn = this.options.spawn ?? spawnSync;
+    const child = spawn(python, args, {
       encoding: "utf8",
       env: { ...env },
+      timeout: spawnTimeoutMs(limits),
     });
     const runDir = runDirectory(runRoot, task.id, seed, arm);
-    if (child.error) {
+    const spawnCode = (child.error as { code?: string } | undefined)?.code;
+    if (child.error && spawnCode !== "ETIMEDOUT") {
       throw new ExecutorUnavailable(this.name, redact(child.error.message, env));
     }
     const rewardPath = join(runDir, "verifier", "reward.txt");
     const traced = readTrace(join(runDir, "trace.jsonl"), env);
+    const timedOut = readTimedOut(join(runDir, "result.json"))
+      || traced.lines.some((line) => line.type === "timeout_abort")
+      || spawnCode === "ETIMEDOUT";
+    const steps = stepsFromTrace(traced.lines);
+    const tokens = usageTokens(traced.usage);
     if (!existsSync(rewardPath)) {
       return {
         taskId: task.id,
-        steps: stepsFromTrace(traced.lines),
+        steps,
         reward: 0,
-        tokens: usageTokens(traced.usage),
+        tokens,
         usage: traced.usage,
         failed: true,
-        labels: labelsFor(true, traced.lines),
+        labels: labelsFor(true, traced.lines, limits, timedOut),
         executor: this.name,
       };
     }
@@ -163,23 +259,23 @@ export class DeviiExecutor implements HarnessExecutor {
     if (!usable) {
       return {
         taskId: task.id,
-        steps: stepsFromTrace(traced.lines),
+        steps,
         reward: 0,
-        tokens: usageTokens(traced.usage),
+        tokens,
         usage: traced.usage,
         failed: true,
-        labels: ["format-invalid"],
+        labels: labelsFor(true, traced.lines, limits, timedOut),
         executor: this.name,
       };
     }
     return {
       taskId: task.id,
-      steps: stepsFromTrace(traced.lines),
+      steps,
       reward,
-      tokens: usageTokens(traced.usage),
+      tokens,
       usage: traced.usage,
       failed: false,
-      labels: [],
+      labels: labelsFor(false, traced.lines, limits, timedOut),
       executor: this.name,
     };
   }
