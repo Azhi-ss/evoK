@@ -13,6 +13,7 @@ import { createExecutor, executorKindFromSaved } from "./modules/executor";
 import { LocalJsonTaskSource, PlaygroundTaskSource } from "./modules/probe";
 import { GreedySelector } from "./modules/selector";
 import { Orchestrator } from "./orchestrator";
+import { pinPackageAgentDir } from "./pi/agent-dirs";
 import {
   attachSampleBridge,
   createMemoryBus,
@@ -283,6 +284,7 @@ async function stepRun(root: string, options: DispatchOptions): Promise<CommandR
 
   const round = saved.round + 1;
   const candidateId = `c${round}`;
+  pinPackageAgentDir();
   const useSample = options.sampleBridge ?? !options.events;
   const bus = options.events ?? createMemoryBus();
   if (useSample) attachSampleBridge(bus);
