@@ -18,6 +18,17 @@ describe("devii_one dry plan", () => {
     mkdirSync(join(task, "environment"), { recursive: true });
     mkdirSync(tests);
     writeFileSync(join(task, "instruction.md"), "public instruction\n");
+    writeFileSync(join(task, "task.toml"), [
+      "[agent]",
+      "timeout_sec = 90",
+      "",
+      "[verifier]",
+      "timeout_sec = 30",
+      "",
+      "[environment]",
+      "allow_internet = true",
+      "",
+    ].join("\n"));
     writeFileSync(join(tests, "secret.txt"), FILE_SECRET);
     const config = join(dir, "config.json");
     const memory = join(dir, "memory.jsonl");
@@ -55,6 +66,8 @@ describe("devii_one dry plan", () => {
     expect(plan.dry).toBe(true);
     expect(plan.runDir).toBe(join(runRoot, "tasks2/i006", "0", "treatment"));
     expect(plan.agentArgv[0]).toBe("bwrap");
+    expect(plan.agentArgv).not.toContain("--unshare-net");
+    expect(plan.checkerArgv).not.toContain("--unshare-net");
     expect(plan.checkerArgv[0]).toBe("bwrap");
     expect(plan.agentArgv).not.toContain(tests);
     expect(plan.agentArgv).not.toContain("/tests");
