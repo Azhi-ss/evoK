@@ -230,7 +230,7 @@ run.mkdir(parents=True)
       "agent-timeout-sec:90",
       "checker-timeout-sec:30",
       "timed_out:true",
-      "network:unshare-net",
+      "network:gateway-only",
     ]);
   });
 

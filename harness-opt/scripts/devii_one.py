@@ -10,10 +10,18 @@ timeout: `[agent].timeout_sec` is the agent wall clock, and the checker phase
 uses `[verifier].timeout_sec` (or `[checker].timeout_sec` when the verifier
 table has no timeout). A missing file or a missing timeout fails.
 
-Network choice: `[environment].allow_internet = false` adds `--unshare-net` to
-both bwrap commands (a new netns with only loopback). This script does not run
-a relay that would keep the model gateway (`BASE_URL`) reachable, so that
-endpoint is isolated with the rest of the network.
+Network choice when `[environment].allow_internet = false` (`gateway-only`):
+
+The sandbox gets `--unshare-net`, so it has no route to the internet. Loopback
+stays up. A host process listens on a unix socket and dials only the configured
+`BASE_URL` host and port. That socket is bind-mounted at `/opt/model-relay.sock`.
+`relay_inside.py` listens inside the netns on that same host:port (a DNS name is
+pinned to 127.0.0.1 in a private `/etc/hosts`; a non-loopback IPv4 is added to
+`lo`) and splices each TCP connection to the unix socket. Bytes are not
+rewritten, so TLS to a hostname still sees the real certificate. `/etc/resolv.conf`
+is not mounted. `CAP_NET_BIND_SERVICE` lets the sandbox bind port 443;
+`CAP_NET_ADMIN` only configures this empty netns and does not add an external
+interface. `allow_internet` missing or true keeps the shared network.
 """
 from __future__ import annotations
 
@@ -23,14 +31,26 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import tomllib
+from urllib.parse import urlparse
 
 FORBIDDEN = {"tests", "solution", "private", "_control", "__MACOSX"}
 KEY_NAMES = ("API_KEY", "BOHR_ACCESS_KEY")
-NETWORK_UNSHARED = "unshare-net"
+NETWORK_GATEWAY = "gateway-only"
 NETWORK_SHARED = "shared"
+SANDBOX_RELAY_SOCK = "/opt/model-relay.sock"
+SANDBOX_RELAY_SCRIPT = "/opt/model-relay-inside.py"
+RELAY_INSIDE = Path(__file__).resolve().with_name("relay_inside.py")
+ETC_MOUNTS = (
+    "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf", "/etc/hosts",
+    "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime",
+)
+GATEWAY_ETC_SKIP = {"/etc/resolv.conf", "/etc/hosts"}
+DEFAULT_BASE_URL = "https://open.bohrium.com/openapi/model-gateway/v1"
 
 
 def secrets():
@@ -105,7 +125,7 @@ def load_task_limits(task_dir: Path) -> TaskLimits:
         agent_timeout_sec=_positive_timeout(agent["timeout_sec"], "[agent].timeout_sec", path),
         checker_timeout_sec=_positive_timeout(checker_timeout, checker_label, path),
         allow_internet=allow_internet,
-        network_mode=NETWORK_SHARED if allow_internet else NETWORK_UNSHARED,
+        network_mode=NETWORK_SHARED if allow_internet else NETWORK_GATEWAY,
     )
 
 
@@ -118,22 +138,223 @@ def limits_payload(limits: TaskLimits) -> dict:
     }
 
 
-def namespace(home, workspace, extra, *, unshare_net=False):
+def model_base_url() -> str:
+    return os.environ.get("BASE_URL") or DEFAULT_BASE_URL
+
+
+def _is_ipv4(host: str) -> bool:
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+    except OSError:
+        return False
+    return True
+
+
+def parse_gateway(base_url: str) -> tuple[str, int]:
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise SystemExit(f"BASE_URL is not a usable model gateway: {base_url}")
+    try:
+        socket.inet_pton(socket.AF_INET6, host)
+        ipv6 = True
+    except OSError:
+        ipv6 = False
+    if ipv6:
+        raise SystemExit(f"BASE_URL host must be a DNS name or IPv4 address: {base_url}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host, port
+
+
+def gateway_listen_host(host: str) -> str:
+    """Address the in-netns proxy binds. DNS names are reached via /etc/hosts."""
+    if host in {"localhost", "127.0.0.1"}:
+        return "127.0.0.1"
+    if _is_ipv4(host):
+        return host
+    return "127.0.0.1"
+
+
+def gateway_hosts_text(host: str) -> str:
+    names = ["localhost"]
+    if not _is_ipv4(host) and host != "localhost":
+        names.append(host)
+    return "127.0.0.1 " + " ".join(names) + "\n"
+
+
+@dataclass(frozen=True)
+class GatewaySpec:
+    base_url: str
+    host: str
+    port: int
+    listen_host: str
+    socket_path: Path
+    hosts_path: Path
+    script_path: Path
+
+    def payload(self) -> dict:
+        return {
+            "baseUrl": self.base_url,
+            "host": self.host,
+            "port": self.port,
+            "listenHost": self.listen_host,
+            "socket": str(self.socket_path),
+            "hosts": str(self.hosts_path),
+            "script": str(self.script_path),
+        }
+
+
+def gateway_for(base_url: str, directory: Path) -> GatewaySpec:
+    host, port = parse_gateway(base_url)
+    if not RELAY_INSIDE.is_file():
+        raise SystemExit(f"model relay script is missing: {RELAY_INSIDE}")
+    return GatewaySpec(
+        base_url=base_url,
+        host=host,
+        port=port,
+        listen_host=gateway_listen_host(host),
+        socket_path=directory / "relay.sock",
+        hosts_path=directory / "hosts",
+        script_path=RELAY_INSIDE,
+    )
+
+
+def gateway_from_payload(payload: dict) -> GatewaySpec:
+    return GatewaySpec(
+        base_url=payload["baseUrl"],
+        host=payload["host"],
+        port=int(payload["port"]),
+        listen_host=payload["listenHost"],
+        socket_path=Path(payload["socket"]),
+        hosts_path=Path(payload["hosts"]),
+        script_path=Path(payload["script"]),
+    )
+
+
+class HostRelay:
+    """Dials only the configured BASE_URL host:port for each unix-socket client."""
+
+    def __init__(self, spec: GatewaySpec):
+        self.spec = spec
+        self._sock: socket.socket | None = None
+
+    def start(self) -> None:
+        spec = self.spec
+        spec.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        spec.hosts_path.write_text(gateway_hosts_text(spec.host))
+        if spec.socket_path.exists():
+            spec.socket_path.unlink()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(spec.socket_path))
+        os.chmod(spec.socket_path, 0o600)
+        server.listen(128)
+        self._sock = server
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def stop(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            sock.close()
+        if self.spec.socket_path.exists():
+            self.spec.socket_path.unlink()
+
+    def _accept(self) -> None:
+        sock = self._sock
+        if sock is None:
+            return
+        while True:
+            try:
+                client, _addr = sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(client,), daemon=True).start()
+
+    def _handle(self, client: socket.socket) -> None:
+        remote = None
+        try:
+            remote = socket.create_connection((self.spec.host, self.spec.port), timeout=10)
+            remote.settimeout(None)
+            left = threading.Thread(target=_pipe_sockets, args=(client, remote), daemon=True)
+            right = threading.Thread(target=_pipe_sockets, args=(remote, client), daemon=True)
+            left.start()
+            right.start()
+            left.join()
+            right.join()
+        except OSError:
+            pass
+        finally:
+            client.close()
+            if remote is not None:
+                remote.close()
+
+
+def _pipe_sockets(src: socket.socket, dst: socket.socket) -> None:
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def namespace(home, workspace, extra, *, gateway: GatewaySpec | None = None):
     command = ["bwrap", "--die-with-parent", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
-    if unshare_net:
-        command.append("--unshare-net")
+    if gateway is not None:
+        # Empty netns plus caps to bind the gateway port. No external interface.
+        command += [
+            "--unshare-net", "--unshare-user", "--uid", "0", "--gid", "0",
+            "--cap-add", "CAP_NET_BIND_SERVICE", "--cap-add", "CAP_NET_ADMIN",
+        ]
     for path in ["/usr", "/bin", "/lib", "/lib64"]:
         if Path(path).exists():
             command += ["--ro-bind", path, path]
-    for path in ["/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime"]:
+    for path in ETC_MOUNTS:
+        if gateway is not None and path in GATEWAY_ETC_SKIP:
+            continue
         if Path(path).exists():
             command += ["--ro-bind", str(Path(path).resolve()), path]
+    if gateway is not None:
+        command += [
+            "--ro-bind", str(gateway.hosts_path), "/etc/hosts",
+            "--bind", str(gateway.socket_path), SANDBOX_RELAY_SOCK,
+            "--ro-bind", str(gateway.script_path), SANDBOX_RELAY_SCRIPT,
+        ]
     command += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/app",
                 "--bind", str(home), "/root", "--bind", str(workspace), "/workspace"]
     packages = Path.home() / ".local/lib/python3.12/site-packages"
     if packages.is_dir():
         command += ["--ro-bind", str(packages), "/opt/python-packages"]
     return command + extra
+
+
+def wrap_relay(argv: list[str], gateway: GatewaySpec) -> list[str]:
+    if "--" not in argv:
+        raise SystemExit("sandbox command is missing --")
+    split = argv.index("--")
+    return [
+        *argv[: split + 1],
+        "/usr/bin/python3", SANDBOX_RELAY_SCRIPT,
+        "--listen", gateway.listen_host,
+        "--port", str(gateway.port),
+        "--sock", SANDBOX_RELAY_SOCK,
+        "--",
+        *argv[split + 1 :],
+    ]
+
+
+def sandbox_argv(home, workspace, extra, gateway: GatewaySpec | None):
+    argv = namespace(home, workspace, extra, gateway=gateway)
+    if gateway is None:
+        return argv
+    return wrap_relay(argv, gateway)
 
 
 def base_env():
@@ -199,8 +420,9 @@ def build_plan(args):
     if not str(args.seed).isdigit():
         raise SystemExit("unsafe seed")
     limits = load_task_limits(Path(args.task_dir))
-    unshare_net = limits.network_mode == NETWORK_UNSHARED
     run = Path(args.run_root) / task_id / str(args.seed) / arm
+    base_url = model_base_url()
+    gateway = gateway_for(base_url, run / "gateway") if limits.network_mode == NETWORK_GATEWAY else None
     config = Path(args.config)
     memory = Path(args.memory) if args.memory else None
     tests = Path(args.tests) if args.tests else None
@@ -220,7 +442,7 @@ def build_plan(args):
     agent_env = base_env()
     agent_env.update(
         API_KEY=os.environ.get("API_KEY") or os.environ.get("BOHR_ACCESS_KEY") or "",
-        BASE_URL=os.environ.get("BASE_URL") or "https://open.bohrium.com/openapi/model-gateway/v1",
+        BASE_URL=base_url,
         HARNESS_WORKSPACE="/workspace/runs",
         HARNESS_CANDIDATE_CONFIG="/opt/candidate-config.json",
     )
@@ -228,23 +450,26 @@ def build_plan(args):
         agent_env["HARNESS_MEMORY_PATH"] = "/opt/memory.jsonl"
     home = run / "home"
     workspace = run / "workspace"
-    agent = namespace(home, workspace, agent_extra, unshare_net=unshare_net)
+    agent = sandbox_argv(home, workspace, agent_extra, gateway)
     checker = None
     checker_env = None
     if tests is not None:
         # The staged outputs directory is chosen by run.sh after the agent starts.
         # Dry mode prints the bind targets; execute() fills the real host paths.
-        checker = namespace(
+        checker = sandbox_argv(
             run / "checker-home",
             workspace,
             checker_binds(tests, "<staged-outputs>", "<staged-run>", run / "verifier"),
-            unshare_net=unshare_net,
+            gateway,
         )
         checker_env = base_env()
+        if gateway is not None:
+            checker_env["BASE_URL"] = base_url
     return {
         "dry": True,
         "runDir": str(run),
         "limits": limits_payload(limits),
+        "gateway": None if gateway is None else gateway.payload(),
         "agentArgv": agent,
         "agentEnv": redact_env(agent_env),
         "checkerArgv": checker,
@@ -303,7 +528,7 @@ def execute(args, plan):
     agent_env = base_env()
     agent_env.update(
         API_KEY=os.environ.get("API_KEY") or os.environ.get("BOHR_ACCESS_KEY") or "",
-        BASE_URL=os.environ.get("BASE_URL") or "https://open.bohrium.com/openapi/model-gateway/v1",
+        BASE_URL=model_base_url(),
         HARNESS_WORKSPACE="/workspace/runs",
         HARNESS_CANDIDATE_CONFIG="/opt/candidate-config.json",
     )
@@ -311,38 +536,66 @@ def execute(args, plan):
         agent_env["HARNESS_MEMORY_PATH"] = "/opt/memory.jsonl"
     log = run / "devii_one.log"
     limits = plan["limits"]
-    unshare_net = limits["network_mode"] == NETWORK_UNSHARED
-    exit_code = run_logged(plan["agentArgv"], agent_env, log, limits["agent_timeout_sec"])
-    timed_out = exit_code is None
-    workspace = run / "workspace"
-    actual = staged_run(workspace, log)
-    outputs = actual / "outputs" if actual else run / "missing-outputs"
-    outputs.mkdir(exist_ok=True)
-    checker_exit = None
-    if args.tests:
-        checker = namespace(
-            run / "checker-home",
-            workspace,
-            checker_binds(Path(args.tests), outputs, actual, run / "verifier"),
-            unshare_net=unshare_net,
-        )
-        checker_exit = run_logged(checker, base_env(), run / "checker.log", limits["checker_timeout_sec"])
-    trace_src = actual / "trace.jsonl" if actual else None
-    if trace_src and trace_src.is_file():
-        with trace_src.open() as source, (run / "trace.jsonl").open("w") as target:
-            for line in source:
-                target.write(clean(line))
-    result = {
-        "timed_out": timed_out,
-        "agent_timeout_sec": limits["agent_timeout_sec"],
-        "checker_timeout_sec": limits["checker_timeout_sec"],
-        "allow_internet": limits["allow_internet"],
-        "network_mode": limits["network_mode"],
-        "agent_exit": exit_code,
-        "checker_exit": checker_exit,
-    }
-    (run / "result.json").write_text(json.dumps(result) + "\n")
-    return result
+    gateway = gateway_from_payload(plan["gateway"]) if plan.get("gateway") else None
+    if gateway is not None:
+        agent_env["BASE_URL"] = gateway.base_url
+    relay = HostRelay(gateway) if gateway is not None else None
+    if relay is not None:
+        relay.start()
+    try:
+        exit_code = run_logged(plan["agentArgv"], agent_env, log, limits["agent_timeout_sec"])
+        timed_out = exit_code is None
+        workspace = run / "workspace"
+        actual = staged_run(workspace, log)
+        outputs = actual / "outputs" if actual else run / "missing-outputs"
+        outputs.mkdir(exist_ok=True)
+        checker_exit = None
+        if args.tests:
+            checker = sandbox_argv(
+                run / "checker-home",
+                workspace,
+                checker_binds(Path(args.tests), outputs, actual, run / "verifier"),
+                gateway,
+            )
+            checker_env = base_env()
+            if gateway is not None:
+                checker_env["BASE_URL"] = gateway.base_url
+            checker_exit = run_logged(checker, checker_env, run / "checker.log", limits["checker_timeout_sec"])
+        trace_src = actual / "trace.jsonl" if actual else None
+        if trace_src and trace_src.is_file():
+            with trace_src.open() as source, (run / "trace.jsonl").open("w") as target:
+                for line in source:
+                    target.write(clean(line))
+        result = {
+            "timed_out": timed_out,
+            "agent_timeout_sec": limits["agent_timeout_sec"],
+            "checker_timeout_sec": limits["checker_timeout_sec"],
+            "allow_internet": limits["allow_internet"],
+            "network_mode": limits["network_mode"],
+            "agent_exit": exit_code,
+            "checker_exit": checker_exit,
+        }
+        (run / "result.json").write_text(json.dumps(result) + "\n")
+        return result
+    finally:
+        if relay is not None:
+            relay.stop()
+
+
+def run_gateway_probe(base_url: str, home: Path, workspace: Path, command: list[str], env: dict[str, str]):
+    """Run one command inside the real gateway sandbox. Used by the bwrap test."""
+    home.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    gateway = gateway_for(base_url, home.parent / "gateway")
+    relay = HostRelay(gateway)
+    relay.start()
+    guest = dict(env)
+    guest["BASE_URL"] = base_url
+    try:
+        argv = sandbox_argv(home, workspace, ["--chdir", "/root", "--", *command], gateway)
+        return subprocess.run(argv, env=guest, text=True, capture_output=True, timeout=30)
+    finally:
+        relay.stop()
 
 
 def parse_args(argv):

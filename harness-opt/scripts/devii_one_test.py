@@ -1,13 +1,17 @@
-"""Unit tests for devii_one task limits. Subprocess is mocked; bwrap is not started."""
+"""devii_one limits. Unit tests mock subprocess. The bwrap test runs only when bwrap exists."""
 from __future__ import annotations
 
 import argparse
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -142,7 +146,8 @@ allow_internet = false
             (tests / "test.sh").write_text("#!/bin/bash\nexit 0\n")
             run_root = root / "runs"
             args = args_for(task, run_root, tests)
-            plan = devii_one.build_plan(args)
+            with mock.patch.dict(os.environ, {"BASE_URL": "http://127.0.0.1:9/v1"}):
+                plan = devii_one.build_plan(args)
             calls: list[list[str]] = []
             timeouts: list[float | None] = []
 
@@ -177,8 +182,12 @@ allow_internet = false
             self.assertEqual(len(calls), 2)
             self.assertNotIn(str(tests), calls[0])
             self.assertIn(str(tests), calls[1])
-            self.assertIn("--unshare-net", calls[0])
-            self.assertIn("--unshare-net", calls[1])
+            for command in calls:
+                self.assertIn("--unshare-net", command)
+                self.assertIn(devii_one.SANDBOX_RELAY_SOCK, command)
+                self.assertIn(devii_one.SANDBOX_RELAY_SCRIPT, command)
+                self.assertIn("CAP_NET_BIND_SERVICE", command)
+                self.assertNotIn("/etc/resolv.conf", command)
             self.assertIn(11, timeouts)
             self.assertIn(4, timeouts)
             self.assertEqual(result["timed_out"], True)
@@ -187,7 +196,7 @@ allow_internet = false
             self.assertEqual(recorded["timed_out"], True)
             self.assertEqual(recorded["agent_timeout_sec"], 11)
             self.assertEqual(recorded["checker_timeout_sec"], 4)
-            self.assertEqual(recorded["network_mode"], "unshare-net")
+            self.assertEqual(recorded["network_mode"], "gateway-only")
 
     def test_network_flag_follows_allow_internet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,10 +227,105 @@ timeout_sec = 30
                         raise AssertionError("bwrap was started")
                     return real_popen(command, *popen_args, **popen_kwargs)
 
-                with mock.patch("devii_one.subprocess.Popen", side_effect=reject_bwrap):
+                with mock.patch.dict(os.environ, {"BASE_URL": "http://127.0.0.1:9/v1"}), \
+                        mock.patch("devii_one.subprocess.Popen", side_effect=reject_bwrap):
                     plan = devii_one.build_plan(args_for(task, root / name / "runs", tests))
                 for argv in (plan["agentArgv"], plan["checkerArgv"]):
                     self.assertEqual("--unshare-net" in argv, expect_unshare, name)
+                    self.assertEqual(devii_one.SANDBOX_RELAY_SOCK in argv, expect_unshare, name)
+                    self.assertEqual(devii_one.SANDBOX_RELAY_SCRIPT in argv, expect_unshare, name)
+                    if expect_unshare:
+                        self.assertNotIn("/etc/resolv.conf", argv)
+                        self.assertEqual(plan["limits"]["network_mode"], "gateway-only")
+                        self.assertEqual(plan["gateway"]["port"], 9)
+                        self.assertEqual(plan["gateway"]["host"], "127.0.0.1")
+
+    def test_gateway_hosts_pin_only_the_model_name(self) -> None:
+        self.assertEqual(
+            devii_one.gateway_hosts_text("open.bohrium.com"),
+            "127.0.0.1 localhost open.bohrium.com\n",
+        )
+        self.assertNotIn("pypi.org", devii_one.gateway_hosts_text("open.bohrium.com"))
+        self.assertEqual(
+            devii_one.parse_gateway("https://open.bohrium.com/openapi/model-gateway/v1"),
+            ("open.bohrium.com", 443),
+        )
+        self.assertEqual(devii_one.gateway_listen_host("open.bohrium.com"), "127.0.0.1")
+        self.assertEqual(devii_one.parse_gateway("http://127.0.0.1:9/v1"), ("127.0.0.1", 9))
+        self.assertEqual(devii_one.gateway_listen_host("10.1.2.3"), "10.1.2.3")
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("bwrap"), "bwrap is unavailable")
+    def test_bwrap_gateway_reaches_stub_and_blocks_other_hosts(self) -> None:
+        body = b"gateway-ok"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        guest = """
+import json, os, socket, urllib.request
+out = {}
+try:
+    with urllib.request.urlopen(os.environ["BASE_URL"] + "/ping", timeout=5) as resp:
+        out["body"] = resp.read().decode()
+        out["status"] = resp.status
+except Exception as exc:
+    out["gateway_error"] = type(exc).__name__ + ": " + str(exc)
+try:
+    socket.getaddrinfo("pypi.org", 443)
+    out["pypi"] = True
+except Exception as exc:
+    out["pypi"] = False
+    out["pypi_error"] = type(exc).__name__
+sock = socket.socket()
+sock.settimeout(2)
+try:
+    sock.connect(("1.1.1.1", 443))
+    out["external_ip"] = True
+except Exception as exc:
+    out["external_ip"] = False
+    out["external_error"] = type(exc).__name__
+print(json.dumps(out))
+"""
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                proc = devii_one.run_gateway_probe(
+                    f"http://127.0.0.1:{port}/v1",
+                    root / "home",
+                    root / "ws",
+                    ["/usr/bin/python3", "-c", guest],
+                    {"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1"},
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+                payload = json.loads(proc.stdout)
+                self.assertEqual(payload.get("body"), "gateway-ok", payload)
+                self.assertEqual(payload.get("status"), 200, payload)
+                self.assertIs(payload.get("pypi"), False, payload)
+                self.assertIs(payload.get("external_ip"), False, payload)
+                hosts = devii_one.run_gateway_probe(
+                    "https://open.bohrium.com/openapi/model-gateway/v1",
+                    root / "home-name",
+                    root / "ws-name",
+                    ["/bin/cat", "/etc/hosts"],
+                    {"PATH": "/usr/bin:/bin", "HOME": "/root"},
+                )
+                self.assertEqual(hosts.returncode, 0, hosts.stderr)
+                self.assertIn("127.0.0.1 localhost open.bohrium.com", hosts.stdout)
+                self.assertNotIn("pypi.org", hosts.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

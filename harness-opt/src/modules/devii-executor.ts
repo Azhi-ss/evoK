@@ -40,7 +40,7 @@ interface TaskLimits {
   readonly agent_timeout_sec: number;
   readonly checker_timeout_sec: number;
   readonly allow_internet: boolean;
-  readonly network_mode: "unshare-net" | "shared";
+  readonly network_mode: "gateway-only" | "shared";
 }
 
 const defaultScript = join(dirname(fileURLToPath(import.meta.url)), "../../scripts/devii_one.py");
@@ -139,7 +139,7 @@ function readTaskLimits(python: string, script: string, taskDir: string): TaskLi
   if (!isPositive(parsed.agent_timeout_sec) || !isPositive(parsed.checker_timeout_sec)) {
     throw new Error(detail || `task.toml is missing a timeout: ${taskDir}`);
   }
-  if (typeof parsed.allow_internet !== "boolean" || (parsed.network_mode !== "unshare-net" && parsed.network_mode !== "shared")) {
+  if (typeof parsed.allow_internet !== "boolean" || (parsed.network_mode !== "gateway-only" && parsed.network_mode !== "shared")) {
     throw new Error(`task.toml network mode is missing: ${taskDir}`);
   }
   return {
