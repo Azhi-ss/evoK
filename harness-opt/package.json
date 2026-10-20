@@ -1,0 +1,32 @@
+{
+  "name": "pi-harness-opt",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+    "description": "Deterministic harness optimizer. Depends on pi-subagents for delegation events and the named workflow harnessopt.round.",
+  "keywords": ["pi-package"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "npx -p typescript@5.9.3 tsc -p tsconfig.json --pretty false"
+  },
+  "bin": {
+    "harness-opt": "./src/cli.ts",
+    "harnessopt-select": "./bin/select.ts",
+    "harnessopt-eval": "./bin/eval.ts",
+    "harnessopt-record": "./bin/record.ts"
+  },
+  "pi": {
+    "extensions": ["./extensions/harness-opt/index.ts"],
+    "subagents": {
+      "agents": ["./agents"]
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "pi-subagents": "0.79.1"
+  }
+}
