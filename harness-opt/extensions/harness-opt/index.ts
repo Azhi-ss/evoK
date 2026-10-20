@@ -8,6 +8,7 @@ import {
 } from "pi-subagents/required-child-extensions";
 import { registerWorkflowResource, type WorkflowResourceRegistration } from "pi-subagents/workflow-resources";
 import { flag, splitArgsPreservingJson } from "../../src/args";
+import { pinPackageAgentDir } from "../../src/pi/agent-dirs";
 import { DEFAULT_DELEGATION_TIMEOUT_MS } from "../../src/pi/delegate";
 import { selectParent } from "../../bin/select";
 import { recordEvent } from "../../bin/record";
@@ -84,6 +85,7 @@ const ROLE_GUARD_EXTENSION = fileURLToPath(new URL("./role-guard.ts", import.met
 
 export function createHarnessOptExtension(): (pi: ExtensionAPI) => void {
   return (pi) => {
+    pinPackageAgentDir();
     let registration: WorkflowResourceRegistration | undefined;
     let childExtensions: RequiredChildExtensionRegistration | undefined;
     pi.registerCommand("harness-opt", {
