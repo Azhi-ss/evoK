@@ -7,7 +7,9 @@ import {
   assertRoleSpawn,
   buildRoleSpawn,
   DOCUMENTED_MODEL_MAX_TOKENS,
+  killLiveRolePi,
   launchRolePi,
+  launchRolePiAsync,
   outputHitLengthLimit,
   PI_OUTPUT_LIMIT_STDERR,
   ROLE_OUTPUT_CAPS,
@@ -63,7 +65,7 @@ describe("role spawn", () => {
     }
   });
 
-  test("a real pi launch receives --tools read and no role run id", () => {
+  test("a real pi launch receives --tools read and no role run id", async () => {
     const root = mkdtempSync(join(tmpdir(), "role-argv-"));
     const cwd = join(root, "cwd");
     const sessions = join(root, "sessions");
@@ -84,6 +86,14 @@ describe("role spawn", () => {
     const prompt = "name the shared failure";
     const launched = launchRolePi(bin, config, prompt);
     expect(launched.status).toBe(0);
+    const sleeper = join(root, "sleep.mjs");
+    writeFileSync(sleeper, "#!/usr/bin/env node\nsetTimeout(() => {}, 30000);\n");
+    chmodSync(sleeper, 0o755);
+    const pending = launchRolePiAsync(sleeper, config, prompt);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    killLiveRolePi();
+    const killed = await pending;
+    expect(killed.signal).toBe("SIGKILL");
     expect(launched.argv).toEqual([
       bin,
       "--print",

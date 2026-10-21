@@ -83,6 +83,12 @@ def declared_round0(path, sha) -> dict:
     return {"srcPath": path, "srcSha256": _round0_sha(sha), "hostCopyPath": ""}
 
 
+def gate_rule_sha() -> str:
+    """sha256 of the host reviewer-gate rule. It is part of the pre-round signature."""
+    path = Path(__file__).resolve().parents[1] / "docs" / "reviewer-gate-rules.md"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
     """Sign the caps, an inert seedSha, and round0Record before round 1.
 
@@ -117,6 +123,7 @@ def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None
         "seedSha": hashlib.sha256(bytes(seed)).hexdigest(),
         "seed": 0,
         "innovatorCap": INNOVATOR_CAP,
+        "gateRuleSha": gate_rule_sha(),
         "ranker": ranker,
         "critic": critic,
         **CAPS,

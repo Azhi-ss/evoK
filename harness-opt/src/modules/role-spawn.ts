@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -237,11 +237,13 @@ export function roleArgvRecord(config: RoleSpawnConfig, argv: readonly string[])
   return { argv, maxTokens: config.maxTokens };
 }
 
-export function launchRolePi(
-  piBin: string,
-  config: RoleSpawnConfig,
-  prompt: string,
-): { readonly status: number | null; readonly argv: readonly string[]; readonly stdout: string; readonly stderr: string } {
+function rolePiCommand(piBin: string, config: RoleSpawnConfig, prompt: string): {
+  readonly argv: string[];
+  readonly bin: string;
+  readonly args: string[];
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+} {
   const argv = rolePiArgv(piBin, config, prompt);
   const [bin, ...args] = argv;
   if (!bin) throw new Error("pi binary is empty");
@@ -252,12 +254,65 @@ export function launchRolePi(
   if (config.baseUrl) env.BASE_URL = config.baseUrl;
   pinPackageAgentDir(env);
   pinRoleRelay(env, config);
+  return { argv, bin, args, cwd: config.cwd, env };
+}
+
+export function launchRolePi(
+  piBin: string,
+  config: RoleSpawnConfig,
+  prompt: string,
+): { readonly status: number | null; readonly argv: readonly string[]; readonly stdout: string; readonly stderr: string } {
+  const { argv, bin, args, cwd, env } = rolePiCommand(piBin, config, prompt);
   const child = spawnSync(bin, args, {
     encoding: "utf8",
-    cwd: config.cwd,
+    cwd,
     env,
   });
   return { status: child.status, argv, stdout: child.stdout ?? "", stderr: child.stderr ?? "" };
+}
+
+/** The Pi process the loop can SIGKILL when a hard token cap is crossed mid-run. */
+let liveRolePi: ChildProcess | null = null;
+
+export function killLiveRolePi(): void {
+  const child = liveRolePi;
+  if (!child || child.killed || child.exitCode !== null) return;
+  child.kill("SIGKILL");
+}
+
+/**
+ * Same argv as `launchRolePi`, but the event loop stays free so a token watcher
+ * can `killLiveRolePi` before the process finishes.
+ */
+export function launchRolePiAsync(
+  piBin: string,
+  config: RoleSpawnConfig,
+  prompt: string,
+): Promise<{ readonly status: number | null; readonly signal: NodeJS.Signals | null; readonly argv: readonly string[]; readonly stdout: string; readonly stderr: string }> {
+  const { argv, bin, args, cwd, env } = rolePiCommand(piBin, config, prompt);
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    liveRolePi = child;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (liveRolePi === child) liveRolePi = null;
+      reject(error);
+    });
+    child.on("close", (status, signal) => {
+      if (settled) return;
+      settled = true;
+      if (liveRolePi === child) liveRolePi = null;
+      resolve({ status, signal, argv, stdout, stderr });
+    });
+  });
 }
 
 function roleModel(role: OptRoleName): string {

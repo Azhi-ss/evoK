@@ -14,6 +14,7 @@ const STUB = `
 import { writeFileSync } from "node:fs";
 const handlers = new Map();
 let sessionListener = () => {};
+let stopGoal = false;
 export const bus = {
   on(channel, fn) {
     const set = handlers.get(channel) ?? new Set();
@@ -23,15 +24,23 @@ export const bus = {
   },
   emit(channel, data) {
     for (const fn of [...(handlers.get(channel) ?? [])]) fn(data);
+    if (channel === "pi-goal:cancel") stopGoal = true;
     if (channel !== "pi-goal:start") return;
+    stopGoal = false;
     const turns = Number(process.env.HARNESS_STUB_TURNS || "3");
-    for (let i = 0; i < turns; i++) sessionListener({ type: "turn_end" });
+    let sent = 0;
+    for (let i = 0; i < turns; i++) {
+      if (stopGoal) break;
+      sent += 1;
+      sessionListener({ type: "turn_end" });
+    }
     const ev = "pi-goal:event:" + data.runId;
+    const reported = stopGoal ? sent : turns;
     bus.emit(ev, { type: "state", status: "active" });
     if (process.env.HARNESS_STUB_OFFICIAL === "0") {
       bus.emit(ev, { type: "state", status: "complete" });
     } else {
-      bus.emit(ev, { type: "state", status: "complete", automaticModelTurns: turns });
+      bus.emit(ev, { type: "state", status: "complete", automaticModelTurns: reported });
     }
   },
 };
@@ -166,7 +175,7 @@ describe("patched harness smoke", () => {
     expect(patchedSettings.defaultTools).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls"]);
     expect(patchedSettings.compaction.keepRecentTokens).toBe(16000);
     const goal = JSON.parse(readFileSync(join(plainPatched.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as { continuationLimits: { automaticTurns: number; noProgressTurns: number } };
-    expect(goal.continuationLimits).toEqual({ automaticTurns: 25, noProgressTurns: 3 });
+    expect(goal.continuationLimits).toEqual({ automaticTurns: 25, noProgressTurns: 3, maxContinuationTurns: 25 });
 
     const memory = join(root, "memory.jsonl");
     writeFileSync(memory, `${JSON.stringify({ text: "repeat tool errors", scope: "all" })}\n`);
@@ -240,4 +249,33 @@ describe("patched harness smoke", () => {
     expect(result.status).toBe("ok");
     expect(controlRun.result.stdout).not.toContain("smoke-test-key");
   }, 30000);
+
+  test("goal.maxContinuationTurns stops the continuation loop at N", () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-cap-"));
+    const home = prepareHome(root);
+    const patched = join(home, "src/harness.mjs");
+    const applied = spawnSync("node", [applyScript, upstream, patched], { encoding: "utf8" });
+    expect(applied.status).toBe(0);
+    const config = {
+      parts: {
+        "agent-loop": { maxSteps: 25, noProgressTurns: 3, maxNudges: 2, requireWrite: false },
+        toolchain: { checker: "none", subagents: false, bashTimeoutSec: 300, tools: { enabled: ["read", "write"] } },
+        goal: { maxContinuationTurns: 2 },
+      },
+    };
+    const configPath = join(root, "goal.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    const run = runHarness(home, patched, join(root, "run"), {
+      HARNESS_CANDIDATE_CONFIG: configPath,
+      HARNESS_STUB_TURNS: "8",
+    });
+    expect(run.result.status).toBe(0);
+    const start = run.trace.find((event) => event.type === "run_start") as unknown as { effective: Record<string, unknown> };
+    const end = run.trace.find((event) => event.type === "run_end") as unknown as { goalContinuationTurns: number; maxContinuationTurns: number };
+    expect(start.effective["goal.maxContinuationTurns"]).toBe(2);
+    expect(end.goalContinuationTurns).toBe(2);
+    expect(end.maxContinuationTurns).toBe(2);
+    const goal = JSON.parse(readFileSync(join(run.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as { continuationLimits: { maxContinuationTurns: number } };
+    expect(goal.continuationLimits.maxContinuationTurns).toBe(2);
+  });
 });

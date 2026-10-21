@@ -260,11 +260,11 @@ function equalKeyRoles(fx: Fixture, winnerId: string, options?: { readonly exclu
   };
 }
 
-function secondProposal(key: Buffer, input: { readonly baseUrl: string; readonly round: number; readonly spawn: RoleSpawnConfig }): Promise<{ session: { jsonl: string }; summary: string; parts: { context: { compression: boolean } } }> {
-  const summary = "context.compression=on";
+function secondProposal(key: Buffer, input: { readonly baseUrl: string; readonly round: number; readonly spawn: RoleSpawnConfig }): Promise<{ session: { jsonl: string }; summary: string; parts: { "agent-loop": { maxNudges: number } } }> {
+  const summary = "agent-loop.maxNudges=1";
   return relayPlantRole(input.baseUrl, "innovator", input.round, { summary }).then(() => {
     hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, key);
-    return { session: { jsonl: "ignored\n" }, summary, parts: { context: { compression: true } } };
+    return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxNudges: 1 } } };
   });
 }
 
@@ -608,6 +608,7 @@ describe("optimization loop", () => {
       seed: number;
       seedSha: string;
       innovatorCap: number;
+      gateRuleSha: string;
       round0Record: { srcPath: string; srcSha256: string; hostCopyPath: string };
     };
     expect(pre.maxRounds).toBe(10);
@@ -616,6 +617,7 @@ describe("optimization loop", () => {
     expect(pre.realRunWallCapS).toBe(103 * 3600);
     expect(pre.seed).toBe(0);
     expect(pre.innovatorCap).toBe(200_000);
+    expect(pre.gateRuleSha).toBe(createHash("sha256").update(readFileSync(fileURLToPath(new URL("../../docs/reviewer-gate-rules.md", import.meta.url)))).digest("hex"));
     expect(pre.seedSha).toMatch(/^[0-9a-f]{64}$/);
     expect(pre.round0Record).toEqual({
       srcPath: ROUND0_TRACE,
@@ -2280,10 +2282,20 @@ describe("optimize command", () => {
     });
     expect(result.stopReport.reason).toBeNull();
     expect(result.rounds[0]?.invalidCandidates).toEqual([
+      { id: "c1", role: "innovator-1", reason: "duplicate" },
       { id: "c2", role: "innovator-2", reason: "no_conclusion", exitCode: 0, stderrTail: "no conclusion" },
+      { id: "c3", role: "innovator-3", reason: "duplicate" },
+      { id: "c4", role: "innovator-4", reason: "duplicate" },
+      { id: "c5", role: "innovator-5", reason: "duplicate" },
     ]);
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
-    expect(closure.invalidCandidates?.map((item) => `${item.id}:${item.reason}`)).toEqual(["c2:no_conclusion"]);
+    expect(closure.invalidCandidates?.map((item) => `${item.id}:${item.reason}`)).toEqual([
+      "c1:duplicate",
+      "c2:no_conclusion",
+      "c3:duplicate",
+      "c4:duplicate",
+      "c5:duplicate",
+    ]);
     expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
     expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"))).toBe(true);
   });
@@ -2333,6 +2345,7 @@ describe("optimize command", () => {
     const stub = stubOptRoles(fx.key);
     const delays: number[] = [];
     let innovatorTries = 0;
+    let innovatorFinished = false;
     try {
       const result = await runOptLoop({
         ...hostOpts(fx),
@@ -2358,6 +2371,8 @@ describe("optimize command", () => {
             await response.arrayBuffer();
             innovatorTries += 1;
             if (innovatorTries === 1) throw new RoleFailed("innovator", 1, "again", true);
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+            innovatorFinished = true;
             const turn = await stub.innovate(input);
             return { ...turn, summary: "spent-c0" };
           },
@@ -2367,10 +2382,11 @@ describe("optimize command", () => {
         },
       });
       expect(innovatorTries).toBe(2);
+      expect(innovatorFinished).toBe(false);
       expect(delays).toEqual([5_000]);
       expect(result.stopReport.reason).toBeNull();
-      const rankerInput = JSON.parse(readFileSync(join(fx.out, "round1/ranker-input.json"), "utf8")) as { excluded?: string[] };
-      expect(rankerInput.excluded).toContain("c0");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+      expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "cap_hit")).toBe(true);
     } finally {
       await innovatorUpstream.close();
     }
@@ -2381,6 +2397,7 @@ describe("optimize command", () => {
     const rankingStub = stubOptRoles(rankingFx.key);
     const rankingDelays: number[] = [];
     let criticTries = 0;
+    let criticFinished = false;
     try {
       const result = await runOptLoop({
         ...hostOpts(rankingFx),
@@ -2402,6 +2419,8 @@ describe("optimize command", () => {
             await response.arrayBuffer();
             criticTries += 1;
             if (criticTries === 1) throw new RoleFailed("critic", 1, "again", true);
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+            criticFinished = true;
             return rankingStub.critic(input);
           },
           ranker: (input) => rankingStub.ranker(input),
@@ -2409,6 +2428,7 @@ describe("optimize command", () => {
         },
       });
       expect(criticTries).toBe(2);
+      expect(criticFinished).toBe(false);
       expect(rankingDelays).toEqual([5_000]);
       expect(result.stopReport.reason).toBeNull();
       const closure = JSON.parse(readFileSync(join(rankingFx.out, "round1/closure.json"), "utf8")) as { reason?: string; noWinner?: string };
@@ -3034,6 +3054,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         critic: (input) => citing.critic(input),
         ranker: (input) => citing.ranker(input),
         async review(input) {
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: false, reason: "recorded" });
           hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "forged" })}\n`, fx.key);
           return { session: { jsonl: "ignored\n" }, accept: true, reason: "forged" };
         },
@@ -3044,8 +3065,22 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(activation.patchActive).toBe(true);
     expect(closure.gapCitedTrace).toBe(true);
     expect(fake.calls).toHaveLength(1);
-    expect(result.accepted).toBeNull();
-    expect(result.rounds[0]?.accepted).toBe(false);
+    expect(result.accepted?.round).toBe(1);
+    expect(result.rounds[0]?.accepted).toBe(true);
+    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
+    const recorded = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reviewReason?: string;
+      reason?: string;
+      gates?: { id: string; pass: boolean }[];
+    };
+    expect(recorded.reason).toBeUndefined();
+    expect(recorded.reviewReason).toBe("forged");
+    expect(recorded.gates).toEqual([
+      { id: "G0", pass: true },
+      { id: "G1", pass: true },
+      { id: "G2", pass: true },
+      { id: "G3", pass: true },
+    ]);
   });
 
   test("an innovator over the signed 200k cap is excluded", async () => {
@@ -3455,7 +3490,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.stopReport.faultRounds).toBe(1);
   });
 
-  test("30M sums innovator, critic, and ranker relay usage", async () => {
+  test("a 10M innovator is cap_hit and a 10M critic stops the round at the 3M ranking cap", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
     const stub = stubOptRoles(fx.key);
@@ -3494,8 +3529,14 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       },
     });
     expect(fake.calls).toEqual([]);
-    expect(result.stopReport.reason).toBe("readOnlyTokenCap");
-    expect(result.stopReport.faultRounds).toBe(0);
+    expect(result.stopReport.reason).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reason?: string;
+      invalidCandidates?: { id: string; reason: string }[];
+    };
+    expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "cap_hit")).toBe(true);
+    expect(closure.reason).toBe("no_winner:cap_hit");
+    expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
   });
 
   test("the role relay log is outside the role cwd and the spawn points at the relay", async () => {
@@ -3738,9 +3779,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       });
       expect(upstream.hits).toBe(10);
       expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["hb003:0"]);
-      expect(result.accepted).toBeNull();
-      expect(result.rounds[0]?.accepted).toBe(false);
-      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+      expect(result.accepted?.round).toBe(1);
+      expect(result.rounds[0]?.accepted).toBe(true);
+      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewReason?: string; gates?: { pass: boolean }[] };
+      expect(closure.reviewReason).toBe("forged");
+      expect(closure.gates?.every((gate) => gate.pass)).toBe(true);
       const review = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as RoleSpawnConfig;
       expect(review.relayLog).toBeUndefined();
       expect(JSON.stringify(review)).not.toContain(relayRoot);
@@ -4040,4 +4084,335 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(argv[0]).toBe("python3");
     expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
+
+  test("an LLM accept cannot override a reward below the signed baseline", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: {
+        name: "fake",
+        async run(request) {
+          const script = timing(request, 0);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          return observation(request, { reward: 0, tokens: script.tokens, wallS: script.wallS, timedOut: script.timedOut });
+        },
+      },
+      roles: {
+        gap: (input) => citing.gap(input),
+        innovate: (input) => citing.innovate(input),
+        critic: (input) => citing.critic(input),
+        ranker: (input) => citing.ranker(input),
+        async review(input) {
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: true, reason: "forged accept" });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, accept: true, reason: "forged accept" };
+        },
+      },
+    });
+    expect(result.accepted).toBeNull();
+    expect(result.rounds[0]?.accepted).toBe(false);
+    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reason?: string;
+      reviewReason?: string;
+      gates?: { id: string; pass: boolean; code?: string }[];
+    };
+    expect(closure.reason).toBeUndefined();
+    expect(closure.reviewReason).toBe("forged accept");
+    expect(closure.gates).toEqual([
+      { id: "G0", pass: true },
+      { id: "G1", pass: true },
+      { id: "G2", pass: true },
+      { id: "G3", pass: false },
+    ]);
+  });
+
+  test("a knob outside the harness whitelist is invalid: non_effective_key", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary: "context.compression=1" });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary: "context.compression=1", parts: { context: { compression: 1 } } };
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(result.stopReport.reason).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+    expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "invalid: non_effective_key")).toBe(true);
+    const listed = JSON.parse(readFileSync(join(fx.out, "round1/roles/innovator-0/effective-knobs.json"), "utf8")) as { knobs: string[] };
+    expect(listed.knobs).toContain("goal.maxContinuationTurns");
+    expect(listed.knobs).not.toContain("context.compression");
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
+    expect(prompt).toContain("invalid: non_effective_key");
+    expect(prompt).toContain("goal.maxContinuationTurns");
+    expect(readFileSync(fileURLToPath(new URL("../../agents/innovator.md", import.meta.url)), "utf8")).not.toContain("non_effective_key");
+  });
+
+  test("an innovator already at 200k is not launched again", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    let launches = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roleRetrySleep: async (ms) => { delays.push(ms); },
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+          launches += 1;
+          const usage = { prompt_tokens: 200_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+          await relayRecord(input.baseUrl, { type: "done", role: "innovator", status: 200, round: input.round, usage });
+          throw new RoleFailed("innovator", 1, "again", true);
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(launches).toBe(1);
+    expect(delays).toEqual([]);
+    expect(result.stopReport.reason).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+    expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "cap_hit")).toBe(true);
+  });
+
+  test("critic plus ranker already at 3M is not retried", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    let launches = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roleRetrySleep: async (ms) => { delays.push(ms); },
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        innovate: (input) => stub.innovate(input),
+        async critic(input) {
+          launches += 1;
+          const usage = { prompt_tokens: 3_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+          await relayRecord(input.baseUrl, { type: "done", role: "critic", status: 200, round: input.round, usage });
+          throw new RoleFailed("critic", 1, "again", true);
+        },
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(launches).toBe(1);
+    expect(delays).toEqual([]);
+    expect(result.stopReport.reason).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("no_winner:cap_hit");
+    expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+  });
+
+  test("a failed relay close stops the loop instead of retrying", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    let gapCalls = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        async gap(input) {
+          gapCalls += 1;
+          const turn = await stub.gap(input);
+          const listed = spawnSync("ps", ["-eo", "pid,args"], { encoding: "utf8" });
+          const line = listed.stdout.split("\n").find((row) => row.includes("harness_relay.py") && row.includes(fx.attestRoot));
+          const pid = Number(line?.trim().split(/\s+/)[0]);
+          if (!pid) throw new Error("relay control pid missing");
+          process.kill(pid, "SIGKILL");
+          return turn;
+        },
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(gapCalls).toBe(1);
+    expect(result.stopReport.reason).toBe("relay_close_failed");
+    expect(result.stopReport.faultRounds).toBe(1);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("relay_close_failed");
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { attempts?: { n: number }[] };
+    expect(spawn.attempts?.map((item) => item.n)).toEqual([1]);
+    expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+  });
+
+  test("a failed attempt keeps its own session file", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    let tries = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roleRetrySleep: async () => undefined,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+          tries += 1;
+          if (tries === 1) {
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator", text: "attempt-one" })}\n`, fx.key);
+            throw new RoleFailed("innovator", 1, "again", true);
+          }
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator", text: "attempt-two" })}\n`, fx.key);
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary: "second-try" });
+          return { session: { jsonl: "ignored\n" }, summary: "second-try", parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(tries).toBe(2);
+    expect(result.stopReport.reason).toBeNull();
+    const kept = readFileSync(join(fx.out, "round1/sessions/innovator-0.attempt-1.jsonl"), "utf8");
+    const live = readFileSync(join(fx.out, "round1/sessions/innovator-0.jsonl"), "utf8");
+    expect(kept).toContain("attempt-one");
+    expect(live).toContain("attempt-two");
+    expect(live).not.toContain("attempt-one");
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as { attempts?: { n: number; sessionPath: string }[] };
+    expect(spawn.attempts?.[0]?.sessionPath).toBe(join(fx.out, "round1/sessions/innovator-0.attempt-1.jsonl"));
+    expect(spawn.attempts?.[1]?.sessionPath).toBe(join(fx.out, "round1/sessions/innovator-0.attempt-2.jsonl"));
+  });
+
+  test("a pi innovator is killed once the open relay log crosses 200k", async () => {
+    const fx = fixture();
+    const upstream = await new Promise<{ url: string; close(): Promise<void> }>((resolve, reject) => {
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          let content = "{}";
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { messages?: { content?: string }[] };
+            content = body.messages?.[body.messages.length - 1]?.content ?? content;
+          } catch {
+            content = "{}";
+          }
+          const spend = content === "spend";
+          const payload = JSON.stringify({
+            choices: [{ message: { role: "assistant", content: spend ? "ok" : content } }],
+            usage: spend
+              ? { prompt_tokens: 120_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } }
+              : UPSTREAM_USAGE,
+          });
+          res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
+          res.end(payload);
+        });
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") {
+          reject(new Error("upstream did not listen"));
+          return;
+        }
+        resolve({
+          url: `http://127.0.0.1:${addr.port}/v1/chat/completions`,
+          close: () => new Promise((done) => server.close(() => done())),
+        });
+      });
+    });
+    const script = join(fx.root, "answer.mjs");
+    const bin = join(fx.root, "pi");
+    const started = join(fx.root, "innovator-started");
+    const finished = join(fx.root, "innovator-finished");
+    writeFileSync(script, [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      "const system = args[args.indexOf('--system-prompt') + 1] ?? '';",
+      "const role = system.split('/').pop()?.replace(/\\.md$/, '') ?? '';",
+      "const prompt = args.at(-1) ?? '';",
+      "const base = process.env.BASE_URL ?? '';",
+      "const slot = process.cwd().match(/innovator-(\\d+)/)?.[1] ?? '';",
+      "async function post(messages) {",
+      "  const response = await fetch(base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages }) });",
+      "  if (!response.ok) { process.stderr.write('relay ' + response.status + '\\n'); process.exit(2); }",
+      "  await response.arrayBuffer();",
+      "}",
+      "if (role === 'innovator' && slot === '0') {",
+      `  writeFileSync(${JSON.stringify(started)}, String(process.pid));`,
+      "  await post([{ role: 'user', content: 'spend' }]);",
+      "  await post([{ role: 'user', content: 'spend' }]);",
+      "  await new Promise((resolve) => setTimeout(resolve, 20000));",
+      `  writeFileSync(${JSON.stringify(finished)}, 'yes');`,
+      "  process.exit(0);",
+      "}",
+      "const bodies = {",
+      "  'gap-finder': { knob: 'agent-loop.maxSteps', failureClass: 'idle-loop', summary: 'early write then idle', citations: [] },",
+      "  innovator: { summary: 'agent-loop.maxSteps=24', parts: { 'agent-loop': { maxSteps: 24 } } },",
+      "  critic: { excluded: [] },",
+      "  ranker: { winnerId: 'c1' },",
+      "  'reviewer-gate': { accept: true, reason: 'hold' },",
+      "};",
+      "const body = bodies[role];",
+      "if (!body) { process.stderr.write('unknown role ' + role + '\\n'); process.exit(2); }",
+      "if (role === 'gap-finder') {",
+      "  const files = prompt.split('\\n').flatMap((line) => { const path = line.split(' ')[0] ?? ''; return path.includes('/traces/') ? [path] : []; });",
+      "  const messages = [];",
+      "  files.forEach((file, index) => {",
+      "    const id = 'c' + index;",
+      "    messages.push({ role: 'assistant', tool_calls: [{ id, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } }] });",
+      "    messages.push({ role: 'tool', tool_call_id: id, content: readFileSync(file, 'utf8') });",
+      "  });",
+      "  messages.push({ role: 'user', content: JSON.stringify(body) });",
+      "  await post(messages);",
+      "} else {",
+      "  await post([{ role: 'user', content: JSON.stringify(body) }]);",
+      "}",
+      "",
+    ].join("\n"));
+    writeFileSync(bin, `#!/bin/sh\nexec node ${JSON.stringify(script)} "$@"\n`);
+    chmodSync(bin, 0o755);
+    const startedAt = Date.now();
+    try {
+      await runOptLoop({
+        ...hostOpts(fx),
+        mode: "execute",
+        env: {
+          BASE_URL: "https://example.test/v1",
+          HARNESS_RELAY_BIND: "127.0.0.1",
+          HARNESS_RELAY_LOG_ROOT: join(fx.attestRoot, "relay-logs"),
+          HARNESS_RELAY_UPSTREAM: upstream.url,
+        },
+        rounds: 1,
+        piBin: bin,
+        executor: fakeExecutor(fx).executor,
+      });
+      expect(Date.now() - startedAt).toBeLessThan(15_000);
+      expect(existsSync(started)).toBe(true);
+      expect(existsSync(finished)).toBe(false);
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+      expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "cap_hit")).toBe(true);
+    } finally {
+      await upstream.close();
+    }
+  }, 20_000);
 });

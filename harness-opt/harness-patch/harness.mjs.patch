@@ -8,7 +8,7 @@
  import zlib from "node:zlib";
  
  import {
-@@ -77,12 +78,103 @@
+@@ -77,12 +78,104 @@
  const outputDir = process.env.OUTPUT_DIR || "/app/outputs";
  const runDir = process.env.RUN_DIR || codeDir;
  const tracePath = process.env.TRACE_PATH || path.join(runDir, "trace.jsonl");
@@ -107,6 +107,7 @@
 +	"memory.scope": textOr(candidateValue("memory", "scope"), "all"),
 +	"memory.recall": textOr(candidateValue("memory", "recall"), "recent"),
 +	"memory.maxItems": nonNegativeInt(candidateValue("memory", "maxItems"), 8),
++	"goal.maxContinuationTurns": positiveInt(candidateValue("goal", "maxContinuationTurns"), 25),
 +};
 +const maxTokens = effective["context.maxTokens"];
 +const contextWindow = effective["context.window"];
@@ -114,7 +115,7 @@
  process.env.PI_CODING_AGENT_DIR = agentDir;
  
  mkdirSync(agentDir, { recursive: true });
-@@ -101,8 +193,8 @@
+@@ -101,8 +194,9 @@
  	path.join(agentDir, "pi-goal.json"),
  	`${JSON.stringify({
  		continuationLimits: {
@@ -122,6 +123,7 @@
 -			noProgressTurns: 3,
 +			automaticTurns: effective["agent-loop.maxSteps"],
 +			noProgressTurns: effective["agent-loop.noProgressTurns"],
++			maxContinuationTurns: effective["goal.maxContinuationTurns"],
  		},
  		rpc: {
  			enabled: true,
@@ -319,12 +321,17 @@
  const subagentLaunches = [];
  const processCalls = [];
  let leadText = "";
-@@ -988,6 +1173,9 @@
+@@ -988,6 +1174,14 @@
  				result: event.result,
  			});
  			return;
 +		case "turn_end":
-+			if (goalRunActive) goalTurnEnds++;
++			if (goalRunActive) {
++				goalTurnEnds++;
++				if (goalTurnEnds >= effective["goal.maxContinuationTurns"]) {
++					leadLoader.eventBus.emit("pi-goal:cancel", { reason: "maxContinuationTurns" });
++				}
++			}
 +			return;
  		case "agent_end":
  			stats.turns++;
@@ -375,7 +382,7 @@
  			return { ok: false, error: verification.issues.join("; ") };
  		}
  		return { ok: true };
-@@ -1212,11 +1412,13 @@
+@@ -1212,11 +1418,16 @@
  		: null;
  
  	try {
@@ -386,6 +393,9 @@
  			const onEvent = (ev) => {
  				trace({ ts: Date.now(), type: "goal_event", role: "lead", ...ev });
 +				noteGoalContinuation(ev);
++				if ((goalContinuationFromGoal ? goalContinuationTurns : goalTurnEnds) >= effective["goal.maxContinuationTurns"]) {
++					leadLoader.eventBus.emit("pi-goal:cancel", { runId, reason: "maxContinuationTurns" });
++				}
  				if (ev.type === "state" && ["complete", "blocked", "paused", "usage_limited", "budget_limited", "cleared"].includes(ev.status)) {
  					terminalEvent = ev;
  					resolve({ ok: ev.status === "complete", event: ev });
@@ -451,13 +461,16 @@
  	ts: Date.now(),
  	type: "run_end",
  	status,
-@@ -1397,7 +1601,9 @@
+@@ -1397,7 +1610,12 @@
  	artifact_count: artifacts.length,
  	subagent_calls: subagentLaunches.length,
  	verification_ok: verification.ok,
 -});
 +};
-+if (candidateActive) runEnd.goalContinuationTurns = goalContinuationTurns;
++if (candidateActive) {
++	runEnd.goalContinuationTurns = goalContinuationTurns;
++	runEnd.maxContinuationTurns = effective["goal.maxContinuationTurns"];
++}
 +trace(runEnd);
  unsubscribe();
  session.dispose();
