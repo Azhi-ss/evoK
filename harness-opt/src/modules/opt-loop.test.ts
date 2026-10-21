@@ -14,6 +14,7 @@ import {
   CONTROL_CONFIG_TEXT,
   OPT_MODEL,
   realRunCommand,
+  reconcilePrereg,
   runOptLoop,
   runOptOnce,
   runRecordArgv,
@@ -812,6 +813,20 @@ describe("optimization loop", () => {
     expect(rendered).toContain(fx.harnessPath);
     expect(rendered).toContain(request.runId);
     expect(rendered).toContain(join(fx.root, "relay", request.runId ?? "", "relay.jsonl"));
+  });
+
+  test("the seed-9 prereg uses the configured task", () => {
+    const fx = fixture();
+    const config = join(fx.root, "control.json");
+    writeFileSync(config, CONTROL_CONFIG_TEXT);
+    expect(() => reconcilePrereg("tasks3/hb003", "", config, 9, "control")).toThrow(/reconcile task/);
+    const accepted = reconcilePrereg("tasks3/hb003", "hb003", config, 9, "control");
+    expect(accepted).toEqual({ accepted: true, purpose: "reconcile", exclude: true });
+    const other = reconcilePrereg("tasks2/i014", "hb003", config, 9, "control");
+    expect(other.accepted).toBe(false);
+    expect(other.exclude).toBe(false);
+    const later = reconcilePrereg("hb003", "hb003", config, 8, "control");
+    expect(later.accepted).toBe(false);
   });
 
   test("round 1 refuses a missing, forged, or mis-bound control attestation", async () => {

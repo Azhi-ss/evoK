@@ -255,6 +255,10 @@ def _once_args(argv):
             flags["relay-external"]=True
             index+=1
             continue
+        if arg=="--reconcile":
+            flags["reconcile"]=True
+            index+=1
+            continue
         if not arg.startswith("--"):
             raise OnceError(f"unexpected {arg}")
         key=arg[2:]
@@ -344,7 +348,7 @@ def _standalone_relay(relay_root, port):
 def _kill_container(name, call):
     call(["sudo","docker","kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None):
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None):
     """One task, one seed, one arm. The host owns the run id and the relay open/close.
 
     `external` means a relay is already listening and has this run open. This process
@@ -477,10 +481,34 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             res["unscored_reason"]="checker_missing"
             res["checker_exit"]="skipped"
         recorded=finalize_launch(run, run_id, root, res)
+        fault=None
         if not external:
-            relay.close_run(run_id)
+            report=relay.close_run(run_id) or {}
             closed=True
-        if recorded.get("score_status")=="scored" and recorded.get("reward") is not None and recorded.get("checker_exit")!="skipped_token_cap":
+            fault=report.get("fault") if isinstance(report, dict) else None
+            if fault in ("attest_mismatch", "usage_missing"):
+                recorded["score_status"]="unscored"
+                recorded["reward"]=None
+                recorded["unscored_reason"]=fault
+                recorded["relayFault"]=fault
+        if fault not in ("attest_mismatch", "usage_missing"):
+            decision=hooks.reconcile_first_run(
+                task=resolved,
+                expected_task=task if expected_task is None else expected_task,
+                config_sha=config_sha,
+                seed=seed,
+                arm=arm,
+                reconcile=bool(reconcile),
+                already=(Path(root)/"reconcile.json").is_file(),
+            )
+        else:
+            decision={"accepted": False, "purpose": None, "exclude": False}
+        recorded["reconcile"]=decision
+        if decision["accepted"]:
+            recorded["purpose"]="reconcile"
+            (Path(root)/"reconcile.json").write_text(json.dumps({"task": hooks._task_name(resolved), "seed": seed})+"\n")
+        (Path(run)/"result.json").write_text(json.dumps(recorded, indent=1))
+        if recorded.get("score_status")=="scored" and recorded.get("reward") is not None and recorded.get("checker_exit")!="skipped_token_cap" and fault not in ("attest_mismatch", "usage_missing"):
             binding=hooks.relay_binding(log_path)
             signed=hooks.sign_run_record(
                 _attest_key(), checker_dir,
@@ -567,7 +595,8 @@ def once_from_flags(argv, **deps):
         flags["task"], seed, flags["arm"], flags["config"], flags["run-dir"], flags["harness"],
         run_id=run_id, relay_root=relay_root, external=bool(flags.get("relay-external")),
         model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
-        attest_dir=flags.get("attest-dir"), nonce=flags.get("nonce"), **deps,
+        attest_dir=flags.get("attest-dir"), nonce=flags.get("nonce"),
+        reconcile=bool(flags.get("reconcile")), expected_task=flags["task"], **deps,
     )
 
 def main():

@@ -312,6 +312,8 @@ interface ScoredRun {
   readonly relayPatchActive: boolean;
   /** Host run signature. Reviewer input and run-notes both verify this file. */
   readonly runRecordPath?: string;
+  /** Set when this run is the configured seed-9 control prereg. Statistics omit it. */
+  readonly purpose?: "reconcile";
 }
 
 const HOST_EVIDENCE_FAULTS = new Set([
@@ -1281,6 +1283,9 @@ async function executeScored(
     ewi_trace_ref = null;
   }
   const ewi: ScoredRelayEwi = { ...scored, ewi_trace_ref };
+  const prereg = request.seed === 9 && request.arm === "control"
+    ? reconcilePrereg(request.task.path, request.task.id, request.configPath, request.seed, request.arm)
+    : null;
   const mountedSha = sha256File(request.configPath);
   const relayPatchActive = relayActive(join(scoredRelayRoot, runId, "relay.jsonl"), mountedSha);
   return {
@@ -1300,6 +1305,45 @@ async function executeScored(
     attestReasons: verified.ok ? [] : verified.reasons,
     relayPatchActive,
     ...(runRecordPath ? { runRecordPath } : {}),
+    ...(prereg?.exclude ? { purpose: "reconcile" as const } : {}),
+  };
+}
+
+/** Seed-9 control prereg. expectedTask is the loop's required task. An empty task is refused. */
+export function reconcilePrereg(
+  task: string,
+  expectedTask: string,
+  configPath: string,
+  seed: number,
+  arm: string,
+  already = false,
+): { readonly accepted: boolean; readonly purpose: string | null; readonly exclude: boolean } {
+  if (expectedTask.trim() === "") throw new Error("reconcile task");
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const proc = spawnSync("python3", [
+    "-c",
+    [
+      "import hashlib, json, sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import hooks",
+      "sha = hashlib.sha256(Path(sys.argv[4]).read_bytes()).hexdigest()",
+      "print(json.dumps(hooks.reconcile_first_run(task=sys.argv[2], expected_task=sys.argv[3], config_sha=sha, seed=int(sys.argv[5]), arm=sys.argv[6], reconcile=True, already=sys.argv[7] == '1')))",
+    ].join("\n"),
+    relayDir,
+    task,
+    expectedTask,
+    configPath,
+    String(seed),
+    arm,
+    already ? "1" : "0",
+  ], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "reconcile task").trim());
+  const parsed = JSON.parse(proc.stdout) as { accepted?: unknown; purpose?: unknown; exclude?: unknown };
+  return {
+    accepted: parsed.accepted === true,
+    purpose: typeof parsed.purpose === "string" ? parsed.purpose : null,
+    exclude: parsed.exclude === true,
   };
 }
 
@@ -1413,7 +1457,7 @@ function summarize(runs: readonly ScoredRun[], threshold: number): {
   readonly rewardMean: number | null;
   readonly withoutEwi: { readonly count: number; readonly rewardMean: number | null; readonly timedOut: number };
 } {
-  const views = runs.map(toView);
+  const views = runs.filter((run) => run.purpose !== "reconcile").map(toView);
   const scored = views.filter((run) => run.scoreStatus === "scored" && run.reward !== null);
   const kept = scored.filter((run) => run.ewi === false);
   return {

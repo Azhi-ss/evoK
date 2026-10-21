@@ -876,11 +876,15 @@ class HookCase(unittest.TestCase):
         }
         for code, kind in mapping.items():
             self.assertEqual(kind, "infra" if code in hooks.INFRA_CODES else "run")
-        good = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True)
-        self.assertEqual(good["purpose"], "reconcile")
-        again = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True, already=True)
+        with self.assertRaises(ValueError):
+            hooks.reconcile_first_run(task="hb003", expected_task="", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True)
+        good = hooks.reconcile_first_run(task="tasks3/hb003", expected_task="hb003", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True)
+        self.assertEqual(good, {"accepted": True, "purpose": "reconcile", "exclude": True})
+        again = hooks.reconcile_first_run(task="hb003", expected_task="hb003", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True, already=True)
         self.assertFalse(again["accepted"])
-        wrong = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=8, arm="control", reconcile=True)
+        other = hooks.reconcile_first_run(task="i014", expected_task="hb003", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True)
+        self.assertFalse(other["accepted"])
+        wrong = hooks.reconcile_first_run(task="hb003", expected_task="hb003", config_sha=hooks.CONTROL_CONFIG_SHA, seed=8, arm="control", reconcile=True)
         self.assertFalse(wrong["accepted"])
         rows = [{"purpose": "reconcile", "reward": 0}, {"purpose": "dev", "reward": 1}]
         kept = hooks.exclude_from_statistics(rows)
@@ -1641,9 +1645,8 @@ class OnceCase(unittest.TestCase):
             bind_host="127.0.0.1", plant_enabled=True,
         )
 
-    def _run(self, relay, run, checker):
+    def _run(self, relay, run, checker, extra=(), run_id="ab" * 16):
         self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
-        run_id = "ab" * 16
         seen = []
 
         class Proc:
@@ -1664,6 +1667,7 @@ class OnceCase(unittest.TestCase):
             "--task", "hb003", "--seed", "9", "--arm", "control",
             "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
             "--run-id", run_id, "--nonce", "cd" * 16, "--attest-dir", str(attest),
+            *extra,
         ], popen=popen, call=checker, preflight=lambda **_kwargs: None,
            stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
            limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
@@ -1682,7 +1686,9 @@ class OnceCase(unittest.TestCase):
         self.assertIn(f"{self.config}:/cfg/candidate.json:ro", argv)
 
     def _verify(self, attest, run, run_id):
-        bun = os.environ.get("BUN", str(Path.home() / ".bun" / "bin" / "bun"))
+        import shutil
+        bun = shutil.which("bun")
+        self.assertTrue(bun, "bun")
         code = "\n".join([
             'import { readFileSync } from "node:fs";',
             'import { verifyHostAttestation } from "./harness-opt/src/modules/attestation.ts";',
@@ -1767,6 +1773,101 @@ class OnceCase(unittest.TestCase):
         verified = self._verify(attest, run, run_id)
         self.assertTrue(verified["ok"], verified)
         self.assertIsNone(verified["reward"])
+
+    def test_seed9_reconcile_uses_the_configured_task(self):
+        relay = self._relay()
+        run = self.root / "recon"
+
+        class Done:
+            returncode = 0
+
+        def checker(argv, **kwargs):
+            (run / "verifier").mkdir(parents=True, exist_ok=True)
+            (run / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        recorded, _seen, _run_id, _attest = self._run(relay, run, checker, extra=("--reconcile",))
+        self.assertEqual(recorded["purpose"], "reconcile")
+        self.assertTrue(recorded["reconcile"]["exclude"])
+        self.assertEqual(recorded["score_status"], "scored")
+        self.assertEqual(recorded["reward"], 1)
+        run2 = self.root / "recon-again"
+
+        def checker2(argv, **kwargs):
+            (run2 / "verifier").mkdir(parents=True, exist_ok=True)
+            (run2 / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        again, _seen2, _id2, _attest2 = self._run(relay, run2, checker2, extra=("--reconcile",), run_id="cd" * 16)
+        self.assertFalse(again["reconcile"]["accepted"])
+        self.assertNotIn("purpose", again)
+
+    def test_standalone_close_fault_is_unscored_and_unsigned(self):
+        class Done:
+            returncode = 0
+
+        mismatch_relay = self._relay()
+        mismatch = self.root / "mismatch"
+        mismatch_id = "ab" * 16
+
+        def tamper(argv, **kwargs):
+            (mismatch / "verifier").mkdir(parents=True, exist_ok=True)
+            (mismatch / "verifier" / "reward.txt").write_text("1\n")
+            with (self.root / "relay" / mismatch_id / "relay.jsonl").open("ab") as handle:
+                handle.write(b"tamper\n")
+            return Done()
+
+        recorded, _seen, run_id, _attest = self._run(mismatch_relay, mismatch, tamper, run_id=mismatch_id)
+        self.assertEqual(recorded["unscored_reason"], "attest_mismatch")
+        self.assertEqual(recorded["score_status"], "unscored")
+        self.assertIsNone(recorded["reward"])
+        self.assertFalse((self.root / "relay" / run_id / "run-record.json").exists())
+        self.assertNotIn("purpose", recorded)
+
+        missing_root = self.root / "relay-missing"
+        missing_relay = Relay(
+            port=8642, log_root=missing_root, upstream_key_file=str(self.up), attest_key_file=str(self.key),
+            bind_host="127.0.0.1", plant_enabled=True,
+        )
+        missing = self.root / "missing-log"
+        missing_id = "ef" * 16
+
+        def drop_log(argv, **kwargs):
+            (missing / "verifier").mkdir(parents=True, exist_ok=True)
+            (missing / "verifier" / "reward.txt").write_text("1\n")
+            (missing_root / missing_id / "relay.jsonl").unlink()
+            return Done()
+
+        # The helper always reads self.root / "relay". Drive this case through run_once directly.
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+        seen = []
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        def popen(argv, **kwargs):
+            seen.append(list(argv))
+            (missing / "workspace" / "runs" / "task-stub").mkdir(parents=True, exist_ok=True)
+            missing_relay.record(missing_id, {"type": "done", "status": 200, "usage": dict(USAGE)})
+            return Proc()
+
+        dropped = self.box.once_from_flags([
+            "--task", "hb003", "--seed", "9", "--arm", "control",
+            "--config", str(self.config), "--run-dir", str(missing), "--harness", str(self.harness),
+            "--run-id", missing_id,
+        ], popen=popen, call=drop_log, preflight=lambda **_kwargs: None,
+           stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
+           limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
+           relay=missing_relay, listen=False, lock_path=self.root / "missing.lock")
+        self.assertEqual(dropped["unscored_reason"], "usage_missing")
+        self.assertEqual(dropped["score_status"], "unscored")
+        self.assertIsNone(dropped["reward"])
+        self.assertFalse((missing_root / missing_id / "run-record.json").exists())
+        self.assertEqual(len(seen), 1)
 
 
 def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):

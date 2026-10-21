@@ -185,8 +185,27 @@ def prepare_container(run_dir, mounts, expected_mounts, launch):
     return {"started": True, "layout": layout}
 
 
-def reconcile_first_run(*, task, config_sha, seed, arm, reconcile, already=False):
-    ok = task == "i014" and config_sha == CONTROL_CONFIG_SHA and seed == 9 and arm == "control" and reconcile is True and not already
+def _task_name(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().strip("/")
+    if text == "":
+        return ""
+    return text.split("/")[-1]
+
+
+def reconcile_first_run(*, task, expected_task, config_sha, seed, arm, reconcile, already=False):
+    """Seed-9 control prereg. expected_task is the configured task. It has no default."""
+    if _task_name(expected_task) == "":
+        raise ValueError("reconcile task")
+    ok = (
+        _task_name(task) == _task_name(expected_task)
+        and config_sha == CONTROL_CONFIG_SHA
+        and seed == 9
+        and arm == "control"
+        and reconcile is True
+        and not already
+    )
     if not ok:
         return {"accepted": False, "purpose": None, "exclude": False}
     return {"accepted": True, "purpose": "reconcile", "exclude": True}

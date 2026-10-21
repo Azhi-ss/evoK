@@ -186,7 +186,7 @@ bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
 HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
 HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
 python3 harness-opt/relay/devii_docker_v2.py once \
-  --task hb003 --seed 9 --arm control \
+  --task hb003 --seed 9 --arm control --reconcile \
   --config /workspace/harness-opt-runs/config/control.json \
   --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control \
   --harness /workspace/harness-opt-runs/config/harness.pr202.mjs
