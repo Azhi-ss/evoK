@@ -1,8 +1,11 @@
 /**
  * Knobs the patched company harness reads. One list: the innovator prompt,
  * candidate validation, and the harness-patch test all use this array.
- * `goal.maxContinuationTurns` is included because the patched harness stops
- * the continuation loop on it and copies it into run_start.effective.
+ * `agent-loop.maxSteps` caps agent_end steps (`stats.turns`, `run_end.steps`).
+ * `goal.maxContinuationTurns` caps continuation turns: pi-goal automatic model
+ * responses. That same number is `continuationLimits.automaticTurns` and
+ * `run_end.goalContinuationTurns`. A relay call is an `assistant_message` or
+ * `auto_retry_start` trace line. It is not a knob and neither cap applies to it.
  */
 export const EFFECTIVE_KNOBS = [
   "agent-loop.maxSteps",

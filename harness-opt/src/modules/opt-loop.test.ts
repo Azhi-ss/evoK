@@ -4160,6 +4160,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
     expect(prompt).toContain("invalid: non_effective_key");
     expect(prompt).toContain("goal.maxContinuationTurns");
+    expect(prompt).toContain("run_end.goalContinuationTurns");
+    expect(prompt).toContain("agent-loop.maxSteps 是 agent_end 步数");
     expect(readFileSync(fileURLToPath(new URL("../../agents/innovator.md", import.meta.url)), "utf8")).not.toContain("non_effective_key");
   });
 

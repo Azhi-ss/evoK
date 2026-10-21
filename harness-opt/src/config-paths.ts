@@ -42,7 +42,7 @@ export const PART_CONFIG_SHAPE: Record<HarnessPart, ShapeNode> = {
  * leaf string is present in the patched source.
  */
 export const HARNESS_LEAF_CONSUMPTION: Readonly<Record<string, string>> = {
-  "agent-loop.maxSteps": "pi-goal.json continuationLimits.automaticTurns",
+  "agent-loop.maxSteps": "session agent_end step cap (stats.turns)",
   "agent-loop.noProgressTurns": "pi-goal.json continuationLimits.noProgressTurns",
   "agent-loop.maxNudges": "missing-output nudge loop bound",
   "agent-loop.requireWrite": "missing-output nudge loop gate",

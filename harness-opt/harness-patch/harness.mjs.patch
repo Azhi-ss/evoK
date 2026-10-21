@@ -121,7 +121,7 @@
  		continuationLimits: {
 -			automaticTurns: 25,
 -			noProgressTurns: 3,
-+			automaticTurns: effective["agent-loop.maxSteps"],
++			automaticTurns: effective["goal.maxContinuationTurns"],
 +			noProgressTurns: effective["agent-loop.noProgressTurns"],
 +			maxContinuationTurns: effective["goal.maxContinuationTurns"],
  		},
@@ -297,44 +297,58 @@
  });
  await session.bindExtensions({});
  
-@@ -948,6 +1116,23 @@
+@@ -948,6 +1116,39 @@
  const startedAt = Date.now();
  const deadline = timeoutSec > 0 ? startedAt + timeoutSec * 1000 : 0;
  const stats = { assistant_text: 0, tool_calls: 0, tool_errors: 0, turns: 0, retries: 0, usage: null };
++// steps: stats.turns, one session agent_end, capped by agent-loop.maxSteps.
++// continuation turns: pi-goal automatic model responses. An official
++// automaticModelTurns value, or "N of M automatic model responses", replaces
++// this count; until one arrives, each goal-run turn_end increments it.
++// goal.maxContinuationTurns caps this same number, pi-goal enforces it as
++// continuationLimits.automaticTurns, and run_end.goalContinuationTurns reports it.
++// relay calls: trace assistant_message and auto_retry_start. Neither cap applies.
 +let goalRunActive = false;
-+let goalTurnEnds = 0;
-+let goalContinuationTurns = 0;
-+let goalContinuationFromGoal = false;
++let continuationTurns = 0;
++let continuationFromGoal = false;
++let continuationCapped = false;
++function setContinuationTurns(n) {
++	if (continuationCapped) return;
++	if (typeof n !== "number" || !Number.isFinite(n)) return;
++	continuationTurns = n;
++	if (continuationTurns >= effective["goal.maxContinuationTurns"]) {
++		continuationCapped = true;
++		leadLoader.eventBus.emit("pi-goal:cancel", { reason: "maxContinuationTurns" });
++	}
++}
 +function noteGoalContinuation(ev) {
 +	if (!ev || typeof ev !== "object") return;
-+	if (typeof ev.automaticModelTurns === "number" && Number.isFinite(ev.automaticModelTurns)) {
-+		goalContinuationTurns = Math.max(goalContinuationTurns, ev.automaticModelTurns);
-+		goalContinuationFromGoal = true;
++	let official = null;
++	if (typeof ev.automaticModelTurns === "number" && Number.isFinite(ev.automaticModelTurns)) official = ev.automaticModelTurns;
++	else {
++		const reason = typeof ev.reason === "string" ? ev.reason : "";
++		const match = /(\d+) of \d+ automatic model responses/.exec(reason);
++		if (match) official = Number(match[1]);
 +	}
-+	const reason = typeof ev.reason === "string" ? ev.reason : "";
-+	const match = /(\d+) of \d+ automatic model responses/.exec(reason);
-+	if (match) {
-+		goalContinuationTurns = Math.max(goalContinuationTurns, Number(match[1]));
-+		goalContinuationFromGoal = true;
-+	}
++	if (official === null) return;
++	continuationFromGoal = true;
++	setContinuationTurns(official);
 +}
  const subagentLaunches = [];
  const processCalls = [];
  let leadText = "";
-@@ -988,6 +1174,14 @@
+@@ -988,6 +1202,12 @@
  				result: event.result,
  			});
  			return;
 +		case "turn_end":
-+			if (goalRunActive) {
-+				goalTurnEnds++;
-+				if (goalTurnEnds >= effective["goal.maxContinuationTurns"]) {
-+					leadLoader.eventBus.emit("pi-goal:cancel", { reason: "maxContinuationTurns" });
-+				}
-+			}
++			if (goalRunActive && !continuationFromGoal) setContinuationTurns(continuationTurns + 1);
 +			return;
  		case "agent_end":
  			stats.turns++;
++			if (stats.turns >= effective["agent-loop.maxSteps"]) {
++				session.abort().catch((err) => trace({ ts: Date.now(), type: "abort_error", error: String(err) }));
++			}
  			return;
 @@ -1027,7 +1215,7 @@
  	}
@@ -382,7 +396,7 @@
  			return { ok: false, error: verification.issues.join("; ") };
  		}
  		return { ok: true };
-@@ -1212,11 +1418,16 @@
+@@ -1212,11 +1418,13 @@
  		: null;
  
  	try {
@@ -393,9 +407,6 @@
  			const onEvent = (ev) => {
  				trace({ ts: Date.now(), type: "goal_event", role: "lead", ...ev });
 +				noteGoalContinuation(ev);
-+				if ((goalContinuationFromGoal ? goalContinuationTurns : goalTurnEnds) >= effective["goal.maxContinuationTurns"]) {
-+					leadLoader.eventBus.emit("pi-goal:cancel", { runId, reason: "maxContinuationTurns" });
-+				}
  				if (ev.type === "state" && ["complete", "blocked", "paused", "usage_limited", "budget_limited", "cleared"].includes(ev.status)) {
  					terminalEvent = ev;
  					resolve({ ok: ev.status === "complete", event: ev });
@@ -408,7 +419,7 @@
  			return { ok: true, status: "complete" };
  		}
  		if (terminalEvent?.status === "blocked") {
-@@ -1250,13 +1452,15 @@
+@@ -1250,13 +1452,14 @@
  		if (phaseToolCalls === 0) {
  			return { ok: false, error: terminalEvent?.reason || "phase completed without tool calls" };
  		}
@@ -420,7 +431,6 @@
  	} catch (err) {
  		return { ok: false, error: String(err && err.stack ? err.stack : err) };
  	} finally {
-+		if (!goalContinuationFromGoal) goalContinuationTurns = goalTurnEnds;
 +		goalRunActive = false;
  		if (typeof unsubscribe === "function") unsubscribe();
  		if (timer) clearTimeout(timer);
@@ -461,15 +471,16 @@
  	ts: Date.now(),
  	type: "run_end",
  	status,
-@@ -1397,7 +1610,12 @@
+@@ -1397,7 +1610,13 @@
  	artifact_count: artifacts.length,
  	subagent_calls: subagentLaunches.length,
  	verification_ok: verification.ok,
 -});
 +};
 +if (candidateActive) {
-+	runEnd.goalContinuationTurns = goalContinuationTurns;
++	runEnd.goalContinuationTurns = continuationTurns;
 +	runEnd.maxContinuationTurns = effective["goal.maxContinuationTurns"];
++	runEnd.steps = stats.turns;
 +}
 +trace(runEnd);
  unsubscribe();
