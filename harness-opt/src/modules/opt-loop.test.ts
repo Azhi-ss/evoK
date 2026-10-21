@@ -13,6 +13,7 @@ import {
   CONTROL_CONFIG_SHA,
   CONTROL_CONFIG_TEXT,
   OPT_MODEL,
+  realRunCommand,
   runOptLoop,
   runOptOnce,
   runRecordArgv,
@@ -24,7 +25,7 @@ import {
   type OptRoles,
 } from "./opt-loop";
 import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
-import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type OptTask, type RunArtifactTiming } from "./opt-executor";
+import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type OptTask, type RunArtifactTiming } from "./opt-executor";
 
 /** Caller-supplied loop target. The loop itself has no built-in task. */
 const LOOP_TASK: OptTask = {
@@ -760,7 +761,7 @@ describe("optimization loop", () => {
     expect(existsSync(join(copied ?? "", "..", "..", "run-record.json"))).toBe(false);
   });
 
-  test("execute mode refuses to start without BASE_URL or a command", async () => {
+  test("execute mode refuses to start without BASE_URL", async () => {
     const fx = fixture();
     await expect(runOptLoop({
       ...hostOpts(fx),
@@ -771,13 +772,46 @@ describe("optimization loop", () => {
       executorCommand: ["python3", "{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
       driver: join(fx.root, "driver.py"),
     })).rejects.toThrow(/BASE_URL/);
-    await expect(runOptLoop({
-      ...hostOpts(fx),
-      mode: "execute",
-      rounds: 1,
-      env: { BASE_URL: "https://example.test/v1" },
-      roles: stubOptRoles(fx.key),
-    })).rejects.toThrow(/executor command/);
+  });
+
+  test("execute mode's real run is the once entry", () => {
+    const fx = fixture();
+    const command = realRunCommand();
+    const text = command.join("\n");
+    expect(text).toContain("once");
+    expect(text).toContain("--relay-external");
+    expect(text).toContain("{taskPath}");
+    expect(text).toContain("{runDir}");
+    expect(text).toContain("{attestDir}");
+    expect(text).toContain("{harness}");
+    expect(text).toContain("{runId}");
+    expect(text).toContain("{relayLog}");
+    expect(text).not.toContain("API_KEY");
+    const request: OptRunRequest = {
+      task: LOOP_TASK,
+      seed: 9,
+      arm: "control",
+      configPath: join(fx.root, "control.json"),
+      runDir: join(fx.root, "run"),
+      attestDir: join(fx.root, "attest"),
+      harnessPath: fx.harnessPath,
+      runId: "ab".repeat(16),
+      nonce: "cd".repeat(16),
+      relayLogRoot: join(fx.root, "relay"),
+      model: OPT_MODEL,
+      tokenCap: tokenCap(LOOP_TASK),
+    };
+    const rendered = renderExecutorCommand(command, request);
+    const joined = rendered.join("\n");
+    expect(joined).not.toContain("API_KEY");
+    expect(rendered).toContain("once");
+    expect(rendered).toContain("--relay-external");
+    expect(rendered).toContain("tasks3/hb003");
+    expect(rendered).toContain(request.runDir);
+    expect(rendered).toContain(request.attestDir);
+    expect(rendered).toContain(fx.harnessPath);
+    expect(rendered).toContain(request.runId);
+    expect(rendered).toContain(join(fx.root, "relay", request.runId ?? "", "relay.jsonl"));
   });
 
   test("round 1 refuses a missing, forged, or mis-bound control attestation", async () => {

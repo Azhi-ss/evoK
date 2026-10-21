@@ -32,6 +32,7 @@ import {
   hostRunId,
   tokenCap,
   type OptExecutor,
+  type OptRunObservation,
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
@@ -1101,13 +1102,34 @@ export function stubOptRoles(key: Buffer): OptRoles {
   };
 }
 
+/** Real-run argv. The loop opens the relay run; this process uses `--relay-external` and does not bind. */
+export function realRunCommand(): readonly string[] {
+  const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
+  return [
+    "python3", script, "once",
+    "--task", "{taskPath}",
+    "--seed", "{seed}",
+    "--arm", "{arm}",
+    "--config", "{config}",
+    "--run-dir", "{runDir}",
+    "--harness", "{harness}",
+    "--run-id", "{runId}",
+    "--relay-log", "{relayLog}",
+    "--relay-external",
+    "--network", "{network}",
+    "--model", "{model}",
+    "--token-cap", "{tokenCap}",
+    "--attest-dir", "{attestDir}",
+    "--nonce", "{nonce}",
+  ];
+}
+
 function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv, key: Buffer): OptExecutor {
   if (options.mode === "dry-run") return createDryRunExecutor({ key, harnessPath: options.harnessPath });
-  if (!options.executorCommand || options.executorCommand.length === 0) {
-    throw new Error("execute mode needs an executor command");
-  }
+  const supplied = options.executorCommand !== undefined && options.executorCommand.length > 0;
   return new CommandOptExecutor({
-    command: options.executorCommand,
+    command: supplied ? options.executorCommand ?? [] : realRunCommand(),
+    ...(supplied ? {} : { name: "once" }),
     ...(options.driver ? { driver: options.driver } : {}),
     env,
   });
@@ -1140,7 +1162,8 @@ async function executeScored(
   threshold: number,
   scoreHost: { readonly now: () => number; readonly watcher: ResultWriteWatcher },
 ): Promise<ScoredRun> {
-  assertScoredRelayLog(host.relayLogRoot);
+  const scoredRelayRoot = executor.name === "once" && activeRelayRoot ? activeRelayRoot : host.relayLogRoot;
+  assertScoredRelayLog(scoredRelayRoot);
   resolveEwiIdleScript();
   if (existsSync(join(request.runDir, "result.json"))) throw new Error("run dir already exists");
   assertAttestIsolated(host.attestDir, request.runDir);
@@ -1154,15 +1177,25 @@ async function executeScored(
     harnessPath: host.harnessPath,
     runId,
     nonce,
-    relayLogRoot: host.relayLogRoot,
+    relayLogRoot: scoredRelayRoot,
   };
   const resultFile = join(request.runDir, "outputs", PREREGISTERED_RESULT_FILE);
   scoreHost.watcher.arm(resultFile);
-  const observation = await executor.run(full);
-  copyCheckerBeforeSign(request.runDir, host.relayLogRoot, runId);
+  let openedExecutor = false;
+  if (executor.name === "once") {
+    await relayRpc({ op: "open", runId, kind: "executor", expectedSha: sha256File(request.configPath) });
+    openedExecutor = true;
+  }
+  let observation: OptRunObservation;
+  try {
+    observation = await executor.run(full);
+  } finally {
+    if (openedExecutor) await closeRelay(runId);
+  }
+  copyCheckerBeforeSign(request.runDir, scoredRelayRoot, runId);
   const tEnd = scoreHost.now();
   const watch = scoreHost.watcher.snapshot();
-  const responseEnds = relayResponseEnds(join(host.relayLogRoot, runId, "relay.jsonl"));
+  const responseEnds = relayResponseEnds(join(scoredRelayRoot, runId, "relay.jsonl"));
   const verified = verifyHostAttestation({
     attestDir: host.attestDir,
     key: host.key,
@@ -1187,7 +1220,7 @@ async function executeScored(
     reward = null;
     unscoredReason = "result_runid_mismatch";
   }
-  const checkerDir = join(host.relayLogRoot, runId, "checker");
+  const checkerDir = join(scoredRelayRoot, runId, "checker");
   let evaluatorNull: string | null = null;
   if (observation.tokens > request.tokenCap) {
     scoreStatus = "unscored";
@@ -1203,6 +1236,11 @@ async function executeScored(
       scoreStatus = "unscored";
     }
   } else if (reward === null) {
+    const noted = readEvaluatorNullScore(request.runDir, checkerDir);
+    if (noted) {
+      evaluatorNull = noted;
+      if (!unscoredReason || unscoredReason === "unscored") unscoredReason = noted;
+    }
     scoreStatus = "unscored";
   }
   let runRecordPath: string | undefined;
@@ -1213,7 +1251,7 @@ async function executeScored(
       reward = null;
       unscoredReason = "attest_mismatch";
     } else {
-      runRecordPath = join(host.relayLogRoot, runId, "run-record.json");
+      runRecordPath = join(scoredRelayRoot, runId, "run-record.json");
       writeFileSync(runRecordPath, `${JSON.stringify(signed)}\n`);
     }
   }
@@ -1244,7 +1282,7 @@ async function executeScored(
   }
   const ewi: ScoredRelayEwi = { ...scored, ewi_trace_ref };
   const mountedSha = sha256File(request.configPath);
-  const relayPatchActive = relayActive(join(host.relayLogRoot, runId, "relay.jsonl"), mountedSha);
+  const relayPatchActive = relayActive(join(scoredRelayRoot, runId, "relay.jsonl"), mountedSha);
   return {
     task: request.task.id,
     seed: request.seed,

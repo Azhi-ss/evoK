@@ -178,7 +178,21 @@ bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。`--attest-root` 必须在 `--out` 外面。
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会拉起真实运行。省略 `--executor-cmd` 时，这一步就是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
+
+单独跑一题一种子一臂（盒子上 hb003、seed 9、control 的对账）不经过环，由这条命令自己监听 relay、分配 runId、打开并关闭：
+
+```bash
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
+python3 harness-opt/relay/devii_docker_v2.py once \
+  --task hb003 --seed 9 --arm control \
+  --config /workspace/harness-opt-runs/config/control.json \
+  --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs
+```
+
+`--harness` 的 sha256 必须是 `4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c`，否则在 docker 之前拒绝。容器 argv 只来自 `hooks.container_argv`（已有的 `sudo -E docker`），没有 `API_KEY`，`BASE_URL` 指向 `http://10.204.0.1:8642/r/<runId>/v1`，网络是 `devii-004-int`。tokens 只读 relay usage。checker 之后先 `copy_checker_before_sign` 再 `sign_run_record`。评估器 null 分记为 unscored，原因留在 relay 的 checker 目录里。挂上的 harness sha 写在 `result.json` 的 `mountedHarnessSha`。
 
 下面这条只跑一个候选种子，用来在真镜像和真模型上证明激活可以为真。它不是预注册的终比，也不会跑 `C0,X0,...` 或 held-out。镜像里的 harness 必须是这份补丁：它自己读候选 config，把 sha256 写进 `run_start`，并追加到 lead system prompt，Pi 再把这段写进 `.pi-sessions/*.jsonl`。包装器在容器退出后把这些文件留在 `{runDir}`，并把证明写到 `{attestDir}/attestation.json`，其中 `run.nonce` 必须等于 `{nonce}`。网络参数是 `--network devii-004-int`。
 

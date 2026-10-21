@@ -76,6 +76,8 @@ export interface SpawnResult {
 
 export interface CommandExecutorOptions {
   readonly command: readonly string[];
+  /** Defaults to "command". The loop's real-run entry uses "once". */
+  readonly name?: string;
   readonly driver?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
@@ -136,9 +138,11 @@ export function renderExecutorCommand(
 }
 
 export class CommandOptExecutor implements OptExecutor {
-  readonly name = "command";
+  readonly name: string;
 
-  constructor(private readonly options: CommandExecutorOptions) {}
+  constructor(private readonly options: CommandExecutorOptions) {
+    this.name = options.name ?? "command";
+  }
 
   async run(request: OptRunRequest): Promise<OptRunObservation> {
     const env = this.options.env ?? process.env;

@@ -9,10 +9,13 @@ Usage:
   devii_docker_v2.py limits <task>...        # print parsed timeouts/network, no docker, no model
   devii_docker_v2.py groups                    # print probe/heldout/minloop task lists
   devii_docker_v2.py plan <probe|heldout|minloop|all> [k]
-The host execute path requires API_KEY in the environment and does not pass it into the container.
+  devii_docker_v2.py once --task <id> --seed <n> --arm control|candidate --config <file> --run-dir <dir> --harness <file>
+The batch execute path requires API_KEY in the host environment and does not pass it into the container.
+`once` does not read API_KEY and does not put it in the container. The container BASE_URL is the relay.
 Agent argv comes from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL.
 The checker uses the same builder with expose_relay=False, so it has no model access.
-Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1."""
+Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1.
+`once` mounts harness sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c and refuses any other file."""
 import fcntl, json, os, secrets, shutil, socket, subprocess, sys, time, hashlib, tomllib
 from pathlib import Path
 import hooks
@@ -20,6 +23,8 @@ IMAGE="registry.bohrium.dp.tech/dptech/dp/native/prod-4721445/4644300/pi-bio-har
 DATA=Path("/workspace/contest-data/devii"); LAKE=DATA/"shared/data_lake"
 HOME=Path("/workspace/harness-opt-runs"); CFG=HOME/"config"
 PATCHED=CFG/"harness.patched.mjs"; PATCHED_SHA="3f4a45ea484a8d645edb8f10e6b57aefeff5a4a7d2938fc95d1870bfa125efd1"
+# Box prereq harness. Once refuses any other bytes. There is no allow-override.
+HARNESS_SHA="4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c"
 MODEL="deepseek-v4-1-flash-261017"
 TASKS=["tasks1/003-tsa-seq-robust-domain-discovery","tasks2/i006","tasks3/hb008","tasks1/004-dims-pqn-batch-qc","tasks2/i028"]  # prereg tasks.selected order
 BATCH={"1":["tasks1/003-tsa-seq-robust-domain-discovery","tasks3/hb008","tasks1/004-dims-pqn-batch-qc"],"2":["tasks2/i006","tasks2/i028"]}
@@ -116,19 +121,21 @@ def release_run_lock(fd):
 def _with_run_flags(argv, name, *, workdir, entrypoint, extra=()):
     """Keep container_argv's network, cap-drop, env, and mounts. Operational flags go in front of them."""
     return ["sudo","-E",*argv[:3],"--name",name,*extra,"-w",workdir,"--entrypoint",entrypoint,*argv[3:]]
-def agent_mounts(task, run, arm):
-    """Existing mounts: this run directory, CFG, and the tasks2 data lake under contest-data."""
+def agent_mounts(task, run, arm, harness=None, config=None):
+    """Existing mounts: this run directory, the harness file, the candidate config, and the tasks2 data lake."""
     run=Path(run)
+    harness_src=Path(harness) if harness else PATCHED
+    config_src=Path(config) if config else CFG/f"{arm}.json"
     mounts=[
-        (str(PATCHED), "/opt/harness/src/harness.mjs:ro"),
+        (str(harness_src), "/opt/harness/src/harness.mjs:ro"),
         (str(run/"public"), "/input/task:ro"),
         (str(run/"workspace"), "/workspace"),
-        (str(CFG/f"{arm}.json"), "/cfg/candidate.json:ro"),
+        (str(config_src), "/cfg/candidate.json:ro"),
     ]
     if str(task).startswith("tasks2/"):
         mounts.append((str(LAKE), "/shared/data_lake:ro"))
     return mounts
-def agent_cmd(task, run, arm, name, *, run_id, port):
+def agent_cmd(task, run, arm, name, *, run_id, port, harness=None, config=None, model=None):
     """Agent argv comes only from hooks.container_argv, which drops NET_RAW and refuses /home/box."""
     argv=hooks.container_argv(
         image=IMAGE, run_id=run_id, port=port, network="devii-004-int",
@@ -138,8 +145,8 @@ def agent_cmd(task, run, arm, name, *, run_id, port):
             "OMP_NUM_THREADS":"4",
             "OPENBLAS_NUM_THREADS":"4",
         },
-        mounts=agent_mounts(task, run, arm),
-        command=["/opt/harness/run.sh","--task","/input/task/instruction.md","--model-name",MODEL],
+        mounts=agent_mounts(task, run, arm, harness=harness, config=config),
+        command=["/opt/harness/run.sh","--task","/input/task/instruction.md","--model-name", model or MODEL],
     )
     return _with_run_flags(argv, name, workdir="/root", entrypoint="bash", extra=("--cpus","4","--memory","8g"))
 def stage_public(task, dst):
@@ -214,6 +221,355 @@ def finalize_launch(run, relay_id, relay_log_root, res):
     path=Path(run)/"result.json"
     path.write_text(json.dumps(recorded, indent=1))
     return recorded
+
+class OnceError(RuntimeError):
+    pass
+
+def resolve_task(task):
+    """A config id such as hb003, or the TOKEN_W path tasks3/hb003."""
+    raw=str(task).strip().strip("/")
+    if raw in TOKEN_W:
+        return raw
+    matches=[key for key in TOKEN_W if key.split("/")[-1]==raw]
+    if len(matches)!=1:
+        raise OnceError(f"unknown task {task}")
+    return matches[0]
+
+def assert_harness(path):
+    """Refuse before docker unless the file is exactly HARNESS_SHA."""
+    file=Path(path)
+    if file.is_symlink() or not file.is_file():
+        raise OnceError("harness sha")
+    digest=hashlib.sha256(file.read_bytes()).hexdigest()
+    if digest!=HARNESS_SHA:
+        raise OnceError("harness sha")
+    return digest
+
+def _once_args(argv):
+    flags={}
+    index=0
+    items=list(argv)
+    while index<len(items):
+        arg=items[index]
+        if arg=="--relay-external":
+            flags["relay-external"]=True
+            index+=1
+            continue
+        if not arg.startswith("--"):
+            raise OnceError(f"unexpected {arg}")
+        key=arg[2:]
+        if index+1>=len(items) or str(items[index+1]).startswith("--"):
+            raise OnceError(f"missing --{key}")
+        flags[key]=items[index+1]
+        index+=2
+    return flags
+
+def _file_sha(path):
+    file=Path(path)
+    if file.is_symlink() or not file.is_file():
+        return None
+    return hashlib.sha256(file.read_bytes()).hexdigest()
+
+def _tree_shas(root):
+    base=Path(root)
+    if base.is_symlink() or not base.is_dir():
+        return {}
+    out={}
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+        kept=[]
+        for name in dirnames:
+            if not (Path(dirpath)/name).is_symlink():
+                kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            path=Path(dirpath)/name
+            if path.is_symlink() or not path.is_file():
+                continue
+            out[path.relative_to(base).as_posix()]=hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+def _attest_key():
+    import harness_relay
+    path=os.environ.get("HARNESS_ATTEST_KEY_FILE") or ""
+    if path.strip()=="":
+        raise OnceError("HARNESS_ATTEST_KEY_FILE")
+    try:
+        return harness_relay._read_secret(path)
+    except (OSError, RuntimeError) as exc:
+        raise OnceError("HARNESS_ATTEST_KEY_FILE") from exc
+
+def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta):
+    """Host attestation outside the run dir. HMAC bytes match canon.canonical."""
+    import canon
+    attest=Path(attest_dir)
+    run_dir=Path(run)
+    attest_abs=os.path.abspath(attest)
+    run_abs=os.path.abspath(run_dir)
+    if attest_abs==run_abs or attest_abs.startswith(run_abs+os.sep) or run_abs.startswith(attest_abs+os.sep):
+        raise OnceError("attest dir overlaps the run dir")
+    body={
+        "schema": "devii-opt-attest/v1",
+        "mountedHarnessSha": _file_sha(harness),
+        "mountedConfigSha": _file_sha(config),
+        "traceSha": _file_sha(run_dir/"trace.jsonl"),
+        "piSessionShas": _tree_shas(run_dir/".pi-sessions"),
+        "outputShas": _tree_shas(run_dir/"outputs"),
+        "reward": reward,
+        "rewardFileSha": _file_sha(run_dir/"verifier"/"reward.txt"),
+        "resultSha": _file_sha(run_dir/"result.json"),
+        "run": meta,
+    }
+    if not isinstance(body["mountedHarnessSha"], str) or not isinstance(body["mountedConfigSha"], str):
+        raise OnceError("attestation sha")
+    signed={**body, "hmacSha256": hmac_sha(key, canon.canonical(body))}
+    attest.mkdir(parents=True, exist_ok=True)
+    (attest/"attestation.json").write_text(json.dumps(signed, indent=2, ensure_ascii=False)+"\n")
+    return signed
+
+def hmac_sha(key, payload):
+    import hmac as hmac_mod
+    return hmac_mod.new(key, payload, hashlib.sha256).hexdigest()
+
+def _standalone_relay(relay_root, port):
+    import harness_relay
+    attest=os.environ.get("HARNESS_ATTEST_KEY_FILE") or ""
+    upstream=os.environ.get("RELAY_UPSTREAM_KEY_FILE") or ""
+    if attest.strip()=="" or upstream.strip()=="":
+        raise OnceError("HARNESS_ATTEST_KEY_FILE and RELAY_UPSTREAM_KEY_FILE")
+    return harness_relay.Relay(
+        port=port, log_root=str(relay_root), upstream_key_file=upstream, attest_key_file=attest,
+        bind_host=harness_relay.BIND_HOST, plant_enabled=False,
+    )
+
+def _kill_container(name, call):
+    call(["sudo","docker","kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None):
+    """One task, one seed, one arm. The host owns the run id and the relay open/close.
+
+    `external` means a relay is already listening and has this run open. This process
+    does not bind, open, or close that relay. Tokens come from the relay log only.
+    """
+    import threading
+    import harness_relay
+    if arm not in ("control","candidate"):
+        raise OnceError("arm")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed<0:
+        raise OnceError("seed")
+    if model is not None and model!=MODEL:
+        raise OnceError("model")
+    chosen=model or MODEL
+    resolved=resolve_task(task)
+    harness_sha=assert_harness(harness)
+    config_path=Path(config)
+    if config_path.is_symlink() or not config_path.is_file():
+        raise OnceError("config")
+    config_sha=hashlib.sha256(config_path.read_bytes()).hexdigest()
+    if not isinstance(run_id, str) or len(run_id)!=32:
+        run_id=secrets.token_hex(16)
+    port=relay_port() if port is None else int(port)
+    if relay is not None:
+        root=require_relay_log_root(str(relay.log_root))
+    else:
+        root=require_relay_log_root(str(relay_root if relay_root is not None else os.environ.get("HARNESS_RELAY_LOG_ROOT") or hooks.DEFAULT_RELAY_ROOT))
+    cap=token_cap(resolved) if token_cap_override is None else int(token_cap_override)
+    if cap<=0:
+        raise OnceError("token cap")
+    run=Path(run)
+    if listen is None:
+        listen=relay is None and not external
+    log_path=Path(root)/run_id/"relay.jsonl"
+    stop=None
+    sock=None
+    thread=None
+    lock_fd=None
+    closed=external
+    try:
+        if external:
+            if not log_path.is_file():
+                return _once_unscored(run, resolved, seed, arm, run_id, root, harness_sha, cap, "usage_missing", attest_dir, nonce, harness, config_path)
+        else:
+            if relay is None:
+                relay=_standalone_relay(root, port)
+            relay.open_run(run_id, "executor", config_sha)
+            if listen:
+                sock=relay.bind()
+                stop=threading.Event()
+                thread=threading.Thread(target=harness_relay._accept_loop, args=(relay, sock, stop), name="once-relay", daemon=True)
+                thread.start()
+        for name in ("workspace","verifier"):
+            (run/name).mkdir(parents=True, exist_ok=True)
+        (stage or stage_public)(resolved, run/"public")
+        lim=(limits_of or limits)(resolved)
+        check=preflight or assert_task_network
+        check(network="devii-004-int", host="10.204.0.1", port=port)
+        lock=lock_path or os.environ.get("HARNESS_RUN_LOCK", str(HOME/".devii-one-run.lock"))
+        name=f"devii-once-{resolved.split('/')[-1][:12]}-{seed}-{arm}"
+        lock_fd=one_run_lock(lock)
+        t0=time.time(); timed_out=False; token_killed=False; rc=None
+        tokens_used=0
+        with open(run/"devii_one.log","w") as log:
+            argv=agent_cmd(resolved, run, arm, name, run_id=run_id, port=port, harness=harness, config=config_path, model=chosen)
+            proc=popen(argv, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                while True:
+                    try:
+                        rc=proc.wait(timeout=15)
+                        break
+                    except subprocess.TimeoutExpired:
+                        tokens_used, usage_missing=relay_usage_tokens(root, run_id)
+                        if usage_missing:
+                            token_killed=True; rc="usage_missing"
+                            _kill_container(name, call)
+                            try: proc.wait(timeout=60)
+                            except subprocess.TimeoutExpired: proc.kill()
+                            break
+                        if not check_token_cap(resolved, tokens_used)[0] or tokens_used>cap:
+                            token_killed=True
+                            _kill_container(name, call)
+                            try: proc.wait(timeout=60)
+                            except subprocess.TimeoutExpired: proc.kill()
+                            rc="token_cap"; break
+                        if time.time()-t0 >= lim["agent_timeout_sec"]:
+                            _kill_container(name, call); timed_out=True; rc="timeout"
+                            try: proc.wait(timeout=60)
+                            except subprocess.TimeoutExpired: proc.kill()
+                            break
+            except Exception:
+                proc.kill(); raise
+        tokens_used, usage_missing=relay_usage_tokens(root, run_id)
+        if not token_killed and usage_missing:
+            token_killed=True; rc="usage_missing"
+        elif not token_killed and (not check_token_cap(resolved, tokens_used)[0] or tokens_used>cap):
+            token_killed=True; rc="token_cap"
+        res={"task":resolved,"seed":seed,"arm":arm,"exit":rc,"wall_s":round(time.time()-t0,1),"image":IMAGE,"timed_out":timed_out,"token_killed":token_killed,"tokens":tokens_used,"tokens_used":tokens_used,"token_cap":cap,"mountedHarnessSha":harness_sha,"model":chosen,"net":"devii-004-int"}
+        checker_dir=Path(root)/run_id/"checker"
+        staged=sorted((run/"workspace"/"runs").glob("task-*")) if (run/"workspace"/"runs").is_dir() else []
+        if token_killed:
+            res["score_status"]="unscored"
+            res["reward"]=None
+            res["unscored_reason"]="usage_missing" if rc=="usage_missing" else "token_cap"
+            res["checker_exit"]="skipped_token_cap"
+        elif staged:
+            rel=staged[-1].relative_to(run/"workspace")
+            with hooks.ScorerWatch(run/"verifier", checker_dir):
+                try:
+                    with open(run/"checker.log","w") as clog:
+                        completed=call(checker_cmd(resolved, run, rel, name+"-chk", run_id=run_id, port=port), stdout=clog, stderr=subprocess.STDOUT, timeout=lim["verifier_timeout_sec"])
+                    res["checker_exit"]=completed.returncode
+                except subprocess.TimeoutExpired:
+                    _kill_container(name+"-chk", call)
+                    res["checker_exit"]="timeout"
+            res=hooks.apply_score_accounting(res, run/"verifier", checker_dir)
+            if res.get("score_status")=="unscored":
+                res["reward"]=None
+            else:
+                try:
+                    res["reward"]=hooks.read_checker_reward(run/"verifier")
+                    res["score_status"]="scored"
+                except ValueError:
+                    res["score_status"]="unscored"
+                    res["reward"]=None
+                    res["unscored_reason"]=res.get("unscored_reason") or "reward-missing"
+        else:
+            res["score_status"]="unscored"
+            res["reward"]=None
+            res["unscored_reason"]="checker_missing"
+            res["checker_exit"]="skipped"
+        recorded=finalize_launch(run, run_id, root, res)
+        if not external:
+            relay.close_run(run_id)
+            closed=True
+        if recorded.get("score_status")=="scored" and recorded.get("reward") is not None and recorded.get("checker_exit")!="skipped_token_cap":
+            binding=hooks.relay_binding(log_path)
+            signed=hooks.sign_run_record(
+                _attest_key(), checker_dir,
+                relay_log_sha=binding["relayLogSha"], relay_sha=binding["relaySha"], boot_id=binding["bootId"],
+                expected_run_id=run_id,
+            )
+            (Path(root)/run_id/"run-record.json").write_text(json.dumps(signed)+"\n")
+            recorded["runRecord"]=signed
+        if attest_dir:
+            from datetime import datetime, timezone
+            meta={
+                "arm": arm,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "exit": recorded.get("exit") if recorded.get("exit") is not None else 0,
+                "runDir": os.path.abspath(run),
+                "runId": run_id,
+                "runPath": os.path.abspath(run),
+                "score_status": recorded.get("score_status") or "unscored",
+                "seed": seed,
+                "task": resolved,
+                "tokens": int(recorded.get("tokens") or 0),
+            }
+            if isinstance(nonce, str) and nonce!="":
+                meta["nonce"]=nonce
+            write_run_attestation(
+                attest_dir, run, key=_attest_key(), harness=harness, config=config_path,
+                reward=recorded.get("reward") if recorded.get("score_status")=="scored" else None,
+                meta=meta,
+            )
+        return recorded
+    finally:
+        if not closed and relay is not None:
+            try: relay.close_run(run_id)
+            except Exception: pass
+        if stop is not None:
+            stop.set()
+        if sock is not None:
+            try: sock.close()
+            except OSError: pass
+        if thread is not None:
+            thread.join(timeout=2)
+        if lock_fd is not None:
+            release_run_lock(lock_fd)
+
+def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason, attest_dir, nonce, harness, config):
+    run=Path(run)
+    res={"task":task,"seed":seed,"arm":arm,"exit":reason,"wall_s":0,"timed_out":False,"token_killed":True,"tokens":0,"tokens_used":0,"token_cap":cap,"mountedHarnessSha":harness_sha,"score_status":"unscored","reward":None,"unscored_reason":reason,"checker_exit":"skipped_token_cap","net":"devii-004-int"}
+    for name in ("workspace","verifier"):
+        (run/name).mkdir(parents=True, exist_ok=True)
+    recorded=finalize_launch(run, run_id, root, res)
+    if attest_dir:
+        from datetime import datetime, timezone
+        meta={"arm":arm,"at":datetime.now(timezone.utc).isoformat(),"exit":reason,"runDir":os.path.abspath(run),"runId":run_id,"runPath":os.path.abspath(run),"score_status":"unscored","seed":seed,"task":task,"tokens":0}
+        if isinstance(nonce, str) and nonce!="":
+            meta["nonce"]=nonce
+        write_run_attestation(attest_dir, run, key=_attest_key(), harness=harness, config=config, reward=None, meta=meta)
+    return recorded
+
+def once_from_flags(argv, **deps):
+    flags=_once_args(argv)
+    missing=[name for name in ("task","seed","arm","config","run-dir","harness") if name not in flags]
+    if missing:
+        raise OnceError("once needs "+", ".join("--"+name for name in missing))
+    network=flags.get("network")
+    if network is not None and network!="devii-004-int":
+        raise OnceError("network")
+    try:
+        seed=int(flags["seed"])
+    except (TypeError, ValueError) as exc:
+        raise OnceError("seed") from exc
+    cap=flags.get("token-cap")
+    relay_log=flags.get("relay-log")
+    run_id=flags.get("run-id")
+    relay_root=None
+    if relay_log:
+        log=Path(relay_log)
+        if log.name!="relay.jsonl":
+            raise OnceError("relay log")
+        relay_root=str(log.parent.parent)
+        if run_id is not None and log.parent.name!=run_id:
+            raise OnceError("relay log")
+        run_id=run_id or log.parent.name
+    return run_once(
+        flags["task"], seed, flags["arm"], flags["config"], flags["run-dir"], flags["harness"],
+        run_id=run_id, relay_root=relay_root, external=bool(flags.get("relay-external")),
+        model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
+        attest_dir=flags.get("attest-dir"), nonce=flags.get("nonce"), **deps,
+    )
+
 def main():
     a=sys.argv[1:]
     if a[:1]==["groups"]:
@@ -308,5 +664,11 @@ def main():
             finally:
                 if lock_fd is not None:
                     release_run_lock(lock_fd)
+    elif a[:1]==["once"]:
+        try:
+            print(json.dumps(once_from_flags(a[1:])), flush=True)
+        except OnceError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
     else: print(__doc__)
 if __name__=="__main__": main()

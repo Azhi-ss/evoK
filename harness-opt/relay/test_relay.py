@@ -1586,6 +1586,189 @@ class NullScoreCase(unittest.TestCase):
         self.assertIsNone(accounted["reward"])
 
 
+class OnceCase(unittest.TestCase):
+    def setUp(self):
+        import devii_docker_v2 as box
+        self.box = box
+        self.root = Path(tempfile.mkdtemp())
+        self.harness = self.root / "harness.mjs"
+        self.harness.write_text("export const harness = 1;\n")
+        self.config = self.root / "control.json"
+        self.config.write_text('{"parts":{"agent-loop":{"maxSteps":25}}}\n')
+        self.key = self.root / "attest.key"
+        write_key(self.key, b"a" * 32)
+        self.up = self.root / "upstream.key"
+        write_key(self.up, b"b" * 32)
+        self._old_attest = os.environ.get("HARNESS_ATTEST_KEY_FILE")
+        self._old_up = os.environ.get("RELAY_UPSTREAM_KEY_FILE")
+        os.environ["HARNESS_ATTEST_KEY_FILE"] = str(self.key)
+        os.environ["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        self._old_sha = box.HARNESS_SHA
+
+    def tearDown(self):
+        self.box.HARNESS_SHA = self._old_sha
+        if self._old_attest is None:
+            os.environ.pop("HARNESS_ATTEST_KEY_FILE", None)
+        else:
+            os.environ["HARNESS_ATTEST_KEY_FILE"] = self._old_attest
+        if self._old_up is None:
+            os.environ.pop("RELAY_UPSTREAM_KEY_FILE", None)
+        else:
+            os.environ["RELAY_UPSTREAM_KEY_FILE"] = self._old_up
+
+    def test_wrong_harness_sha_refuses_before_docker(self):
+        seen = []
+
+        def popen(*args, **kwargs):
+            seen.append(args)
+
+        with self.assertRaises(self.box.OnceError) as caught:
+            self.box.once_from_flags([
+                "--task", "hb003", "--seed", "9", "--arm", "control",
+                "--config", str(self.config), "--run-dir", str(self.root / "run"),
+                "--harness", str(self.harness),
+            ], popen=popen, preflight=lambda **_kwargs: None, stage=lambda *_args: None, limits_of=lambda _task: {"agent_timeout_sec": 30, "verifier_timeout_sec": 30})
+        self.assertIn("harness", str(caught.exception))
+        self.assertEqual(seen, [])
+        with self.assertRaises(self.box.OnceError) as arm:
+            self.box.run_once("hb003", 9, "treatment", self.config, self.root / "other", self.harness, popen=popen)
+        self.assertIn("arm", str(arm.exception))
+        self.assertEqual(seen, [])
+
+    def _relay(self):
+        return Relay(
+            port=8642, log_root=self.root / "relay", upstream_key_file=str(self.up), attest_key_file=str(self.key),
+            bind_host="127.0.0.1", plant_enabled=True,
+        )
+
+    def _run(self, relay, run, checker):
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+        run_id = "ab" * 16
+        seen = []
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        def popen(argv, **kwargs):
+            seen.append(list(argv))
+            (run / "workspace" / "runs" / "task-stub").mkdir(parents=True, exist_ok=True)
+            relay.record(run_id, {"type": "done", "status": 200, "usage": dict(USAGE)})
+            return Proc()
+
+        attest = self.root / "attest" / run.name
+        recorded = self.box.once_from_flags([
+            "--task", "hb003", "--seed", "9", "--arm", "control",
+            "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
+            "--run-id", run_id, "--nonce", "cd" * 16, "--attest-dir", str(attest),
+        ], popen=popen, call=checker, preflight=lambda **_kwargs: None,
+           stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
+           limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
+           relay=relay, listen=False, lock_path=self.root / f"{run.name}.lock")
+        return recorded, seen, run_id, attest
+
+    def _assert_argv(self, argv, run_id):
+        blob = "\n".join(argv)
+        self.assertEqual(argv[:4], ["sudo", "-E", "docker", "run"])
+        self.assertIn("--network", argv)
+        self.assertEqual(argv[argv.index("--network") + 1], "devii-004-int")
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
+        self.assertIn(f"BASE_URL=http://10.204.0.1:8642/r/{run_id}/v1", argv)
+        self.assertNotIn("API_KEY", blob)
+        self.assertIn(f"{self.harness}:/opt/harness/src/harness.mjs:ro", argv)
+        self.assertIn(f"{self.config}:/cfg/candidate.json:ro", argv)
+
+    def _verify(self, attest, run, run_id):
+        bun = os.environ.get("BUN", str(Path.home() / ".bun" / "bin" / "bun"))
+        code = "\n".join([
+            'import { readFileSync } from "node:fs";',
+            'import { verifyHostAttestation } from "./harness-opt/src/modules/attestation.ts";',
+            "const result = verifyHostAttestation({",
+            "  attestDir: process.env.ATTEST,",
+            "  key: readFileSync(process.env.KEY),",
+            "  configPath: process.env.CONFIG,",
+            "  harnessPath: process.env.HARNESS,",
+            "  runDir: process.env.RUN,",
+            "  runId: process.env.RUN_ID,",
+            "  expectedNonce: process.env.NONCE,",
+            "});",
+            "process.stdout.write(JSON.stringify(result));",
+        ])
+        env = os.environ.copy()
+        env.update({
+            "ATTEST": str(attest), "KEY": str(self.key), "CONFIG": str(self.config),
+            "HARNESS": str(self.harness), "RUN": str(run), "RUN_ID": run_id, "NONCE": "cd" * 16,
+        })
+        proc = subprocess.run([bun, "-e", code], cwd=str(HERE.parent.parent), capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        return json.loads(proc.stdout)
+
+    def test_once_launches_through_container_argv_and_signs_relay_usage(self):
+        relay = self._relay()
+        run = self.root / "scored"
+
+        class Done:
+            returncode = 0
+
+        def checker(argv, **kwargs):
+            (run / "verifier").mkdir(parents=True, exist_ok=True)
+            (run / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        recorded, seen, run_id, attest = self._run(relay, run, checker)
+        self.assertEqual(len(seen), 1)
+        self._assert_argv(seen[0], run_id)
+        self.assertEqual(recorded["task"], "tasks3/hb003")
+        self.assertEqual(recorded["seed"], 9)
+        self.assertEqual(recorded["arm"], "control")
+        self.assertEqual(recorded["mountedHarnessSha"], hashlib.sha256(self.harness.read_bytes()).hexdigest())
+        self.assertEqual(recorded["score_status"], "scored")
+        self.assertEqual(recorded["reward"], 1)
+        self.assertEqual(recorded["tokens"], 12)
+        signed = json.loads((self.root / "relay" / run_id / "run-record.json").read_text())
+        for field in ("checkerOutputSha", "reward", "relayLogSha", "relaySha", "bootId"):
+            self.assertIn(field, signed)
+        self.assertEqual(signed["reward"], 1)
+        self.assertEqual(signed["relaySha"], relay.relay_sha)
+        self.assertEqual(signed["bootId"], relay.boot_id)
+        self.assertTrue(signed["relayLogSha"])
+        verified = self._verify(attest, run, run_id)
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["reward"], 1)
+        self.assertEqual(verified["mountedHarnessSha"], recorded["mountedHarnessSha"])
+
+    def test_null_score_stays_unscored_and_keeps_the_reason(self):
+        relay = self._relay()
+        run = self.root / "null"
+
+        class Done:
+            returncode = 0
+
+        def checker(argv, **kwargs):
+            (run / "verifier").mkdir(parents=True, exist_ok=True)
+            (run / "verifier" / ".scorer-result.json").write_text(json.dumps({"total_score": None, "reason": "gold labels missing"}) + "\n")
+            (run / "verifier" / "reward.txt").write_text("0\n")
+            return Done()
+
+        recorded, seen, run_id, attest = self._run(relay, run, checker)
+        self.assertEqual(len(seen), 1)
+        self._assert_argv(seen[0], run_id)
+        self.assertEqual(recorded["score_status"], "unscored")
+        self.assertIsNone(recorded["reward"])
+        self.assertEqual(recorded["unscored_reason"], "gold labels missing")
+        self.assertEqual(recorded["mountedHarnessSha"], hashlib.sha256(self.harness.read_bytes()).hexdigest())
+        self.assertFalse((self.root / "relay" / run_id / "run-record.json").exists())
+        copied = json.loads((self.root / "relay" / run_id / "checker" / ".scorer-result.json").read_text())
+        self.assertEqual(copied["reason"], "gold labels missing")
+        self.assertIsNone(copied["total_score"])
+        verified = self._verify(attest, run, run_id)
+        self.assertTrue(verified["ok"], verified)
+        self.assertIsNone(verified["reward"])
+
+
 def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):
     import subprocess
     tmp = tempfile.TemporaryDirectory()
