@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
 import {
@@ -259,6 +259,10 @@ export interface OptLoopOptions {
   readonly antiForgery?: () => boolean;
   /** Target task. Required. The loop has no built-in task. */
   readonly task: OptTask;
+  /** Data root `once` joins onto a relative task path. Default is the `DATA` path in `devii_docker_v2.py`. */
+  readonly taskDataRoot?: string;
+  /** Toml mirror `once` checks when the data root has no `task.toml`. Default is `TOML_MIRROR` in that script. */
+  readonly taskMirrorRoot?: string;
   /** Round-0 trace path. Required. A missing file is signed as a declared identity. */
   readonly round0TracePath: string;
   /** Round-0 sha256. Required. A present file must match this pin. */
@@ -313,7 +317,7 @@ export interface OptLoopResult {
     readonly reason: string | null;
     readonly faultRounds: number;
     readonly reviewerRejectRounds: number;
-    /** Set when `reason` is `role_failed`, `no_conclusion`, or `internal_error`. */
+    /** Set when `reason` is `role_failed`, `no_conclusion`, `internal_error`, or `invalid: non_effective_key`. */
     readonly role?: string;
     readonly exitCode?: number | null;
     readonly stderrTail?: string;
@@ -455,6 +459,15 @@ export function roleFailureIsTransient(logPath: string, stderr: string): { reado
   return { transient, cap: null };
 }
 
+/** `DATA` or `TOML_MIRROR` as assigned in `devii_docker_v2.py`. The loop does not hard-code that path. */
+function onceAssignedPath(name: "DATA" | "TOML_MIRROR"): string {
+  const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
+  const match = new RegExp(`^${name}=Path\\("([^"]+)"\\)`, "m").exec(readFileSync(script, "utf8"));
+  const value = match?.[1];
+  if (!value || !isAbsolute(value)) throw new Error(`once ${name} path`);
+  return value;
+}
+
 /** Refuse to start when a whitelisted knob has no `effective["..."]` read in the harness file. */
 function assertHarnessCoversKnobs(harnessPath: string): void {
   let text = "";
@@ -468,19 +481,67 @@ function assertHarnessCoversKnobs(harnessPath: string): void {
   if (missing.length > 0) throw new Error(`harness is missing effective-config for ${missing.join(", ")}`);
 }
 
-/** `[agent].timeout_sec` from `{task}/task.toml` or `{task}/task/task.toml`. No default. */
-function officialAgentTimeoutSec(taskPath: string): number | null {
-  for (const file of [join(taskPath, "task.toml"), join(taskPath, "task", "task.toml")]) {
-    if (!existsSync(file)) continue;
-    try {
-      if (!lstatSync(file).isFile()) continue;
-    } catch {
-      continue;
-    }
-    const parsed = parseAgentTimeoutSec(readFileSync(file, "utf8"));
-    if (parsed !== null) return parsed;
+function regularToml(file: string): boolean {
+  try {
+    const linked = lstatSync(file);
+    return linked.isFile() && !linked.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function dataTaskToml(taskPath: string, dataRoot: string): { readonly dir: string; readonly file: string } | null {
+  const dir = isAbsolute(taskPath) ? resolve(taskPath) : resolve(dataRoot, taskPath);
+  for (const file of [join(dir, "task.toml"), join(dir, "task", "task.toml")]) {
+    if (regularToml(file)) return { dir, file };
   }
   return null;
+}
+
+function mirrorSums(mirrorRoot: string): Map<string, string> {
+  const sums = new Map<string, string>();
+  const file = join(mirrorRoot, "SHA256SUMS");
+  if (!regularToml(file)) return sums;
+  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const parts = line.trim().split(/\s+/);
+    const hash = parts[0] ?? "";
+    const name = (parts[1] ?? "").replace(/^\.\//, "");
+    if (hash !== "" && name !== "") sums.set(name, hash);
+  }
+  return sums;
+}
+
+function mirrorTaskToml(taskPath: string, mirrorRoot: string): { readonly dir: string; readonly file: string } | null {
+  if (isAbsolute(taskPath)) return null;
+  const sums = mirrorSums(mirrorRoot);
+  const dir = resolve(mirrorRoot, taskPath);
+  for (const rel of [join(taskPath, "task.toml"), join(taskPath, "task", "task.toml")]) {
+    const file = join(mirrorRoot, rel);
+    if (!regularToml(file)) continue;
+    const digest = sha256(readFileSync(file));
+    if (sums.get(rel) !== digest) throw new Error(`task.toml mirror sha mismatch: ${rel}`);
+    return { dir, file };
+  }
+  return null;
+}
+
+/**
+ * Absolute task directory `once` reads, plus `[agent].timeout_sec`.
+ * A relative path is joined to the data root, then the mirror. It is not resolved against the loop cwd.
+ * Missing file or missing timeout refuses the start. No default.
+ */
+export function resolveOfficialTask(
+  taskPath: string,
+  dataRoot = onceAssignedPath("DATA"),
+  mirrorRoot = onceAssignedPath("TOML_MIRROR"),
+): { readonly dir: string; readonly file: string; readonly timeoutSec: number } {
+  const trimmed = taskPath.trim();
+  const located = dataTaskToml(trimmed, dataRoot) ?? mirrorTaskToml(trimmed, mirrorRoot);
+  if (!located) throw new Error(`task.toml missing for ${trimmed}`);
+  const timeoutSec = parseAgentTimeoutSec(readFileSync(located.file, "utf8"));
+  if (timeoutSec === null) throw new Error(`task.toml has no [agent].timeout_sec: ${located.file}`);
+  return { dir: located.dir, file: located.file, timeoutSec };
 }
 
 function requireLoopTask(task: OptTask | undefined): OptTask {
@@ -521,7 +582,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const firstRun = join(options.out, "round1", "runs", task.id, "seed0", "candidate");
   if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
-  const officialTimeoutSec = officialAgentTimeoutSec(task.path);
+  const officialTask = resolveOfficialTask(task.path, options.taskDataRoot ?? onceAssignedPath("DATA"), options.taskMirrorRoot ?? onceAssignedPath("TOML_MIRROR"));
+  const officialTimeoutSec = officialTask.timeoutSec;
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : options.piBin ? piSubagentRoles(options.piBin) : undefined);
   if (!roles) throw new Error("execute mode needs roles");
   assertAttestRoot(options.attestRoot, options.out);
@@ -641,7 +703,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const stopLoop = (reason: string, failure?: RoleFailureInfo, extra?: Partial<ClosureRecord> & { patchHash?: string | null }): void => {
       if (reason === "usage_missing" || reason === "role_output_truncated" || reason === "attest_mismatch" || reason === "relay_close_failed") faultRounds += 1;
       stopReason = reason;
-      if ((reason === "role_failed" || reason === "no_conclusion" || reason === "internal_error") && failure) failedRole = failure;
+      if (surfacesRoleFailure(reason) && failure) failedRole = failure;
       emitClosure({
         round,
         closed: false,
@@ -833,6 +895,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           ...gapTraces.map((hint) => hint.file),
           ...(previousReviewSession ? [previousReviewSession] : []),
         ], relay, gapPrompt, "gap-finder", options.roleMaxTokens?.["gap-finder"]);
+        writeJson(join(spawn.cwd, "effective-knobs.json"), { knobs: EFFECTIVE_KNOBS });
         const input: GapCall = {
           round,
           traces: gapTraces,
@@ -844,7 +907,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         };
         assertNoHeldOutLeak(input, "gap input");
         writeJson(join(options.out, `round${round}`, "gap-input.json"), input);
-        return { spawn, call: () => roles.gap(input) };
+        return {
+          spawn,
+          call: async () => {
+            const turn = await roles.gap(input);
+            if (!isEffectiveKnob(turn.knob)) throw new GapKnobError(turn.knob);
+            return turn;
+          },
+        };
       },
     });
     if (gapRun.status !== "ok") {
@@ -1309,6 +1379,47 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
+    writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
+    const notesPath = join(options.out, `round${round}`, "run-notes.md");
+    const seeded = runs[0];
+    const edges = readRunEdges(seeded?.verified?.tracePath ?? seeded?.tracePath ?? "");
+    const changed = changedLeaves(control, candidate);
+    let harnessText = "";
+    try {
+      harnessText = readFileSync(options.harnessPath, "utf8");
+    } catch {
+      harnessText = "";
+    }
+    const preflight = options.stopBeforeRun
+      ? evaluatePreflightGates({
+          gapCitedPrevious: gapCitedTrace,
+          knobPaths: gap.knob.trim() === "" ? [] : [gap.knob],
+          patchPaths: changed.map((leaf) => leaf.path),
+          changed,
+          whitelist: EFFECTIVE_KNOBS,
+          harnessKeys: harnessEffectiveKeys(harnessText),
+        })
+      : null;
+    const hostVerdict = options.stopBeforeRun
+      ? null
+      : evaluateReviewerGates({
+          evidenceOk: runEvidenceOk(runs, options.attestKeyFile, notesPath),
+          gapCitedPrevious: gapCitedTrace,
+          knobPaths: gap.knob.trim() === "" ? [] : [gap.knob],
+          patchPaths: changed.map((leaf) => leaf.path),
+          changed,
+          effective: edges.effective,
+          runEnd: edges.runEnd,
+          scored: seeded?.scoreStatus === "scored",
+          timedOut: seeded?.timedOut === true,
+          wallS: seeded?.wallS ?? null,
+          officialTimeoutSec,
+          reward: seeded?.reward ?? null,
+          baselineReward,
+        });
+    const reviewerGates = preflight
+      ? { gates: preflight.gates, preflight: true as const, final: false as const }
+      : { gates: hostVerdict?.gates ?? [] };
     const reviewPrompt = reviewerTaskPrompt({
       round,
       patchHash,
@@ -1323,6 +1434,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       continuing: false,
       build(relay) {
         const spawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], relay, reviewPrompt, "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
+        stageReviewerInputs(spawn.cwd, [
+          ["candidates/gap.json", { knob: gap.knob, failureClass: gap.failureClass, summary: gap.summary, citations: gap.citations }],
+          ["candidates/patch.diff", readFileSync(diffPath, "utf8")],
+          ["candidates/activation.json", activation],
+          ["candidates/effective.json", edges.effective ?? flattenConfig(candidate)],
+          ["state/nodes/run_end.json", edges.runEnd],
+          ["state/nodes/gates.json", reviewerGates],
+        ]);
         const input: ReviewCall = {
           round,
           patchHash,
@@ -1395,21 +1514,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     if (options.stopBeforeRun) {
-      const changed = changedLeaves(control, candidate);
-      let harnessText = "";
-      try {
-        harnessText = readFileSync(options.harnessPath, "utf8");
-      } catch {
-        harnessText = "";
-      }
-      const preflight = evaluatePreflightGates({
-        gapCitedPrevious: gapCitedTrace,
-        knobPaths: gap.knob.trim() === "" ? [] : [gap.knob],
-        patchPaths: changed.map((leaf) => leaf.path),
-        changed,
-        whitelist: EFFECTIVE_KNOBS,
-        harnessKeys: harnessEffectiveKeys(harnessText),
-      });
+      if (!preflight) throw new Error("preflight gates missing");
       previousReview = { accept: false, reason: verdict.reason };
       previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
       previousReviewSha = reviewCaptured?.sha256 ?? null;
@@ -1437,25 +1542,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
-    const notesPath = join(options.out, `round${round}`, "run-notes.md");
-    const seeded = runs[0];
-    const edges = readRunEdges(seeded?.verified?.tracePath ?? seeded?.tracePath ?? "");
-    const changed = changedLeaves(control, candidate);
-    const hostVerdict = evaluateReviewerGates({
-      evidenceOk: runEvidenceOk(runs, options.attestKeyFile, notesPath),
-      gapCitedPrevious: gapCitedTrace,
-      knobPaths: gap.knob.trim() === "" ? [] : [gap.knob],
-      patchPaths: changed.map((leaf) => leaf.path),
-      changed,
-      effective: edges.effective,
-      runEnd: edges.runEnd,
-      scored: seeded?.scoreStatus === "scored",
-      timedOut: seeded?.timedOut === true,
-      wallS: seeded?.wallS ?? null,
-      officialTimeoutSec,
-      reward: seeded?.reward ?? null,
-      baselineReward,
-    });
+    if (!hostVerdict) throw new Error("reviewer gates missing");
     emitClosure({
       round,
       closed: false,
@@ -1520,7 +1607,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reason: stopReason,
       faultRounds,
       reviewerRejectRounds,
-      ...((stopReason === "role_failed" || stopReason === "no_conclusion" || stopReason === "internal_error") && failedRole
+      ...(stopReason !== null && surfacesRoleFailure(stopReason) && failedRole
         ? { role: failedRole.role, exitCode: failedRole.exitCode, stderrTail: failedRole.stderrTail }
         : {}),
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
@@ -1724,8 +1811,13 @@ function writeSpawnAttempts(
   writeJson(file, { ...current, attempts });
 }
 
+function surfacesRoleFailure(reason: string): boolean {
+  return reason === "role_failed" || reason === "no_conclusion" || reason === "internal_error" || reason === "invalid: non_effective_key";
+}
+
 function roleStopReason(error: unknown): string {
   if (error instanceof RoleOutputTruncated) return error.reason;
+  if (error instanceof GapKnobError) return error.reason;
   const message = error instanceof RoleFailed ? error.stderrTail : error instanceof Error ? error.message : "";
   if (/no conclusion/i.test(message)) return "no_conclusion";
   if (error instanceof RoleFailed) return "role_failed";
@@ -1828,6 +1920,18 @@ export class GapTracePathError extends Error {
   }
 }
 
+/** Gap-finder named a knob outside the effective-knob whitelist. Not transient. */
+export class GapKnobError extends Error {
+  readonly knob: string;
+  readonly reason = "invalid: non_effective_key";
+
+  constructor(knob: string) {
+    super(`gap-finder knob ${knob} is not an effective knob`);
+    this.name = "GapKnobError";
+    this.knob = knob;
+  }
+}
+
 /** Read-only copy under gap-finder's traces/. The notice and the private host path stay out. */
 export function stageGapTrace(src: string, dest: string, expectedSha: string): void {
   const name = basename(dest);
@@ -1897,8 +2001,10 @@ function gapTaskPrompt(input: { readonly round: number; readonly traces: readonl
     "只读下面列出的 traces/ 文件，归纳一个共同失败模式。",
     traces || "没有附带 trace。",
     `上一轮评语：${review}`,
+    "knob 必须是下面这些有效旋钮之一。同一份名单在 cwd 的 effective-knobs.json。碰了名单以外的键，这一轮停，原因是 invalid: non_effective_key。",
+    ...EFFECTIVE_KNOBS,
     "最后一条 assistant 消息只放一个 JSON 对象，字段为 knob、failureClass、summary、citations。",
-    "knob 是配置路径。failureClass 只能是 timeout、idle-loop、tool-misuse、context-overflow、skill-not-triggered、format-invalid。",
+    "failureClass 只能是 timeout、idle-loop、tool-misuse、context-overflow、skill-not-triggered、format-invalid。",
     "citations 是字符串数组。",
   ].join("\n");
 }
@@ -1943,11 +2049,52 @@ function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash:
   const runs = input.runs.map((run) => `seed=${run.seed} reward=${run.reward ?? "null"} status=${run.scoreStatus} tokens=${run.tokens}`);
   return [
     `第 ${input.round} 轮 reviewer-gate。`,
+    "只读当前目录里的这些文件，工具只有 read：",
+    "candidates/gap.json",
+    "candidates/patch.diff",
+    "candidates/activation.json",
+    "candidates/effective.json",
+    "state/nodes/run_end.json",
+    "state/nodes/gates.json",
     `补丁 ${input.patchHash}。旋钮 ${input.knob}。摘要 ${input.summary}。`,
     runs.join("\n") || "没有运行。",
     `ewiSeeds：${input.ewiSeeds.join(" ") || "无"}`,
     "最后一条 assistant 消息只放一个 JSON 对象，字段只有 reason，reason 是字符串。",
   ].join("\n");
+}
+
+const REVIEWER_INPUTS = [
+  "candidates/gap.json",
+  "candidates/patch.diff",
+  "candidates/activation.json",
+  "candidates/effective.json",
+  "state/nodes/run_end.json",
+  "state/nodes/gates.json",
+] as const;
+
+/** Read-only copies inside the reviewer cwd. A retry replaces a regular file and refuses a symlink. */
+function stageReviewerInputs(cwd: string, files: readonly (readonly [string, unknown])[]): void {
+  const allowed = new Set<string>(REVIEWER_INPUTS);
+  for (const [rel, value] of files) {
+    if (!allowed.has(rel)) throw new Error("reviewer input path");
+    const dest = join(cwd, rel);
+    mkdirSync(dirname(dest), { recursive: true });
+    try {
+      const linked = lstatSync(dest);
+      if (linked.isSymbolicLink() || !linked.isFile()) throw new Error("reviewer input path");
+      unlinkSync(dest);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const body = typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`;
+    const fd = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+    try {
+      writeSync(fd, body);
+      fchmodSync(fd, 0o444);
+    } finally {
+      closeSync(fd);
+    }
+  }
 }
 
 function gapFromAssistant(text: string): { knob: string; failureClass: string; summary: string; citations: string[] } | null {
