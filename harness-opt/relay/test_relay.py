@@ -1828,7 +1828,7 @@ class OnceCase(unittest.TestCase):
             bind_host="127.0.0.1", plant_enabled=True,
         )
 
-    def _run(self, relay, run, checker, extra=(), run_id="ab" * 16):
+    def _run(self, relay, run, checker, extra=(), run_id="ab" * 16, docker=None):
         self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
         seen = []
 
@@ -1855,7 +1855,7 @@ class OnceCase(unittest.TestCase):
         ], popen=popen, call=checker, preflight=lambda **_kwargs: None,
            stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
            limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
-           relay=relay, listen=False, lock_path=self.root / f"{run.name}.lock")
+           relay=relay, listen=False, lock_path=self.root / f"{run.name}.lock", docker=docker)
         return recorded, seen, run_id, attest
 
     def _assert_argv(self, argv, run_id):
@@ -2106,6 +2106,70 @@ class OnceCase(unittest.TestCase):
         self.assertNotIn("purpose", recorded)
         self.assertFalse((self.root / "relay" / ("ab" * 16) / "run-record.json").exists())
         self.assertEqual(recorded["tokens"], 0)
+
+    def test_once_removes_an_orphan_container_before_the_agent_starts(self):
+        relay = self._relay()
+        run = self.root / "orphan"
+        cid = "ab" * 32
+        name = "devii-once-hb003-9-control"
+        order = []
+
+        class Done:
+            returncode = 0
+
+        def checker(argv, **kwargs):
+            (run / "verifier").mkdir(parents=True, exist_ok=True)
+            (run / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        def docker(argv, **kwargs):
+            order.append(list(argv))
+            class Found:
+                returncode = 0
+                stdout = cid + "\n"
+            class Ok:
+                returncode = 0
+                stdout = ""
+            return Found() if argv[3:4] == ["inspect"] else Ok()
+
+        recorded, seen, run_id, _attest = self._run(relay, run, checker, docker=docker)
+        self.assertEqual([item[3] for item in order], ["inspect", "kill", "rm"])
+        self.assertEqual(order[0][:3], ["sudo", "-E", "docker"])
+        self.assertEqual(order[0][-1], name)
+        self.assertEqual(order[1], ["sudo", "-E", "docker", "kill", name])
+        self.assertEqual(order[2], ["sudo", "-E", "docker", "rm", "-f", name])
+        self.assertEqual(seen[0][:4], ["sudo", "-E", "docker", "run"])
+        self.assertIn(name, seen[0])
+        log = (run / "devii_one.log").read_text(encoding="utf-8")
+        self.assertIn(f"cleaned orphan container name={name} id={cid}", log)
+        self.assertEqual(recorded["score_status"], "scored")
+        self.assertEqual(recorded["reward"], 1)
+        self.assertNotIn("relayFault", recorded)
+        self.assertNotEqual(recorded.get("unscored_reason"), "agent_failed")
+
+        absent = self.root / "no-orphan"
+        absent_order = []
+
+        def checker_absent(argv, **kwargs):
+            (absent / "verifier").mkdir(parents=True, exist_ok=True)
+            (absent / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        def docker_missing(argv, **kwargs):
+            absent_order.append(list(argv))
+            class Missing:
+                returncode = 1
+                stdout = ""
+            return Missing()
+
+        quiet, seen_absent, _id, _attest2 = self._run(
+            relay, absent, checker_absent, run_id="12" * 16, docker=docker_missing,
+        )
+        self.assertEqual([item[3] for item in absent_order], ["inspect"])
+        self.assertNotIn("cleaned orphan", (absent / "devii_one.log").read_text(encoding="utf-8"))
+        self.assertEqual(seen_absent[0][:4], ["sudo", "-E", "docker", "run"])
+        self.assertEqual(quiet["score_status"], "scored")
+        self.assertEqual(quiet["reward"], 1)
 
     def test_once_relay_upstream_is_the_network_upstream(self):
         self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()

@@ -372,10 +372,38 @@ def _standalone_relay(relay_root, port):
     harness_relay.use_network_upstream(relay)
     return relay
 
-def _kill_container(name, call):
-    call(["sudo","docker","kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def _docker_prefix():
+    """`sudo -E docker`, the prefix `_with_run_flags` puts on `hooks.container_argv`."""
+    argv=hooks.container_argv(
+        image="img", run_id="00"*16, port=1, network="devii-004-int",
+        env={}, mounts=[], command=["true"], expose_relay=False,
+    )
+    if not argv or argv[0]!="docker":
+        raise OnceError("docker")
+    return ["sudo","-E",argv[0]]
 
-def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None):
+def _kill_container(name, call):
+    call(_docker_prefix()+["kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def _clear_orphan_container(name, docker, log):
+    """Kill and remove a container left under this run's fixed name. The run itself is not a fault."""
+    prefix=_docker_prefix()
+    found=docker(prefix+["inspect","-f","{{.Id}}",name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if getattr(found, "returncode", 1)!=0:
+        return None
+    cid=getattr(found, "stdout", "")
+    if not isinstance(cid, str):
+        return None
+    cid=cid.strip()
+    if cid=="" or any(ch.isspace() for ch in cid):
+        return None
+    docker(prefix+["kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    docker(prefix+["rm","-f",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log.write(f"cleaned orphan container name={name} id={cid}\n")
+    log.flush()
+    return cid
+
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None):
     """One task, one seed, one arm. The host owns the run id and the relay open/close.
 
     `external` means a relay is already listening and has this run open. This process
@@ -441,7 +469,9 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
         lock_fd=one_run_lock(lock)
         t0=time.time(); timed_out=False; token_killed=False; rc=None
         tokens_used=0
+        docker_call=docker or subprocess.run
         with open(run/"devii_one.log","w") as log:
+            _clear_orphan_container(name, docker_call, log)
             argv=agent_cmd(resolved, run, arm, name, run_id=run_id, port=port, harness=harness, config=config_path, model=chosen)
             proc=popen(argv, stdout=log, stderr=subprocess.STDOUT)
             try:
