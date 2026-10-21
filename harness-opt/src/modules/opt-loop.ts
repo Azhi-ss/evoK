@@ -36,7 +36,7 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
-import { EFFECTIVE_KNOBS, formatKnobLine, harnessEffectiveKeys, isEffectiveKnob, knobCatalog, leafKnobPaths, noopKeys } from "./effective-knobs";
+import { EFFECTIVE_KNOBS, flatDottedKeys, formatKnobLine, harnessEffectiveKeys, isEffectiveKnob, knobCatalog, leafKnobPaths, noopKeys } from "./effective-knobs";
 import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
 import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec } from "./reviewer-gates";
 import {
@@ -211,6 +211,8 @@ export interface ReviewCall {
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
   readonly baseUrl: string;
+  /** Set on the one schema retry. The role prompt appends this reminder. */
+  readonly formatReminder?: string;
 }
 
 export interface ReviewerTurn {
@@ -319,7 +321,7 @@ export interface OptLoopResult {
     readonly reason: string | null;
     readonly faultRounds: number;
     readonly reviewerRejectRounds: number;
-    /** Set when `reason` is `role_failed`, `no_conclusion`, `internal_error`, or `invalid: non_effective_key`. */
+    /** Set when `reason` is `role_failed`, `no_conclusion`, `internal_error`, `invalid: non_effective_key`, or `reviewer_format_invalid`. */
     readonly role?: string;
     readonly exitCode?: number | null;
     readonly stderrTail?: string;
@@ -717,6 +719,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         reviewFedForward: null,
         reason,
         ...(failure ? { roleFailure: failure } : {}),
+        ...(extra?.gates ? { gates: extra.gates } : {}),
+        ...(extra?.preflight !== undefined ? { preflight: extra.preflight } : {}),
+        ...(extra?.final !== undefined ? { final: extra.final } : {}),
+        ...(extra?.rejectCode ? { rejectCode: extra.rejectCode } : {}),
+        ...(extra?.reviewReason !== undefined ? { reviewReason: extra.reviewReason } : {}),
         ...(extra?.rank ? { rank: extra.rank } : {}),
         ...(extra?.codeRank ? { codeRank: extra.codeRank } : {}),
       });
@@ -741,6 +748,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }): Promise<
       | { readonly status: "ok"; readonly value: T; readonly relay: RoleRelay; readonly report: RelayReport; readonly spawn: RoleSpawnConfig; readonly attemptTokens: number; readonly attemptLogs: readonly string[] }
       | { readonly status: "stop"; readonly reason: string; readonly failure?: RoleFailureInfo }
+      | { readonly status: "reviewer_schema"; readonly failure: RoleFailureInfo; readonly parseError: string }
       | { readonly status: "ranking_cap" }
       | { readonly status: "innovator_failed"; readonly failure: RoleFailureInfo; readonly spawn: RoleSpawnConfig; readonly invalidReason: InvalidCandidate["reason"]; readonly attemptTokens: number }
     > => {
@@ -895,6 +903,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
             if (spec.continuing && lastSpawn) return finishInnovator(error, info);
             return { status: "stop", reason: error.reason, failure: info };
           }
+          if (error instanceof ReviewerSchemaError && spec.sessionName === "reviewer-gate") {
+            return {
+              status: "reviewer_schema",
+              failure: { role: spec.sessionName, exitCode: failure.exitCode, stderrTail: error.parseError },
+              parseError: error.parseError,
+            };
+          }
           if (failure.transient && n < ROLE_ATTEMPTS) continue;
           if (spec.continuing && lastSpawn) return finishInnovator(error, info);
           return { status: "stop", reason: roleStopReason(error), failure: info };
@@ -904,6 +919,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (spec.continuing && lastSpawn) return finishInnovator(new RoleFailed(spec.sessionName, null, "", false), info);
       return { status: "stop", reason: "role_failed", failure: info };
     };
+    let pendingReview: (Partial<ClosureRecord> & { patchHash?: string | null }) | undefined;
     try {
     const gapCwd = join(options.out, `round${round}`, "roles", "gap-finder");
     let gapTraces: TraceHint[];
@@ -1073,6 +1089,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         continue;
       }
       if (innovatorRun.status === "ranking_cap") continue;
+      if (innovatorRun.status === "reviewer_schema") {
+        stopLoop("internal_error", innovatorRun.failure);
+        innovatorHalted = true;
+        break;
+      }
       const turn = innovatorRun.value;
       const innovatorSpawn = innovatorRun.spawn;
       const innovatorReport = innovatorRun.report;
@@ -1108,7 +1129,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: artifact });
         continue;
       }
-      if (leafKnobPaths(turn.parts).some((path) => !isEffectiveKnob(path))) {
+      if (flatDottedKeys(turn.parts).length > 0 || leafKnobPaths(turn.parts).some((path) => !isEffectiveKnob(path))) {
         invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: "invalid: non_effective_key" });
         continue;
       }
@@ -1457,19 +1478,42 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const reviewerGates = preflight
       ? { gates: preflight.gates, preflight: true as const, final: false as const }
       : { gates: hostVerdict?.gates ?? [] };
-    const reviewPrompt = reviewerTaskPrompt({
+    const reviewFacts = {
       round,
       patchHash,
       summary: proposed.summary,
       knob: gap.knob,
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+    };
+    pendingReview = {
+      gapCitedTrace,
+      knobMatched,
+      patchActive: activation.patchActive,
+      patchHash,
+      gates: reviewerGates.gates,
+      ...(preflight ? { preflight: true, final: false } : {}),
+      ...(roundRank ? { rank: roundRank } : {}),
+      ...(codeRank ? { codeRank } : {}),
+    };
+    emitClosure({
+      round,
+      closed: false,
+      reviewFedForward: null,
+      gapCitedTrace,
+      knobMatched,
+      patchActive: activation.patchActive,
+      gates: reviewerGates.gates,
+      ...(preflight ? { preflight: true, final: false } : {}),
+      ...(roundRank ? { rank: roundRank } : {}),
+      ...(codeRank ? { codeRank } : {}),
     });
-    const reviewRun = await attemptRole({
+    const launchReview = (formatReminder?: string) => attemptRole({
       sessionName: "reviewer-gate",
       kind: "role:reviewer",
       continuing: false,
       build(relay) {
+        const reviewPrompt = reviewerTaskPrompt({ ...reviewFacts, ...(formatReminder ? { formatReminder } : {}) });
         const spawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], relay, reviewPrompt, "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
         stageReviewerInputs(spawn.cwd, [
           ["candidates/gap.json", { knob: gap.knob, failureClass: gap.failureClass, summary: gap.summary, citations: gap.citations }],
@@ -1480,12 +1524,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           ["state/nodes/gates.json", reviewerGates],
         ]);
         const input: ReviewCall = {
-          round,
-          patchHash,
-          summary: proposed.summary,
-          knob: gap.knob,
-          runs: metrics.runs,
-          ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+          ...reviewFacts,
+          ...(formatReminder ? { formatReminder } : {}),
           sessionPath: spawn.sessionPath,
           spawn: roleFacing(spawn),
           baseUrl: relay.baseUrl,
@@ -1495,9 +1535,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         return { spawn, call: () => roles.review(input) };
       },
     });
+    let reviewRun = await launchReview();
+    if (reviewRun.status === "reviewer_schema") {
+      reviewRun = await launchReview(`${reviewRun.parseError}\n${REVIEWER_SHAPE}`);
+    }
+    if (reviewRun.status === "reviewer_schema") {
+      stopLoop("reviewer_format_invalid", reviewRun.failure, pendingReview);
+      break;
+    }
     if (reviewRun.status !== "ok") {
       if (reviewRun.status === "stop") {
-        stopLoop(reviewRun.reason, reviewRun.failure, { gapCitedTrace, knobMatched, patchActive: activation.patchActive, patchHash });
+        stopLoop(reviewRun.reason, reviewRun.failure, pendingReview);
       }
       break;
     }
@@ -1624,7 +1672,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     if (options.stopBeforeRun) break;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) });
+      stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) }, pendingReview);
       break;
     }
   }
@@ -1819,8 +1867,10 @@ export function piSubagentRoles(piBin: string): OptRoles {
     },
     async review(input) {
       const text = await piConclusion(piBin, input.spawn, input.baseUrl, reviewerTaskPrompt(input));
+      const detail = reviewerSchemaDetail(text);
+      if (detail !== null) throw new ReviewerSchemaError(detail);
       const verdict = reviewerFromAssistant(text);
-      if (!verdict) throw new Error("role reviewer-gate returned no conclusion");
+      if (!verdict) throw new ReviewerSchemaError("reason 形状不对");
       return { session: IGNORED_SESSION, reason: verdict.reason };
     },
   };
@@ -1849,7 +1899,7 @@ function writeSpawnAttempts(
 }
 
 function surfacesRoleFailure(reason: string): boolean {
-  return reason === "role_failed" || reason === "no_conclusion" || reason === "internal_error" || reason === "invalid: non_effective_key";
+  return reason === "role_failed" || reason === "no_conclusion" || reason === "internal_error" || reason === "invalid: non_effective_key" || reason === "reviewer_format_invalid";
 }
 
 function roleStopReason(error: unknown): string {
@@ -1957,6 +2007,17 @@ export class GapTracePathError extends Error {
   }
 }
 
+/** Reviewer JSON was not exactly `{"reason": string}`. One retry, then the loop stops. Not transient. */
+export class ReviewerSchemaError extends Error {
+  readonly parseError: string;
+
+  constructor(parseError: string) {
+    super(parseError);
+    this.name = "ReviewerSchemaError";
+    this.parseError = parseError;
+  }
+}
+
 /** Gap-finder named a knob outside the effective-knob whitelist. Not transient. */
 export class GapKnobError extends Error {
   readonly knob: string;
@@ -2056,7 +2117,8 @@ function innovatorTaskPrompt(input: { readonly round: number; readonly knob: str
     "最后一条 assistant 消息只放一个 JSON 对象。summary 是字符串。parts 的键是 part 名，值是要改的字段。",
     "part 只能是 agent-loop、context、memory、toolchain、skills。",
     "只能改下面这些有效旋钮。碰了名单以外的键，这一条候选无效，原因是 invalid: non_effective_key。",
-    "把当前有效值原样再写一次是空改。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
+    "对象的键本身带点，例如 skills 下面写 \"selector.weight\"，harness 不会读。那也是 invalid: non_effective_key。",
+    "空改比的是 harness 实际会用的值，不是写下的原文。0、超出范围、以及类型不对落到默认的值，都按用过之后的值来比。和当前有效值相同就是空改。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
     "agent-loop.maxSteps 是 agent_end 步数。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这个上限截断。",
     ...knobCatalog(input.control).map(formatKnobLine),
   ].join("\n");
@@ -2083,7 +2145,9 @@ function rankerTaskPrompt(input: { readonly round: number; readonly candidates: 
   ].join("\n");
 }
 
-function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash: string; readonly summary: string; readonly knob: string; readonly runs: readonly RunView[]; readonly ewiSeeds: readonly number[] }): string {
+const REVIEWER_SHAPE = '唯一合法形状是 {"reason":"<string>"}。不要其它字段，不要 accept，不要 verdict。';
+
+function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash: string; readonly summary: string; readonly knob: string; readonly runs: readonly RunView[]; readonly ewiSeeds: readonly number[]; readonly formatReminder?: string }): string {
   const runs = input.runs.map((run) => `seed=${run.seed} reward=${run.reward ?? "null"} status=${run.scoreStatus} tokens=${run.tokens}`);
   return [
     `第 ${input.round} 轮 reviewer-gate。`,
@@ -2098,6 +2162,7 @@ function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash:
     runs.join("\n") || "没有运行。",
     `ewiSeeds：${input.ewiSeeds.join(" ") || "无"}`,
     "最后一条 assistant 消息只放一个 JSON 对象，字段只有 reason，reason 是字符串。",
+    ...(input.formatReminder ? [input.formatReminder] : []),
   ].join("\n");
 }
 
@@ -2203,6 +2268,20 @@ function reviewerFromAssistant(text: string): { reason: string } | null {
     if (keys.length === 1 && keys[0] === "reason" && typeof obj.reason === "string") found = { reason: obj.reason };
   }
   return found;
+}
+
+/** Why the last JSON object is not exactly `{reason: string}`. Null when the strict parser accepts the text. */
+export function reviewerSchemaDetail(text: string): string | null {
+  if (reviewerFromAssistant(text)) return null;
+  const objects = jsonObjects(text);
+  const last = objects.length > 0 ? objects[objects.length - 1] : undefined;
+  if (!last) return "没有 JSON 对象";
+  const keys = Object.keys(last);
+  if (keys.includes("accept") || keys.includes("verdict")) return "accept 和 verdict 不能出现";
+  const extra = keys.filter((key) => key !== "reason");
+  if (extra.length > 0) return `多余字段 ${extra.join(",")}`;
+  if (typeof last.reason !== "string") return "reason 不是字符串";
+  return "reason 形状不对";
 }
 
 function stringList(value: unknown): string[] {
@@ -2904,8 +2983,18 @@ function assertRankerWinnerReviewed(out: string, relayRoot: string): void {
     if (typeof reviewSpawn.baseUrl !== "string") throw new Error("ranker named a winner but reviewer-gate did not run");
     const reviewLog = join(relayRoot, runIdFromBase(reviewSpawn.baseUrl), "relay.jsonl");
     const reviewText = lastAssistantText(reviewLog);
-    if (maxDoneTokens(reviewLog) <= 0 || reviewText === null || !reviewerFromAssistant(reviewText)) {
+    if (maxDoneTokens(reviewLog) <= 0 || reviewText === null) {
       throw new Error("ranker named a winner but reviewer-gate did not run");
+    }
+    if (!reviewerFromAssistant(reviewText)) {
+      let recorded = "";
+      const closurePath = join(roundDir, "closure.json");
+      if (existsSync(closurePath)) {
+        const closure = JSON.parse(readFileSync(closurePath, "utf8")) as { reason?: unknown };
+        if (typeof closure.reason === "string") recorded = closure.reason;
+      }
+      if (recorded === "reviewer_format_invalid") continue;
+      throw new Error('reviewer-gate ran but its conclusion was not {"reason": string}');
     }
   }
 }

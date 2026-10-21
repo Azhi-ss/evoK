@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { EFFECTIVE_KNOBS, formatKnobLine, harnessEffectiveKeys, knobCatalog, noopKeys } from "./effective-knobs";
+import { EFFECTIVE_KNOBS, flatDottedKeys, formatKnobLine, harnessEffectiveKeys, knobCatalog, noopKeys } from "./effective-knobs";
 
 /** Signed baseline the loop is allowed to tune. Bytes, not a rebuilt patch. */
 const DEPLOYED_HARNESS = fileURLToPath(new URL("../../fixtures/harness.4d4e12e5.mjs", import.meta.url));
@@ -86,12 +86,12 @@ describe("effective knobs", () => {
     expect(noopKeys({ "agent-loop": { noProgressTurns: 3 } }, control)).toEqual(["agent-loop.noProgressTurns"]);
     expect(noopKeys({ "agent-loop": { maxSteps: 20, noProgressTurns: 3 } }, control)).toEqual(["agent-loop.noProgressTurns"]);
     expect(noopKeys({ "agent-loop": { noProgressTurns: 4 } }, control)).toEqual([]);
-    expect(noopKeys({ "agent-loop": { noProgressTurns: 0 } }, control)).toEqual([]);
+    expect(noopKeys({ "agent-loop": { noProgressTurns: 0 } }, control)).toEqual(["agent-loop.noProgressTurns"]);
     expect(noopKeys({ "agent-loop": { maxSteps: 25 } }, control)).toEqual(["agent-loop.maxSteps"]);
     expect(noopKeys({ context: { compression: 1 } }, control)).toEqual([]);
   });
 
-  test("control overrides the harness default and the written value is compared as written", () => {
+  test("control overrides are coerced before the no-op comparison", () => {
     const overridden = { parts: { "agent-loop": { maxSteps: 25, noProgressTurns: 4 } } };
     expect(knobCatalog(overridden).find((fact) => fact.key === "agent-loop.noProgressTurns")?.current).toBe(4);
     expect(noopKeys({ "agent-loop": { noProgressTurns: 4 } }, overridden)).toEqual(["agent-loop.noProgressTurns"]);
@@ -100,12 +100,28 @@ describe("effective knobs", () => {
     expect(knobCatalog(invalidIdle).find((fact) => fact.key === "agent-loop.noProgressTurns")?.current).toBe(3);
     const wideBash = { parts: { "agent-loop": { maxSteps: 25 }, toolchain: { bashTimeoutSec: 3000 } } };
     expect(knobCatalog(wideBash).find((fact) => fact.key === "toolchain.bashTimeoutSec")?.current).toBe(300);
-    expect(noopKeys({ toolchain: { bashTimeoutSec: 3000 } }, wideBash)).toEqual([]);
+    expect(noopKeys({ toolchain: { bashTimeoutSec: 3000 } }, wideBash)).toEqual(["toolchain.bashTimeoutSec"]);
     expect(noopKeys({ toolchain: { bashTimeoutSec: 300 } }, wideBash)).toEqual(["toolchain.bashTimeoutSec"]);
+    expect(noopKeys({ toolchain: { bashTimeoutSec: 600 } }, wideBash)).toEqual([]);
     const packed = { parts: { "agent-loop": { maxSteps: 25 }, skills: { pack: "alpha" } } };
     expect(knobCatalog(packed).find((fact) => fact.key === "skills.pack")?.current).toEqual(["alpha"]);
-    expect(noopKeys({ skills: { pack: "alpha" } }, packed)).toEqual([]);
+    expect(noopKeys({ skills: { pack: "alpha" } }, packed)).toEqual(["skills.pack"]);
     expect(noopKeys({ skills: { pack: ["alpha"] } }, packed)).toEqual(["skills.pack"]);
+    expect(noopKeys({ skills: { pack: ["beta"] } }, packed)).toEqual([]);
+  });
+
+  test("0, an out-of-range timeout, and the string 25 match the harness effective value", () => {
+    const control = { parts: { "agent-loop": { maxSteps: 25 } } };
+    expect(noopKeys({ "agent-loop": { noProgressTurns: 0 } }, control)).toEqual(["agent-loop.noProgressTurns"]);
+    expect(noopKeys({ toolchain: { bashTimeoutSec: 5000 } }, control)).toEqual(["toolchain.bashTimeoutSec"]);
+    expect(noopKeys({ "agent-loop": { maxSteps: "25" } }, control)).toEqual(["agent-loop.maxSteps"]);
+    expect(noopKeys({ "agent-loop": { maxSteps: 20 } }, control)).toEqual([]);
+    expect(noopKeys({ toolchain: { bashTimeoutSec: 600 } }, control)).toEqual([]);
+  });
+
+  test("a dotted key inside an object is not a nested harness path", () => {
+    expect(flatDottedKeys({ skills: { "selector.weight": 2 } })).toEqual(["skills.selector.weight"]);
+    expect(flatDottedKeys({ skills: { selector: { weight: 2 } } })).toEqual([]);
   });
 
   test("preflight8 noProgressTurns=3 matches harness.4d4e12e5.mjs line 154", () => {

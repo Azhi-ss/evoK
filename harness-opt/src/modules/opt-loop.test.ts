@@ -27,6 +27,8 @@ import {
   relayPlantRead,
   relayPlantRole,
   relayRecord,
+  reviewerSchemaDetail,
+  ReviewerSchemaError,
   stubOptRoles,
   type OptLoopOptions,
   type OptRoles,
@@ -235,6 +237,18 @@ function runIdOf(baseUrl: string): string {
 
 function roleLog(root: string, baseUrl: string): string {
   return join(root, runIdOf(baseUrl), "relay.jsonl");
+}
+
+function reviewerRelayLogs(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const found: string[] = [];
+  for (const name of readdirSync(root)) {
+    const log = join(root, name, "relay.jsonl");
+    if (!existsSync(log)) continue;
+    const text = readFileSync(log, "utf8");
+    if (text.includes('"kind":"role:reviewer"')) found.push(text);
+  }
+  return found;
 }
 
 function equalKeyRoles(fx: Fixture, winnerId: string, options?: { readonly excluded?: readonly string[]; readonly reviewPlant?: boolean; readonly third?: boolean }): OptRoles {
@@ -3338,6 +3352,173 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
   });
 
+  test("a reviewer that ran with an extra field is not described as not run", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const roles = equalKeyRoles(fx, "c1");
+    const planted = {
+      ...roles,
+      async review(input: Parameters<OptRoles["review"]>[0]) {
+        await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "held", reason_note: null });
+        hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+        return { session: { jsonl: "ignored\n" }, reason: "held" };
+      },
+    };
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: planted,
+    })).rejects.toThrow('reviewer-gate ran but its conclusion was not {"reason": string}');
+    expect(fake.calls).toEqual([]);
+  });
+
+  test("the strict reviewer parser rejects an extra field and a second failure stops", () => {
+    expect(reviewerSchemaDetail('{"reason":"held","reason_note":null}')).toBe("多余字段 reason_note");
+    expect(reviewerSchemaDetail('{"reason":"held","accept":true}')).toBe("accept 和 verdict 不能出现");
+    expect(reviewerSchemaDetail('{"verdict":"accept"}')).toBe("accept 和 verdict 不能出现");
+    expect(reviewerSchemaDetail('{"reason":"held"}')).toBeNull();
+  });
+
+  test("a schema failure retries the reviewer once and a second failure keeps the preflight gates", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const base = equalKeyRoles(fx, "c1");
+    let reviews = 0;
+    let gatesAtSpawn: { id: string; pass: boolean }[] | undefined;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        ...base,
+        async review(input) {
+          reviews += 1;
+          const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+            gates?: { id: string; pass: boolean }[];
+            preflight?: boolean;
+            final?: boolean;
+          };
+          if (reviews === 1) {
+            gatesAtSpawn = closure.gates;
+            expect(closure.preflight).toBe(true);
+            expect(closure.final).toBe(false);
+            expect(closure.gates).toEqual([{ id: "G1", pass: false }, { id: "G2", pass: true }]);
+          }
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "held", reason_note: null });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+          if (reviews === 2) {
+            expect(input.formatReminder).toContain("多余字段 reason_note");
+            expect(input.formatReminder).toContain('{"reason":"<string>"}');
+          }
+          throw new ReviewerSchemaError(reviews === 1 ? "多余字段 reason_note" : "多余字段 reason_note");
+        },
+      },
+    });
+    expect(reviews).toBe(2);
+    expect(fake.calls).toEqual([]);
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
+    expect(prompt).toContain("多余字段 reason_note");
+    expect(prompt).toContain('{"reason":"<string>"}');
+    expect(prompt).toContain("不要 accept，不要 verdict");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reason?: string;
+      gates?: { id: string; pass: boolean }[];
+      preflight?: boolean;
+      final?: boolean;
+    };
+    expect(closure.reason).toBe("reviewer_format_invalid");
+    expect(closure.gates).toEqual(gatesAtSpawn);
+    expect(closure.preflight).toBe(true);
+    expect(closure.final).toBe(false);
+    expect(result.stopReport.reason).toBe("reviewer_format_invalid");
+    expect(result.stopReport.role).toBe("reviewer-gate");
+    expect(result.stopReport.stderrTail).toContain("多余字段 reason_note");
+    const logs = reviewerRelayLogs(join(fx.attestRoot, "relay-logs"));
+    expect(logs).toHaveLength(2);
+    for (const log of logs) expect(log).toContain('"usage"');
+  }, 4_000);
+
+  test("one schema retry accepts a reason-only conclusion", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const base = equalKeyRoles(fx, "c1");
+    let reviews = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        ...base,
+        async review(input) {
+          reviews += 1;
+          if (reviews === 1) {
+            await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "held", reason_note: null });
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+            throw new ReviewerSchemaError("多余字段 reason_note");
+          }
+          expect(input.formatReminder).toContain("多余字段 reason_note");
+          expect(input.formatReminder).toContain('{"reason":"<string>"}');
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "kept" });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, reason: "kept" };
+        },
+      },
+    });
+    expect(reviews).toBe(2);
+    expect(result.stopReport.reason).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewReason?: string; reason?: string; gates?: unknown };
+    expect(closure.reason).toBeUndefined();
+    expect(closure.reviewReason).toBe("kept");
+    expect(closure.gates).toEqual([{ id: "G1", pass: false }, { id: "G2", pass: true }]);
+    expect(reviewerRelayLogs(join(fx.attestRoot, "relay-logs"))).toHaveLength(2);
+  }, 4_000);
+
+  test("a full-run reviewer schema failure keeps G0-G3 that were written before the spawn", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    let reviews = 0;
+    let gatesAtSpawn: { id: string }[] | undefined;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        async review(input) {
+          reviews += 1;
+          const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gates?: { id: string }[]; preflight?: boolean };
+          if (reviews === 1) {
+            gatesAtSpawn = closure.gates;
+            expect(closure.preflight).toBeUndefined();
+            expect(closure.gates?.map((gate) => gate.id)).toEqual(["G0", "G1", "G2", "G3"]);
+          }
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "held", reason_note: null });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
+          throw new ReviewerSchemaError("多余字段 reason_note");
+        },
+      },
+    });
+    expect(reviews).toBe(2);
+    expect(fake.calls).toHaveLength(1);
+    expect(result.stopReport.reason).toBe("reviewer_format_invalid");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; gates?: { id: string }[] };
+    expect(closure.reason).toBe("reviewer_format_invalid");
+    expect(closure.gates).toEqual(gatesAtSpawn);
+    expect(reviewerRelayLogs(join(fx.attestRoot, "relay-logs"))).toHaveLength(2);
+  }, 8_000);
+
   test("execute mode ignores a read-only token override", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
@@ -4900,5 +5081,50 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     };
     expect(saved.stopReport.reason).toBeNull();
     expect(saved.stopReport.noWinner).toEqual([{ round: 1, reason: "no_winner" }]);
+  });
+
+  test("0, 5000, the string 25, and a flat dotted key are rejected before a real candidate runs", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const fake = fakeExecutor(fx);
+    const cases: Record<string, { summary: string; parts: Record<string, Record<string, unknown>> }> = {
+      "0": { summary: "agent-loop.noProgressTurns=0", parts: { "agent-loop": { noProgressTurns: 0 } } },
+      "1": { summary: "toolchain.bashTimeoutSec=5000", parts: { toolchain: { bashTimeoutSec: 5000 } } },
+      "2": { summary: "agent-loop.maxSteps=string-25", parts: { "agent-loop": { maxSteps: "25" } } },
+      "3": { summary: "skills.selector.weight flat", parts: { skills: { "selector.weight": 2 } } },
+    };
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          const slot = input.sessionPath.match(/innovator-(\d+)\.jsonl$/)?.[1] ?? "";
+          const spec = cases[slot];
+          if (!spec) return stub.innovate(input);
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary: spec.summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary: spec.summary, parts: spec.parts };
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      invalidCandidates?: { id: string; reason: string; keys?: string[] }[];
+    };
+    const byId = new Map((closure.invalidCandidates ?? []).map((item) => [item.id, item]));
+    expect(byId.get("c0")).toEqual({ id: "c0", role: "innovator-0", reason: "invalid: no_op_change", keys: ["agent-loop.noProgressTurns"] });
+    expect(byId.get("c1")).toEqual({ id: "c1", role: "innovator-1", reason: "invalid: no_op_change", keys: ["toolchain.bashTimeoutSec"] });
+    expect(byId.get("c2")).toEqual({ id: "c2", role: "innovator-2", reason: "invalid: no_op_change", keys: ["agent-loop.maxSteps"] });
+    expect(byId.get("c3")).toEqual({ id: "c3", role: "innovator-3", reason: "invalid: non_effective_key" });
+    expect(fake.calls).toHaveLength(1);
+    const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as {
+      parts: { "agent-loop": { maxSteps?: number } };
+    };
+    expect(config.parts["agent-loop"].maxSteps).toBe(24);
   });
 });

@@ -60,6 +60,25 @@ export function leafKnobPaths(parts: Readonly<Record<string, unknown>>): string[
 }
 
 /**
+ * Object keys that themselves contain a dot.
+ * The harness splits a leaf on `.` and walks nested objects. A key named
+ * `selector.weight` is never read, even though joining it looks like a whitelist path.
+ */
+export function flatDottedKeys(parts: Readonly<Record<string, unknown>>): string[] {
+  const out: string[] = [];
+  const walk = (prefix: string, value: unknown): void => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const path = prefix === "" ? key : `${prefix}.${key}`;
+      if (key.includes(".")) out.push(path);
+      walk(path, child);
+    }
+  };
+  walk("", parts);
+  return out;
+}
+
+/**
  * Unset `HARNESS_CONTEXT_WINDOW` / `MODEL_MAX_TOKENS` in the signed harness.
  * The catalog uses those literals and does not read the process environment.
  */
@@ -106,18 +125,22 @@ export function formatKnobLine(fact: KnobFact): string {
 }
 
 /**
- * Changed leaves whose written value already equals the current effective value.
- * Comparison is the written value, not the value the harness would coerce it into.
+ * Changed leaves whose harness-effective value already equals the current effective value.
+ * The written leaf is run through the same coercion the 4d4e12e5 harness uses:
+ * out-of-range and non-numbers, including the string `"25"`, fall back to the default.
+ * That fallback is what the harness runs. It is not a parse of the string.
  * One such leaf invalidates the whole candidate, including a candidate whose every
  * change is a no-op and a partial no-op. The caller names these keys and does not
  * strip them to keep the other edits.
  */
 export function noopKeys(parts: Readonly<Record<string, unknown>>, control: unknown): readonly string[] {
   const current = new Map<string, unknown>(knobCatalog(control).map((fact) => [fact.key, fact.current]));
+  const coerce = new Map<string, (value: unknown) => unknown>(SPECS.map((spec) => [spec.key, spec.coerce]));
   const named: string[] = [];
   for (const path of leafKnobPaths(parts)) {
-    if (!current.has(path)) continue;
-    if (JSON.stringify(readLeaf(parts, path)) === JSON.stringify(current.get(path))) named.push(path);
+    const apply = coerce.get(path);
+    if (!apply || !current.has(path)) continue;
+    if (JSON.stringify(apply(readLeaf(parts, path))) === JSON.stringify(current.get(path))) named.push(path);
   }
   return named;
 }
