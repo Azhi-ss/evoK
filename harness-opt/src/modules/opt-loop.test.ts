@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,7 @@ import {
   OPT_MODEL,
   realRunCommand,
   reconcilePrereg,
+  assertLiveRoleCall,
   runLiveRoleSmoke,
   runOptLoop,
   runOptOnce,
@@ -1375,6 +1376,55 @@ function onceStyleAttest(fx: Fixture, candidateConfigHash: string): string {
   return attest;
 }
 
+function taskStyleAttest(fx: Fixture, candidateConfigHash: string): {
+  readonly attest: string;
+  readonly run: string;
+  readonly trace: string;
+  readonly session: string;
+  readonly output: string;
+  readonly traceBytes: Buffer;
+  readonly traceMtime: number;
+} {
+  const run = join(fx.root, `task-run-${candidateConfigHash.slice(0, 8)}`);
+  const task = join(run, "workspace", "runs", "task-1");
+  mkdirSync(join(task, ".pi-sessions"), { recursive: true });
+  mkdirSync(join(task, "outputs"), { recursive: true });
+  mkdirSync(join(run, "verifier"), { recursive: true });
+  const trace = join(task, "trace.jsonl");
+  const session = join(task, ".pi-sessions", "session.jsonl");
+  const output = join(task, "outputs", "answer.txt");
+  writeFileSync(trace, `${JSON.stringify({ type: "run_start", candidateConfigHash })}\n`);
+  writeFileSync(session, "{}\n");
+  writeFileSync(output, "ok\n");
+  writeFileSync(join(run, "verifier", "reward.txt"), "1\n");
+  writeFileSync(join(run, "result.json"), `${JSON.stringify({
+    task: LOOP_TASK.path,
+    seed: 9,
+    arm: "control",
+    score_status: "scored",
+    reward: 1,
+    tokens: 10,
+    exit: 0,
+    runId: "ab".repeat(16),
+  })}\n`);
+  const traceBytes = readFileSync(trace);
+  const traceMtime = statSync(trace).mtimeMs;
+  const attest = join(fx.root, `task-attest-${candidateConfigHash.slice(0, 8)}`);
+  const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
+  const proc = spawnSync("python3", [
+    script, "attest",
+    "--run-dir", run,
+    "--harness", fx.harnessPath,
+    "--config", fx.controlConfig,
+    "--attest-dir", attest,
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HARNESS_ATTEST_KEY_FILE: fx.keyFile },
+  });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "attest").trim());
+  return { attest, run, trace, session, output, traceBytes, traceMtime };
+}
+
 function captureStderr(run: () => Promise<number>): Promise<{ readonly code: number; readonly stderr: string }> {
   const lines: string[] = [];
   const write = process.stderr.write.bind(process.stderr);
@@ -1495,8 +1545,12 @@ describe("optimize command", () => {
       expect(code).toBe(1);
       expect(stderr).toContain("role gap-finder returned no conclusion");
       const argv = readFileSync(recorded, "utf8");
-      expect(argv).toContain("--tools");
-      expect(argv).toContain("read");
+      const lines = argv.split("\n");
+      expect(lines[0]).toBe("--print");
+      expect(lines[lines.indexOf("--tools") + 1]).toBe("read");
+      expect(lines).toContain("--system-prompt");
+      expect(lines[lines.indexOf("--system-prompt") + 1]?.endsWith("/agents/gap-finder.md")).toBe(true);
+      expect(lines.slice(lines.indexOf("--system-prompt") + 2).join("\n").trim().length).toBeGreaterThan(0);
       expect(argv).not.toContain("write");
       expect(argv).not.toContain("bash");
       const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { relayLog?: string; baseUrl?: string };
@@ -1605,11 +1659,76 @@ describe("optimize command", () => {
     expect(mismatch.code).toBe(1);
     expect(mismatch.stderr).toContain("candidateConfigHash");
   });
+
+  test("control-attest reads a task-* trace without rewriting the run", async () => {
+    const fx = fixture();
+    const hash = createHash("sha256").update(readFileSync(fx.controlConfig)).digest("hex");
+    const laid = taskStyleAttest(fx, hash);
+    const signed = JSON.parse(readFileSync(join(laid.attest, "attestation.json"), "utf8")) as {
+      traceSha: string;
+      piSessionShas: Record<string, string>;
+      outputShas: Record<string, string>;
+    };
+    expect(signed.traceSha).toBe(createHash("sha256").update(readFileSync(laid.trace)).digest("hex"));
+    expect(signed.piSessionShas["session.jsonl"]).toBe(createHash("sha256").update(readFileSync(laid.session)).digest("hex"));
+    expect(signed.outputShas["answer.txt"]).toBe(createHash("sha256").update(readFileSync(laid.output)).digest("hex"));
+    expect(existsSync(join(laid.run, "trace.jsonl"))).toBe(false);
+    expect(readFileSync(laid.trace)).toEqual(laid.traceBytes);
+    expect(statSync(laid.trace).mtimeMs).toBe(laid.traceMtime);
+    const previousBind = process.env.HARNESS_RELAY_BIND;
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    try {
+      const code = await main([
+        "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", laid.attest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]);
+      expect(code).toBe(0);
+      expect(readFileSync(laid.trace)).toEqual(laid.traceBytes);
+    } finally {
+      if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previousBind;
+    }
+
+    const mismatchedFx = fixture();
+    const mismatched = taskStyleAttest(mismatchedFx, "ab".repeat(32));
+    const mismatch = await captureStderr(() => main([
+      "optimize", "--out", mismatchedFx.out, "--dry-run", "--rounds", "1",
+      "--attest-root", mismatchedFx.attestRoot,
+      "--attest-key-file", mismatchedFx.keyFile,
+      "--harness", mismatchedFx.harnessPath,
+      "--control-config", mismatchedFx.controlConfig,
+      "--control-attest", mismatched.attest,
+      ...taskFlags(),
+      ...round0Flags(),
+    ]));
+    expect(mismatch.code).toBe(1);
+    expect(mismatch.stderr).toContain("candidateConfigHash");
+  });
+});
+
+test("a live role call needs a done line with tokens and exit 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "role-done-"));
+  const log = join(dir, "relay.jsonl");
+  expect(() => assertLiveRoleCall("gap-finder", 0, log)).toThrow(/no relay request/);
+  writeFileSync(log, `${JSON.stringify({ type: "done", usage: { prompt_tokens: 0, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+  expect(() => assertLiveRoleCall("gap-finder", 0, log)).toThrow(/no relay request/);
+  writeFileSync(log, `${JSON.stringify({ type: "done", usage: null })}\n`);
+  expect(() => assertLiveRoleCall("gap-finder", 0, log)).toThrow(/no relay request/);
+  expect(() => assertLiveRoleCall("gap-finder", 2, log)).toThrow(/exited 2/);
+  expect(() => assertLiveRoleCall("gap-finder", null, log)).toThrow(/exited null/);
+  writeFileSync(log, `${JSON.stringify({ type: "done", usage: { prompt_tokens: 3, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+  expect(() => assertLiveRoleCall("gap-finder", 0, log)).not.toThrow();
 });
 
 const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env.PI_BIN);
 (liveRoleSmoke ? test : test.skip)(
-  "live role smoke launches each role once and does not start docker",
+  "live role smoke requires a relay done with tokens and does not start docker",
   async () => {
     const fx = fixture();
     const previous = {
@@ -1637,9 +1756,17 @@ const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env
       });
       expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
       const innovatorArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as string[];
-      expect(innovatorArgv).toEqual([process.env.PI_BIN, "--tools", "read", "--tools", "write"]);
       const gapArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[];
-      expect(gapArgv).toEqual([process.env.PI_BIN, "--tools", "read"]);
+      expect(innovatorArgv[0]).toBe(process.env.PI_BIN);
+      expect(gapArgv[0]).toBe(process.env.PI_BIN);
+      expect(gapArgv).toContain("--print");
+      expect(innovatorArgv).toContain("--print");
+      expect(gapArgv[gapArgv.indexOf("--tools") + 1]).toBe("read");
+      expect(innovatorArgv[innovatorArgv.indexOf("--tools") + 1]).toBe("read,write");
+      expect(gapArgv[gapArgv.indexOf("--system-prompt") + 1]?.endsWith("/agents/gap-finder.md")).toBe(true);
+      expect(innovatorArgv[innovatorArgv.indexOf("--system-prompt") + 1]?.endsWith("/agents/innovator.md")).toBe(true);
+      expect(gapArgv.at(-1)?.includes("knob")).toBe(true);
+      expect(gapArgv.join("\n")).not.toContain("bash");
     } finally {
       if (previous.base === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous.base;

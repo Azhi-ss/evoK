@@ -165,7 +165,7 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 第一轮的 control trace 用 `--control-attest <目录>` 传入，目录里要有上述证明，而且 `run.arm` 是 `control`。环核对 `mountedConfigSha` 等于宿主 control 文件的 sha256，再核对 trace 里的 `run_start.candidateConfigHash` 等于这个 sha。预注册那份紧凑 control（`{"parts":{"agent-loop":{"maxSteps":25}}}\n`）的 sha256 是 `3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c`。环不把这个常数当成唯一合法值；换一份字节不同的 control 文件，证明对不上就拒绝。环不写 `baseline/` 桩。
 
-`gapCitedTrace` 和 `reviewFedForward` 只认该角色自己的 relay 账本里的 `read` 工具结果，不认角色返回的文本，也不认会话文件里追加的 tool call。gap-finder 和 reviewer-gate 真正拉起 Pi 时 argv 含 `--tools read`，没有 write、edit、bash，argv 里也不放角色 runId。会话文件和宿主账本都在角色 cwd 和允许读取的路径之外，由宿主写入，并用证明密钥做 HMAC。对不上就不采信这份会话。引用是否成立由 `relay/ledger.py read-evidence` 判断：先核对宿主文件 sha，再在该角色 runId 下找一段读到的内容。桩角色不写 relay 读记录，因此 `--dry-run` 的 `gapCitedTrace` 为假。测试里若要让引用成立，用 `relay/plant.py plant-read` 种下读记录。生产 relay CLI 只有 `patch-active`，不种请求。dry-run 的 critic、ranker、reviewer 会用 `plant.py plant-role` 把结论 JSON 写成 assistant 文本，环再按 `bind_role_call` 核对。
+`gapCitedTrace` 和 `reviewFedForward` 只认该角色自己的 relay 账本里的 `read` 工具结果，不认角色返回的文本，也不认会话文件里追加的 tool call。gap-finder、critic、ranker 和 reviewer-gate 真正拉起 Pi 时是非交互的 `--print`，`--tools` 只有 `read`，innovator 的 `--tools` 是一条 `read,write`。没有 edit、bash，argv 里也不放角色 runId。`--system-prompt` 指向 `harness-opt/agents` 里该角色的定义，后面是这一轮的任务提示。会话文件和宿主账本都在角色 cwd 和允许读取的路径之外，由宿主写入，并用证明密钥做 HMAC。对不上就不采信这份会话。引用是否成立由 `relay/ledger.py read-evidence` 判断：先核对宿主文件 sha，再在该角色 runId 下找一段读到的内容。桩角色不写 relay 读记录，因此 `--dry-run` 的 `gapCitedTrace` 为假。测试里若要让引用成立，用 `relay/plant.py plant-read` 种下读记录。生产 relay CLI 只有 `patch-active`，不种请求。dry-run 的 critic、ranker、reviewer 会用 `plant.py plant-role` 把结论 JSON 写成 assistant 文本，环再按 `bind_role_call` 核对。
 
 每一轮落下三个角色的 Pi session jsonl 和宿主算出的 sha、`patch.diff`、以及 `activation.json`。计分 EWI 是 `EWI-relay-v1`：`t_first` 来自宿主对 `outputs/answer.txt` 的观察，没有观察则是 `EWI不可判`（`ewi` 为 null，不是 false）。600 秒标成 `新口径下未校准`。`scripts/ewi_idle.py`（sha256 `8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69`）只作 `ewi_trace_ref`。`EWI_IDLE_SCRIPT` 会被拒绝。阈值仍是 `--ewi-threshold`，默认 600 秒。`ts_of` 用 `math.isfinite`：`assistant_message` 的 `ts` 不是有限数字（布尔、`NaN`、`Infinity`、`-Infinity`、字符串、null、缺字段）时抛 `ValueError('missing ts')`。空行或截断行是 `JSONDecodeError`。非对象行在 `.get` 上是 `AttributeError`。文件末尾换行不会多出一行。`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。`ewiRuns` 只收录 `ewi === true`，`withoutEwi` 只收录 `ewi === false`。停机上限写在第 1 轮之前的 `pre_round1` 里：最多 10 轮、只读 token 3000 万、只读墙钟 48 小时、真实运行墙钟 103 小时，先到先停。checker 输出在签名前从 `{run}/verifier` 拷到 relay 的 `<runId>/checker/`（0700）。`checkerOutputSha` 和 reward 进入运行签名，reviewer 与 run-notes 共用 `verify_run_record`，不符则停环。`pre_round1` 还签 `round0Record`；`seedSha` 留在签名里，不参与排序。critic+ranker 每轮另有 3M 子上限。容器串行启动，带 `--cap-drop NET_RAW`，并且不挂载 `/home/box`。单次 tokens 只认 relay 账本，超过该题 `6×W` 记 `token_cap`。`harness_relay.py` 的 sha256 是 `db5ebd725365000681c8aa88945327e88abd94a13bdc21343771795b174dfe91`（38686 字节）。文件末尾不是换行时，红 close 前先补一个换行。上一次启动留下的未关闭日志，或末尾无法解析的行，标成 closed-red，不挡住新 run，也不删文件。中继启动时按已有日志重算 innovator、critic、ranker 的用量，红 run 记下的 usage 同样计入。`control` 必须带 `--mode dry-run|execute`，缺了就退出，不会默认打开 plant。中继写每一行时用只存在于进程内存的密钥做滚动 HMAC，密钥不落盘。循环的只读 token 合计来自中继控制通道报告；jsonl 与内存链不一致则 `attest_mismatch` 停环。将越过 innovator 20 万或循环 3000 万的转发由中继拒绝。上游已经返回的用量计入 3000 万合计。链 MAC 只在中继进程活着时能核对；离线 `verify-log` 只核对 sha。`sessions/*.spawn.json` 不含 `relayLog`。execute 模式拒绝控制通道的 `record`、`plant-role`、`plant-read`。2xx 缺 cached 字段记 `usage_missing`。若存在 executor 的 relay 账本，`patchActive` 还要求每条请求的 system 配置哈希都包含所挂 config 的 sha；没有这份账本时不因此判假。
 
@@ -178,7 +178,7 @@ bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 要带 `--pi-bin <path>`。环在每次 relay `open` 之后，用这份二进制拉起已有的 pi-subagents 角色：gap-finder、innovator、reviewer-gate 读 `harness-opt/agents` 里的定义（子进程的 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 指向这个目录），critic 和 ranker 走同一条只读 argv，不另写提示词。argv 仍是证据角色的 `--tools read`，innovator 再加 `--tools write`。argv 里不放 runId。子进程拿到这次调用的 `BASE_URL`；证明密钥、relay 日志根和上游密钥不进入这个环境。结论取该 run 最后一条 done 的 assistant 文本。对不上环要的字段就停，不会进 docker。没给 `--pi-bin` 时，`--execute` 仍然以 `execute mode needs roles` 失败。`pre_round1` 仍由 `runOptLoop` 在第 1 轮之前签名，没有第二条签名路径。innovator 单次 20 万和只读 3000 万仍由这条 relay 记账，`sessions/*.spawn.json` 仍是 roleFacing，不含 `relayLog`。省略 `--executor-cmd` 时，种子 0 的真实运行才是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 要带 `--pi-bin <path>`。环在每次 relay `open` 之后，用这份二进制以 `--print` 拉起角色。`--system-prompt` 是 `harness-opt/agents/<role>.md`（gap-finder、innovator、critic、ranker、reviewer-gate；子进程的 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 也指向这个目录），位置参数是这一轮的任务提示（trace、候选、缺口这些输入）。证据角色的 `--tools` 只有 `read`，innovator 是一条 `--tools read,write`。argv 里不放 runId。子进程的 `BASE_URL` 是这次 relay run，并写进该进程自己的 `PI_CODING_AGENT_DIR/models.json`，`API_KEY` 只用占位符。证明密钥、relay 日志根和上游密钥不进入这个环境。结论取该 run 最后一条 done 的 assistant 文本。对不上环要的字段就停，不会进 docker。没给 `--pi-bin` 时，`--execute` 仍然以 `execute mode needs roles` 失败。`pre_round1` 仍由 `runOptLoop` 在第 1 轮之前签名，没有第二条签名路径。innovator 单次 20 万和只读 3000 万仍由这条 relay 记账，`sessions/*.spawn.json` 仍是 roleFacing，不含 `relayLog`。省略 `--executor-cmd` 时，种子 0 的真实运行才是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
 
 单独跑一题一种子一臂（盒子上 hb003、seed 9、control 的对账）不经过环，由这条命令自己监听 relay、分配 runId、打开并关闭：
 
@@ -205,7 +205,7 @@ python3 harness-opt/relay/devii_docker_v2.py once \
   --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest
 ```
 
-已经跑完、目录里还没有 `attestation.json` 的 control-r5，用同一个写入器补证明，不启动 docker：
+已经跑完、目录里还没有 `attestation.json` 的 control-r5，用同一个写入器补证明，不启动 docker。`attest` 只读 run 目录。顶层有普通文件 `trace.jsonl` 时用它；否则用 `workspace/runs/task-*` 里按名字排序后最后一个含 `trace.jsonl` 的目录。`.pi-sessions` 和 `outputs` 先用顶层已经有文件的树，否则用这个 task 目录里的树。不复制、不改 run 里的原件。这样 control-r5 的 `traceSha`、session 和 output 哈希会写上，`--control-attest` 才能接着核对 `candidateConfigHash`：
 
 ```bash
 HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" \
@@ -236,7 +236,7 @@ bun harness-opt/src/cli.ts optimize --execute --rounds 1 \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-角色冒烟默认跳过。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN` 都设置时，每个角色经真实 Pi 拉起一次（gap-finder、innovator、critic、ranker、reviewer-gate），然后停，不启动 docker。测试自己把 relay 绑到 `127.0.0.1`，日志放在临时目录。上游密钥沿用 `RELAY_UPSTREAM_KEY_FILE`。
+角色冒烟默认跳过。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN` 都设置时，每个角色经真实 Pi 跑一次（gap-finder、innovator、critic、ranker、reviewer-gate），然后停，不启动 docker。每个角色都要退出码 0，并且自己的 relay 账本里至少有一条 done，usage 折成的 tokens 大于 0。只拉起进程不算通过。测试自己把 relay 绑到 `127.0.0.1`，日志放在临时目录。上游密钥沿用 `RELAY_UPSTREAM_KEY_FILE`。盒子上的 Pi 是 `/home/box/.local/bin/pi`（CLI 1.3.0），PATH 里要有 Node 22（`~/.nvm/versions/node/v22.23.3/bin`）。
 
 ```bash
 LOOP_LIVE_SMOKE=1 PI_BIN="$PI_BIN" \

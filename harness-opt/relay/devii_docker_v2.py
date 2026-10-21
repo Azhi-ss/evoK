@@ -328,8 +328,47 @@ def _attest_key():
     except (OSError, RuntimeError) as exc:
         raise OnceError("HARNESS_ATTEST_KEY_FILE") from exc
 
+def _is_regular_file(path):
+    file=Path(path)
+    return (not file.is_symlink()) and file.is_file()
+
+def _task_trace(run_dir):
+    """Last regular trace under workspace/runs/task-*, by directory name. Read-only."""
+    root=Path(run_dir)/"workspace"/"runs"
+    if root.is_symlink() or not root.is_dir():
+        return None
+    found=None
+    for child in sorted(root.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_dir() or not child.name.startswith("task-"):
+            continue
+        trace=child/"trace.jsonl"
+        if _is_regular_file(trace):
+            found=trace
+    return found
+
+def _attest_trace_path(run_dir):
+    top=Path(run_dir)/"trace.jsonl"
+    if _is_regular_file(top):
+        return top
+    nested=_task_trace(run_dir)
+    return nested if nested is not None else top
+
+def _attest_tree(run_dir, name):
+    top=Path(run_dir)/name
+    if _tree_shas(top):
+        return top
+    nested=_task_trace(run_dir)
+    if nested is not None and _tree_shas(nested.parent/name):
+        return nested.parent/name
+    return top
+
 def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta):
-    """Host attestation outside the run dir. HMAC bytes match canon.canonical."""
+    """Host attestation outside the run dir. HMAC bytes match canon.canonical.
+
+    A top-level trace.jsonl is hashed when it is a regular file. Otherwise the
+    trace is the last workspace/runs/task-* trace. Sessions and outputs follow
+    the same rule. Nothing under the run dir is written or copied.
+    """
     import canon
     attest=Path(attest_dir)
     run_dir=Path(run)
@@ -341,9 +380,9 @@ def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta
         "schema": "devii-opt-attest/v1",
         "mountedHarnessSha": _file_sha(harness),
         "mountedConfigSha": _file_sha(config),
-        "traceSha": _file_sha(run_dir/"trace.jsonl"),
-        "piSessionShas": _tree_shas(run_dir/".pi-sessions"),
-        "outputShas": _tree_shas(run_dir/"outputs"),
+        "traceSha": _file_sha(_attest_trace_path(run_dir)),
+        "piSessionShas": _tree_shas(_attest_tree(run_dir, ".pi-sessions")),
+        "outputShas": _tree_shas(_attest_tree(run_dir, "outputs")),
         "reward": reward,
         "rewardFileSha": _file_sha(run_dir/"verifier"/"reward.txt"),
         "resultSha": _file_sha(run_dir/"result.json"),

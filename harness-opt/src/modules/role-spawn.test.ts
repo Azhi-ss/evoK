@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertRoleSpawn, buildRoleSpawn, launchRolePi, roleWrite } from "./role-spawn";
+import { PACKAGE_AGENT_DIR } from "../pi/agent-dirs";
+import { assertRoleSpawn, buildRoleSpawn, launchRolePi, roleAgentPath, roleWrite } from "./role-spawn";
 
 describe("role spawn", () => {
   test("gap and reviewer stay read-only, and the session stays outside the cwd", () => {
@@ -67,10 +68,26 @@ describe("role spawn", () => {
       ledgerPath: join(sessions, "ledger.json"),
     });
     const roleRunId = "ab".repeat(16);
-    const launched = launchRolePi(bin, config);
+    const prompt = "name the shared failure";
+    const launched = launchRolePi(bin, config, prompt);
     expect(launched.status).toBe(0);
-    expect(launched.argv).toEqual([bin, "--tools", "read"]);
+    expect(launched.argv).toEqual([
+      bin,
+      "--print",
+      "--no-session",
+      "--no-context-files",
+      "--no-skills",
+      "--tools",
+      "read",
+      "--model",
+      "ai-modeling/deepseek-v4-1-flash-261017",
+      "--system-prompt",
+      roleAgentPath("gap-finder"),
+      prompt,
+    ]);
+    expect(roleAgentPath("gap-finder")).toBe(join(PACKAGE_AGENT_DIR, "gap-finder.md"));
     const text = readFileSync(recorded, "utf8");
+    expect(text).toContain("--print");
     expect(text).toContain("--tools");
     expect(text).toContain("read");
     expect(text).not.toContain("write");
@@ -87,7 +104,8 @@ describe("role spawn", () => {
     const cwdFile = join(root, "cwd.txt");
     const envFile = join(root, "env.txt");
     const bin = join(root, "pi");
-    writeFileSync(bin, `#!/bin/sh\npwd > ${JSON.stringify(cwdFile)}\nprintf '%s' "$BASE_URL" > ${JSON.stringify(envFile)}\nif [ -n "$HARNESS_ATTEST_KEY_FILE$HARNESS_RELAY_LOG_ROOT$RELAY_UPSTREAM_KEY_FILE" ]; then printf 'leak' >> ${JSON.stringify(envFile)}; fi\n`);
+    const keyFile = join(root, "api.txt");
+    writeFileSync(bin, `#!/bin/sh\npwd > ${JSON.stringify(cwdFile)}\nprintf '%s' "$BASE_URL" > ${JSON.stringify(envFile)}\nprintf '%s' "$API_KEY" > ${JSON.stringify(keyFile)}\nif [ -n "$HARNESS_ATTEST_KEY_FILE$HARNESS_RELAY_LOG_ROOT$RELAY_UPSTREAM_KEY_FILE" ]; then printf 'leak' >> ${JSON.stringify(envFile)}; fi\n`);
     chmodSync(bin, 0o755);
     const relayLog = join(root, "private", "ab".repeat(16), "relay.jsonl");
     const baseUrl = `http://10.204.0.1:8642/r/${"ab".repeat(16)}/v1`;
@@ -119,10 +137,15 @@ describe("role spawn", () => {
     process.env.HARNESS_RELAY_LOG_ROOT = join(root, "private");
     process.env.RELAY_UPSTREAM_KEY_FILE = join(root, "upstream.key");
     try {
-      const launched = launchRolePi(bin, config);
+      const launched = launchRolePi(bin, config, "draft one patch");
       expect(launched.status).toBe(0);
+      expect(launched.argv[launched.argv.indexOf("--tools") + 1]).toBe("read,write");
       expect(readFileSync(cwdFile, "utf8").trim()).toBe(cwd);
       expect(readFileSync(envFile, "utf8")).toBe(baseUrl);
+      expect(readFileSync(keyFile, "utf8")).toBe("relay-placeholder-not-a-key");
+      const models = JSON.parse(readFileSync(join(sessions, "innovator-pi-agent", "models.json"), "utf8")) as { providers: { "ai-modeling": { baseUrl: string } } };
+      expect(models.providers["ai-modeling"].baseUrl).toBe(baseUrl);
+      expect(join(sessions, "innovator-pi-agent").startsWith(cwd)).toBe(false);
     } finally {
       if (previous.attest === undefined) delete process.env.HARNESS_ATTEST_KEY_FILE;
       else process.env.HARNESS_ATTEST_KEY_FILE = previous.attest;

@@ -477,10 +477,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ? [{ file: round0.hostCopyPath, line: 1, sha256: round0.srcSha256 }, ...traceHints]
       : traceHints;
     const gapRelay = roleRelay(relayRoot, env);
+    const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview });
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
       ...gapTraces.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
-    ], gapRelay);
+    ], gapRelay, gapPrompt);
     const gapInput: GapCall = {
       round,
       traces: gapTraces,
@@ -519,7 +520,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const closeWithoutRun = (note: string, duplicate: boolean): boolean => {
       consecutiveNoAccept += 1;
-      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env));
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env), "这一轮没有候选，不评测。");
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
       writeClosure(options.out, round, {
@@ -548,7 +549,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
       const innovatorRelay = roleRelay(relayRoot, env);
-      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, sessionName);
+      const innovatePrompt = innovatorTaskPrompt({
+        round,
+        knob: gap.knob,
+        gapSummary: gap.summary,
+        triedSummaries: [...tried],
+        control,
+      });
+      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, innovatePrompt, sessionName);
       const innovateInput: InnovateCall = {
         round,
         knob: gap.knob,
@@ -611,7 +619,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
     const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
     const criticRelay = roleRelay(relayRoot, env);
-    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay);
+    const criticPrompt = criticTaskPrompt({ round, candidates: listed });
+    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay, criticPrompt);
     const criticInput: CriticCall = {
       round,
       candidates: listed,
@@ -655,8 +664,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
 
     const rankerRelay = roleRelay(relayRoot, env);
-    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay);
     const excluded = [...new Set([...criticTurn.excluded, ...capExcluded])];
+    const rankerPrompt = rankerTaskPrompt({ round, candidates: listed, excluded });
+    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt);
     const rankerInput: RankerCall = {
       round,
       candidates: listed,
@@ -819,7 +829,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     const reviewRelay = roleRelay(relayRoot, env);
-    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay);
+    const reviewPrompt = reviewerTaskPrompt({
+      round,
+      patchHash,
+      summary: proposed.summary,
+      knob: gap.knob,
+      runs: metrics.runs,
+      ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+    });
+    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay, reviewPrompt);
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -1056,37 +1074,37 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
 const IGNORED_SESSION: RoleSession = { jsonl: "ignored-return\n" };
 
 /**
- * Execute roles. Each call runs the existing Pi argv after the relay run is open.
- * Conclusions come from that run's last done assistant text. No new prompt is added.
+ * Execute roles. Each call runs Pi in print mode after the relay run is open.
+ * The task prompt carries this round's inputs. Conclusions come from that run's last done assistant text.
  */
 export function piSubagentRoles(piBin: string): OptRoles {
   return {
     async gap(input) {
-      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const text = piConclusion(piBin, input.spawn, input.baseUrl, gapTaskPrompt(input));
       const turn = gapFromAssistant(text);
       if (!turn) throw new Error("role gap-finder returned no conclusion");
       return { session: IGNORED_SESSION, ...turn };
     },
     async innovate(input) {
-      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const text = piConclusion(piBin, input.spawn, input.baseUrl, innovatorTaskPrompt(input));
       const turn = innovatorFromAssistant(text);
       if (!turn) throw new Error("role innovator returned no conclusion");
       return { session: IGNORED_SESSION, ...turn };
     },
     async critic(input) {
-      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const text = piConclusion(piBin, input.spawn, input.baseUrl, criticTaskPrompt(input));
       const excluded = criticFromAssistant(text);
       if (!excluded) throw new Error("role critic returned no conclusion");
       return { session: IGNORED_SESSION, excluded };
     },
     async ranker(input) {
-      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const text = piConclusion(piBin, input.spawn, input.baseUrl, rankerTaskPrompt(input));
       const winnerId = rankerFromAssistant(text);
       if (winnerId === null) throw new Error("role ranker returned no conclusion");
       return { session: IGNORED_SESSION, winnerId };
     },
     async review(input) {
-      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const text = piConclusion(piBin, input.spawn, input.baseUrl, reviewerTaskPrompt(input));
       const verdict = reviewerFromAssistant(text);
       if (!verdict) throw new Error("role reviewer-gate returned no conclusion");
       return { session: IGNORED_SESSION, ...verdict };
@@ -1094,12 +1112,70 @@ export function piSubagentRoles(piBin: string): OptRoles {
   };
 }
 
-function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string): string {
-  const launched = launchRolePi(piBin, spawn);
+function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, prompt: string): string {
+  const launched = launchRolePi(piBin, spawn, prompt);
   if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
   const text = lastDoneAssistant(baseUrl);
   if (text === null) throw new Error(`role ${spawn.role} returned no conclusion`);
   return text;
+}
+
+function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null }): string {
+  const traces = input.traces.map((hint) => `${hint.file} sha256=${hint.sha256} line=${hint.line}`).join("\n");
+  const review = input.previousReview ? JSON.stringify({ accept: input.previousReview.accept, reason: input.previousReview.reason }) : "无";
+  return [
+    `第 ${input.round} 轮 gap-finder。`,
+    "根据下面的 trace 归纳一个共同失败模式。",
+    traces || "没有附带 trace。",
+    `上一轮评语：${review}`,
+    "最后一条 assistant 消息只放一个 JSON 对象，字段为 knob、failureClass、summary、citations。",
+    "knob 是配置路径。failureClass 只能是 timeout、idle-loop、tool-misuse、context-overflow、skill-not-triggered、format-invalid。",
+    "citations 是字符串数组。",
+  ].join("\n");
+}
+
+function innovatorTaskPrompt(input: { readonly round: number; readonly knob: string; readonly gapSummary: string; readonly triedSummaries: readonly string[]; readonly control: unknown }): string {
+  return [
+    `第 ${input.round} 轮 innovator。`,
+    `旋钮 ${input.knob}。`,
+    `缺口：${input.gapSummary}`,
+    `已试过：${input.triedSummaries.join(" | ") || "无"}`,
+    `control：${JSON.stringify(input.control)}`,
+    "最后一条 assistant 消息只放一个 JSON 对象。summary 是字符串。parts 的键是 part 名，值是要改的字段。",
+    "part 只能是 agent-loop、context、memory、toolchain、skills。",
+  ].join("\n");
+}
+
+function criticTaskPrompt(input: { readonly round: number; readonly candidates: readonly CandidateView[] }): string {
+  const lines = input.candidates.map((item) => `${item.id} changedKeys=${item.changedKeys} ${item.summary}`);
+  return [
+    `第 ${input.round} 轮 critic。`,
+    "找出候选里的缺陷。",
+    lines.join("\n") || "没有候选。",
+    "最后一条 assistant 消息只放一个 JSON 对象：excluded 是要排除的候选 id 数组。没有要排除的就用空数组。",
+  ].join("\n");
+}
+
+function rankerTaskPrompt(input: { readonly round: number; readonly candidates: readonly CandidateView[]; readonly excluded: readonly string[] }): string {
+  const lines = input.candidates.map((item) => `${item.id} changedKeys=${item.changedKeys} ${item.summary}`);
+  return [
+    `第 ${input.round} 轮 ranker。`,
+    "对候选做两两比较。分不出高下就记平局。",
+    lines.join("\n") || "没有候选。",
+    `已排除：${input.excluded.join(" ") || "无"}`,
+    "最后一条 assistant 消息只放一个 JSON 对象：winnerId 是字符串。平局或无法决定时 winnerId 为空字符串。",
+  ].join("\n");
+}
+
+function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash: string; readonly summary: string; readonly knob: string; readonly runs: readonly RunView[]; readonly ewiSeeds: readonly number[] }): string {
+  const runs = input.runs.map((run) => `seed=${run.seed} reward=${run.reward ?? "null"} status=${run.scoreStatus} tokens=${run.tokens}`);
+  return [
+    `第 ${input.round} 轮 reviewer-gate。`,
+    `补丁 ${input.patchHash}。旋钮 ${input.knob}。摘要 ${input.summary}。`,
+    runs.join("\n") || "没有运行。",
+    `ewiSeeds：${input.ewiSeeds.join(" ") || "无"}`,
+    "最后一条 assistant 消息只放一个 JSON 对象：accept 是布尔值，reason 是字符串。",
+  ].join("\n");
 }
 
 function gapFromAssistant(text: string): { knob: string; failureClass: string; summary: string; citations: string[] } | null {
@@ -1810,6 +1886,7 @@ function prepareRole(
   piBin: string | undefined,
   allowedPaths: readonly string[],
   relay: RoleRelay,
+  prompt: string,
   sessionName: string = role,
 ): RoleSpawnConfig {
   const cwd = join(out, `round${round}`, "roles", sessionName);
@@ -1824,7 +1901,7 @@ function prepareRole(
     baseUrl: relay.baseUrl,
   });
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), roleFacing(config));
-  const argv = rolePiArgv(piBin ?? "pi", config);
+  const argv = rolePiArgv(piBin ?? "pi", config, prompt);
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
   return config;
 }
@@ -1839,8 +1916,14 @@ const LIVE_ROLES = [
 
 /**
  * One real Pi launch per role, through the same relay open the loop uses.
+ * Each role must exit 0 and leave a done line whose usage weighs to tokens > 0.
  * Stops before any scored docker run. Opt-in via LOOP_LIVE_SMOKE and PI_BIN.
  */
+export function assertLiveRoleCall(role: string, status: number | null, relayLog: string): void {
+  if (status !== 0) throw new Error(`role ${role} pi exited ${status ?? "null"}`);
+  if (maxDoneTokens(relayLog) <= 0) throw new Error(`role ${role} made no relay request`);
+}
+
 export async function runLiveRoleSmoke(options: {
   readonly out: string;
   readonly attestRoot: string;
@@ -1871,9 +1954,11 @@ export async function runLiveRoleSmoke(options: {
   try {
     for (const spec of LIVE_ROLES) {
       const relay = roleRelay(relayRoot, env);
-      const spawn = prepareRole(options.out, 1, spec.role, options.piBin, [], relay, spec.session);
+      const prompt = liveRolePrompt(spec.role);
+      const spawn = prepareRole(options.out, 1, spec.role, options.piBin, [], relay, prompt, spec.session);
       await relayRpc({ op: "open", runId: relay.runId, kind: spec.kind, expectedSha: "0".repeat(64) });
-      launchRolePi(options.piBin, spawn);
+      const launched = launchRolePi(options.piBin, spawn, prompt);
+      assertLiveRoleCall(spec.role, launched.status, relay.relayLog);
       launches[spec.role] += 1;
       await closeRelay(relay.runId);
     }
@@ -1883,6 +1968,75 @@ export async function runLiveRoleSmoke(options: {
     activeRelayRoot = null;
     await relayCtl.shutdown();
   }
+}
+
+function liveRolePrompt(role: (typeof LIVE_ROLES)[number]["role"]): string {
+  if (role === "gap-finder") return gapTaskPrompt({ round: 1, traces: [], previousReview: null });
+  if (role === "innovator") {
+    return innovatorTaskPrompt({
+      round: 1,
+      knob: "agent-loop.maxSteps",
+      gapSummary: "steps run long",
+      triedSummaries: [],
+      control: { parts: { "agent-loop": { maxSteps: 25 } } },
+    });
+  }
+  if (role === "critic") {
+    return criticTaskPrompt({ round: 1, candidates: [{ id: "c0", summary: "lower the step cap", changedKeys: 1 }] });
+  }
+  if (role === "ranker") {
+    return rankerTaskPrompt({
+      round: 1,
+      candidates: [{ id: "c0", summary: "lower the step cap", changedKeys: 1 }],
+      excluded: [],
+    });
+  }
+  return reviewerTaskPrompt({
+    round: 1,
+    patchHash: "0".repeat(64),
+    summary: "lower the step cap",
+    knob: "agent-loop.maxSteps",
+    runs: [],
+    ewiSeeds: [],
+  });
+}
+
+/** Ledger weight: prompt + completion. A missing cached field is not a counted done. */
+function maxDoneTokens(relayLog: string): number {
+  if (!existsSync(relayLog)) return 0;
+  let best = 0;
+  for (const event of readJsonl(relayLog)) {
+    if (!event || typeof event !== "object") continue;
+    const row = event as { type?: unknown; usage?: unknown };
+    if (row.type !== "done") continue;
+    const weighed = usageWeight(row.usage);
+    if (weighed !== null && weighed > best) best = weighed;
+  }
+  return best;
+}
+
+function usageWeight(usage: unknown): number | null {
+  if (!usage || typeof usage !== "object") return null;
+  const row = usage as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    prompt_tokens_details?: unknown;
+    prompt_cache_hit_tokens?: unknown;
+  };
+  let cache: unknown;
+  const details = row.prompt_tokens_details;
+  if (details && typeof details === "object" && "cached_tokens" in details) {
+    cache = (details as { cached_tokens?: unknown }).cached_tokens;
+  } else if ("prompt_cache_hit_tokens" in row) {
+    cache = row.prompt_cache_hit_tokens;
+  } else {
+    return null;
+  }
+  const prompt = row.prompt_tokens;
+  const completion = row.completion_tokens;
+  if (typeof cache !== "number" || typeof prompt !== "number" || typeof completion !== "number") return null;
+  if (!Number.isFinite(cache) || !Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+  return (prompt - cache) + completion + cache;
 }
 
 function bindConclusion(

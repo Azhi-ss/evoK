@@ -29,9 +29,9 @@ function sameDirectory(left: string, right: string): boolean {
 }
 
 /**
- * Append the package agents directory so gap-finder, innovator, and
- * reviewer-gate resolve without a manual export. An entry that is already
- * present is left untouched, including its original spelling.
+ * Append the package agents directory so gap-finder, innovator, critic,
+ * ranker, and reviewer-gate resolve without a manual export. An entry that
+ * is already present is left untouched, including its original spelling.
  */
 export function pinPackageAgentDir(env: NodeJS.ProcessEnv = process.env): string {
   const current = splitExtraAgentDirs(env[EXTRA_AGENT_DIRS_ENV]);

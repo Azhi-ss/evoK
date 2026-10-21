@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { pinPackageAgentDir } from "../pi/agent-dirs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { PACKAGE_AGENT_DIR, pinPackageAgentDir } from "../pi/agent-dirs";
 
 /** Read-only evidence roles. Critic and ranker launch the same way as gap and reviewer. */
 export const EVIDENCE_ROLES = ["gap-finder", "reviewer-gate", "critic", "ranker"] as const;
@@ -120,14 +120,43 @@ export function recordedSessionSha(ledgerPath: string, role: string, key: Buffer
   return typeof recorded === "string" && recorded !== "" ? recorded : null;
 }
 
-/** Real Pi argv. Evidence roles get `--tools read` and never a role run id. */
-export function rolePiArgv(piBin: string, config: RoleSpawnConfig): string[] {
-  if (config.role === "innovator") return [piBin, "--tools", "read", "--tools", "write"];
-  return [piBin, "--tools", "read"];
+/** Same placeholder the relay accepts. The upstream key stays off this process. */
+const ROLE_API_KEY = "relay-placeholder-not-a-key";
+
+/** Agent definition for this role. `harness-opt/agents/<role>.md`. */
+export function roleAgentPath(role: OptRoleName): string {
+  const file = join(PACKAGE_AGENT_DIR, `${role}.md`);
+  if (!existsSync(file)) throw new Error(`role ${role} agent file is missing`);
+  return file;
 }
 
-export function launchRolePi(piBin: string, config: RoleSpawnConfig): { readonly status: number | null; readonly argv: readonly string[] } {
-  const argv = rolePiArgv(piBin, config);
+/**
+ * Non-interactive Pi. `--print` plus the task prompt is what makes a model call.
+ * `--tools` replaces Pi's defaults, so read-only roles stay on `read` and the
+ * innovator gets one `read,write` list. The agent file is the system prompt.
+ */
+export function rolePiArgv(piBin: string, config: RoleSpawnConfig, prompt: string): string[] {
+  const text = prompt.trim();
+  if (text === "") throw new Error(`role ${config.role} task prompt is empty`);
+  const tools = config.role === "innovator" ? "read,write" : "read";
+  return [
+    piBin,
+    "--print",
+    "--no-session",
+    "--no-context-files",
+    "--no-skills",
+    "--tools",
+    tools,
+    "--model",
+    roleModel(config.role),
+    "--system-prompt",
+    roleAgentPath(config.role),
+    text,
+  ];
+}
+
+export function launchRolePi(piBin: string, config: RoleSpawnConfig, prompt: string): { readonly status: number | null; readonly argv: readonly string[] } {
+  const argv = rolePiArgv(piBin, config, prompt);
   const [bin, ...args] = argv;
   if (!bin) throw new Error("pi binary is empty");
   const env = { ...process.env };
@@ -136,12 +165,52 @@ export function launchRolePi(piBin: string, config: RoleSpawnConfig): { readonly
   delete env.RELAY_UPSTREAM_KEY_FILE;
   if (config.baseUrl) env.BASE_URL = config.baseUrl;
   pinPackageAgentDir(env);
+  pinRoleRelay(env, config);
   const child = spawnSync(bin, args, {
     encoding: "utf8",
     cwd: config.cwd,
     env,
   });
   return { status: child.status, argv };
+}
+
+function roleModel(role: OptRoleName): string {
+  const text = readFileSync(roleAgentPath(role), "utf8");
+  const front = text.match(/^---\n([\s\S]*?)\n---/);
+  const model = front?.[1]?.split("\n").find((line) => line.startsWith("model:"))?.slice("model:".length).trim();
+  if (!model) throw new Error(`role ${role} agent file has no model`);
+  return model;
+}
+
+/** Point this Pi process at the relay run. The user's agent dir is left untouched. */
+function pinRoleRelay(env: NodeJS.ProcessEnv, config: RoleSpawnConfig): void {
+  if (!config.baseUrl) return;
+  const model = roleModel(config.role);
+  const slash = model.indexOf("/");
+  const provider = slash > 0 ? model.slice(0, slash) : "ai-modeling";
+  const id = slash > 0 ? model.slice(slash + 1) : model;
+  const agentDir = join(resolve(config.sessionPath, ".."), `${config.role}-pi-agent`);
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, "models.json"), `${JSON.stringify({
+    providers: {
+      [provider]: {
+        name: provider,
+        baseUrl: config.baseUrl,
+        api: "openai-completions",
+        apiKey: "${API_KEY}",
+        models: [{
+          id,
+          name: id,
+          reasoning: false,
+          contextWindow: 131072,
+          maxTokens: 8192,
+          compat: { supportsDeveloperRole: false },
+        }],
+      },
+    },
+  }, null, 2)}\n`);
+  env.PI_CODING_AGENT_DIR = agentDir;
+  env.API_KEY = ROLE_API_KEY;
 }
 
 function isEvidenceRole(role: string): role is EvidenceRole {

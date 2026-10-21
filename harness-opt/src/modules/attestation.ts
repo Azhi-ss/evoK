@@ -246,20 +246,21 @@ export function verifyHostAttestation(input: {
   const outputs = mapField(unsigned, ATTEST_FIELDS.outputs, reasons, "outputs");
   const reward = rewardField(unsigned, reasons);
 
-  if (reasons.length === 0 && runDir) {
-    const tracePath = join(runDir, "trace.jsonl");
-    if (traceSha !== fileShaOrNull(tracePath)) reasons.push("trace");
+  const layout = runDir ? attestLayout(runDir) : null;
+  if (reasons.length === 0 && runDir && layout) {
+    if (traceSha !== fileShaOrNull(layout.trace)) reasons.push("trace");
     if (rewardFileSha !== fileShaOrNull(join(runDir, "verifier", "reward.txt"))) reasons.push("rewardFile");
     if (resultSha !== fileShaOrNull(join(runDir, "result.json"))) reasons.push("result");
-    if (!sameMap(sessions, treeShas(join(runDir, ".pi-sessions")))) reasons.push("sessions");
-    if (!sameMap(outputs, treeShas(join(runDir, "outputs")))) reasons.push("outputs");
+    if (!sameMap(sessions, treeShas(layout.sessions))) reasons.push("sessions");
+    if (!sameMap(outputs, treeShas(layout.outputs))) reasons.push("outputs");
   }
   if (reasons.length > 0 || !mountedHarnessSha || !mountedConfigSha || !arm) {
     return { ok: false, reasons: unique(reasons.length > 0 ? reasons : ["json"]) };
   }
+  const sessionsRoot = layout?.sessions ?? join(runDir, ".pi-sessions");
   const sessionFiles = Object.keys(sessions)
     .sort()
-    .map((rel) => sessionFile(runDir, rel))
+    .map((rel) => sessionFile(sessionsRoot, rel))
     .filter((item): item is string => item !== null);
   if (sessionFiles.length !== Object.keys(sessions).length) return { ok: false, reasons: ["sessions"] };
   return {
@@ -271,7 +272,7 @@ export function verifyHostAttestation(input: {
     mountedHarnessSha,
     mountedConfigSha,
     traceSha,
-    tracePath: traceSha ? join(runDir, "trace.jsonl") : null,
+    tracePath: traceSha && layout ? layout.trace : null,
     piSessionShas: sessions,
     sessionFiles,
     outputShas: outputs,
@@ -287,13 +288,14 @@ function attestBody(input: HostAttestationWrite): JsonNode {
   if (input.meta.runPath.trim() === "") throw new Error("attestation runPath is empty");
   const run = resolve(input.runDir);
   const runPath = resolve(input.meta.runPath);
+  const layout = attestLayout(run);
   const pairs: (readonly [string, JsonNode])[] = [
     [ATTEST_FIELDS.schema, { t: "str", v: ATTEST_SCHEMA }],
     [ATTEST_FIELDS.harness, { t: "str", v: sha256File(input.harnessPath) }],
     [ATTEST_FIELDS.config, { t: "str", v: sha256File(input.configPath) }],
-    [ATTEST_FIELDS.trace, shaNode(fileShaOrNull(join(run, "trace.jsonl")))],
-    [ATTEST_FIELDS.sessions, mapNode(treeShas(join(run, ".pi-sessions")))],
-    [ATTEST_FIELDS.outputs, mapNode(treeShas(join(run, "outputs")))],
+    [ATTEST_FIELDS.trace, shaNode(fileShaOrNull(layout.trace))],
+    [ATTEST_FIELDS.sessions, mapNode(treeShas(layout.sessions))],
+    [ATTEST_FIELDS.outputs, mapNode(treeShas(layout.outputs))],
     [ATTEST_FIELDS.reward, input.reward === null ? NULL_NODE : { t: "num", lex: pythonFloatLexeme(input.reward) }],
     [ATTEST_FIELDS.rewardFile, shaNode(fileShaOrNull(join(run, "verifier", "reward.txt")))],
     [ATTEST_FIELDS.result, shaNode(fileShaOrNull(join(run, "result.json")))],
@@ -353,10 +355,70 @@ function hashOrEmpty(file: string): string {
   }
 }
 
-function sessionFile(runDir: string, rel: string): string | null {
+/**
+ * Top-level `trace.jsonl` wins when it is a regular file.
+ * Otherwise the lexicographically last `workspace/runs/task-*` trace is used.
+ * Session and output trees stay at the top level when they already have files.
+ */
+function attestLayout(runDir: string): { readonly trace: string; readonly sessions: string; readonly outputs: string } {
+  const topTrace = join(runDir, "trace.jsonl");
+  const nested = taskTrace(runDir);
+  const taskDir = nested ? resolve(nested, "..") : null;
+  return {
+    trace: isRegularFile(topTrace) ? topTrace : nested ?? topTrace,
+    sessions: artifactTree(runDir, ".pi-sessions", taskDir),
+    outputs: artifactTree(runDir, "outputs", taskDir),
+  };
+}
+
+function artifactTree(runDir: string, name: string, taskDir: string | null): string {
+  const top = join(runDir, name);
+  if (Object.keys(treeShas(top)).length > 0) return top;
+  if (taskDir) {
+    const nested = join(taskDir, name);
+    if (Object.keys(treeShas(nested)).length > 0) return nested;
+  }
+  return top;
+}
+
+function taskTrace(runDir: string): string | null {
+  const root = join(runDir, "workspace", "runs");
+  let linked;
+  try {
+    linked = lstatSync(root);
+  } catch {
+    return null;
+  }
+  if (!linked.isDirectory() || linked.isSymbolicLink()) return null;
+  let found: string | null = null;
+  for (const name of readdirSync(root).filter((item) => item.startsWith("task-")).sort()) {
+    const dir = join(root, name);
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+    const trace = join(dir, "trace.jsonl");
+    if (isRegularFile(trace)) found = trace;
+  }
+  return found;
+}
+
+function isRegularFile(file: string): boolean {
+  try {
+    const linked = lstatSync(file);
+    return linked.isFile() && !linked.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function sessionFile(sessionsRoot: string, rel: string): string | null {
   if (rel === "" || isAbsolute(rel) || rel.split("/").some((part) => part === ".." || part === "")) return null;
-  const full = resolve(runDir, ".pi-sessions", rel);
-  const root = resolve(runDir, ".pi-sessions");
+  const full = resolve(sessionsRoot, rel);
+  const root = resolve(sessionsRoot);
   if (full !== root && !full.startsWith(root + sep)) return null;
   return full;
 }
