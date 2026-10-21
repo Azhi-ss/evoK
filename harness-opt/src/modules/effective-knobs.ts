@@ -1,11 +1,12 @@
 /**
- * Knobs the patched company harness reads. One list: the innovator prompt,
- * candidate validation, and the harness-patch test all use this array.
+ * Knobs the signed baseline harness reads as `effective["..."]`.
+ * That file is sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * One list: the innovator prompt, candidate validation, and the startup check
+ * all use this array. The branch harness source may wire more keys. Those stay
+ * off this list while the signed baseline does not read them.
  * `agent-loop.maxSteps` caps agent_end steps (`stats.turns`, `run_end.steps`).
- * `goal.maxContinuationTurns` caps continuation turns: pi-goal automatic model
- * responses. That same number is `continuationLimits.automaticTurns` and
- * `run_end.goalContinuationTurns`. A relay call is an `assistant_message` or
- * `auto_retry_start` trace line. It is not a knob and neither cap applies to it.
+ * A relay call is an `assistant_message` or `auto_retry_start` trace line.
+ * It is not a knob and this cap does not apply to it.
  */
 export const EFFECTIVE_KNOBS = [
   "agent-loop.maxSteps",
@@ -29,7 +30,6 @@ export const EFFECTIVE_KNOBS = [
   "memory.scope",
   "memory.recall",
   "memory.maxItems",
-  "goal.maxContinuationTurns",
 ] as const;
 
 const EFFECTIVE_KNOB_SET = new Set<string>(EFFECTIVE_KNOBS);

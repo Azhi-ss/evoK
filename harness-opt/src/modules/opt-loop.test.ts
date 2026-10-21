@@ -77,14 +77,14 @@ interface Fixture {
   readonly controlTrace: string;
 }
 
-function fixture(): Fixture {
+function fixture(harnessSource?: string): Fixture {
   const root = mkdtempSync(join(tmpdir(), "opt-loop-"));
   const keyFile = join(root, "attest.key");
   const key = Buffer.alloc(32, 9);
   writeFileSync(keyFile, key);
   chmodSync(keyFile, 0o600);
   const harnessPath = join(root, "harness.mjs");
-  writeFileSync(harnessPath, `${EFFECTIVE_KNOBS.map((key) => `effective["${key}"]`).join("\n")}\n`);
+  writeFileSync(harnessPath, harnessSource ?? `${EFFECTIVE_KNOBS.map((key) => `effective["${key}"]`).join("\n")}\n`);
   const taskDir = join(root, "task");
   mkdirSync(taskDir, { recursive: true });
   writeFileSync(join(taskDir, "task.toml"), "[agent]\ntimeout_sec = 3600\n\n[verifier]\ntimeout_sec = 60\n");
@@ -4114,15 +4114,30 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
 
+  test("the loop starts against the deployed harness 4d4e12e5", async () => {
+    const deployed = fileURLToPath(new URL("../../fixtures/harness.4d4e12e5.mjs", import.meta.url));
+    const fx = fixture(readFileSync(deployed, "utf8"));
+    expect(createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex")).toBe(
+      "4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c",
+    );
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+    });
+    expect(result.stopReport.reason).toBeNull();
+  });
+
   test("a harness missing a whitelisted effective key refuses to start", async () => {
     const fx = fixture();
-    writeFileSync(fx.harnessPath, `${EFFECTIVE_KNOBS.filter((key) => key !== "goal.maxContinuationTurns").map((key) => `effective["${key}"]`).join("\n")}\n`);
+    writeFileSync(fx.harnessPath, `${EFFECTIVE_KNOBS.filter((key) => key !== "agent-loop.maxSteps").map((key) => `effective["${key}"]`).join("\n")}\n`);
     await expect(runOptLoop({
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
       executor: fakeExecutor(fx).executor,
-    })).rejects.toThrow(/harness is missing effective-config for goal.maxContinuationTurns/);
+    })).rejects.toThrow(/harness is missing effective-config for agent-loop.maxSteps/);
     expect(existsSync(join(fx.out, "pre-round1.json"))).toBe(false);
   });
 
@@ -4235,12 +4250,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
     expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "invalid: non_effective_key")).toBe(true);
     const listed = JSON.parse(readFileSync(join(fx.out, "round1/roles/innovator-0/effective-knobs.json"), "utf8")) as { knobs: string[] };
-    expect(listed.knobs).toContain("goal.maxContinuationTurns");
+    expect(listed.knobs).toContain("agent-loop.maxSteps");
+    expect(listed.knobs).not.toContain("goal.maxContinuationTurns");
     expect(listed.knobs).not.toContain("context.compression");
     const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
     expect(prompt).toContain("invalid: non_effective_key");
-    expect(prompt).toContain("goal.maxContinuationTurns");
-    expect(prompt).toContain("run_end.goalContinuationTurns");
+    expect(prompt).not.toContain("goal.maxContinuationTurns");
     expect(prompt).toContain("agent-loop.maxSteps 是 agent_end 步数");
     expect(readFileSync(fileURLToPath(new URL("../../agents/innovator.md", import.meta.url)), "utf8")).not.toContain("non_effective_key");
   });

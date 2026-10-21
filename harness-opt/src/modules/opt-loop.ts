@@ -1911,9 +1911,9 @@ function innovatorTaskPrompt(input: { readonly round: number; readonly knob: str
     `已试过：${input.triedSummaries.join(" | ") || "无"}`,
     `control：${JSON.stringify(input.control)}`,
     "最后一条 assistant 消息只放一个 JSON 对象。summary 是字符串。parts 的键是 part 名，值是要改的字段。",
-    "part 只能是 agent-loop、context、memory、toolchain、skills、goal。",
+    "part 只能是 agent-loop、context、memory、toolchain、skills。",
     "只能改下面这些有效旋钮。碰了名单以外的键，这一条候选无效，原因是 invalid: non_effective_key。",
-    "agent-loop.maxSteps 是 agent_end 步数。goal.maxContinuationTurns 是 continuation turn（pi-goal 的 automatic model response），写进 continuationLimits.automaticTurns，并且就是 run_end.goalContinuationTurns。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这两个上限截断。",
+    "agent-loop.maxSteps 是 agent_end 步数。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这个上限截断。",
     ...EFFECTIVE_KNOBS,
   ].join("\n");
 }
