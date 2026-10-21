@@ -58,3 +58,154 @@ export function leafKnobPaths(parts: Readonly<Record<string, unknown>>): string[
   walk("", parts);
   return out;
 }
+
+/**
+ * Unset `HARNESS_CONTEXT_WINDOW` / `MODEL_MAX_TOKENS` in the signed harness.
+ * The catalog uses those literals and does not read the process environment.
+ */
+const CONTEXT_WINDOW_DEFAULT = 131072;
+const MAX_TOKENS_DEFAULT = 8192;
+const SAFE_INT = Number.MAX_SAFE_INTEGER;
+const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+
+export interface KnobFact {
+  readonly key: (typeof EFFECTIVE_KNOBS)[number];
+  readonly current: unknown;
+  readonly type: "positiveInt" | "nonNegativeInt" | "finiteNumber" | "boolean" | "string" | "string[]" | "enum";
+  readonly min?: number;
+  readonly max?: number;
+  readonly values?: readonly string[];
+}
+
+/**
+ * Current effective value of every whitelist key.
+ * That value is the 4d4e12e5 default after the harness coercion of the control leaf.
+ */
+export function knobCatalog(control: unknown): readonly KnobFact[] {
+  const parts = controlParts(control);
+  return SPECS.map((spec) => {
+    const current = spec.coerce(readLeaf(parts, spec.key));
+    return {
+      key: spec.key,
+      current,
+      type: spec.type,
+      ...(spec.min !== undefined ? { min: spec.min } : {}),
+      ...(spec.max !== undefined ? { max: spec.max } : {}),
+      ...(spec.values ? { values: spec.values } : {}),
+    };
+  });
+}
+
+/** One prompt line: key, current effective value, type, and bounds when the harness has them. */
+export function formatKnobLine(fact: KnobFact): string {
+  let line = `${fact.key} current=${JSON.stringify(fact.current)} type=${fact.type}`;
+  if (fact.min !== undefined) line += ` min=${fact.min}`;
+  if (fact.max !== undefined) line += ` max=${fact.max}`;
+  if (fact.values !== undefined) line += ` values=${fact.values.join(",")}`;
+  return line;
+}
+
+/**
+ * Changed leaves whose written value already equals the current effective value.
+ * Comparison is the written value, not the value the harness would coerce it into.
+ * One such leaf invalidates the whole candidate, including a candidate whose every
+ * change is a no-op and a partial no-op. The caller names these keys and does not
+ * strip them to keep the other edits.
+ */
+export function noopKeys(parts: Readonly<Record<string, unknown>>, control: unknown): readonly string[] {
+  const current = new Map<string, unknown>(knobCatalog(control).map((fact) => [fact.key, fact.current]));
+  const named: string[] = [];
+  for (const path of leafKnobPaths(parts)) {
+    if (!current.has(path)) continue;
+    if (JSON.stringify(readLeaf(parts, path)) === JSON.stringify(current.get(path))) named.push(path);
+  }
+  return named;
+}
+
+function controlParts(control: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (!control || typeof control !== "object" || Array.isArray(control)) return undefined;
+  const parts = (control as { readonly parts?: unknown }).parts;
+  if (!parts || typeof parts !== "object" || Array.isArray(parts)) return undefined;
+  return parts as Readonly<Record<string, unknown>>;
+}
+
+function readLeaf(parts: Readonly<Record<string, unknown>> | undefined, key: string): unknown {
+  const dot = key.indexOf(".");
+  if (!parts || dot <= 0) return undefined;
+  let cur: unknown = parts[key.slice(0, dot)];
+  for (const segment of key.slice(dot + 1).split(".")) {
+    if (!cur || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(cur, segment)) return undefined;
+    cur = (cur as Record<string, unknown>)[segment];
+  }
+  return cur;
+}
+
+function positiveInt(value: unknown, fallback: number, max = SAFE_INT): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max ? value : fallback;
+}
+
+function nonNegativeInt(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function boolOr(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function textOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() !== "" ? value : fallback;
+}
+
+function enabledTools(value: unknown): string[] {
+  if (!Array.isArray(value)) return [...DEFAULT_TOOLS];
+  const allowed = new Set<string>(DEFAULT_TOOLS);
+  const tools = value.filter((item): item is string => typeof item === "string" && allowed.has(item));
+  for (const required of ["read", "write"]) {
+    if (!tools.includes(required)) tools.push(required);
+  }
+  return tools;
+}
+
+function skillPack(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim() !== "");
+  if (typeof value === "string" && value.trim() !== "") return [value.trim()];
+  return [];
+}
+
+interface KnobSpec {
+  readonly key: (typeof EFFECTIVE_KNOBS)[number];
+  readonly type: KnobFact["type"];
+  readonly min?: number;
+  readonly max?: number;
+  readonly values?: readonly string[];
+  readonly coerce: (value: unknown) => unknown;
+}
+
+const SPECS: readonly KnobSpec[] = [
+  { key: "agent-loop.maxSteps", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 25) },
+  { key: "agent-loop.noProgressTurns", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 3) },
+  { key: "agent-loop.maxNudges", type: "nonNegativeInt", min: 0, max: SAFE_INT, coerce: (value) => nonNegativeInt(value, 2) },
+  { key: "agent-loop.requireWrite", type: "boolean", coerce: (value) => boolOr(value, true) },
+  { key: "context.window", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, CONTEXT_WINDOW_DEFAULT) },
+  { key: "context.maxTokens", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, MAX_TOKENS_DEFAULT) },
+  { key: "context.compaction.enabled", type: "boolean", coerce: (value) => boolOr(value, true) },
+  { key: "context.compaction.reserveTokens", type: "nonNegativeInt", min: 0, max: SAFE_INT, coerce: (value) => nonNegativeInt(value, 16384) },
+  { key: "context.compaction.keepRecentTokens", type: "nonNegativeInt", min: 0, max: SAFE_INT, coerce: (value) => nonNegativeInt(value, 16000) },
+  { key: "toolchain.tools.enabled", type: "string[]", values: DEFAULT_TOOLS, coerce: (value) => enabledTools(value) },
+  { key: "toolchain.bashTimeoutSec", type: "positiveInt", min: 1, max: 1800, coerce: (value) => positiveInt(value, 300, 1800) },
+  { key: "toolchain.subagents", type: "boolean", coerce: (value) => boolOr(value, true) },
+  { key: "toolchain.checker", type: "enum", values: ["none", "contract"], coerce: (value) => (value === "none" ? "none" : "contract") },
+  { key: "skills.maxChars", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 24000) },
+  { key: "skills.pack", type: "string[]", coerce: (value) => skillPack(value) },
+  { key: "skills.selector.weight", type: "finiteNumber", coerce: (value) => finiteNumber(value, 1) },
+  { key: "skills.selector.bias", type: "finiteNumber", coerce: (value) => finiteNumber(value, 0) },
+  { key: "memory.enabled", type: "boolean", coerce: (value) => value === true },
+  { key: "memory.scope", type: "string", coerce: (value) => textOr(value, "all") },
+  { key: "memory.recall", type: "string", coerce: (value) => textOr(value, "recent") },
+  { key: "memory.maxItems", type: "nonNegativeInt", min: 0, max: SAFE_INT, coerce: (value) => nonNegativeInt(value, 8) },
+];

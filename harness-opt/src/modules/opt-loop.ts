@@ -36,7 +36,7 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
-import { EFFECTIVE_KNOBS, harnessEffectiveKeys, isEffectiveKnob, leafKnobPaths } from "./effective-knobs";
+import { EFFECTIVE_KNOBS, formatKnobLine, harnessEffectiveKeys, isEffectiveKnob, knobCatalog, leafKnobPaths, noopKeys } from "./effective-knobs";
 import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
 import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec } from "./reviewer-gates";
 import {
@@ -115,6 +115,8 @@ export interface GapCall {
   readonly spawn: RoleSpawnConfig;
   /** Relay data plane for this call. The record path stays on the host. */
   readonly baseUrl: string;
+  /** Host control config. The prompt catalog shows its current effective values. */
+  readonly control: unknown;
 }
 
 export interface GapTurn {
@@ -335,9 +337,11 @@ interface RoleFailureInfo {
 interface InvalidCandidate {
   readonly id: string;
   readonly role: string;
-  readonly reason: "no_output" | "patch_without_config" | "no_conclusion" | "role_failed" | "role_output_truncated" | "cap_hit" | "duplicate" | "invalid: non_effective_key";
+  readonly reason: "no_output" | "patch_without_config" | "no_conclusion" | "role_failed" | "role_output_truncated" | "cap_hit" | "duplicate" | "invalid: non_effective_key" | "invalid: no_op_change";
   readonly exitCode?: number | null;
   readonly stderrTail?: string;
+  /** No-op leaves. Set when `reason` is `invalid: no_op_change`. The other leaves are not kept. */
+  readonly keys?: readonly string[];
 }
 
 interface ConfigFile {
@@ -885,7 +889,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     writeJson(join(options.out, `round${round}`, "gap-traces.json"), { traces: gapTraces });
-    const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview });
+    const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview, control });
     const gapRun = await attemptRole({
       sessionName: "gap-finder",
       kind: "role:gap-finder",
@@ -895,7 +899,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           ...gapTraces.map((hint) => hint.file),
           ...(previousReviewSession ? [previousReviewSession] : []),
         ], relay, gapPrompt, "gap-finder", options.roleMaxTokens?.["gap-finder"]);
-        writeJson(join(spawn.cwd, "effective-knobs.json"), { knobs: EFFECTIVE_KNOBS });
+        writeJson(join(spawn.cwd, "effective-knobs.json"), { knobs: knobCatalog(control) });
         const input: GapCall = {
           round,
           traces: gapTraces,
@@ -904,6 +908,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           sessionPath: spawn.sessionPath,
           spawn: roleFacing(spawn),
           baseUrl: relay.baseUrl,
+          control,
         };
         assertNoHeldOutLeak(input, "gap input");
         writeJson(join(options.out, `round${round}`, "gap-input.json"), input);
@@ -1010,7 +1015,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         hardCap: { kind: "innovator", limit: innovatorCap, spent: () => 0 },
         build(relay) {
           const spawn = prepareRole(options.out, round, "innovator", options.piBin, [], relay, innovatePrompt, sessionName, options.roleMaxTokens?.innovator);
-          writeJson(join(spawn.cwd, "effective-knobs.json"), { knobs: EFFECTIVE_KNOBS });
+          writeJson(join(spawn.cwd, "effective-knobs.json"), { knobs: knobCatalog(control) });
           const input: InnovateCall = {
             round,
             knob: gap.knob,
@@ -1079,6 +1084,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       }
       if (leafKnobPaths(turn.parts).some((path) => !isEffectiveKnob(path))) {
         invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: "invalid: non_effective_key" });
+        continue;
+      }
+      // One no-op leaf invalidates the whole candidate. Name those keys; do not strip them.
+      const unchanged = noopKeys(turn.parts, control);
+      if (unchanged.length > 0) {
+        invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: "invalid: no_op_change", keys: unchanged });
         continue;
       }
       if (seen.has(turn.summary)) {
@@ -1993,7 +2004,7 @@ function stageGapTraces(
   });
 }
 
-function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null }): string {
+function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown }): string {
   const traces = input.traces.map((hint) => `${hint.file} sha256=${hint.sha256} line=${hint.line}`).join("\n");
   const review = input.previousReview ? JSON.stringify({ accept: input.previousReview.accept, reason: input.previousReview.reason }) : "无";
   return [
@@ -2001,8 +2012,8 @@ function gapTaskPrompt(input: { readonly round: number; readonly traces: readonl
     "只读下面列出的 traces/ 文件，归纳一个共同失败模式。",
     traces || "没有附带 trace。",
     `上一轮评语：${review}`,
-    "knob 必须是下面这些有效旋钮之一。同一份名单在 cwd 的 effective-knobs.json。碰了名单以外的键，这一轮停，原因是 invalid: non_effective_key。",
-    ...EFFECTIVE_KNOBS,
+    "knob 必须是下面这些有效旋钮之一。同一份名单在 cwd 的 effective-knobs.json。每一行带当前有效值、类型，以及已知的范围。碰了名单以外的键，这一轮停，原因是 invalid: non_effective_key。",
+    ...knobCatalog(input.control).map(formatKnobLine),
     "最后一条 assistant 消息只放一个 JSON 对象，字段为 knob、failureClass、summary、citations。",
     "failureClass 只能是 timeout、idle-loop、tool-misuse、context-overflow、skill-not-triggered、format-invalid。",
     "citations 是字符串数组。",
@@ -2019,8 +2030,9 @@ function innovatorTaskPrompt(input: { readonly round: number; readonly knob: str
     "最后一条 assistant 消息只放一个 JSON 对象。summary 是字符串。parts 的键是 part 名，值是要改的字段。",
     "part 只能是 agent-loop、context、memory、toolchain、skills。",
     "只能改下面这些有效旋钮。碰了名单以外的键，这一条候选无效，原因是 invalid: non_effective_key。",
+    "把当前有效值原样再写一次是空改。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
     "agent-loop.maxSteps 是 agent_end 步数。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这个上限截断。",
-    ...EFFECTIVE_KNOBS,
+    ...knobCatalog(input.control).map(formatKnobLine),
   ].join("\n");
 }
 
