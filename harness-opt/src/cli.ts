@@ -18,7 +18,7 @@ const USAGE = [
   "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir>",
   "                        i014 loop with stub roles and no model call",
   "  optimize --execute --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --executor-cmd '<json argv>'",
-  "                        needs BASE_URL; i014 passes --network shared",
+  "                        needs BASE_URL; every task passes --network devii-004-int",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>'",
   "                        one candidate seed to prove activation; not the final comparison",
 ].join("\n");
@@ -196,10 +196,9 @@ function taskFromFlags(argv: readonly string[]): OptTask {
   const id = flag(argv, "--task") ?? DEV_TASK.id;
   const path = flag(argv, "--task-path") ?? DEV_TASK.path;
   const network = flag(argv, "--network") ?? DEV_TASK.network;
-  if (network !== "gateway-only" && network !== "shared") {
-    throw new Error("optimize-one --network must be gateway-only or shared");
+  if (network !== "devii-004-int") {
+    throw new Error("optimize-one --network must be devii-004-int");
   }
-  if (id === DEV_TASK.id && network !== "shared") throw new Error("i014 network must be shared");
   const rawWeight = flag(argv, "--token-w");
   const tokenW = rawWeight === undefined ? (id === DEV_TASK.id ? DEV_TASK.tokenW : Number.NaN) : Number(rawWeight);
   if (!Number.isFinite(tokenW) || tokenW <= 0) throw new Error("optimize-one --token-w must be a positive number");

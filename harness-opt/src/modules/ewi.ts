@@ -1,13 +1,17 @@
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Frozen externally. The loop reads this unless a run passes another threshold. */
 export const DEFAULT_EWI_THRESHOLD_SEC = 600;
 
+/** sha256 of the packaged `scripts/ewi_idle.py`. Scoring shells out to that file. */
+export const EWI_IDLE_SHA = "478e7fb27284459b677e600d7c67e2dd5ff742c49ea9045a18520ab76d7270cb";
+
 /**
- * Path of `ewi_idle.py` when a caller shells out to it.
- * `EWI_IDLE_SCRIPT` wins. Otherwise the package copy. The scoring path does not shell out.
+ * Path of `ewi_idle.py`. `EWI_IDLE_SCRIPT` wins. Otherwise the package copy.
+ * `measureRunEwi` runs this script and uses its numbers.
  */
 export function resolveEwiIdleScript(configured?: string): string {
   const chosen = (configured ?? process.env.EWI_IDLE_SCRIPT ?? "").trim();
@@ -111,16 +115,40 @@ export function measureEwi(observation: EwiObservation, thresholdSec: number): E
   };
 }
 
-/** Read one run directory the way ewi_idle.py reads a batch row. */
+/** Read one run directory by running `ewi_idle.py`. The TypeScript path does not parse the trace. */
 export function measureRunEwi(input: RunEwiInput, thresholdSec: number): EwiMetrics {
-  return measureEwi({
-    task: input.task,
-    seed: input.seed,
-    timedOut: input.timedOut,
-    tWrite: latestOutputMtime(input.outputsDir),
-    tEnd: readBatchDone(readFileSync(input.batchLogPath, "utf8"), input.runNumber ?? 1),
-    assistantTs: assistantTimestamps(input.tracePath),
-  }, thresholdSec);
+  if (!Number.isFinite(thresholdSec) || thresholdSec <= 0) {
+    throw new Error("EWI threshold must be a positive number of seconds");
+  }
+  const script = resolveEwiIdleScript();
+  const runDir = dirname(input.batchLogPath);
+  const summary = `${runDir}/summary.csv`;
+  if (!existsSync(summary)) {
+    mkdirSync(runDir, { recursive: true });
+    const timed = input.timedOut ? "True" : "False";
+    writeFileSync(summary, `task,seed,n,timed_out,trace\n${input.task},${input.seed},${input.runNumber ?? 1},${timed},${input.tracePath}\n`);
+  }
+  const proc = spawnSync("python3", [script, runDir], { encoding: "utf8" });
+  if (proc.status !== 0) {
+    throw new Error(`${proc.stderr || ""}${proc.stdout || ""}`.trim() || "ewi_idle.py failed");
+  }
+  const line = proc.stdout.split("\n").find((item) => item.startsWith("{"));
+  if (!line) throw new Error(proc.stdout || "ewi_idle.py printed nothing");
+  const row = JSON.parse(line) as { task: string; seed: string; timed_out: string; post_write: number; idle: number; gap_max: number };
+  const timedOut = row.timed_out === "True";
+  const clause1 = row.idle >= thresholdSec;
+  const clause2 = timedOut && row.gap_max >= thresholdSec;
+  return {
+    task: row.task,
+    seed: String(row.seed),
+    timedOut,
+    postWriteS: row.post_write,
+    idleS: row.idle,
+    gapMaxS: row.gap_max,
+    clause1,
+    clause2,
+    ewi: clause1 || clause2,
+  };
 }
 
 function significand(value: number): { readonly mantissa: bigint; readonly exp: number } {
@@ -131,138 +159,4 @@ function significand(value: number): { readonly mantissa: bigint; readonly exp: 
   const fraction = bits & ((1n << 52n) - 1n);
   if (biased === 0) return { mantissa: fraction, exp: -1022 - 52 };
   return { mantissa: (1n << 52n) | fraction, exp: biased - 1023 - 52 };
-}
-
-function latestOutputMtime(outputsDir: string): number {
-  let latest = Number.NEGATIVE_INFINITY;
-  let files = 0;
-  const stack = [outputsDir];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) continue;
-    for (const name of readdirSync(current)) {
-      const full = join(current, name);
-      const linked = lstatSync(full);
-      if (linked.isSymbolicLink()) {
-        const target = statSync(full);
-        if (target.isDirectory()) continue;
-        if (!target.isFile()) continue;
-        files += 1;
-        latest = Math.max(latest, target.mtimeMs / 1000);
-        continue;
-      }
-      if (linked.isDirectory()) {
-        stack.push(full);
-        continue;
-      }
-      if (!linked.isFile()) continue;
-      files += 1;
-      latest = Math.max(latest, linked.mtimeMs / 1000);
-    }
-  }
-  if (files === 0) throw new Error(`outputs has no files: ${outputsDir}`);
-  return latest;
-}
-
-/**
- * Lines the way `for line in open(trace)` yields them.
- * A trailing newline does not add an extra empty line. A blank line in the
- * middle is a real line and must fail `json.loads`, same as ewi_idle.py.
- */
-function pythonLines(text: string): string[] {
-  if (text === "") return [];
-  const lines = text.split("\n");
-  if (text.endsWith("\n")) lines.pop();
-  return lines;
-}
-
-function assistantTimestamps(tracePath: string): number[] {
-  const stamps: number[] = [];
-  const lines = pythonLines(readFileSync(tracePath, "utf8"));
-  for (let index = 0; index < lines.length; index += 1) {
-    const parsed = parsePythonJsonLine(lines[index] ?? "", index);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-    const record = parsed as { type?: unknown; ts?: unknown };
-    if (record.type !== "assistant_message") continue;
-    // true/false, strings, NaN, and ±Infinity are the same failure as a missing key.
-    if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) {
-      throw new Error(`assistant_message on line ${index + 1} is missing ts`);
-    }
-    stamps.push(record.ts / 1000);
-  }
-  return stamps;
-}
-
-/** Python `json.loads` accepts NaN, Infinity, and -Infinity. Those values are still missing `ts`. */
-function parsePythonJsonLine(line: string, index: number): unknown {
-  try {
-    return JSON.parse(rewritePythonNonFinite(line), (_key, value) => {
-      if (value === "__PY_NAN__") return Number.NaN;
-      if (value === "__PY_INF__") return Infinity;
-      if (value === "__PY_NINF__") return -Infinity;
-      return value;
-    });
-  } catch {
-    throw new Error(`trace.jsonl line ${index + 1} is not JSON`);
-  }
-}
-
-function rewritePythonNonFinite(line: string): string {
-  let out = "";
-  let index = 0;
-  while (index < line.length) {
-    const char = line[index] ?? "";
-    if (char === "\"") {
-      let end = index + 1;
-      while (end < line.length) {
-        if (line[end] === "\\") {
-          end += 2;
-          continue;
-        }
-        if (line[end] === "\"") {
-          end += 1;
-          break;
-        }
-        end += 1;
-      }
-      out += line.slice(index, end);
-      index = end;
-      continue;
-    }
-    if (line.startsWith("NaN", index) && !isWord(line[index + 3])) {
-      out += "\"__PY_NAN__\"";
-      index += 3;
-      continue;
-    }
-    if (line.startsWith("-Infinity", index) && !isWord(line[index + 9])) {
-      out += "\"__PY_NINF__\"";
-      index += 9;
-      continue;
-    }
-    if (line.startsWith("Infinity", index) && !isWord(line[index + 8])) {
-      out += "\"__PY_INF__\"";
-      index += 8;
-      continue;
-    }
-    out += char;
-    index += 1;
-  }
-  return out;
-}
-
-function isWord(char: string | undefined): boolean {
-  return char !== undefined && /[A-Za-z0-9_]/.test(char);
-}
-
-function readBatchDone(log: string, runNumber: number): number {
-  let found: number | undefined;
-  for (const line of log.split("\n")) {
-    const match = /^(\S+) run (\d+) done\b/.exec(line);
-    if (!match || Number(match[2]) !== runNumber) continue;
-    const stamp = Date.parse(match[1] ?? "");
-    if (!Number.isFinite(stamp)) throw new Error(`batch.log timestamp is not readable: ${match[1]}`);
-    found = stamp / 1000;
-  }
-  if (found === undefined) throw new Error(`batch.log has no run ${runNumber} done line`);
-  return found;
 }

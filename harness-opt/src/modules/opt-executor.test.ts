@@ -3,13 +3,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEV_TASK } from "./opt-loop";
-import { CommandOptExecutor, renderExecutorCommand, tokenCap, type OptRunRequest, type OptTask } from "./opt-executor";
+import { createHash } from "node:crypto";
+import { CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, type OptRunRequest, type OptTask } from "./opt-executor";
 
 const TASK: OptTask = {
   id: "002",
   path: "tasks1/002-bigwig-h3k27ac-igg-peak-audit",
   split: "held-out",
-  network: "gateway-only",
+  network: "devii-004-int",
   tokenW: 2_383_647,
 };
 
@@ -59,7 +60,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
     const observation = await executor.run(request(dir));
     const argv = JSON.parse(readFileSync(join(dir, "run", "argv.json"), "utf8")) as string[];
     expect(argv).toContain("tasks1/002-bigwig-h3k27ac-igg-peak-audit");
-    expect(argv).toContain("gateway-only");
+    expect(argv).toContain("devii-004-int");
     expect(argv).toContain("deepseek-v4-1-flash-261017");
     expect(argv).toContain(join(dir, "config.json"));
     expect(argv).toContain(String(tokenCap(TASK)));
@@ -97,16 +98,29 @@ writeFileSync(run + "/result.json", JSON.stringify({
     expect(spawned).toBe(false);
   });
 
-  test("i014 is rendered as network shared", () => {
+  test("i014 is rendered on devii-004-int", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-i014-"));
     const argv = renderExecutorCommand(
       ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
       { ...request(dir), task: DEV_TASK, tokenCap: tokenCap(DEV_TASK) },
     );
-    expect(DEV_TASK.network).toBe("shared");
-    expect(argv).toContain("shared");
+    expect(DEV_TASK.network).toBe("devii-004-int");
+    expect(argv).toContain("devii-004-int");
     expect(argv).not.toContain("open");
+    expect(argv).not.toContain("shared");
     expect(argv).not.toContain("gateway-only");
+  });
+});
+
+describe("host run id", () => {
+  test("is 16 random bytes and not a hash of the run directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-run-id-"));
+    const first = hostRunId();
+    const second = hostRunId();
+    expect(first).toMatch(/^[0-9a-f]{32}$/);
+    expect(second).toMatch(/^[0-9a-f]{32}$/);
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(createHash("sha256").update(dir).digest("hex"));
   });
 });
 

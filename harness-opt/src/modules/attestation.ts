@@ -42,6 +42,8 @@ export interface AttestRunMeta {
   /** Host-assigned run directory. Must equal the path the loop passed in. */
   readonly runPath: string;
   readonly at: string;
+  /** One-time host nonce. Present only when the loop issued one. */
+  readonly nonce?: string;
 }
 
 export interface HostAttestationWrite {
@@ -187,6 +189,8 @@ export function verifyHostAttestation(input: {
   readonly runDir?: string;
   /** When set, the signed runId must be this host-allocated id. */
   readonly runId?: string;
+  /** When set, the signed nonce must be this host-issued value. */
+  readonly expectedNonce?: string;
 }): VerifiedAttestation | AttestationRejection {
   const file = join(input.attestDir, ATTEST_FILENAME);
   if (!existsSync(file)) return { ok: false, reasons: ["missing"] };
@@ -232,6 +236,8 @@ export function verifyHostAttestation(input: {
   if (signedRunPath && runDir && resolve(signedRunPath) !== resolve(runDir)) reasons.push("runPath");
   if (input.runDir && signedRunPath && resolve(input.runDir) !== resolve(signedRunPath)) reasons.push("runPath");
   if (input.runId && signedRunId !== input.runId) reasons.push("runId");
+  const signedNonce = runNode && runNode.t === "obj" ? stringField(runNode, "nonce") : null;
+  if (input.expectedNonce && signedNonce !== input.expectedNonce) reasons.push("nonce");
 
   const traceSha = shaOrNull(unsigned, ATTEST_FIELDS.trace, reasons, "trace");
   const rewardFileSha = shaOrNull(unsigned, ATTEST_FIELDS.rewardFile, reasons, "rewardFile");
@@ -300,6 +306,7 @@ function attestBody(input: HostAttestationWrite): JsonNode {
         ["runDir", { t: "str", v: run }],
         ["runId", { t: "str", v: input.meta.runId }],
         ["runPath", { t: "str", v: runPath }],
+        ...(input.meta.nonce ? [["nonce", { t: "str", v: input.meta.nonce }] as const] : []),
         ["score_status", { t: "str", v: input.meta.score_status }],
         ["seed", { t: "num", lex: integerLexeme(input.meta.seed) }],
         ["task", { t: "str", v: input.meta.task }],

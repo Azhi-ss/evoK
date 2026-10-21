@@ -1,6 +1,8 @@
-import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
 import {
   assertAttestIsolated,
@@ -23,9 +25,10 @@ import {
 } from "./opt-executor";
 import {
   buildRoleSpawn,
-  hostRecordRead,
   hostWriteSession,
+  launchRolePi,
   recordedSessionSha,
+  rolePiArgv,
   type RoleSpawnConfig,
 } from "./role-spawn";
 
@@ -36,7 +39,7 @@ export const DEV_TASK: OptTask = {
   id: "i014",
   path: "tasks2/i014",
   split: "dev",
-  network: "shared",
+  network: "devii-004-int",
   tokenW: 1_625_811,
 };
 
@@ -45,11 +48,11 @@ export const HELD_OUT_TASKS: readonly OptTask[] = [
     id: "002",
     path: "tasks1/002-bigwig-h3k27ac-igg-peak-audit",
     split: "held-out",
-    network: "gateway-only",
+    network: "devii-004-int",
     tokenW: 2_383_647,
   },
-  { id: "i030", path: "tasks2/i030", split: "held-out", network: "shared", tokenW: 4_876_782 },
-  { id: "hb003", path: "tasks3/hb003", split: "held-out", network: "shared", tokenW: 9_024_166 },
+  { id: "i030", path: "tasks2/i030", split: "held-out", network: "devii-004-int", tokenW: 4_876_782 },
+  { id: "hb003", path: "tasks3/hb003", split: "held-out", network: "devii-004-int", tokenW: 9_024_166 },
 ];
 
 /** control.json shape from the preregistration. maxSteps 25. */
@@ -179,6 +182,8 @@ export interface OptLoopOptions {
   readonly driver?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
+  /** When set, gap and reviewer are exec'd with this binary and `--tools read`. */
+  readonly piBin?: string;
 }
 
 export interface AcceptedCandidate {
@@ -224,6 +229,7 @@ interface ScoredRun {
   readonly tracePath: string;
   readonly verified: VerifiedAttestation | null;
   readonly attestReasons: readonly string[];
+  readonly relayPatchActive: boolean;
 }
 
 interface ClosureRecord {
@@ -245,9 +251,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   if (seeds.length === 0) throw new Error("seeds are empty");
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
-  const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles() : undefined);
-  if (!roles) throw new Error("execute mode needs roles");
+  const firstRun = join(options.out, "round1", "runs", DEV_TASK.id, `seed${seeds[0]}`, "candidate");
+  if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
+  const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : undefined);
+  if (!roles) throw new Error("execute mode needs roles");
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
   const executor = options.executor ?? executorFor(options, env, attestKey);
@@ -271,7 +279,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
   for (let round = 1; round <= rounds; round += 1) {
     const started = now();
-    const gapSpawn = prepareRole(options.out, round, "gap-finder", [
+    const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
       ...traceHints.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
     ]);
@@ -286,18 +294,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     const gap = await roles.gap(gapInput);
-    const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath);
-    const gapCitedTrace = gapCaptured
-      ? citedByCapturedRead(gapCaptured.text, traceHints, options.out)
-      : false;
+    const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
+    const gapLog = join(options.out, `round${round}`, "relay", "gap-finder.jsonl");
+    const gapCitedTrace = traceHints.length > 0 && traceHints.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
     if (round > 1 && previousReviewSession && previousReviewSha) {
-      const fed = gapCaptured
-        ? citedByCapturedRead(gapCaptured.text, [{ file: previousReviewSession, line: 1, sha256: previousReviewSha }], options.out)
-        : false;
+      const fed = relayCited(gapLog, previousReviewSession, previousReviewSha);
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
       writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
     }
-    const innovatorSpawn = prepareRole(options.out, round, "innovator", []);
+    const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, []);
     const innovateInput: InnovateCall = {
       round,
       knob: gap.knob,
@@ -310,13 +315,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(innovateInput, "innovator input");
     writeJson(join(options.out, `round${round}`, "innovator-input.json"), innovateInput);
     const proposed = await roles.innovate(innovateInput);
-    captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath);
+    captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
 
     if (tried.includes(proposed.summary)) {
       const note = "duplicate summary";
-      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", []);
-      hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note));
-      const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath)?.sha256 ?? null;
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, []);
+      hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
+      const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
       writeClosure(options.out, round, {
         round,
         closed: false,
@@ -363,12 +368,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       candidateSha: sha256File(configPath),
       knob: gap.knob,
       knobValue,
+      relayPatchActive: runs.every((run) => run.relayPatchActive),
     });
     writeJson(join(options.out, `round${round}`, "activation.json"), activation);
     const metrics = summarize(runs, threshold);
     writeJson(join(options.out, `round${round}`, "metrics.json"), metrics);
 
-    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", [diffPath]);
+    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath]);
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -382,7 +388,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     const verdict = await roles.review(reviewInput);
-    const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath);
+    const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
     writeClosure(options.out, round, {
       round,
       closed: false,
@@ -470,7 +476,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   }
   const heldOut = {
     calls: heldRuns.length,
-    gatewayOnly: HELD_OUT_TASKS.filter((task) => task.network === "gateway-only").map((task) => task.id),
+    gatewayOnly: HELD_OUT_TASKS.map((task) => task.id),
     comparison: "control-not-run",
     byTask: HELD_OUT_TASKS.map((task) => ({
       task: task.id,
@@ -527,16 +533,46 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     throw new Error(`control config is missing: ${options.controlConfigPath}`);
   }
   const task = options.task ?? DEV_TASK;
-  if (task.id === DEV_TASK.id && task.network !== "shared") throw new Error("i014 network must be shared");
   const model = options.model ?? OPT_MODEL;
   const attestKey = loadAttestKey(options.attestKeyFile);
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
   const runDir = join(options.out, "once", task.id, `seed${seed}`, "candidate");
   const attestDir = join(options.attestRoot, "once", task.id, `seed${seed}`, "candidate");
+  if (existsSync(join(runDir, "result.json"))) throw new Error("run dir already exists");
   assertAttestIsolated(attestDir, runDir);
-  mkdirSync(runDir, { recursive: true });
-  const runId = hostRunId(runDir);
+  const runId = hostRunId();
+  const nonce = claimNonce(options.attestRoot);
+  const relayLogRoot = join(options.attestRoot, "relay-logs");
+  const candidateSha = sha256File(options.configPath);
+  const controlSha = sha256File(options.controlConfigPath);
+  const knobValue = valueAt(JSON.parse(readFileSync(options.configPath, "utf8")) as ConfigFile, options.knob);
+  const layoutOk = hostPreRun(runDir, attestDir, options.configPath, options.harnessPath, options.attestKeyFile);
+  if (!layoutOk) {
+    const activation = {
+      seed,
+      ...inspectAttestedActivation({
+        verified: null,
+        rejection: ["prerun_layout"],
+        candidateSha,
+        controlSha,
+        knob: options.knob,
+        knobValue,
+        relayPatchActive: false,
+      }),
+    };
+    const blocked: OptOnceResult = {
+      model,
+      seed,
+      runDir,
+      patchActive: false,
+      candidateConfigSha: candidateSha,
+      controlConfigSha: controlSha,
+      activation,
+    };
+    writeJson(join(options.out, "once", "activation.json"), blocked);
+    return blocked;
+  }
   const request: OptRunRequest = {
     task,
     seed,
@@ -546,13 +582,12 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     attestDir,
     harnessPath: options.harnessPath,
     runId,
+    nonce,
+    relayLogRoot,
     model,
     tokenCap: tokenCap(task),
   };
   await options.executor.run(request);
-  const candidateSha = sha256File(options.configPath);
-  const controlSha = sha256File(options.controlConfigPath);
-  const knobValue = valueAt(JSON.parse(readFileSync(options.configPath, "utf8")) as ConfigFile, options.knob);
   const verified = verifyHostAttestation({
     attestDir,
     key: attestKey,
@@ -560,7 +595,9 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     harnessPath: options.harnessPath,
     runDir,
     runId,
+    expectedNonce: nonce,
   });
+  const relayPatchActive = relayActive(join(relayLogRoot, runId, "relay.jsonl"), candidateSha);
   const activation = {
     seed,
     ...inspectAttestedActivation({
@@ -570,6 +607,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
       controlSha,
       knob: options.knob,
       knobValue,
+      relayPatchActive,
     }),
   };
   const result: OptOnceResult = {
@@ -585,12 +623,11 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   return result;
 }
 
-export function stubOptRoles(): OptRoles {
+/** Dry-run roles. The host writes the session. It does not fabricate a read. */
+export function stubOptRoles(key: Buffer): OptRoles {
   return {
     async gap(input) {
-      hostWriteSession(input.spawn, sessionLines("gap-finder", "gap"));
-      for (const hint of input.traces) hostRecordRead(input.spawn, hint.file);
-      if (input.previousReviewSession) hostRecordRead(input.spawn, input.previousReviewSession);
+      hostWriteSession(input.spawn, sessionLines("gap-finder", "gap"), key);
       return {
         session: { jsonl: "ignored-return\n" },
         citations: [],
@@ -602,7 +639,7 @@ export function stubOptRoles(): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
-      hostWriteSession(input.spawn, sessionLines("innovator", summary));
+      hostWriteSession(input.spawn, sessionLines("innovator", summary), key);
       return {
         session: { jsonl: "ignored-return\n" },
         summary,
@@ -612,7 +649,7 @@ export function stubOptRoles(): OptRoles {
     async review(input) {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
-      hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason));
+      hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
   };
@@ -633,14 +670,20 @@ function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv, key: Buffe
 interface AttestHost {
   readonly attestDir: string;
   readonly key: Buffer;
+  readonly keyFile: string;
   readonly harnessPath: string;
+  readonly relayLogRoot: string;
+  readonly attestRoot: string;
 }
 
 function hostFor(options: OptLoopOptions, key: Buffer, ...parts: string[]): AttestHost {
   return {
     attestDir: join(options.attestRoot, ...parts),
     key,
+    keyFile: options.attestKeyFile,
     harnessPath: options.harnessPath,
+    relayLogRoot: join(options.attestRoot, "relay-logs"),
+    attestRoot: options.attestRoot,
   };
 }
 
@@ -650,17 +693,20 @@ async function executeScored(
   host: AttestHost,
   threshold: number,
 ): Promise<ScoredRun> {
-  if (request.task.id === DEV_TASK.id && request.task.network !== "shared") {
-    throw new Error("i014 network must be shared");
-  }
+  if (existsSync(join(request.runDir, "result.json"))) throw new Error("run dir already exists");
   assertAttestIsolated(host.attestDir, request.runDir);
+  const runId = request.runId && request.runId.trim() !== "" ? request.runId : hostRunId();
+  const nonce = claimNonce(host.attestRoot);
+  const layoutOk = hostPreRun(request.runDir, host.attestDir, request.configPath, host.harnessPath, host.keyFile);
+  if (!layoutOk) return unscoredRun(request, "prerun_layout", false);
   const full: OptRunRequest = {
     ...request,
     attestDir: host.attestDir,
     harnessPath: host.harnessPath,
-    runId: request.runId && request.runId.trim() !== "" ? request.runId : hostRunId(request.runDir),
+    runId,
+    nonce,
+    relayLogRoot: host.relayLogRoot,
   };
-  mkdirSync(request.runDir, { recursive: true });
   const observation = await executor.run(full);
   const verified = verifyHostAttestation({
     attestDir: host.attestDir,
@@ -668,16 +714,28 @@ async function executeScored(
     configPath: request.configPath,
     harnessPath: host.harnessPath,
     runDir: request.runDir,
-    runId: full.runId,
+    runId,
+    expectedNonce: nonce,
   });
   const rewardFile = readReward(request.runDir);
   let scoreStatus = observation.scoreStatus;
   let reward = scoreStatus === "unscored" ? null : rewardFile.reward;
   let unscoredReason = observation.unscoredReason ?? rewardFile.reason;
+  if (!verified.ok) {
+    scoreStatus = "unscored";
+    reward = null;
+    unscoredReason = "attest_mismatch";
+  }
+  const resultId = resultRunId(request.runDir);
+  if (resultId !== undefined && resultId !== runId) {
+    scoreStatus = "unscored";
+    reward = null;
+    unscoredReason = "result_runid_mismatch";
+  }
   if (observation.tokens > request.tokenCap) {
     scoreStatus = "unscored";
     reward = null;
-    unscoredReason = "token_cap_exceeded";
+    unscoredReason = "token_cap";
   } else if (reward === null) {
     scoreStatus = "unscored";
   }
@@ -690,6 +748,8 @@ async function executeScored(
     batchLogPath: observation.batchLogPath,
     runNumber: 1,
   }, threshold);
+  const mountedSha = sha256File(request.configPath);
+  const relayPatchActive = relayActive(join(host.relayLogRoot, runId, "relay.jsonl"), mountedSha);
   return {
     task: request.task.id,
     seed: request.seed,
@@ -705,6 +765,41 @@ async function executeScored(
     tracePath: observation.tracePath,
     verified: verified.ok ? verified : null,
     attestReasons: verified.ok ? [] : verified.reasons,
+    relayPatchActive,
+  };
+}
+
+function unscoredRun(
+  request: Omit<OptRunRequest, "attestDir" | "harnessPath">,
+  reason: string,
+  relayPatchActive: boolean,
+): ScoredRun {
+  return {
+    task: request.task.id,
+    seed: request.seed,
+    arm: request.arm,
+    reward: null,
+    scoreStatus: "unscored",
+    unscoredReason: reason,
+    tokens: 0,
+    wallS: 0,
+    timedOut: false,
+    ewi: {
+      task: request.task.id,
+      seed: String(request.seed),
+      timedOut: false,
+      postWriteS: 0,
+      idleS: 0,
+      gapMaxS: 0,
+      clause1: false,
+      clause2: false,
+      ewi: false,
+    },
+    runDir: request.runDir,
+    tracePath: join(request.runDir, "trace.jsonl"),
+    verified: null,
+    attestReasons: [reason],
+    relayPatchActive,
   };
 }
 
@@ -726,6 +821,7 @@ function activationRecord(input: {
   readonly candidateSha: string;
   readonly knob: string;
   readonly knobValue: unknown;
+  readonly relayPatchActive: boolean;
 }): {
   readonly patchHash: string;
   readonly controlConfigSha: string;
@@ -743,6 +839,7 @@ function activationRecord(input: {
       controlSha: input.controlSha,
       knob: input.knob,
       knobValue: input.knobValue,
+      relayPatchActive: run.relayPatchActive && input.relayPatchActive,
     }),
   }));
   return {
@@ -750,7 +847,7 @@ function activationRecord(input: {
     controlConfigSha: input.controlSha,
     candidateConfigSha: input.candidateSha,
     differsFromControl: input.candidateSha !== input.controlSha,
-    patchActive: runs.length > 0 && runs.every((run) => run.active),
+    patchActive: input.relayPatchActive && runs.length > 0 && runs.every((run) => run.active),
     runs,
   };
 }
@@ -848,6 +945,7 @@ function prepareRole(
   out: string,
   round: number,
   role: RoleSpawnConfig["role"],
+  piBin: string | undefined,
   allowedPaths: readonly string[],
 ): RoleSpawnConfig {
   const cwd = join(out, `round${round}`, "roles", role);
@@ -860,6 +958,9 @@ function prepareRole(
     ledgerPath: join(out, `round${round}`, "sessions", "ledger.json"),
   });
   writeJson(join(out, `round${round}`, "sessions", `${role}.spawn.json`), config);
+  const argv = rolePiArgv(piBin ?? "pi", config);
+  writeJson(join(out, `round${round}`, "sessions", `${role}.argv.json`), argv);
+  if (piBin) launchRolePi(piBin, config);
   return config;
 }
 
@@ -868,6 +969,7 @@ function captureSession(
   round: number,
   role: string,
   file: string,
+  key: Buffer,
 ): { readonly sha256: string; readonly text: string } | null {
   if (!existsSync(file)) return null;
   let linked;
@@ -879,7 +981,7 @@ function captureSession(
   if (!linked.isFile()) return null;
   const bytes = readFileSync(file);
   const sha = sha256(bytes);
-  const recorded = recordedSessionSha(join(out, `round${round}`, "sessions", "ledger.json"), role);
+  const recorded = recordedSessionSha(join(out, `round${round}`, "sessions", "ledger.json"), role, key);
   if (recorded !== sha) return null;
   const manifestPath = join(out, `round${round}`, "sessions", "manifest.json");
   const current = existsSync(manifestPath)
@@ -1001,6 +1103,81 @@ function sameFile(root: string, left: string, right: string): boolean {
   if (a === b) return true;
   try {
     return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/** Remember a one-time nonce. A repeated value is rejected. */
+export function claimNonce(attestRoot: string, nonce = randomBytes(16).toString("hex")): string {
+  const file = join(attestRoot, "issued-runs.json");
+  let nonces: string[] = [];
+  if (existsSync(file)) {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { nonces?: unknown };
+    if (Array.isArray(parsed.nonces)) nonces = parsed.nonces.filter((item): item is string => typeof item === "string");
+  }
+  if (nonces.includes(nonce)) throw new Error("nonce already used");
+  nonces.push(nonce);
+  writeJson(file, { nonces });
+  return nonce;
+}
+
+function resultRunId(runDir: string): string | undefined {
+  const file = join(runDir, "result.json");
+  if (!existsSync(file)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { runId?: unknown };
+    return typeof parsed.runId === "string" ? parsed.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const PRE_RUN_PY = [
+  "import json, sys",
+  "sys.path.insert(0, sys.argv[1])",
+  "import hooks",
+  "mounts = json.loads(sys.argv[3])",
+  "layout = hooks.pre_run_layout(sys.argv[2], mounts, mounts)",
+  "sealed = hooks.seal_layout(layout, open(sys.argv[4], 'rb').read())",
+  "print(json.dumps(sealed))",
+].join("\n");
+
+function hostPreRun(runDir: string, attestDir: string, configPath: string, harnessPath: string, keyFile: string): boolean {
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const mounts = JSON.stringify([
+    { source: configPath, target: "/opt/config.json" },
+    { source: harnessPath, target: "/opt/harness.mjs" },
+  ]);
+  const proc = spawnSync("python3", ["-c", PRE_RUN_PY, relayDir, runDir, mounts, keyFile], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "pre-run failed").trim());
+  const sealed = JSON.parse(proc.stdout) as { ok?: boolean };
+  mkdirSync(attestDir, { recursive: true });
+  writeFileSync(join(attestDir, "preRunLayout.json"), `${JSON.stringify(sealed, null, 2)}\n`);
+  return sealed.ok === true;
+}
+
+function relayActive(logPath: string, mountedSha: string): boolean {
+  if (!existsSync(logPath)) return true;
+  const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+  const proc = spawnSync("python3", [script, "patch-active", "--log", logPath, "--sha", mountedSha], { encoding: "utf8" });
+  if (!proc.stdout) return false;
+  try {
+    const parsed = JSON.parse(proc.stdout) as { active?: unknown };
+    return parsed.active === true;
+  } catch {
+    return false;
+  }
+}
+
+function relayCited(logPath: string, hostFile: string, sha: string): boolean {
+  if (!existsSync(logPath) || !existsSync(hostFile)) return false;
+  const script = fileURLToPath(new URL("../../relay/ledger.py", import.meta.url));
+  const proc = spawnSync("python3", [script, "read-evidence", "--log", logPath, "--file", hostFile, "--sha", sha], { encoding: "utf8" });
+  if (!proc.stdout) return false;
+  try {
+    const parsed = JSON.parse(proc.stdout) as { ok?: unknown };
+    return parsed.ok === true;
   } catch {
     return false;
   }

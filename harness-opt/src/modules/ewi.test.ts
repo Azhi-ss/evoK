@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_EWI_THRESHOLD_SEC, measureEwi, measureRunEwi, resolveEwiIdleScript, roundTenth } from "./ewi";
+import { DEFAULT_EWI_THRESHOLD_SEC, EWI_IDLE_SHA, measureEwi, measureRunEwi, resolveEwiIdleScript, roundTenth } from "./ewi";
 
 const EWI_SCRIPT = resolveEwiIdleScript();
 
 describe("EWI metric", () => {
+  test("the packaged ewi_idle.py sha is pinned", () => {
+    expect(createHash("sha256").update(readFileSync(EWI_SCRIPT)).digest("hex")).toBe(EWI_IDLE_SHA);
+  });
+
   test("rounds the first decimal the way Python 3 round does", () => {
     expect(roundTenth(1.25)).toBe(1.2);
     expect(roundTenth(1.35)).toBe(1.4);
@@ -208,6 +213,9 @@ describe("EWI metric", () => {
       { name: "ts-string", trace: "{\"type\":\"assistant_message\",\"ts\":\"1\"}\n", link: false, error: /missing ts/ },
       { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false, error: /not JSON/ },
       { name: "missing-ts", trace: "{\"type\":\"assistant_message\"}\n", link: false, error: /missing ts/ },
+      { name: "non-object", trace: "[1,2]\n", link: false, error: /not an object/ },
+      { name: "non-object-null", trace: "null\n", link: false, error: /not an object/ },
+      { name: "lone-cr", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\r{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false, idle: 698 },
       { name: "symlink-output", trace: "", link: true, idle: 700 },
     ];
     for (const row of rows) {

@@ -29,6 +29,8 @@ export interface AttestedActivationInput {
   readonly controlSha: string;
   readonly knob: string;
   readonly knobValue: unknown;
+  /** When false, a relay log did not show the mounted config hash on every request. */
+  readonly relayPatchActive?: boolean;
 }
 
 /**
@@ -59,7 +61,9 @@ export function inspectAttestedActivation(input: AttestedActivationInput): Activ
     : undefined;
   const fragment = candidateHashFragment(input.candidateSha).trim();
   const hashInSystemMessage = verified.sessionFiles.some((file) => systemMessageText(file).includes(fragment));
-  const active = verified.mountedConfigSha === input.candidateSha
+  const relayOk = input.relayPatchActive !== false;
+  const active = relayOk
+    && verified.mountedConfigSha === input.candidateSha
     && input.candidateSha !== ""
     && input.candidateSha !== input.controlSha
     && hash === input.candidateSha

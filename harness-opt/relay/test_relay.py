@@ -1,0 +1,755 @@
+"""Relay, ledger, ITT, and pair-rerun tests. Specs through r8 and L96."""
+import base64
+import hashlib
+import json
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+import canon
+import ewi_relay
+import harness_relay
+import hooks
+from harness_relay import Relay, UpstreamNetworkError, assert_bind_host, new_run_id
+from ledger import Ledger, classify, load, patch_active, read_evidence, strip_line_prefixes, tokens
+
+USAGE = {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 1}}
+HERE = Path(__file__).resolve().parent
+EWI_SCRIPT = HERE.parent / "scripts" / "ewi_idle.py"
+DIFF_TABLE = HERE / "ewi_diff_table.md"
+
+
+def write_key(path: Path, body: bytes) -> None:
+    path.write_bytes(body)
+    os.chmod(path, 0o600)
+
+
+class RelayCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.up = self.root / "up.key"
+        self.att = self.root / "att.key"
+        write_key(self.up, b"upstream-key-0123456789abcdef")
+        write_key(self.att, b"attest-key-0123456789abcdef!!")
+        self.calls = []
+
+        def upstream(body, stream):
+            self.calls.append((body, stream))
+            return 200, b'{"usage":true}', dict(USAGE)
+
+        self.upstream = upstream
+        self.relay = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=upstream)
+        self.run = new_run_id()
+        self.relay.open_run(self.run, "executor", "abc")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def post(self, body, headers=None, run=None, **kw):
+        rid = run or self.run
+        host = headers or {"host": f"10.204.0.1:9"}
+        return self.relay.handle("POST", f"/r/{rid}/v1/chat/completions", body, host, **kw)
+
+    def log_text(self, run=None):
+        return (self.relay.log_path(run or self.run)).read_text(encoding="utf-8")
+
+    def test_01_requests_are_counted_and_tokens_only_increase(self):
+        body = json.dumps({"messages": [{"role": "user", "content": "a"}]}).encode()
+        self.assertEqual(self.post(body)[0], 200)
+        first = tokens(load(self.relay.log_path(self.run)))["tokens"]
+        self.upstream_more = True
+
+        def bigger(body, stream):
+            self.calls.append((body, stream))
+            return 200, b"{}", {"prompt_tokens": 30, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": 2}}
+
+        self.relay.upstream = bigger
+        self.post(body)
+        second = tokens(load(self.relay.log_path(self.run)))["tokens"]
+        self.assertGreater(second, first)
+        self.assertEqual(len(load(self.relay.log_path(self.run)).reqs), 2)
+
+    def test_02_other_run_and_closed_run_are_forbidden(self):
+        other = new_run_id()
+        status, _ = self.post(b"{}", run=other)
+        self.assertEqual(status, 403)
+        self.relay.close_run(self.run)
+        status, _ = self.post(b"{}")
+        self.assertEqual(status, 403)
+        self.assertEqual(self.calls, [])
+
+    def test_03_stream_without_usage_is_usage_missing(self):
+        def bare(body, stream):
+            self.calls.append(body)
+            return 200, b"data: {\"choices\":[]}\n\n", None
+
+        self.relay.upstream = bare
+        body = json.dumps({"stream": True, "messages": [{"role": "user", "content": "a"}]}).encode()
+        self.assertEqual(self.post(body)[0], 200)
+        ledger = load(self.relay.log_path(self.run))
+        self.assertTrue(ledger.reqs[0]["streamPatched"])
+        self.assertTrue(tokens(ledger)["usage_missing"])
+        decision = classify(ledger)
+        self.assertEqual(decision["unscored_kind"], "infra")
+        self.assertIn("usage_missing", decision["codes"])
+        self.assertIsNone(decision["reward"])
+
+    def test_04_disconnect_and_restart(self):
+        before = canon.fsync_count
+        status, _ = self.post(b'{"messages":[]}', client_disconnect=True)
+        self.assertEqual(status, 499)
+        self.assertGreater(canon.fsync_count, before)
+        ledger = load(self.relay.log_path(self.run))
+        done = ledger.dones[0]
+        self.assertEqual(done["error"], "client_disconnect")
+        decision = classify(ledger)
+        self.assertIn("client_disconnect", decision["codes"])
+        self.assertEqual(decision["unscored_kind"], "run")
+        path = self.relay.log_path(self.run)
+        canon.append_jsonl(path, {"type": "req", "seq": 2, "runId": self.run, "bootId": "other-boot", "toolResults": []})
+        restarted = classify(load(path), {"expected_boot_id": self.relay.boot_id})
+        self.assertIn("relay_restart", restarted["codes"])
+        self.assertIn("client_disconnect", restarted["codes"])
+        self.assertEqual(restarted["unscored_kind"], "run")
+        pure = Ledger()
+        pure.reqs = [{"seq": 1, "bootId": "other", "toolResults": []}]
+        pure.dones = [{"seq": 1, "status": 200, "usage": dict(USAGE)}]
+        alone = classify(pure, {"expected_boot_id": "boot"})
+        self.assertEqual(alone["codes"], ["relay_restart"])
+        self.assertEqual(alone["unscored_kind"], "infra")
+
+    def test_05_bad_path_and_host_are_rejected_without_headers(self):
+        self.relay.handle("POST", "/v1/files", b"{}", {"host": "10.204.0.1:9", "authorization": "Bearer incoming-secret"})
+        self.relay.handle("GET", f"/r/{self.run}/v1/chat/completions", b"{}", {"host": "evil.example", "x-secret": "header-secret"})
+        self.post(b'{"messages":[]}', {"host": "10.204.0.2:9", "authorization": "Bearer incoming-secret"})
+        text = self.log_text()
+        rejects = [json.loads(line) for line in text.splitlines() if '"type":"reject"' in line]
+        self.assertGreaterEqual(len(rejects), 3)
+        self.assertNotIn("incoming-secret", text)
+        self.assertNotIn("header-secret", text)
+        self.assertNotIn("authorization", text.lower())
+        self.assertTrue(all(set(row) <= {"type", "ts", "ts_iso", "method", "path", "reason"} for row in rejects))
+
+    def test_12_raw_key_in_body_is_rejected_and_encodings_are_not(self):
+        secret = self.up.read_bytes()
+        body = b'{"messages":[{"role":"user","content":"' + secret + b'"}]}'
+        before = len(self.calls)
+        status, _ = self.post(body)
+        self.assertEqual(status, 403)
+        self.assertEqual(len(self.calls), before)
+        text = self.log_text()
+        self.assertIn("secret_in_body", text)
+        self.assertNotIn(secret.decode(), text)
+        self.assertNotIn('"type":"req"', text)
+        self.assertFalse((self.relay.log_path(self.run).parent / "tool").exists())
+        encoded = base64.b64encode(secret)
+        self.assertNotIn(secret, encoded)
+        status, _ = self.post(b'{"messages":[{"role":"user","content":"' + encoded + b'"}]}')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.calls), before + 1)
+
+    def test_tool_results_come_from_the_assistant_call(self):
+        body = json.dumps({
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read", "arguments": json.dumps({"path": "/tmp/host"})}}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "file-body"},
+            ],
+        }).encode()
+        self.post(body)
+        req = load(self.relay.log_path(self.run)).reqs[0]
+        tool = req["toolResults"][0]
+        self.assertEqual(tool["toolName"], "read")
+        self.assertEqual(tool["args"]["path"], "/tmp/host")
+        self.assertEqual(tool["tool_call_id"], "call_1")
+        stored = (self.relay.log_path(self.run).parent / "tool" / tool["sha256"]).read_text(encoding="utf-8")
+        self.assertEqual(stored, "file-body")
+
+    def test_upstream_error_rows_carry_status_and_class(self):
+        def fail(body, stream):
+            return 400, b"context overflow", None
+
+        self.relay.upstream = fail
+        self.post(b'{"messages":[]}')
+        done = load(self.relay.log_path(self.run)).dones[0]
+        self.assertEqual(done["status"], 400)
+        self.assertEqual(done["errClass"], "4xx")
+        self.relay.upstream = lambda body, stream: (500, b"nope", None)
+        self.post(b'{"messages":[]}')
+        def down(body, stream):
+            raise UpstreamNetworkError()
+
+        self.relay.upstream = down
+        self.post(b'{"messages":[]}')
+        dones = load(self.relay.log_path(self.run)).dones
+        self.assertEqual(dones[1]["errClass"], "5xx")
+        self.assertEqual(dones[1]["status"], 500)
+        self.assertEqual(dones[2]["errClass"], "network")
+        self.assertIsNone(dones[2]["status"])
+
+    def test_bind_policy_and_key_refusal(self):
+        for host in ("0.0.0.0", "10.204.0.2", "127.0.0.1"):
+            with self.assertRaises(RuntimeError):
+                assert_bind_host(host)
+        assert_bind_host("10.204.0.1")
+        with self.assertRaises(RuntimeError):
+            Relay(port=9, log_root=self.root / "a", upstream_key_file=self.att, attest_key_file=self.att)
+        same = self.root / "same.key"
+        write_key(same, self.att.read_bytes())
+        with self.assertRaises(RuntimeError):
+            Relay(port=9, log_root=self.root / "b", upstream_key_file=same, attest_key_file=self.att)
+        self.assertEqual(self.relay.status()["relaySha"], harness_relay.relay_code_sha())
+        self.assertEqual(len(new_run_id()), 32)
+        with self.assertRaises(RuntimeError):
+            self.relay.open_run(new_run_id(), "executor", "x")
+
+    def test_tokens_usage_missing_is_only_2xx(self):
+        ledger = Ledger()
+        ledger.dones = [
+            {"seq": 1, "status": 400, "errClass": "4xx", "usage": None},
+            {"seq": 2, "status": 200, "usage": USAGE},
+        ]
+        self.assertFalse(tokens(ledger)["usage_missing"])
+        ledger.dones.append({"seq": 3, "status": 200, "usage": None})
+        self.assertTrue(tokens(ledger)["usage_missing"])
+        bad = Ledger()
+        bad.dones = [{"seq": 1, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1}}]
+        with self.assertRaises(ValueError):
+            tokens(bad)
+
+
+def _req(seq, boot="boot", usage=USAGE, status=200, error=None, err=None, run="r" * 32):
+    return (
+        {"type": "req", "seq": seq, "runId": run, "bootId": boot, "toolResults": [], "systemConfigHashes": []},
+        {"type": "done", "seq": seq, "status": status, "usage": usage, "error": error, "errClass": err},
+    )
+
+
+def ledger_of(rows, *, errors=None, run=None):
+    ledger = Ledger()
+    ledger.run_id = run
+    ledger.validation_errors = list(errors or [])
+    for row in rows:
+        if row["type"] == "req":
+            ledger.reqs.append(row)
+            if row.get("conclusion") is True and ledger.conclusion_seq is None:
+                ledger.conclusion_seq = row["seq"]
+        elif row["type"] == "done":
+            cleaned = {k: v for k, v in row.items() if v is not None or k in ("status", "usage")}
+            ledger.dones.append(cleaned)
+    return ledger
+
+
+class ClassifyCase(unittest.TestCase):
+    def test_08c_zero_requests_are_zero_and_an_ewi_hit_under_itt(self):
+        decision = classify(Ledger())
+        self.assertEqual(decision["codes"], ["no_requests"])
+        self.assertEqual(decision["unscored_kind"], "infra")
+        self.assertIsNone(decision["reward"])
+        key = b"k" * 32
+        schedule = hooks.sign_schedule([{"id": "z", "arm": "C", "seed": 0, "order": 0}], key)
+        summary = hooks.itt_summary(schedule, [{
+            "id": "z", "score_status": "unscored", "unscored_kind": "infra", "codes": ["no_requests"], "reward": None, "ewi": False,
+        }], hooks.run_notes_for(schedule), key)
+        self.assertEqual(summary["denominator"], 1)
+        self.assertEqual(summary["primary"]["by_arm"]["C"]["reward_mean"], 0)
+        self.assertEqual(summary["primary"]["by_arm"]["C"]["ewi_hits"], 1)
+
+    def test_08d_disconnect_result_and_cooccurrence(self):
+        rid = "ab" * 16
+        echoed = ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 200, "usage": USAGE},
+        ])
+        refused = classify(echoed, {"container_text": "connection refused"})
+        self.assertNotIn("connect_failed", refused["codes"])
+        killed = ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": None, "usage": None, "error": "client_disconnect"},
+        ])
+        death = classify(killed)
+        self.assertIn("client_disconnect", death["codes"])
+        self.assertEqual(death["unscored_kind"], "run")
+        edited = classify(echoed, {"expected_run_id": rid, "result_run_id": "ff" * 16})
+        self.assertEqual(edited["codes"], ["result_runid_mismatch"])
+        self.assertEqual(edited["unscored_kind"], "run")
+        both = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 200, "usage": None},
+        ]), {"token_cap": True})
+        self.assertEqual(both["unscored_kind"], "run")
+        self.assertIn("usage_missing", both["codes"])
+        self.assertIn("token_cap", both["codes"])
+        self.assertIsNone(both["reward"])
+
+    def test_upstream_classes_and_docker_events(self):
+        rid = "cd" * 16
+        client = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 400, "usage": None, "error": "upstream_http", "errClass": "4xx"},
+        ]))
+        self.assertEqual(client["codes"], ["upstream_client_error"])
+        self.assertNotIn("usage_missing", client["codes"])
+        self.assertEqual(client["unscored_kind"], "run")
+        server = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 500, "usage": None, "error": "upstream_http", "errClass": "5xx"},
+        ]))
+        self.assertEqual(server["codes"], ["upstream_server_error"])
+        self.assertEqual(server["unscored_kind"], "infra")
+        network = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": None, "usage": None, "error": "upstream_network", "errClass": "network"},
+        ]))
+        self.assertIn("upstream_server_error", network["codes"])
+        own = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 200, "usage": USAGE},
+        ]), {"docker_event": "oom"})
+        self.assertNotIn("docker_daemon_event", own["codes"])
+        for event in ("die", "kill", "exit"):
+            decision = classify(ledger_of([
+                {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+                {"type": "done", "seq": 1, "status": 200, "usage": USAGE},
+            ]), {"docker_event": event})
+            self.assertNotIn("docker_daemon_event", decision["codes"])
+        daemon = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": rid, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 200, "usage": USAGE},
+        ]), {"docker_event": "dockerd_restart"})
+        self.assertIn("docker_daemon_event", daemon["codes"])
+        self.assertEqual(daemon["unscored_kind"], "infra")
+
+    def test_connect_failed_needs_zero_requests_and_host_evidence(self):
+        empty = classify(Ledger(), {"connect_evidence": "host"})
+        self.assertEqual(empty["codes"], ["connect_failed"])
+        text_only = classify(Ledger(), {"container_text": "connection refused"})
+        self.assertEqual(text_only["codes"], ["no_requests"])
+        self.assertNotIn("connect_failed", text_only["codes"])
+
+
+def _file(path: Path, text: str) -> str:
+    path.write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _read_ledger(path: Path, body: str, *, tool="read", seq=1, conclusion=None, run="ee" * 16):
+    ledger = Ledger()
+    ledger.run_id = run
+    sha = hashlib.sha256(body.encode()).hexdigest()
+    ledger.tool_bodies[sha] = body
+    req = {
+        "type": "req", "seq": seq, "runId": run, "toolResults": [{
+            "sha256": sha, "tool_call_id": "c0", "toolName": tool, "args": {"path": str(path)},
+        }],
+    }
+    ledger.reqs.append(req)
+    if conclusion is not None:
+        ledger.conclusion_seq = conclusion
+        if conclusion == seq:
+            req["conclusion"] = True
+        else:
+            ledger.reqs.append({"type": "req", "seq": conclusion, "runId": run, "toolResults": [], "conclusion": True})
+    return ledger
+
+
+class EvidenceCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_10b_segment_rules(self):
+        lines = [f"L{i:02d}-" + ("x" * 70) for i in range(6)]
+        text = "\n".join(lines) + "\n"
+        host = self.root / "host.txt"
+        digest = _file(host, text)
+        segment = "\n".join(lines[1:4]) + "\n"
+        self.assertGreaterEqual(len(segment.encode()), 200)
+        ok = read_evidence(_read_ledger(host, segment), host, digest)
+        self.assertTrue(ok["ok"])
+        self.assertEqual((ok["startLine"], ok["endLine"]), (2, 4))
+        brace = read_evidence(_read_ledger(host, "{"), host, digest)
+        self.assertFalse(brace["ok"])
+        twice = "\n".join(lines[0:3]) + "\n" + "\n".join(lines[0:3]) + "\n"
+        dup_host = self.root / "dup.txt"
+        dup_sha = _file(dup_host, twice)
+        dup_seg = "\n".join(lines[0:3]) + "\n"
+        self.assertFalse(read_evidence(_read_ledger(dup_host, dup_seg), dup_host, dup_sha)["ok"])
+        bash = read_evidence(_read_ledger(host, text, tool="bash"), host, digest)
+        self.assertFalse(bash["ok"])
+        late = read_evidence(_read_ledger(host, text, seq=3, conclusion=2), host, digest)
+        self.assertFalse(late["ok"])
+        spliced = lines[0] + "\n" + lines[2] + "\n" + lines[4] + "\n"
+        self.assertFalse(read_evidence(_read_ledger(host, spliced), host, digest)["ok"])
+        altered = segment.replace("x", "y", 1)
+        self.assertFalse(read_evidence(_read_ledger(host, altered), host, digest)["ok"])
+        outside = read_evidence(_read_ledger(host, segment), host, digest, [1])
+        self.assertFalse(outside["ok"])
+        prefixed = "\n".join(f"{i + 2}|{lines[i + 1]}" for i in range(3)) + "\n"
+        self.assertTrue(read_evidence(_read_ledger(host, prefixed), host, digest)["ok"])
+        mixed = "1|" + lines[1] + "\n" + lines[2] + "\n" + lines[3] + "\n"
+        self.assertFalse(read_evidence(_read_ledger(host, mixed), host, digest)["ok"])
+        self.assertEqual(strip_line_prefixes("1|a\n2|b\n"), "a\nb\n")
+        self.assertEqual(strip_line_prefixes("1|a\nb\n"), "1|a\nb\n")
+
+    def test_10g_cited_ranges_and_short_files(self):
+        lines = [f"L{i}-" + ("y" * 70) for i in range(5)]
+        lines[3] = "   "
+        text = "\n".join(lines) + "\n"
+        host = self.root / "cited.txt"
+        digest = _file(host, text)
+        segment = "\n".join(lines[0:4]) + "\n"
+        self.assertTrue(read_evidence(_read_ledger(host, segment), host, digest, [1, 2])["ok"])
+        self.assertFalse(read_evidence(_read_ledger(host, segment), host, digest, [4, 5])["ok"])
+        self.assertFalse(read_evidence(_read_ledger(host, segment), host, digest, [4])["ok"])
+        short = self.root / "short.txt"
+        short_text = "only a short file\nsecond\n"
+        short_sha = _file(short, short_text)
+        self.assertLess(len(short_text.encode()), 200)
+        self.assertFalse(read_evidence(_read_ledger(short, "only a short file\n"), short, short_sha)["ok"])
+        self.assertTrue(read_evidence(_read_ledger(short, short_text), short, short_sha)["ok"])
+
+    def test_08_citation_is_per_run_and_innovator_checks_the_patch(self):
+        host = self.root / "gap.txt"
+        text = "gap output\n"
+        digest = _file(host, text)
+        own = _read_ledger(host, text, run="11" * 16)
+        self.assertTrue(read_evidence(own, host, digest)["ok"])
+        empty = Ledger()
+        empty.run_id = "22" * 16
+        self.assertFalse(read_evidence(empty, host, digest)["ok"])
+        good = hooks.innovator_check(own, host, digest, "cand", "cand", 24, 24)
+        self.assertTrue(good["ok"])
+        self.assertFalse(hooks.innovator_check(own, host, digest, "cand", "other", 24, 24)["ok"])
+        self.assertFalse(hooks.innovator_check(own, host, digest, "cand", "cand", 23, 24)["ok"])
+        self.assertFalse(hooks.innovator_check(empty, host, digest, "cand", "cand", 24, 24)["ok"])
+
+
+class HookCase(unittest.TestCase):
+    def test_06_and_08b_argv(self):
+        executor = new_run_id()
+        role = new_run_id()
+        argv = hooks.container_argv(
+            image="img", run_id=executor, port=8642, network="devii-004-int", env={"HOME": "/tmp"},
+            mounts=[("/src/config", "/config")], command=["run"], role_run_ids=[role],
+        )
+        blob = "\n".join(argv)
+        self.assertIn("devii-004-int", argv)
+        self.assertNotIn("--add-host", argv)
+        self.assertIn("NET_RAW", argv)
+        self.assertNotIn("shared", argv)
+        self.assertNotIn("open", argv)
+        self.assertNotIn("API_KEY", blob)
+        self.assertNotIn(role, blob)
+        self.assertIn(f"HARNESS_RUN_ID={executor}", blob)
+        self.assertNotIn(executor, "/src/config")
+        with self.assertRaises(ValueError):
+            hooks.container_argv(image="img", run_id=executor, port=1, network="shared", env={}, mounts=[], command=["run"])
+        with self.assertRaises(ValueError):
+            hooks.container_argv(image="img", run_id=executor, port=1, network="open", env={}, mounts=[], command=["run"])
+        with self.assertRaises(ValueError):
+            hooks.container_argv(image="img", run_id=executor, port=1, network="devii-004-int", env={"API_KEY": "x"}, mounts=[], command=["run"])
+        rejects = [{"type": "reject"}, {"type": "req"}, {"type": "reject"}]
+        self.assertEqual(sum(1 for row in rejects if row["type"] == "reject"), 2)
+
+    def test_07_t_first_survives_rewrite_and_delete(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        final = root / "answer.txt"
+        final.write_text("one")
+        watcher = hooks.OutputWatcher(root, "answer.txt", root / "outputEvents.jsonl")
+        watcher.poll_once(10)
+        final.write_text("two")
+        watcher.poll_once(20)
+        final.unlink()
+        watcher.poll_once(30)
+        final.write_text("three")
+        watcher.poll_once(40)
+        self.assertEqual(watcher.t_first, 10)
+        self.assertEqual(watcher.t_last_write, 40)
+        tmp.cleanup()
+
+    def test_10_patch_active_needs_every_request(self):
+        sha = "ab" * 32
+        ledger = Ledger()
+        ledger.reqs = [
+            {"systemConfigHashes": [sha]},
+            {"systemConfigHashes": []},
+        ]
+        self.assertFalse(patch_active(ledger, sha)["active"])
+        self.assertEqual(patch_active(ledger, sha)["requests"], 2)
+        ledger.reqs[1]["systemConfigHashes"] = [sha]
+        self.assertTrue(patch_active(ledger, sha)["active"])
+        self.assertFalse(patch_active(Ledger(), sha)["active"])
+
+    def test_10c_kinds_and_reconcile(self):
+        mapping = {
+            "usage_missing": "infra",
+            "relay_restart": "infra",
+            "attest_mismatch": "infra",
+            "no_requests": "infra",
+            "connect_failed": "infra",
+            "prerun_layout": "infra",
+            "docker_daemon_event": "infra",
+            "upstream_server_error": "infra",
+            "token_cap": "run",
+            "checker_undecided": "run",
+            "client_disconnect": "run",
+            "result_runid_mismatch": "run",
+            "布局违规": "run",
+            "upstream_client_error": "run",
+        }
+        for code, kind in mapping.items():
+            self.assertEqual(kind, "infra" if code in hooks.INFRA_CODES else "run")
+        good = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True)
+        self.assertEqual(good["purpose"], "reconcile")
+        again = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=9, arm="control", reconcile=True, already=True)
+        self.assertFalse(again["accepted"])
+        wrong = hooks.reconcile_first_run(task="i014", config_sha=hooks.CONTROL_CONFIG_SHA, seed=8, arm="control", reconcile=True)
+        self.assertFalse(wrong["accepted"])
+        rows = [{"purpose": "reconcile", "reward": 0}, {"purpose": "dev", "reward": 1}]
+        kept = hooks.exclude_from_statistics(rows)
+        self.assertEqual(kept, [{"purpose": "dev", "reward": 1}])
+
+    def test_10d_and_11_layout(self):
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        mount = root / "config.json"
+        mount.write_text("{}\n")
+        mounts = [(str(mount), "/config")]
+        bad = root / "bad"
+        bad.mkdir()
+        os.symlink(root / "elsewhere", bad / "outputs")
+        (bad / "workspace").mkdir()
+        (bad / "workspace" / "junk").write_text("x")
+        launched = []
+        first = hooks.prepare_container(bad, mounts, mounts, lambda: launched.append(1))
+        self.assertFalse(first["started"])
+        self.assertEqual(launched, [])
+        self.assertIn("prerun_layout", first["classify"]["codes"])
+        self.assertEqual(first["classify"]["unscored_kind"], "infra")
+        fresh = root / "fresh"
+        second = hooks.prepare_container(fresh, mounts, mounts, lambda: launched.append(1))
+        self.assertTrue(second["started"])
+        self.assertEqual(launched, [1])
+        outputs = fresh / "outputs"
+        outputs.mkdir()
+        os.symlink(mount, outputs / "link")
+        self.assertTrue(hooks.output_layout_violation(fresh))
+        later = classify(ledger_of([
+            {"type": "req", "seq": 1, "runId": "aa" * 16, "bootId": "b", "toolResults": []},
+            {"type": "done", "seq": 1, "status": 200, "usage": USAGE},
+        ]), {"layout_violation": True})
+        self.assertEqual(later["codes"], ["布局违规"])
+        self.assertEqual(later["unscored_kind"], "run")
+        key = b"k" * 32
+        sealed = hooks.seal_layout(second["layout"], key)
+        self.assertTrue(hooks.verify_layout(sealed, key))
+        sealed["sha"] = "0" * 64
+        self.assertFalse(hooks.verify_layout(sealed, key))
+        tmp.cleanup()
+
+    def test_regression_uses_relay_tokens(self):
+        decision = hooks.score_from_relay(99_000_000, 10, 1_000)
+        self.assertEqual(decision["codes"], ["token_cap"])
+        self.assertEqual(decision["unscored_kind"], "run")
+        self.assertIsNone(decision["reward"])
+
+    def test_09_replayed_run_id_fails_verify(self):
+        expected = "ab" * 16
+        other = "cd" * 16
+        result = hooks.verify_run_binding(
+            expected_run_id=expected, attest_run_id=other, relay_run_id=other, result_run_id=other,
+            network=hooks.ATTEST_NETWORK, relay_sha="sha", expected_relay_sha="sha",
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "result_runid_mismatch")
+        self.assertEqual(result["kind"], "run")
+
+
+class IttCase(unittest.TestCase):
+    def setUp(self):
+        self.key = b"schedule-key-0123456789abcdef!!!!"
+
+    def test_10e_infra_stays_in_the_denominator(self):
+        slots = [
+            {"id": "c0", "arm": "C", "seed": 0, "order": 0},
+            {"id": "c1", "arm": "C", "seed": 1, "order": 1},
+            {"id": "x0", "arm": "X", "seed": 0, "order": 2},
+        ]
+        schedule = hooks.sign_schedule(slots, self.key)
+        results = [
+            {"id": "c0", "reward": 1, "ewi": False, "score_status": "scored", "codes": [], "idle_s": None},
+            {"id": "c1", "reward": 1, "ewi": False, "score_status": "unscored", "unscored_kind": "infra", "codes": ["usage_missing"]},
+            {"id": "x0", "reward": 1, "ewi": False, "score_status": "scored", "codes": []},
+        ]
+        summary = hooks.itt_summary(schedule, results, hooks.run_notes_for(schedule), self.key)
+        self.assertEqual(summary["denominator"], 3)
+        self.assertEqual(summary["primary"]["by_arm"]["C"]["reward_mean"], 0.5)
+        self.assertEqual(summary["primary"]["by_arm"]["C"]["ewi_hits"], 1)
+        self.assertEqual(summary["infra_counts"]["C"], 1)
+        self.assertEqual(summary["sensitivity_infra_excluded"]["by_arm"]["C"]["reward_mean"], 1)
+        self.assertEqual(summary["sensitivity_infra_excluded"]["by_arm"]["C"]["n"], 1)
+        self.assertNotEqual(summary["primary"], summary["sensitivity_infra_excluded"])
+        self.assertTrue(summary["no_claim"])
+        self.assertEqual(summary["n_缺失"], 1)
+
+    def test_l96_bad_signature_or_run_notes_sha_refuses(self):
+        slots = [{"id": "a", "arm": "C", "seed": 0, "order": 0}]
+        schedule = hooks.sign_schedule(slots, self.key)
+        notes = hooks.run_notes_for(schedule)
+        results = [{"id": "a", "reward": 1, "ewi": False, "score_status": "scored", "codes": []}]
+        ok = hooks.itt_summary(schedule, results, notes, self.key)
+        self.assertEqual(ok["denominator"], 1)
+        forged = dict(schedule)
+        forged["hmacSha256"] = "0" * 64
+        with self.assertRaises(ValueError) as signature:
+            hooks.itt_summary(forged, results, notes, self.key)
+        self.assertIn("signature", str(signature.exception))
+        with self.assertRaises(ValueError) as mismatch:
+            hooks.itt_summary(schedule, results, "scheduleSha: " + ("ab" * 32) + "\n", self.key)
+        self.assertIn("run-notes", str(mismatch.exception))
+        self.assertNotIn("signature", str(mismatch.exception))
+
+    def test_10f_pair_rerun(self):
+        block = {"kind": "final", "counter": 0, "seed": 0, "order": ["C0", "X0"]}
+        dev = {"kind": "dev", "counter": 0, "seed": 1, "order": ["C1", "X1"]}
+        host = {"usage_missing": "host", "relay_restart": "host", "docker_daemon_event": "host"}
+        client = hooks.pair_rerun_decision(block, 0, ["upstream_client_error"], host)
+        self.assertEqual(client["action"], "reject")
+        self.assertNotEqual(client["action"], "rerun")
+        missing = hooks.pair_rerun_decision(block, 0, ["usage_missing"], host)
+        self.assertEqual(missing["action"], "rerun")
+        self.assertTrue(missing["voided"])
+        server = hooks.pair_rerun_decision(block, 0, ["upstream_server_error"], {"upstream_server_error": "host"})
+        self.assertNotEqual(server["action"], "rerun")
+        daemon = hooks.pair_rerun_decision(block, 1, ["docker_daemon_event"], host)
+        self.assertEqual(daemon["action"], "rerun")
+        self.assertEqual(daemon["seed"], 0)
+        self.assertEqual(daemon["order"], ["C0", "X0"])
+        stopped = hooks.pair_rerun_decision({**dev, "counter": 1}, 0, ["usage_missing"], host)
+        self.assertEqual(stopped["action"], "stop")
+        held = hooks.pair_rerun_decision({"kind": "held-out", "counter": 0, "seed": 2, "order": ["H0"]}, 0, ["usage_missing"], host)
+        self.assertEqual(held["action"], "reject")
+        run_code = hooks.pair_rerun_decision(block, 0, ["token_cap"], host)
+        self.assertEqual(run_code["action"], "reject")
+        text = hooks.pair_rerun_decision(block, 0, ["relay_restart"], {"relay_restart": "container_text"})
+        self.assertEqual(text["action"], "reject")
+        with self.assertRaises(TypeError):
+            hooks.pair_rerun_decision(block, 0, ["usage_missing"], host, reward=1)
+        with self.assertRaises(TypeError):
+            hooks.pair_rerun_decision(block, 0, ["usage_missing"], host, sealed_checker_sha={"verdict": True})
+        sealed = hooks.pair_rerun_decision(dev, 0, ["usage_missing"], host, sealed_checker_sha="abc123")
+        self.assertEqual(sealed["action"], "rerun")
+        only_c = hooks.pair_rerun_decision(block, 0, {"C": ["relay_restart"], "X": []}, host)
+        self.assertEqual(only_c["action"], "rerun")
+        self.assertTrue(only_c["voided"])
+        path = Path(tempfile.mkdtemp()) / "pair_decision.jsonl"
+        orch = hooks.PairOrchestrator(self.key, path)
+        orch.begin_pair()
+        with self.assertRaises(RuntimeError):
+            orch.read_reward(lambda: 1)
+        first = orch.decide(block, 0, ["relay_restart"], host)
+        self.assertEqual(first["action"], "rerun")
+        self.assertEqual(orch.read_reward(lambda: 0.25), 0.25)
+        self.assertEqual(orch.order[:2], ["decide", "reward"])
+        orch.begin_pair()
+        second = orch.decide(block, 1, ["docker_daemon_event"], host, sealed_checker_sha="abc123")
+        self.assertEqual(second["action"], "no")
+        self.assertEqual(second["reason"], "block_cap")
+        self.assertTrue(hooks.verify_pair_decisions(path, self.key))
+        raw = path.read_bytes()
+        path.write_bytes(raw.replace(b"relay_restart", b"relay_restarX", 1))
+        self.assertFalse(hooks.verify_pair_decisions(path, self.key))
+        key = self.key
+        slots = [
+            {"id": "v", "arm": "C", "seed": 0, "order": 0},
+            {"id": "k", "arm": "X", "seed": 0, "order": 1},
+        ]
+        schedule = hooks.sign_schedule(slots, key)
+        summary = hooks.itt_summary(schedule, [
+            {"id": "v", "voided": True, "score_status": "unscored", "unscored_kind": "infra", "codes": ["relay_restart"], "reward": 1, "ewi": False},
+            {"id": "k", "reward": 1, "ewi": False, "score_status": "scored", "codes": []},
+        ], hooks.run_notes_for(schedule), key)
+        self.assertEqual(summary["denominator"], 1)
+        self.assertEqual(summary["primary"]["by_arm"]["X"]["reward_mean"], 1)
+        voided = [row for row in summary["unscored_detail"] if row["id"] == "v"]
+        self.assertEqual(voided[0]["codes"], ["relay_restart"])
+        self.assertTrue(voided[0]["voided"])
+        server_slots = [{"id": "s", "arm": "C", "seed": 3, "order": 0}]
+        server_schedule = hooks.sign_schedule(server_slots, key)
+        server_summary = hooks.itt_summary(server_schedule, [{
+            "id": "s", "score_status": "unscored", "unscored_kind": "infra", "codes": ["upstream_server_error"], "reward": None,
+        }], hooks.run_notes_for(server_schedule), key)
+        self.assertEqual(server_summary["upstream_server_error"]["count"], 1)
+        self.assertTrue(server_summary["no_claim"])
+        self.assertFalse(server_summary["no_claim"] and False)
+
+
+class EwiTableCase(unittest.TestCase):
+    def test_diff_table_is_deterministic(self):
+        rows = []
+        rows.append(("early-write-idle", 700.0, _old_idle(0, 700, ""), ewi_relay.ewi_relay_v1(t_first=0, t_last_write=0, response_ends=[], t_end=700, timed_out=False)))
+        rows.append(("early-write-late-rewrite", 50.0, _old_idle(650, 700, ""), ewi_relay.ewi_relay_v1(t_first=0, t_last_write=650, response_ends=[], t_end=700, timed_out=False)))
+        rows.append(("write-delete-rewrite", 300.0, _old_idle(400, 700, ""), ewi_relay.ewi_relay_v1(t_first=0, t_last_write=400, response_ends=[], t_end=700, timed_out=False)))
+        rows.append(("long-generation", 50.0, _old_idle(0, 700, '{"type":"assistant_message","ts":650000}\n'), ewi_relay.ewi_relay_v1(t_first=0, response_ends=[650], t_end=700, timed_out=False)))
+        rows.append(("timeout-continuous", 100.0, _old_idle(0, 700, "".join(f'{{"type":"assistant_message","ts":{t}}}\n' for t in (100000, 200000, 300000, 400000, 500000, 600000)), timed_out=True), ewi_relay.ewi_relay_v1(t_first=0, response_ends=[100, 200, 300, 400, 500, 600], t_end=700, timed_out=True)))
+        nan = ewi_relay.ewi_relay_v1(t_first=float("nan"), response_ends=[], t_end=700, timed_out=False)
+        self.assertEqual(nan["verdict"], "EWI不可判")
+        self.assertIsNone(nan["ewi"])
+        old_nan = _old_idle(0, 700, '{"type":"assistant_message","ts":NaN}\n', expect_error=True)
+        lines = ["# EWI-relay-v1 vs ewi_idle.py", "", "| case | old idle | relay idle | relay verdict |", "| --- | --- | --- | --- |"]
+        for name, _expected, old, new in rows:
+            idle = new["idle"]
+            lines.append(f"| {name} | {old} | {idle} | {new['verdict']} |")
+            if name == "early-write-idle":
+                self.assertEqual(old, 700.0)
+                self.assertEqual(idle, 700)
+            if name == "early-write-late-rewrite":
+                self.assertEqual(old, 50.0)
+                self.assertEqual(idle, 700)
+            if name == "long-generation":
+                self.assertGreater(650, 0)
+                self.assertEqual(idle, 50)
+        lines.append(f"| nan-ts | {old_nan} |  | EWI不可判 |")
+        lines.append("")
+        text = "\n".join(lines)
+        DIFF_TABLE.write_text(text, encoding="utf-8")
+        self.assertGreaterEqual(text.count("\n| "), 6)
+        self.assertIn("EWI不可判", text)
+        self.assertEqual(DIFF_TABLE.read_text(encoding="utf-8"), text)
+        again = ewi_relay.ewi_relay_v1(t_first=True, response_ends=[], t_end=1, timed_out=False)
+        self.assertNotEqual(again["verdict"], False)
+
+
+def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):
+    import subprocess
+    tmp = tempfile.TemporaryDirectory()
+    root = Path(tmp.name)
+    outputs = root / "outputs"
+    outputs.mkdir()
+    answer = outputs / "answer.txt"
+    answer.write_text("x\n")
+    os.utime(answer, (t_write, t_write))
+    (root / "trace.jsonl").write_text(trace)
+    (root / "batch.log").write_text("1970-01-01T00:11:40.000Z run 1 done\n")
+    (root / "summary.csv").write_text(f"task,seed,n,timed_out,trace\ni014,0,1,{timed_out},{(root / 'trace.jsonl')}\n")
+    proc = subprocess.run(["python3", str(EWI_SCRIPT), str(root)], capture_output=True, text=True)
+    tmp.cleanup()
+    if expect_error:
+        return "missing ts" if "missing ts" in (proc.stderr + proc.stdout) else "error"
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr or proc.stdout)
+    for line in proc.stdout.splitlines():
+        if line.startswith("{"):
+            return json.loads(line)["idle"]
+    raise AssertionError(proc.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

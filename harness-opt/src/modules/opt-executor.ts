@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { candidateHashFragment } from "./activation";
 import { writeHostAttestation, type AttestRunMeta } from "./attestation";
 
@@ -9,7 +10,7 @@ export interface OptTask {
   readonly id: string;
   readonly path: string;
   readonly split: "dev" | "held-out";
-  readonly network: "gateway-only" | "shared";
+  readonly network: "devii-004-int";
   readonly tokenW: number;
 }
 
@@ -27,15 +28,19 @@ export interface OptRunRequest {
   readonly attestDir: string;
   /** Host harness file mounted over the image harness. Optional unless `{harness}` is used. */
   readonly harnessPath?: string;
-  /** Host-allocated id. The wrapper copies it into `run.runId`. */
+  /** Host-allocated id. The wrapper copies it into `run.runId`. 32 hex, not a path hash. */
   readonly runId?: string;
+  /** One-time nonce bound into the attestation. */
+  readonly nonce?: string;
+  /** Host directory for the relay log of this run. Outside every mount. */
+  readonly relayLogRoot?: string;
   readonly model: string;
   readonly tokenCap: number;
 }
 
-/** Stable id for the host-assigned run directory. The sandbox does not choose it. */
-export function hostRunId(runDir: string): string {
-  return createHash("sha256").update(resolve(runDir)).digest("hex");
+/** 32 hex characters from 16 random bytes. Not derived from the run directory. */
+export function hostRunId(): string {
+  return randomBytes(16).toString("hex");
 }
 
 export interface OptRunObservation {
@@ -82,6 +87,8 @@ const PLACEHOLDERS = [
   "config",
   "runDir",
   "runId",
+  "nonce",
+  "relayLog",
   "attestDir",
   "harness",
   "model",
@@ -107,6 +114,9 @@ export function renderExecutorCommand(
   }
   if (text.includes("{attestKey}") || text.includes("HARNESS_ATTEST_KEY_FILE")) {
     throw new Error("executor command must not receive the attest key path");
+  }
+  if (request.task.network !== "devii-004-int") {
+    throw new Error("executor network must be devii-004-int");
   }
   const namesTask = text.includes("{task}") || text.includes("{taskPath}");
   if (!namesTask || !text.includes("{runDir}") || !text.includes("{attestDir}")) {
@@ -230,13 +240,18 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
       timestamp: 0,
     },
   })}\n`);
+  const runId = request.runId && request.runId.trim() !== "" ? request.runId : hostRunId();
   writeFileSync(join(request.runDir, "result.json"), `${JSON.stringify({
     reward: timing.reward,
     tokens: timing.tokens,
     wall_s: timing.wallS,
     timed_out: timing.timedOut,
     score_status: "scored",
+    runId,
   })}\n`);
+  if (request.relayLogRoot) {
+    plantExecutorRelay(join(request.relayLogRoot, runId, "relay.jsonl"), runId, candidateHashFragment(hash));
+  }
   if (!attest) return;
   const runPath = resolve(request.runDir);
   const meta: AttestRunMeta = {
@@ -247,7 +262,8 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     tokens: timing.tokens,
     exit: 0,
     runDir: runPath,
-    runId: request.runId && request.runId.trim() !== "" ? request.runId : hostRunId(runPath),
+    runId,
+    ...(request.nonce ? { nonce: request.nonce } : {}),
     runPath,
     at: attest.at ?? "2026-10-21T00:00:00+09:00",
   };
@@ -322,7 +338,15 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!request.runId || request.runId.trim() === "") throw new Error("executor command needs a host run id for {runId}");
     return request.runId;
   }
-  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId">, string> = {
+  if (name === "nonce") {
+    if (!request.nonce || request.nonce.trim() === "") throw new Error("executor command needs a nonce for {nonce}");
+    return request.nonce;
+  }
+  if (name === "relayLog") {
+    if (!request.relayLogRoot || !request.runId) throw new Error("executor command needs a relay log for {relayLog}");
+    return join(request.relayLogRoot, request.runId, "relay.jsonl");
+  }
+  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId" | "nonce" | "relayLog">, string> = {
     task: request.task.id,
     taskPath: request.task.path,
     seed: String(request.seed),
@@ -348,6 +372,12 @@ function flatten(value: Record<string, unknown>, prefix = ""): Record<string, un
     }
   }
   return out;
+}
+
+function plantExecutorRelay(logPath: string, runId: string, systemText: string): void {
+  const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+  const proc = spawnSync("python3", [script, "plant-request", "--log", logPath, "--run-id", runId, "--system", systemText], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "relay plant failed").trim());
 }
 
 function redact(text: string, env: NodeJS.ProcessEnv): string {

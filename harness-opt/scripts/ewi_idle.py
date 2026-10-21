@@ -4,19 +4,34 @@ R=sys.argv[1]; done={}
 for l in open(f'{R}/batch.log'):
     m=re.match(r'(\S+) run (\d+) done',l)
     if m: done[int(m.group(2))]=D.datetime.fromisoformat(m.group(1)).timestamp()
+def ts_of(rec):
+    # Same failure as a missing key: bool, NaN, ±Inf, str, null, list, object.
+    if not isinstance(rec, dict):
+        raise TypeError('trace line is not an object')
+    if rec.get('type')!='assistant_message':
+        return None
+    if 'ts' not in rec:
+        raise KeyError('missing ts')
+    ts=rec['ts']
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts!=ts or ts==float('inf') or ts==float('-inf'):
+        raise KeyError('missing ts')
+    return ts/1000
 def am_ts(tr):
     out=[]
+    # open() uses universal newlines, so a lone CR splits the same way Python does.
     for x in open(tr):
-        rec=json.loads(x)
-        if rec.get('type')!='assistant_message':
-            continue
-        if 'ts' not in rec:
-            raise KeyError('ts')
-        ts=rec['ts']
-        # bool is a subclass of int. Non-finite and non-number values are a missing ts.
-        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts!=ts or ts==float('inf') or ts==float('-inf'):
-            raise KeyError('ts')
-        out.append(ts/1000)
+        try:
+            rec=json.loads(x)
+        except json.JSONDecodeError:
+            raise SystemExit('trace line is not JSON')
+        try:
+            stamp=ts_of(rec)
+        except TypeError:
+            raise SystemExit('trace line is not an object')
+        except KeyError:
+            raise SystemExit('assistant_message is missing ts')
+        if stamp is not None:
+            out.append(stamp)
     return out
 out=[]
 for i,r in enumerate(csv.DictReader(open(f'{R}/summary.csv')),2):
