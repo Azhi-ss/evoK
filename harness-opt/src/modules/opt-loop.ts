@@ -230,7 +230,11 @@ export interface OptRoles {
 
 export interface OptLoopOptions {
   readonly out: string;
-  /** Ceiling at or below the signed maxRounds. Omitted means that signed cap. */
+  /**
+   * Fresh loop: ceiling at or below the signed maxRounds. Omitted means that cap.
+   * With `resumeFrom`: how many further rounds to run. Omitted means one more round.
+   * The campaign still stops at 10 rounds.
+   */
   readonly rounds?: number;
   readonly ewiThresholdSec?: number;
   readonly model?: string;
@@ -267,10 +271,16 @@ export interface OptLoopOptions {
   readonly taskDataRoot?: string;
   /** Toml mirror `once` checks when the data root has no `task.toml`. Default is `TOML_MIRROR` in that script. */
   readonly taskMirrorRoot?: string;
-  /** Round-0 trace path. Required. A missing file is signed as a declared identity. */
-  readonly round0TracePath: string;
-  /** Round-0 sha256. Required. A present file must match this pin. */
-  readonly round0TraceSha: string;
+  /** Round-0 trace path. Required unless `resumeFrom` is set. A missing file is signed as a declared identity. */
+  readonly round0TracePath?: string;
+  /** Round-0 sha256. Required unless `resumeFrom` is set. A present file must match this pin. */
+  readonly round0TraceSha?: string;
+  /**
+   * Continue in this loop directory. Round N+1 reads that directory's last
+   * real-run trace, checks its sha against the signed attestation, and keeps
+   * the baseline from the last accepted round.
+   */
+  readonly resumeFrom?: string;
   /** Flip one byte of the host copy after it is signed. */
   readonly round0Tamper?: boolean;
   /**
@@ -574,19 +584,272 @@ function round0IsFile(path: string): boolean {
   }
 }
 
+const CAMPAIGN_FILE = "campaign.json";
+
+interface CampaignDisk {
+  completedRounds: number;
+  readOnlyTokens: number;
+  readOnlyWallS: number;
+  realRunWallS: number;
+  baselineReward: number | null;
+  consecutiveNoAccept: number;
+  previousReview: ReviewNote | null;
+  accepted: AcceptedCandidate | null;
+  gapRound: number | null;
+}
+
+interface ResumeState {
+  readonly nextRound: number;
+  readonly completedRounds: number;
+  readonly readOnlyTokens: number;
+  readonly readOnlyWallS: number;
+  readonly realRunWallS: number;
+  readonly baselineReward: number | null;
+  readonly baselineText: string;
+  readonly gapPath: string;
+  readonly gapSha: string;
+  readonly gapRound: number;
+  readonly consecutiveNoAccept: number;
+  readonly previousReview: ReviewNote | null;
+  readonly accepted: AcceptedCandidate | null;
+}
+
+class ResumeTraceError extends Error {
+  constructor() {
+    super("resume trace sha mismatch");
+    this.name = "ResumeTraceError";
+  }
+}
+
+function roundNumbers(out: string): number[] {
+  if (!existsSync(out)) return [];
+  const nums: number[] = [];
+  for (const name of readdirSync(out)) {
+    const match = /^round(\d+)$/.exec(name);
+    if (match?.[1]) nums.push(Number(match[1]));
+  }
+  return nums.sort((left, right) => left - right);
+}
+
+function candidateRunDir(out: string, round: number, taskId: string): string {
+  return join(out, `round${round}`, "runs", taskId, "seed0", "candidate");
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    const linked = lstatSync(path);
+    return linked.isFile() && !linked.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function readCampaign(out: string): CampaignDisk | null {
+  const file = join(out, CAMPAIGN_FILE);
+  if (!existsSync(file)) return null;
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<CampaignDisk>;
+  if (typeof parsed.completedRounds !== "number") return null;
+  return {
+    completedRounds: parsed.completedRounds,
+    readOnlyTokens: typeof parsed.readOnlyTokens === "number" ? parsed.readOnlyTokens : 0,
+    readOnlyWallS: typeof parsed.readOnlyWallS === "number" ? parsed.readOnlyWallS : 0,
+    realRunWallS: typeof parsed.realRunWallS === "number" ? parsed.realRunWallS : 0,
+    baselineReward: typeof parsed.baselineReward === "number" ? parsed.baselineReward : null,
+    consecutiveNoAccept: typeof parsed.consecutiveNoAccept === "number" ? parsed.consecutiveNoAccept : 0,
+    previousReview: parsed.previousReview && typeof parsed.previousReview.reason === "string"
+      ? { accept: parsed.previousReview.accept === true, reason: parsed.previousReview.reason }
+      : null,
+    accepted: parsed.accepted && typeof parsed.accepted.round === "number" ? parsed.accepted : null,
+    gapRound: typeof parsed.gapRound === "number" ? parsed.gapRound : null,
+  };
+}
+
+function priorRoundSummaries(out: string, nextRound: number): OptLoopResult["rounds"][number][] {
+  const file = join(out, "loop-result.json");
+  if (!existsSync(file)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { rounds?: OptLoopResult["rounds"] };
+    if (!Array.isArray(parsed.rounds)) return [];
+    const byRound = new Map<number, OptLoopResult["rounds"][number]>();
+    for (const round of parsed.rounds) {
+      if (round && typeof round.round === "number" && round.round < nextRound) byRound.set(round.round, round);
+    }
+    return [...byRound.values()].sort((left, right) => left.round - right.round);
+  } catch {
+    return [];
+  }
+}
+
+function latestRunRound(out: string, taskId: string, rounds: readonly number[]): number | null {
+  for (let index = rounds.length - 1; index >= 0; index -= 1) {
+    const round = rounds[index];
+    if (round === undefined) continue;
+    if (existsSync(join(candidateRunDir(out, round, taskId), "result.json"))) return round;
+  }
+  return null;
+}
+
+function lastAcceptedRound(out: string): number | null {
+  const file = join(out, "loop-result.json");
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+      accepted?: { round?: unknown } | null;
+      rounds?: { round?: unknown; accepted?: unknown }[];
+    };
+    if (parsed.accepted && typeof parsed.accepted.round === "number") return parsed.accepted.round;
+    const rounds = parsed.rounds ?? [];
+    for (let index = rounds.length - 1; index >= 0; index -= 1) {
+      const round = rounds[index];
+      if (round?.accepted === true && typeof round.round === "number") return round.round;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Previous real-run trace. `task-copy/trace.jsonl` must match the signed attestation. */
+function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string, round: number): { readonly path: string; readonly sha256: string } {
+  const runDir = candidateRunDir(out, round, taskId);
+  const attestDir = join(attestRoot, `round${round}`, taskId, "seed0", "candidate");
+  const configPath = join(out, `round${round}`, "candidate", "config.json");
+  const verified = verifyHostAttestation({
+    attestDir,
+    key,
+    configPath,
+    harnessPath,
+    runDir,
+  });
+  if (!verified.ok) {
+    if (verified.reasons.includes("trace")) throw new ResumeTraceError();
+    throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
+  }
+  if (!verified.traceSha) throw new ResumeTraceError();
+  const copy = join(runDir, "task-copy", "trace.jsonl");
+  if (isRegularFile(copy)) {
+    if (sha256(readFileSync(copy)) !== verified.traceSha) throw new ResumeTraceError();
+    return { path: copy, sha256: verified.traceSha };
+  }
+  if (!verified.tracePath || !isRegularFile(verified.tracePath) || sha256(readFileSync(verified.tracePath)) !== verified.traceSha) {
+    throw new ResumeTraceError();
+  }
+  return { path: verified.tracePath, sha256: verified.traceSha };
+}
+
+function relayIdsUnder(out: string): string[] {
+  const ids = new Set<string>();
+  const rounds = roundNumbers(out);
+  for (const round of rounds) {
+    const sessions = join(out, `round${round}`, "sessions");
+    if (existsSync(sessions)) {
+      for (const name of readdirSync(sessions)) {
+        if (!name.endsWith(".spawn.json")) continue;
+        try {
+          const parsed = JSON.parse(readFileSync(join(sessions, name), "utf8")) as { baseUrl?: unknown };
+          const match = typeof parsed.baseUrl === "string" ? /\/r\/([0-9a-f]{32})\/v1$/.exec(parsed.baseUrl) : null;
+          if (match?.[1]) ids.add(match[1]);
+        } catch {
+          // A torn spawn record is not a token source.
+        }
+      }
+    }
+    const runs = join(out, `round${round}`, "runs");
+    if (!existsSync(runs)) continue;
+    const stack = [runs];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      if (!dir) continue;
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        let linked;
+        try {
+          linked = lstatSync(path);
+        } catch {
+          continue;
+        }
+        if (linked.isSymbolicLink()) continue;
+        if (linked.isDirectory()) stack.push(path);
+        else if (name === "result.json") {
+          try {
+            const parsed = JSON.parse(readFileSync(path, "utf8")) as { runId?: unknown };
+            if (typeof parsed.runId === "string" && parsed.runId !== "") ids.add(parsed.runId);
+          } catch {
+            // Ignore an unreadable result.
+          }
+        }
+      }
+    }
+  }
+  return [...ids];
+}
+
+function loadResume(options: OptLoopOptions, key: Buffer, relayRoot: string): ResumeState {
+  const from = options.resumeFrom;
+  if (!from) throw new Error("resume directory is missing");
+  if (resolve(from) !== resolve(options.out)) throw new Error("resume writes into the previous loop directory");
+  const task = requireLoopTask(options.task);
+  const rounds = roundNumbers(options.out);
+  if (rounds.length === 0) throw new Error("resume found no completed round");
+  const disk = readCampaign(options.out);
+  const completedRounds = disk?.completedRounds ?? rounds[rounds.length - 1] ?? 0;
+  if (completedRounds < 1) throw new Error("resume found no completed round");
+  const gapRound = disk?.gapRound ?? latestRunRound(options.out, task.id, rounds);
+  if (gapRound === null) throw new Error("resume found no real-run trace");
+  const gap = attestedGapTrace(options.out, options.attestRoot, key, options.harnessPath, task.id, gapRound);
+  const baselinePath = join(options.out, "baseline", "config.json");
+  let baselineText: string;
+  let baselineReward = disk?.baselineReward ?? null;
+  if (existsSync(baselinePath) && disk) {
+    baselineText = readFileSync(baselinePath, "utf8");
+  } else {
+    const acceptedRound = disk?.accepted?.round ?? lastAcceptedRound(options.out);
+    const acceptedConfig = acceptedRound === null ? "" : join(options.out, `round${acceptedRound}`, "candidate", "config.json");
+    if (acceptedConfig !== "" && existsSync(acceptedConfig)) {
+      baselineText = readFileSync(acceptedConfig, "utf8");
+      if (baselineReward === null) {
+        const verified = verifyHostAttestation({
+          attestDir: join(options.attestRoot, `round${acceptedRound}`, task.id, "seed0", "candidate"),
+          key,
+          configPath: acceptedConfig,
+          harnessPath: options.harnessPath,
+          runDir: candidateRunDir(options.out, acceptedRound ?? 0, task.id),
+        });
+        if (verified.ok && typeof verified.reward === "number") baselineReward = verified.reward;
+      }
+    } else {
+      const controlPath = join(options.out, "control", "config.json");
+      if (!existsSync(controlPath)) throw new Error("resume baseline config is missing");
+      baselineText = readFileSync(controlPath, "utf8");
+    }
+  }
+  const loggedTokens = relayIdsUnder(options.out).reduce((sum, id) => sum + weighedLogTokens(join(relayRoot, id, "relay.jsonl")), 0);
+  return {
+    nextRound: completedRounds + 1,
+    completedRounds,
+    readOnlyTokens: disk?.readOnlyTokens ?? loggedTokens,
+    readOnlyWallS: disk?.readOnlyWallS ?? 0,
+    realRunWallS: disk?.realRunWallS ?? 0,
+    baselineReward,
+    baselineText,
+    gapPath: gap.path,
+    gapSha: gap.sha256,
+    gapRound,
+    consecutiveNoAccept: disk?.consecutiveNoAccept ?? 0,
+    previousReview: disk?.previousReview ?? null,
+    accepted: disk?.accepted ?? null,
+  };
+}
+
 /** Gap, six innovators, critic, ranker, one seed-0 run, reviewer. No model call lives in this function. */
 export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult> {
-  const rounds = Math.min(options.rounds ?? LOOP_CAPS.maxRounds, LOOP_CAPS.maxRounds);
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
   const model = options.model ?? OPT_MODEL;
-  if (!Number.isInteger(rounds) || rounds < 1) throw new Error("rounds must be a positive integer");
   assertHarnessCoversKnobs(options.harnessPath);
   const task = requireLoopTask(options.task);
-  const round0Pin = requireRound0(options.round0TracePath, options.round0TraceSha);
+  const resumeRequested = options.resumeFrom !== undefined && options.resumeFrom.trim() !== "";
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
-  const firstRun = join(options.out, "round1", "runs", task.id, "seed0", "candidate");
-  if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
   const officialTask = resolveOfficialTask(task.path, options.taskDataRoot ?? onceAssignedPath("DATA"), options.taskMirrorRoot ?? onceAssignedPath("TOML_MIRROR"));
   const officialTimeoutSec = officialTask.timeoutSec;
@@ -601,42 +864,73 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     watcher: options.resultWatcher ?? absentResultWatcher(),
   };
   mkdirSync(options.out, { recursive: true });
-  const round0Copy = {
-    srcPath: round0Pin.path,
-    srcSha256: round0Pin.sha,
-    ...(round0IsFile(round0Pin.path)
-      ? { hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
-      : {}),
-  };
-  const preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
-  writeJson(join(options.out, "pre-round1.json"), preRound1);
-  const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
+  const relayRoot = loopRelayRoot(options, env);
+  const resume = resumeRequested ? loadResume(options, attestKey, relayRoot) : null;
+  const additional = Math.min(options.rounds ?? (resume ? 1 : LOOP_CAPS.maxRounds), LOOP_CAPS.maxRounds);
+  if (!Number.isInteger(additional) || additional < 1) throw new Error("rounds must be a positive integer");
+  const startRound = resume?.nextRound ?? 1;
+  const lastRound = Math.min(startRound + additional - 1, LOOP_CAPS.maxRounds);
+  if (!resume && existsSync(join(options.out, "round1", "runs", task.id, "seed0", "candidate", "result.json"))) {
+    throw new Error("run dir already exists");
+  }
+  if (resume && existsSync(join(candidateRunDir(options.out, startRound, task.id), "result.json"))) {
+    throw new Error("run dir already exists");
+  }
+  const round0Pin = resume ? null : requireRound0(options.round0TracePath, options.round0TraceSha);
+  let preRound1: Record<string, unknown>;
   let round0: { readonly hostCopyPath: string; readonly srcSha256: string } | null = null;
-  if (signedRound0 && typeof signedRound0.hostCopyPath === "string" && signedRound0.hostCopyPath !== "" && typeof signedRound0.srcSha256 === "string") {
-    round0 = { hostCopyPath: signedRound0.hostCopyPath, srcSha256: signedRound0.srcSha256 };
-    if (options.round0Tamper) {
-      const bytes = readFileSync(round0.hostCopyPath);
-      const flipped = Buffer.from(bytes);
-      flipped[0] = flipped[0] === 0 ? 1 : 0;
-      writeFileSync(round0.hostCopyPath, flipped);
+  if (resume) {
+    const signed = join(options.out, "pre-round1.json");
+    if (!existsSync(signed)) throw new Error("resume needs pre-round1.json");
+    preRound1 = JSON.parse(readFileSync(signed, "utf8")) as Record<string, unknown>;
+  } else if (round0Pin) {
+    const round0Copy = {
+      srcPath: round0Pin.path,
+      srcSha256: round0Pin.sha,
+      ...(round0IsFile(round0Pin.path)
+        ? { hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
+        : {}),
+    };
+    preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
+    writeJson(join(options.out, "pre-round1.json"), preRound1);
+    const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
+    if (signedRound0 && typeof signedRound0.hostCopyPath === "string" && signedRound0.hostCopyPath !== "" && typeof signedRound0.srcSha256 === "string") {
+      round0 = { hostCopyPath: signedRound0.hostCopyPath, srcSha256: signedRound0.srcSha256 };
+      if (options.round0Tamper) {
+        const bytes = readFileSync(round0.hostCopyPath);
+        const flipped = Buffer.from(bytes);
+        flipped[0] = flipped[0] === 0 ? 1 : 0;
+        writeFileSync(round0.hostCopyPath, flipped);
+      }
     }
+  } else {
+    throw new Error("round-0 trace path is required");
   }
 
-  const controlPath = join(options.out, "control", "config.json");
-  const controlBytes = options.controlConfigPath ? readFileSync(options.controlConfigPath) : Buffer.from(CONTROL_CONFIG_TEXT);
-  writeText(controlPath, controlBytes.toString("utf8"));
-  const control = JSON.parse(controlBytes.toString("utf8")) as ConfigFile;
-  const controlSha = sha256File(controlPath);
-  const loadedControl = loadControlAttests(options.controlAttests, controlPath, attestKey, options.harnessPath);
-  let traceHints: TraceHint[] = loadedControl.hints;
-  let baselineReward: number | null = loadedControl.reward;
+  const originalControlPath = join(options.out, "control", "config.json");
+  const baselinePath = join(options.out, "baseline", "config.json");
+  if (!resume) {
+    const controlBytes = options.controlConfigPath ? readFileSync(options.controlConfigPath) : Buffer.from(CONTROL_CONFIG_TEXT);
+    writeText(originalControlPath, controlBytes.toString("utf8"));
+    writeText(baselinePath, controlBytes.toString("utf8"));
+  } else {
+    writeText(baselinePath, resume.baselineText);
+  }
+  let control = JSON.parse(readFileSync(baselinePath, "utf8")) as ConfigFile;
+  let controlSha = sha256File(baselinePath);
+  const loadedControl = resume ? null : loadControlAttests(options.controlAttests, originalControlPath, attestKey, options.harnessPath);
+  let traceHints: TraceHint[] = resume
+    ? [{ file: resume.gapPath, line: 1, sha256: resume.gapSha }]
+    : loadedControl?.hints ?? [];
+  let baselineReward: number | null = resume ? resume.baselineReward : loadedControl?.reward ?? null;
+  let latestGapRound: number | null = resume?.gapRound ?? null;
 
   const tried: string[] = [];
-  let accepted: AcceptedCandidate | null = null;
-  let previousReview: ReviewNote | null = null;
+  let accepted: AcceptedCandidate | null = resume?.accepted ?? null;
+  let previousReview: ReviewNote | null = resume?.previousReview ?? null;
   let previousReviewSession: string | null = null;
   let previousReviewSha: string | null = null;
-  const roundSummaries: OptLoopResult["rounds"][number][] = [];
+  const roundSummaries: OptLoopResult["rounds"][number][] = resume ? priorRoundSummaries(options.out, startRound) : [];
   let stopReason: string | null = null;
   let failedRole: RoleFailureInfo | undefined;
   let faultRounds = 0;
@@ -646,22 +940,27 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   };
   let reviewerRejectRounds = 0;
   const noWinnerRounds: { round: number; reason: string }[] = [];
-  let consecutiveNoAccept = 0;
-  let realRunWallS = 0;
-  let readOnlyWallS = 0;
+  let consecutiveNoAccept = resume?.consecutiveNoAccept ?? 0;
+  let completedRounds = resume?.completedRounds ?? 0;
+  let realRunWallS = resume?.realRunWallS ?? 0;
+  let readOnlyWallS = resume?.readOnlyWallS ?? 0;
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
-  const relayRoot = loopRelayRoot(options, env);
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
   const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
-  let readOnlyTotal = 0;
-  const relayTotal = (): { readonly tokens: number; readonly usageMissing: boolean } => ({ tokens: readOnlyTotal, usageMissing: false });
+  const carriedReadOnly = resume?.readOnlyTokens ?? 0;
+  let readOnlyTotal = carriedReadOnly;
+  const noteLoopTokens = (loopTokens: number): void => {
+    readOnlyTotal = carriedReadOnly + loopTokens;
+  };
+  const readOnlyNow = (): number => (
+    options.mode === "dry-run" && options.readOnlyTokens ? carriedReadOnly + options.readOnlyTokens() : readOnlyTotal
+  );
+  const relayTotal = (): { readonly tokens: number; readonly usageMissing: boolean } => ({ tokens: readOnlyNow(), usageMissing: false });
   const loopCap = (startedRounds: number) => {
-    const summed = options.mode === "dry-run" && options.readOnlyTokens
-      ? { tokens: options.readOnlyTokens(), usageMissing: false }
-      : relayTotal();
+    const summed = relayTotal();
     if (summed.usageMissing) return "usage_missing" as const;
     return capHit({
       startedRounds,
@@ -672,7 +971,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   };
 
   try {
-  for (let round = 1; round <= rounds; round += 1) {
+  if (startRound > lastRound) {
+    stopReason = loopCap(startRound - 1) ?? "maxRounds";
+  }
+  for (let round = startRound; round <= lastRound && stopReason === null; round += 1) {
     if (existsSync(join(options.out, "STOP"))) {
       stopReason = "stop_file";
       break;
@@ -694,6 +996,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       stopReason = "anti_forgery";
       break;
     }
+    if (resume) {
+      for (const hint of traceHints) {
+        let bytes: Buffer;
+        try {
+          bytes = readFileSync(hint.file);
+        } catch {
+          throw new ResumeTraceError();
+        }
+        if (sha256(bytes) !== hint.sha256) throw new ResumeTraceError();
+      }
+    }
+    completedRounds = round;
     const started = now();
     const roleMs = started.getTime();
     let roundRank: "walkover" | undefined;
@@ -846,7 +1160,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
             if (!(error instanceof CapExceeded)) throw error;
             const closed = await finishClose();
             if (!isRelayReport(closed)) return closed;
-            readOnlyTotal = closed.loopTokens;
+            noteLoopTokens(closed.loopTokens);
             countAttempt(closed);
             const killedFault = faultBeforeCap(closed);
             if (killedFault) {
@@ -863,7 +1177,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           const closed = await finishClose();
           if (!isRelayReport(closed)) return closed;
           note(readSpawnExit(built.spawn.sessionPath), false, "");
-          readOnlyTotal = closed.loopTokens;
+          noteLoopTokens(closed.loopTokens);
           countAttempt(closed);
           const capped = closed.refused === "readOnlyTokenCap" || (spec.hardCap !== undefined && (overHardCap("") || (spec.hardCap.kind === "innovator" && closed.refused === "innovatorCap")));
           if (capped) {
@@ -878,7 +1192,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         } catch (error) {
           const closed = await finishClose();
           if (!isRelayReport(closed)) return closed;
-          readOnlyTotal = closed.loopTokens;
+          noteLoopTokens(closed.loopTokens);
           countAttempt(closed);
           const failure = failureFrom(error, relay.relayLog);
           note(failure.exitCode, failure.transient, failure.stderrTail);
@@ -1113,7 +1427,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         innovatorHalted = true;
         break;
       }
-      readOnlyTotal = innovatorReport.loopTokens;
+      noteLoopTokens(innovatorReport.loopTokens);
       const opened = loopCap(round - 1);
       if (opened) {
         stopLoop(opened);
@@ -1203,7 +1517,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       stopLoop("usage_missing");
       break;
     }
-    readOnlyTotal = criticReport.loopTokens;
+    noteLoopTokens(criticReport.loopTokens);
     const afterCritic = loopCap(round - 1);
     if (afterCritic) {
       stopLoop(afterCritic);
@@ -1278,7 +1592,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         stopLoop("usage_missing");
         break;
       }
-      readOnlyTotal = rankerReport.loopTokens;
+      noteLoopTokens(rankerReport.loopTokens);
       const budget = rankingBudget([
         ...roleAttemptEvents(criticRun.attemptLogs, "critic", round),
         ...roleAttemptEvents(rankerRun.attemptLogs, "ranker", round),
@@ -1327,7 +1641,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const candidate = mergeConfig(control, proposed.parts);
     const configPath = join(options.out, `round${round}`, "candidate", "config.json");
     writeJson(configPath, candidate);
-    const diff = unifiedDiff("control/config.json", readFileSync(controlPath, "utf8"), `round${round}/candidate/config.json`, readFileSync(configPath, "utf8"));
+    const diff = unifiedDiff("baseline/config.json", readFileSync(baselinePath, "utf8"), `round${round}/candidate/config.json`, readFileSync(configPath, "utf8"));
     const diffPath = join(options.out, `round${round}`, "patch.diff");
     writeText(diffPath, diff);
     const patchHash = sha256(readFileSync(diffPath));
@@ -1474,6 +1788,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           officialTimeoutSec,
           reward: seeded?.reward ?? null,
           baselineReward,
+          patchActive: activation.patchActive,
         });
     const reviewerGates = preflight
       ? { gates: preflight.gates, preflight: true as const, final: false as const }
@@ -1651,6 +1966,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
       consecutiveNoAccept = 0;
       if (seeded?.reward !== null && seeded?.reward !== undefined) baselineReward = seeded.reward;
+      const nextText = readFileSync(configPath, "utf8");
+      writeText(baselinePath, nextText);
+      control = JSON.parse(nextText) as ConfigFile;
+      controlSha = sha256File(baselinePath);
     } else {
       consecutiveNoAccept += 1;
     }
@@ -1661,6 +1980,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (!run.verified?.traceSha || !run.verified.tracePath) return [];
       return [{ file: run.verified.tracePath, line: 1, sha256: run.verified.traceSha }];
     });
+    if (traceHints.length > 0) latestGapRound = round;
     pushRound({
       round,
       accepted: take,
@@ -1671,6 +1991,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     });
     if (options.stopBeforeRun) break;
     } catch (error) {
+      if (error instanceof ResumeTraceError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) }, pendingReview);
       break;
@@ -1698,6 +2019,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
+  writeJson(join(options.out, CAMPAIGN_FILE), {
+    completedRounds,
+    readOnlyTokens: readOnlyNow(),
+    readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
+    realRunWallS,
+    baselineReward,
+    consecutiveNoAccept,
+    previousReview,
+    accepted,
+    gapRound: latestGapRound,
+  });
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
   } finally {

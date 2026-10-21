@@ -27,6 +27,12 @@ export interface ReviewerGateInput {
   readonly officialTimeoutSec: number | null;
   readonly reward: number | null;
   readonly baselineReward: number | null;
+  /**
+   * Host activation. False when the relay, mounted config, session hash, or
+   * effective knob does not prove the patch was loaded. A matching effective
+   * value alone is not enough.
+   */
+  readonly patchActive: boolean;
 }
 
 export interface ReviewerGateReport {
@@ -84,6 +90,7 @@ function withinOfficialTimeout(wallS: number | null, timeoutSec: number | null):
 }
 
 function activeLeaves(input: ReviewerGateInput): { readonly pass: boolean; readonly code?: string } {
+  if (!input.patchActive) return { pass: false, code: "inactive_key" };
   if (input.changed.length === 0) return { pass: false, code: "inactive_key" };
   for (const leaf of input.changed) {
     if (!input.effective || !sameValue(input.effective[leaf.path], leaf.value)) {

@@ -16,6 +16,7 @@ function input(over: Partial<ReviewerGateInput> = {}): ReviewerGateInput {
     officialTimeoutSec: 90,
     reward: 1,
     baselineReward: 1,
+    patchActive: true,
     ...over,
   };
 }
@@ -38,6 +39,13 @@ describe("reviewer gates", () => {
     const report = evaluateReviewerGates(input({ knobPaths: ["context.window"], patchPaths: ["agent-loop.maxSteps"] }));
     expect(report.verdict).toBe("reject");
     expect(report.gates[1]?.pass).toBe(false);
+  });
+
+  test("G2 rejects when patchActive is false even though the effective value matches", () => {
+    const report = evaluateReviewerGates(input({ patchActive: false }));
+    expect(report.verdict).toBe("reject");
+    expect(report.rejectCode).toBe("inactive_key");
+    expect(report.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
   });
 
   test("G2 rejects an inactive key and a continuation past its cap", () => {

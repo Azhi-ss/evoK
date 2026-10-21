@@ -5127,4 +5127,190 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     };
     expect(config.parts["agent-loop"].maxSteps).toBe(24);
   });
+
+  test("resume continues numbering and caps from the signed task-copy trace", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const runDir = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      readOnlyTokens: () => 1_000,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const taskCopy = mirrorTaskCopy(runDir);
+    const taskSha = createHash("sha256").update(readFileSync(taskCopy)).digest("hex");
+    const saved = readFileSync(join(fx.out, "campaign.json"), "utf8");
+    const campaign = JSON.parse(saved) as { completedRounds: number; readOnlyTokens: number; gapRound: number };
+    expect(campaign.completedRounds).toBe(1);
+    expect(campaign.readOnlyTokens).toBe(1_000);
+    expect(campaign.gapRound).toBe(1);
+
+    const spike = async (patch: Record<string, number>, reason: string): Promise<void> => {
+      const body = JSON.parse(saved) as Record<string, unknown>;
+      writeFileSync(join(fx.out, "campaign.json"), `${JSON.stringify({ ...body, ...patch }, null, 2)}\n`);
+      const stopped = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        resumeFrom: fx.out,
+        readOnlyTokens: () => 0,
+        executor: fakeExecutor(fx).executor,
+        roles: citing,
+      });
+      expect(stopped.stopReport.reason).toBe(reason);
+      expect(existsSync(join(fx.out, "round2"))).toBe(false);
+      writeFileSync(join(fx.out, "campaign.json"), saved);
+    };
+    await spike({ realRunWallS: 103 * 3600 }, "realRunWallCap");
+    await spike({ readOnlyWallS: 48 * 3600 }, "readOnlyWallCap");
+    await spike({ completedRounds: 10 }, "maxRounds");
+
+    const continued = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      readOnlyTokens: () => 2_000,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(continued.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(existsSync(join(fx.out, "round1"))).toBe(true);
+    expect(existsSync(join(fx.out, "round2"))).toBe(true);
+    const traces = JSON.parse(readFileSync(join(fx.out, "round2/gap-traces.json"), "utf8")) as { traces: { sha256: string }[] };
+    expect(traces.traces.map((hint) => hint.sha256)).toContain(taskSha);
+    const after = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as {
+      completedRounds: number;
+      readOnlyTokens: number;
+    };
+    expect(after.completedRounds).toBe(2);
+    expect(after.readOnlyTokens).toBe(3_000);
+
+    const capped = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      readOnlyTokens: () => 30_000_000,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(capped.stopReport.reason).toBe("readOnlyTokenCap");
+    expect(existsSync(join(fx.out, "round3"))).toBe(false);
+  });
+
+  test("optimize --resume refuses a task-copy whose sha misses the signed attestation", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const runDir = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
+    const taskCopy = mirrorTaskCopy(runDir);
+    const bytes = readFileSync(taskCopy);
+    bytes[0] = bytes[0] === 0 ? 1 : 0;
+    writeFileSync(taskCopy, bytes);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume trace sha mismatch");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("a rejected resumed round keeps the accepted baseline config and reward", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const first = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(first.accepted?.round).toBe(1);
+    const acceptedBaseline = readFileSync(join(fx.out, "baseline", "config.json"), "utf8");
+    const acceptedConfig = JSON.parse(acceptedBaseline) as { parts: { "agent-loop": { maxSteps: number } } };
+    expect(acceptedConfig.parts["agent-loop"].maxSteps).toBe(24);
+    mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    const second = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: {
+        name: "lower",
+        async run(request) {
+          const script = timing(request, 0);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          return observation(request, { reward: 0, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+      roles: citing,
+    });
+    expect(second.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(second.rounds[1]?.accepted).toBe(false);
+    expect(second.accepted?.round).toBe(1);
+    expect(readFileSync(join(fx.out, "baseline", "config.json"), "utf8")).toBe(acceptedBaseline);
+    const kept = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { baselineReward: number | null };
+    expect(kept.baselineReward).toBe(1);
+    const rejected = JSON.parse(readFileSync(join(fx.out, "round2/candidate/config.json"), "utf8")) as {
+      parts: { "agent-loop": { maxSteps: number } };
+    };
+    expect(rejected.parts["agent-loop"].maxSteps).toBe(23);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+      gates: { id: string; pass: boolean }[];
+    };
+    expect(closure.gates).toEqual([
+      { id: "G0", pass: true },
+      { id: "G1", pass: true },
+      { id: "G2", pass: true },
+      { id: "G3", pass: false },
+    ]);
+  });
+
+  test("optimize --from-round labels the next round without a round0 trace", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+    });
+    const previousBind = process.env.HARNESS_RELAY_BIND;
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    try {
+      const code = await main([
+        "optimize", "--from-round", fx.out, "--dry-run", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(fx.root),
+      ]);
+      expect(code).toBe(0);
+    } finally {
+      if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previousBind;
+    }
+    expect(existsSync(join(fx.out, "round2/closure.json"))).toBe(true);
+    const result = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { rounds: { round: number }[] };
+    expect(result.rounds.map((round) => round.round)).toEqual([1, 2]);
+  });
 });
+
+function mirrorTaskCopy(runDir: string): string {
+  const dest = join(runDir, "task-copy");
+  mkdirSync(join(dest, ".pi-sessions"), { recursive: true });
+  mkdirSync(join(dest, "outputs"), { recursive: true });
+  writeFileSync(join(dest, "trace.jsonl"), readFileSync(join(runDir, "trace.jsonl")));
+  writeFileSync(join(dest, ".pi-sessions", "session.jsonl"), readFileSync(join(runDir, ".pi-sessions", "session.jsonl")));
+  writeFileSync(join(dest, "outputs", "answer.txt"), readFileSync(join(runDir, "outputs", "answer.txt")));
+  return join(dest, "trace.jsonl");
+}
