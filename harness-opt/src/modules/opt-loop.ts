@@ -311,7 +311,7 @@ export interface OptLoopResult {
     readonly reason: string | null;
     readonly faultRounds: number;
     readonly reviewerRejectRounds: number;
-    /** Set when `reason` is `role_failed`. */
+    /** Set when `reason` is `role_failed`, `no_conclusion`, or `internal_error`. */
     readonly role?: string;
     readonly exitCode?: number | null;
     readonly stderrTail?: string;
@@ -329,7 +329,7 @@ interface RoleFailureInfo {
 interface InvalidCandidate {
   readonly id: string;
   readonly role: string;
-  readonly reason: "no_output" | "patch_without_config" | "role_failed";
+  readonly reason: "no_output" | "patch_without_config" | "no_conclusion" | "role_failed" | "role_output_truncated";
   readonly exitCode?: number | null;
   readonly stderrTail?: string;
 }
@@ -415,9 +415,9 @@ export function stderrTail(stderr: string): string {
   return trimmed.length <= STDERR_TAIL ? trimmed : trimmed.slice(trimmed.length - STDERR_TAIL);
 }
 
-/** HTTP 5xx, a non-cap 429, or a network error in the relay log or on stderr. A cap refusal is not transient. */
+/** HTTP 5xx or a network error in the relay log or on stderr. A 429 counts only from a known relay log, and a cap refusal is not transient. */
 export function roleFailureIsTransient(logPath: string, stderr: string): { readonly transient: boolean; readonly cap: "readOnlyTokenCap" | "innovatorCap" | null } {
-  let transient = /\b(?:429|500|502|503|504)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|fetch failed|upstream network/i.test(stderr);
+  let transient = /\b(?:500|502|503|504)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|fetch failed|upstream network/i.test(stderr);
   let cap: "readOnlyTokenCap" | "innovatorCap" | null = null;
   if (logPath !== "" && existsSync(logPath)) {
     for (const event of readJsonl(logPath)) {
@@ -591,7 +591,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const stopLoop = (reason: string, failure?: RoleFailureInfo, extra?: Partial<ClosureRecord> & { patchHash?: string | null }): void => {
       if (reason === "usage_missing" || reason === "role_output_truncated" || reason === "attest_mismatch") faultRounds += 1;
       stopReason = reason;
-      if (reason === "role_failed" && failure) failedRole = failure;
+      if ((reason === "role_failed" || reason === "no_conclusion" || reason === "internal_error") && failure) failedRole = failure;
       emitClosure({
         round,
         closed: false,
@@ -622,13 +622,22 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       readonly continuing: boolean;
       readonly build: (relay: RoleRelay) => { readonly spawn: RoleSpawnConfig; readonly call: () => Promise<T> };
     }): Promise<
-      | { readonly status: "ok"; readonly value: T; readonly relay: RoleRelay; readonly report: RelayReport; readonly spawn: RoleSpawnConfig }
+      | { readonly status: "ok"; readonly value: T; readonly relay: RoleRelay; readonly report: RelayReport; readonly spawn: RoleSpawnConfig; readonly attemptTokens: number; readonly attemptLogs: readonly string[] }
       | { readonly status: "stop"; readonly reason: string; readonly failure?: RoleFailureInfo }
-      | { readonly status: "innovator_failed"; readonly failure: RoleFailureInfo; readonly spawn: RoleSpawnConfig }
+      | { readonly status: "innovator_failed"; readonly failure: RoleFailureInfo; readonly spawn: RoleSpawnConfig; readonly invalidReason: InvalidCandidate["reason"]; readonly attemptTokens: number }
     > => {
       const attempts: { n: number; runId: string; exitCode: number | null; transient: boolean; stderrTail: string }[] = [];
+      const attemptLogs: string[] = [];
+      let attemptTokens = 0;
       const sleep = options.roleRetrySleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
       let lastSpawn: RoleSpawnConfig | null = null;
+      const finishInnovator = (error: unknown, info: RoleFailureInfo): { readonly status: "innovator_failed"; readonly failure: RoleFailureInfo; readonly spawn: RoleSpawnConfig; readonly invalidReason: InvalidCandidate["reason"]; readonly attemptTokens: number } => ({
+        status: "innovator_failed",
+        failure: info,
+        spawn: lastSpawn as RoleSpawnConfig,
+        invalidReason: innovatorInvalidReason(error, lastSpawn?.cwd ?? ""),
+        attemptTokens,
+      });
       for (let n = 1; n <= ROLE_ATTEMPTS; n += 1) {
         if (n > 1) {
           const blocked = loopCap(round - 1);
@@ -644,12 +653,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           attempts.push({ n, runId: relay.runId, exitCode, transient, stderrTail: tail });
           writeSpawnAttempts(built.spawn.sessionPath, attempts);
         };
+        const countAttempt = (report: RelayReport | null): void => {
+          attemptLogs.push(relay.relayLog);
+          attemptTokens += report?.tokens ?? 0;
+        };
         try {
           const value = await built.call();
           const report = await closeRelay(relay.runId);
           note(readSpawnExit(built.spawn.sessionPath), false, "");
           readOnlyTotal = report.loopTokens;
-          return { status: "ok", value, relay, report, spawn: built.spawn };
+          countAttempt(report);
+          return { status: "ok", value, relay, report, spawn: built.spawn, attemptTokens, attemptLogs };
         } catch (error) {
           let report: RelayReport | null = null;
           try {
@@ -658,37 +672,38 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
             report = null;
           }
           if (report) readOnlyTotal = report.loopTokens;
+          countAttempt(report);
           const failure = failureFrom(error, relay.relayLog);
           note(failure.exitCode, failure.transient, failure.stderrTail);
-          if (report?.refused === "readOnlyTokenCap" || report?.refused === "innovatorCap") {
-            return { status: "stop", reason: report.refused };
-          }
-          if (failure.cap) return { status: "stop", reason: failure.cap };
-          const blocked = loopCap(round - 1);
-          if (blocked) return { status: "stop", reason: blocked };
-          if (error instanceof RoleOutputTruncated) return { status: "stop", reason: error.reason };
-          if (report?.fault) return { status: "stop", reason: report.fault };
-          const roleExit = error instanceof RoleFailed || failure.transient;
-          if (!roleExit) throw error;
-          if (failure.transient && n < ROLE_ATTEMPTS) continue;
           const info: RoleFailureInfo = { role: spec.sessionName, exitCode: failure.exitCode, stderrTail: failure.stderrTail };
-          if (spec.continuing && lastSpawn) return { status: "innovator_failed", failure: info, spawn: lastSpawn };
-          return { status: "stop", reason: "role_failed", failure: info };
+          if (report?.refused === "readOnlyTokenCap" || report?.refused === "innovatorCap") {
+            return { status: "stop", reason: report.refused, failure: info };
+          }
+          if (failure.cap) return { status: "stop", reason: failure.cap, failure: info };
+          const blocked = loopCap(round - 1);
+          if (blocked) return { status: "stop", reason: blocked, failure: info };
+          if (report?.fault) return { status: "stop", reason: report.fault, failure: info };
+          if (error instanceof RoleOutputTruncated) {
+            if (spec.continuing && lastSpawn) return finishInnovator(error, info);
+            return { status: "stop", reason: error.reason, failure: info };
+          }
+          if (failure.transient && n < ROLE_ATTEMPTS) continue;
+          if (spec.continuing && lastSpawn) return finishInnovator(error, info);
+          return { status: "stop", reason: roleStopReason(error), failure: info };
         }
       }
       const info: RoleFailureInfo = { role: spec.sessionName, exitCode: null, stderrTail: "" };
-      if (spec.continuing && lastSpawn) return { status: "innovator_failed", failure: info, spawn: lastSpawn };
+      if (spec.continuing && lastSpawn) return finishInnovator(new RoleFailed(spec.sessionName, null, "", false), info);
       return { status: "stop", reason: "role_failed", failure: info };
     };
+    try {
     const gapCwd = join(options.out, `round${round}`, "roles", "gap-finder");
     let gapTraces: TraceHint[];
     try {
       gapTraces = stageGapTraces(gapCwd, gapTraceSources(round, round0, traceHints));
     } catch (error) {
       if (!(error instanceof GapTraceShaError) && !(error instanceof GapTracePathError)) throw error;
-      stopReason = "anti_forgery";
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop("anti_forgery");
       break;
     }
     writeJson(join(options.out, `round${round}`, "gap-traces.json"), { traces: gapTraces });
@@ -726,10 +741,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gapReport = gapRun.report;
     const gapFault = gapReport.fault;
     if (gapFault) {
-      faultRounds += 1;
-      stopReason = gapFault;
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop(gapFault);
       break;
     }
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
@@ -769,6 +781,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         patchActive: false,
         reviewFedForward: null,
         noWinner: note,
+        reason: note,
         ...(roundRank ? { rank: roundRank } : {}),
         ...(codeRank ? { codeRank } : {}),
       });
@@ -794,8 +807,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const seen = new Set(tried);
     const proposals: { id: string; slot: number; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
     const capExcluded: string[] = [];
-    let innovatorStop: string | null = null;
-    let innovatorFault: "usage_missing" | "attest_mismatch" | null = null;
     let innovatorHalted = false;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
@@ -833,11 +844,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         break;
       }
       if (innovatorRun.status === "innovator_failed") {
-        const issue = innovatorArtifactIssue(innovatorRun.spawn.cwd, null);
         invalidCandidates.push({
           id: `c${slot}`,
           role: sessionName,
-          reason: issue ?? "no_output",
+          reason: innovatorRun.invalidReason,
           exitCode: innovatorRun.failure.exitCode,
           stderrTail: innovatorRun.failure.stderrTail,
         });
@@ -848,24 +858,28 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const innovatorReport = innovatorRun.report;
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
       if (innovatorReport.fault) {
-        innovatorFault = innovatorReport.fault;
+        stopLoop(innovatorReport.fault);
+        innovatorHalted = true;
         break;
       }
       if (innovatorReport.refused === "readOnlyTokenCap") {
-        innovatorStop = "readOnlyTokenCap";
+        stopLoop("readOnlyTokenCap");
+        innovatorHalted = true;
         break;
       }
       if (innovatorReport.usageMissing) {
-        innovatorFault = "usage_missing";
+        stopLoop("usage_missing");
+        innovatorHalted = true;
         break;
       }
       readOnlyTotal = innovatorReport.loopTokens;
       const opened = loopCap(round - 1);
       if (opened) {
-        innovatorStop = opened;
+        stopLoop(opened);
+        innovatorHalted = true;
         break;
       }
-      if (innovatorReport.refused === "innovatorCap" || innovatorReport.tokens >= innovatorCap) capExcluded.push(`c${slot}`);
+      if (innovatorReport.refused === "innovatorCap" || innovatorRun.attemptTokens >= innovatorCap) capExcluded.push(`c${slot}`);
       const artifact = innovatorArtifactIssue(innovatorSpawn.cwd, turn);
       if (artifact) {
         invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: artifact });
@@ -879,20 +893,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
     if (innovatorHalted) break;
     if (stopReason === "role_output_truncated") break;
-    if (innovatorFault) {
-      faultRounds += 1;
-      stopReason = innovatorFault;
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-      break;
-    }
-    if (innovatorStop) {
-      if (innovatorStop === "usage_missing") faultRounds += 1;
-      stopReason = innovatorStop;
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-      break;
-    }
     if (proposals.length === 0) {
       const note = invalidCandidates.length > 0 ? "no_winner" : "duplicate summary";
       if (closeWithoutRun(note, invalidCandidates.length === 0)) break;
@@ -929,31 +929,21 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const criticReport = criticRun.report;
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
     if (criticReport.fault) {
-      faultRounds += 1;
-      stopReason = criticReport.fault;
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop(criticReport.fault);
       break;
     }
     if (criticReport.refused === "readOnlyTokenCap") {
-      stopReason = "readOnlyTokenCap";
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop("readOnlyTokenCap");
       break;
     }
     if (criticReport.usageMissing) {
-      faultRounds += 1;
-      stopReason = "usage_missing";
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop("usage_missing");
       break;
     }
     readOnlyTotal = criticReport.loopTokens;
     const afterCritic = loopCap(round - 1);
     if (afterCritic) {
-      assignStop(afterCritic);
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop(afterCritic);
       break;
     }
 
@@ -965,7 +955,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       continue;
     }
     if (remaining.length === 1) {
-      const budget = rankingBudget(hostedEvents(criticRelay.relayLog, "critic", round));
+      const budget = rankingBudget(roleAttemptEvents(criticRun.attemptLogs, "critic", round));
       if (budget.capHit) {
         if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
         continue;
@@ -1009,29 +999,21 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const rankerReport = rankerRun.report;
       captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
       if (rankerReport.fault) {
-        faultRounds += 1;
-        stopReason = rankerReport.fault;
-        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        stopLoop(rankerReport.fault);
         break;
       }
       if (rankerReport.refused === "readOnlyTokenCap") {
-        stopReason = "readOnlyTokenCap";
-        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        stopLoop("readOnlyTokenCap");
         break;
       }
       if (rankerReport.usageMissing) {
-        faultRounds += 1;
-        stopReason = "usage_missing";
-        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        stopLoop("usage_missing");
         break;
       }
       readOnlyTotal = rankerReport.loopTokens;
       const budget = rankingBudget([
-        ...hostedEvents(criticRelay.relayLog, "critic", round),
-        ...hostedEvents(rankerRelay.relayLog, "ranker", round),
+        ...roleAttemptEvents(criticRun.attemptLogs, "critic", round),
+        ...roleAttemptEvents(rankerRun.attemptLogs, "ranker", round),
       ]);
       if (budget.capHit) {
         if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
@@ -1070,9 +1052,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const proposed = { summary: winner.summary, parts: winner.parts };
     const afterRoles = loopCap(round - 1);
     if (afterRoles) {
-      assignStop(afterRoles);
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      stopLoop(afterRoles);
       break;
     }
 
@@ -1134,6 +1114,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       faultRounds += 1;
     }
     if (stopBeforeReview) {
+      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
+      if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+        stopReason = "anti_forgery";
+      }
       emitClosure({
         round,
         closed: false,
@@ -1141,19 +1125,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         knobMatched,
         patchActive: activation.patchActive,
         reviewFedForward: null,
+        ...(stopReason ? { reason: stopReason } : {}),
         ...(roundRank ? { rank: roundRank } : {}),
         ...(codeRank ? { codeRank } : {}),
       });
-      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
-      if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
-        stopReason = "anti_forgery";
-      }
       pushRound({
         round,
         accepted: false,
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(stopReason ? { reason: stopReason } : {}),
         ...(codeRank ? { codeRank } : {}),
       });
       break;
@@ -1168,6 +1150,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         knobMatched,
         patchActive: activation.patchActive,
         reviewFedForward: null,
+        reason: "anti_forgery",
         ...(roundRank ? { rank: roundRank } : {}),
         ...(codeRank ? { codeRank } : {}),
       });
@@ -1181,6 +1164,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        reason: "anti_forgery",
         ...(codeRank ? { codeRank } : {}),
       });
       break;
@@ -1238,42 +1222,40 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(codeRank ? { codeRank } : {}),
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
-    if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
-      stopReason = "anti_forgery";
+    const sealReview = (reason: string): void => {
+      if (reason === "usage_missing" || reason === "attest_mismatch" || reason === "role_output_truncated") faultRounds += 1;
+      stopReason = reason;
+      emitClosure({
+        round,
+        closed: false,
+        gapCitedTrace,
+        knobMatched,
+        patchActive: activation.patchActive,
+        reviewFedForward: null,
+        reason,
+        ...(roundRank ? { rank: roundRank } : {}),
+        ...(codeRank ? { codeRank } : {}),
+      });
       pushRound({
         round,
         accepted: false,
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        reason,
         ...(codeRank ? { codeRank } : {}),
       });
+    };
+    if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+      sealReview("anti_forgery");
       break;
     }
     if (reviewGate) {
-      faultRounds += 1;
-      stopReason = reviewGate;
-      pushRound({
-        round,
-        accepted: false,
-        duplicate: false,
-        patchHash,
-        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
-        ...(codeRank ? { codeRank } : {}),
-      });
+      sealReview(reviewGate);
       break;
     }
     if (reviewReport.usageMissing) {
-      faultRounds += 1;
-      stopReason = "usage_missing";
-      pushRound({
-        round,
-        accepted: false,
-        duplicate: false,
-        patchHash,
-        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
-        ...(codeRank ? { codeRank } : {}),
-      });
+      sealReview("usage_missing");
       break;
     }
     const reviewBound = bindConclusion("reviewer", reviewRelay, { accept: verdict.accept, reason: verdict.reason });
@@ -1301,6 +1283,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(codeRank ? { codeRank } : {}),
     });
     if (options.stopBeforeRun) break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) });
+      break;
+    }
   }
 
   if (options.stopBeforeRun) assertRankerWinnerReviewed(options.out, relayRoot);
@@ -1318,7 +1305,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reason: stopReason,
       faultRounds,
       reviewerRejectRounds,
-      ...(stopReason === "role_failed" && failedRole ? { role: failedRole.role, exitCode: failedRole.exitCode, stderrTail: failedRole.stderrTail } : {}),
+      ...((stopReason === "role_failed" || stopReason === "no_conclusion" || stopReason === "internal_error") && failedRole
+        ? { role: failedRole.role, exitCode: failedRole.exitCode, stderrTail: failedRole.stderrTail }
+        : {}),
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
@@ -1520,6 +1509,28 @@ function writeSpawnAttempts(
   writeJson(file, { ...current, attempts });
 }
 
+function roleStopReason(error: unknown): string {
+  if (error instanceof RoleOutputTruncated) return error.reason;
+  const message = error instanceof RoleFailed ? error.stderrTail : error instanceof Error ? error.message : "";
+  if (/no conclusion/i.test(message)) return "no_conclusion";
+  if (error instanceof RoleFailed) return "role_failed";
+  return "internal_error";
+}
+
+function innovatorInvalidReason(error: unknown, cwd: string): InvalidCandidate["reason"] {
+  if (error instanceof RoleOutputTruncated) return "role_output_truncated";
+  const message = error instanceof RoleFailed ? error.stderrTail : error instanceof Error ? error.message : "";
+  if (/no conclusion/i.test(message)) return "no_conclusion";
+  const artifact = innovatorArtifactIssue(cwd, null);
+  if (artifact) return artifact;
+  if (error instanceof RoleFailed) return "no_output";
+  return "role_failed";
+}
+
+function roleAttemptEvents(logs: readonly string[], role: string, round: number): unknown[] {
+  return logs.flatMap((log) => hostedEvents(log, role, round));
+}
+
 function failureFrom(error: unknown, logPath: string): { readonly exitCode: number | null; readonly stderrTail: string; readonly transient: boolean; readonly cap: "readOnlyTokenCap" | "innovatorCap" | null } {
   const raw = error instanceof RoleFailed ? error.stderrTail : error instanceof Error ? error.message : "";
   const exitCode = error instanceof RoleFailed ? error.exitCode : null;
@@ -1586,7 +1597,7 @@ function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, pr
     const judged = roleFailureIsTransient(logPath, launched.stderr);
     throw new RoleFailed(spawn.role, launched.status, stderrTail(launched.stderr), judged.cap ? false : judged.transient);
   }
-  if (text === null) throw new Error(`role ${spawn.role} returned no conclusion`);
+  if (text === null) throw new RoleFailed(spawn.role, launched.status, "no conclusion", false);
   return text;
 }
 

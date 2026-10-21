@@ -18,6 +18,7 @@ import {
   assertLiveRoleCall,
   runLiveRoleSmoke,
   stageGapTrace,
+  roleFailureIsTransient,
   RoleFailed,
   runOptLoop,
   runOptOnce,
@@ -783,13 +784,20 @@ describe("optimization loop", () => {
     const previous = process.env.EWI_IDLE_SCRIPT;
     process.env.EWI_IDLE_SCRIPT = "/tmp/not-the-approved-ewi.py";
     try {
-      await expect(runOptLoop({
+      const result = await runOptLoop({
         ...hostOpts(fx),
         mode: "dry-run",
         rounds: 1,
         roles: rejectingRoles(fx),
         executor: fakeExecutor(fx).executor,
-      })).rejects.toThrow(/EWI_IDLE_SCRIPT/);
+      });
+      expect(result.stopReport.reason).toBe("internal_error");
+      expect(result.stopReport.stderrTail).toContain("EWI_IDLE_SCRIPT");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; roleFailure?: { stderrTail?: string } };
+      expect(closure.reason).toBe("internal_error");
+      expect(closure.roleFailure?.stderrTail).toContain("EWI_IDLE_SCRIPT");
+      expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+      expect(result.accepted).toBeNull();
     } finally {
       if (previous === undefined) delete process.env.EWI_IDLE_SCRIPT;
       else process.env.EWI_IDLE_SCRIPT = previous;
@@ -1872,8 +1880,15 @@ describe("optimize command", () => {
         ...taskFlags(),
         ...round0Flags(),
       ]));
-      expect(code).toBe(1);
-      expect(stderr).toContain("role gap-finder returned no conclusion");
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null; role?: string; exitCode?: number | null; stderrTail?: string } };
+      expect(loop.stopReport.reason).toBe("no_conclusion");
+      expect(loop.stopReport.role).toBe("gap-finder");
+      expect(loop.stopReport.exitCode).toBe(0);
+      expect(loop.stopReport.stderrTail).toBe("no conclusion");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("no_conclusion");
       const argv = readFileSync(recorded, "utf8");
       const lines = argv.split("\n");
       expect(lines[0]).toBe("--print");
@@ -2241,6 +2256,169 @@ describe("optimize command", () => {
     expect(closure.rank).toBe("walkover");
     expect(closure.invalidCandidates?.map((item) => item.id)).toEqual(["c0", "c2", "c3", "c4", "c5"]);
     expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+  });
+
+  test("an innovator that exits 0 without a conclusion is invalid and the round continues", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          if (!input.sessionPath.endsWith("innovator-2.jsonl")) return stub.innovate(input);
+          writeFileSync(join(input.spawn.cwd, "patch.json"), "{\"summary\":\"prose only\"}\n");
+          throw new RoleFailed("innovator", 0, "no conclusion", false);
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.rounds[0]?.invalidCandidates).toEqual([
+      { id: "c2", role: "innovator-2", reason: "no_conclusion", exitCode: 0, stderrTail: "no conclusion" },
+    ]);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+    expect(closure.invalidCandidates?.map((item) => `${item.id}:${item.reason}`)).toEqual(["c2:no_conclusion"]);
+    expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+    expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"))).toBe(true);
+  });
+
+  test("an arbitrary error inside the round still writes closure and loop-result", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: () => { throw new Error("sensor exploded"); },
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(result.stopReport.reason).toBe("internal_error");
+    expect(result.stopReport.role).toBe("gap-finder");
+    expect(result.stopReport.stderrTail).toBe("sensor exploded");
+    expect(result.rounds[0]?.reason).toBe("internal_error");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; roleFailure?: { stderrTail?: string } };
+    expect(closure.reason).toBe("internal_error");
+    expect(closure.roleFailure?.stderrTail).toBe("sensor exploded");
+    expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+  });
+
+  test("a stderr 429 is not transient when the relay log path is unknown", () => {
+    expect(roleFailureIsTransient("", "HTTP 429").transient).toBe(false);
+    expect(roleFailureIsTransient("/tmp/does-not-exist-relay.jsonl", "upstream returned 429").transient).toBe(false);
+    expect(roleFailureIsTransient("", "HTTP 502").transient).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), "relay-429-"));
+    const log = join(dir, "relay.jsonl");
+    writeFileSync(log, `${JSON.stringify({ type: "done", status: 429, errClass: "4xx" })}\n`);
+    expect(roleFailureIsTransient(log, "HTTP 429").transient).toBe(true);
+    writeFileSync(log, `${JSON.stringify({ type: "done", status: 429, errClass: "readOnlyTokenCap" })}\n`);
+    expect(roleFailureIsTransient(log, "HTTP 429")).toEqual({ transient: false, cap: "readOnlyTokenCap" });
+  });
+
+  test("retry tokens from every attempt count toward the innovator cap and the ranking cap", async () => {
+    const innovatorUsage = { prompt_tokens: 120_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+    const innovatorUpstream = await listenUpstream(innovatorUsage);
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    let innovatorTries = 0;
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: innovatorUpstream.url },
+        rounds: 1,
+        roleRetrySleep: async (ms) => { delays.push(ms); },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          gap: (input) => stub.gap(input),
+          async innovate(input) {
+            const slot = /innovator-(\d+)\.jsonl$/.exec(input.sessionPath)?.[1] ?? "0";
+            if (slot !== "0") {
+              const turn = await stub.innovate(input);
+              return { ...turn, summary: `${turn.summary}#${slot}` };
+            }
+            const response = await fetch(`${input.baseUrl}/chat/completions`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ messages: [{ role: "user", content: "spend" }] }),
+            });
+            if (!response.ok) throw new Error(`relay ${response.status}`);
+            await response.arrayBuffer();
+            innovatorTries += 1;
+            if (innovatorTries === 1) throw new RoleFailed("innovator", 1, "again", true);
+            const turn = await stub.innovate(input);
+            return { ...turn, summary: "spent-c0" };
+          },
+          critic: (input) => stub.critic(input),
+          ranker: (input) => stub.ranker(input),
+          review: (input) => stub.review(input),
+        },
+      });
+      expect(innovatorTries).toBe(2);
+      expect(delays).toEqual([5_000]);
+      expect(result.stopReport.reason).toBeNull();
+      const rankerInput = JSON.parse(readFileSync(join(fx.out, "round1/ranker-input.json"), "utf8")) as { excluded?: string[] };
+      expect(rankerInput.excluded).toContain("c0");
+    } finally {
+      await innovatorUpstream.close();
+    }
+
+    const rankingUsage = { prompt_tokens: 2_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+    const rankingUpstream = await listenUpstream(rankingUsage);
+    const rankingFx = fixture();
+    const rankingStub = stubOptRoles(rankingFx.key);
+    const rankingDelays: number[] = [];
+    let criticTries = 0;
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(rankingFx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: rankingUpstream.url },
+        rounds: 1,
+        roleRetrySleep: async (ms) => { rankingDelays.push(ms); },
+        executor: fakeExecutor(rankingFx).executor,
+        roles: {
+          gap: (input) => rankingStub.gap(input),
+          innovate: (input) => rankingStub.innovate(input),
+          async critic(input) {
+            const response = await fetch(`${input.baseUrl}/chat/completions`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ messages: [{ role: "user", content: "rank-spend" }] }),
+            });
+            if (!response.ok) throw new Error(`relay ${response.status}`);
+            await response.arrayBuffer();
+            criticTries += 1;
+            if (criticTries === 1) throw new RoleFailed("critic", 1, "again", true);
+            return rankingStub.critic(input);
+          },
+          ranker: (input) => rankingStub.ranker(input),
+          review: (input) => rankingStub.review(input),
+        },
+      });
+      expect(criticTries).toBe(2);
+      expect(rankingDelays).toEqual([5_000]);
+      expect(result.stopReport.reason).toBeNull();
+      const closure = JSON.parse(readFileSync(join(rankingFx.out, "round1/closure.json"), "utf8")) as { reason?: string; noWinner?: string };
+      expect(closure.reason).toBe("no_winner:cap_hit");
+      expect(closure.noWinner).toBe("no_winner:cap_hit");
+      expect(existsSync(join(rankingFx.out, "loop-result.json"))).toBe(true);
+      expect(existsSync(join(rankingFx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+    } finally {
+      await rankingUpstream.close();
+    }
   });
 
   test("optimize --execute --stop-before-run writes the closure and does not start docker", async () => {
@@ -3170,6 +3348,35 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.stopReport.reason).toBe("usage_missing");
     expect(result.stopReport.faultRounds).toBe(1);
     expect(result.rounds).toHaveLength(1);
+    expect(result.rounds[0]?.reason).toBe("usage_missing");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("usage_missing");
+  });
+
+  test("a gap-finder relay fault writes closure", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        async gap(input) {
+          const turn = await stub.gap(input);
+          unlinkSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl));
+          return turn;
+        },
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(result.stopReport.reason).toBe("usage_missing");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("usage_missing");
+    expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
   });
 
   test("null innovator usage and a request without a done line stop the loop", async () => {
@@ -3617,6 +3824,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       expect(fake.calls).toEqual([]);
       expect(result.stopReport.reason).toBe("attest_mismatch");
       expect(result.stopReport.faultRounds).toBeGreaterThanOrEqual(1);
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("attest_mismatch");
     };
     await edit("rewrite");
     await edit("append");
@@ -3660,6 +3869,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       expect(calls).toBe(2);
       expect(fake.calls).toEqual([]);
       expect(result.stopReport).toEqual({ reason: "readOnlyTokenCap", faultRounds: 0, reviewerRejectRounds: 0 });
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("readOnlyTokenCap");
     } finally {
       await upstream.close();
     }
@@ -3690,6 +3901,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     expect(fake.calls).toEqual([]);
     expect(result.stopReport).toEqual({ reason: "usage_missing", faultRounds: 1, reviewerRejectRounds: 0 });
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("usage_missing");
   });
 
   test("over-limit is refused by relay", async () => {
@@ -3725,6 +3938,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       });
       expect(fake.calls).toEqual([]);
       expect(result.stopReport).toEqual({ reason: "readOnlyTokenCap", faultRounds: 0, reviewerRejectRounds: 0 });
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("readOnlyTokenCap");
     } finally {
       await upstream.close();
     }
@@ -3812,6 +4027,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.stopReport.reason).toBe("usage_missing");
     expect(result.stopReport.faultRounds).toBeGreaterThanOrEqual(1);
     expect(fake.calls).toHaveLength(role === "reviewer" ? 1 : 0);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("usage_missing");
   });
 
   test("the run-record child argv does not carry the attest key", () => {
