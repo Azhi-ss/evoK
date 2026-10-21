@@ -740,27 +740,31 @@ function writeSignedTraceLedger(out: string, round: number, traceSha: string, ke
   });
 }
 
-/** Signed trace sha recorded in that round's directory. A bad mac is not a sha. */
-function signedTraceLedgerSha(out: string, round: number, key: Buffer): string | null {
+/**
+ * Signed trace sha recorded in that round's directory.
+ * Missing file is `absent`. A present file with a bad mac is `bad`.
+ */
+function signedTraceLedgerSha(out: string, round: number, key: Buffer): { readonly state: "absent" | "bad" | "ok"; readonly traceSha?: string } {
   const file = join(out, `round${round}`, TRACE_LEDGER);
-  if (!isRegularFile(file)) return null;
+  if (!isRegularFile(file)) return { state: "absent" };
   let parsed: { round?: unknown; traceSha?: unknown; hmacSha256?: unknown };
   try {
     parsed = JSON.parse(readFileSync(file, "utf8")) as { round?: unknown; traceSha?: unknown; hmacSha256?: unknown };
   } catch {
-    return null;
+    return { state: "bad" };
   }
-  if (parsed.round !== round || typeof parsed.traceSha !== "string" || typeof parsed.hmacSha256 !== "string") return null;
+  if (parsed.round !== round || typeof parsed.traceSha !== "string" || typeof parsed.hmacSha256 !== "string") return { state: "bad" };
   const expected = createHmac("sha256", key).update(JSON.stringify({ round, traceSha: parsed.traceSha })).digest("hex");
   const left = Buffer.from(parsed.hmacSha256);
   const right = Buffer.from(expected);
-  if (left.length !== right.length || !timingSafeEqual(left, right)) return null;
-  return parsed.traceSha;
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return { state: "bad" };
+  return { state: "ok", traceSha: parsed.traceSha };
 }
 
 /**
  * Previous real-run trace.
- * The file sha has to equal the signed host attestation and the HMAC ledger in that round's directory.
+ * The file sha has to equal the signed host attestation.
+ * A `trace-ledger.json` in that round's directory, when present, has to carry the same sha under the attest HMAC.
  * A sha that exists only as an operator flag is not used.
  */
 function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string, round: number): { readonly path: string; readonly sha256: string } {
@@ -779,8 +783,8 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
     throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
   }
   if (!verified.traceSha) throw new ResumeTraceError();
-  const ledgerSha = signedTraceLedgerSha(out, round, key);
-  if (!ledgerSha || ledgerSha !== verified.traceSha) throw new ResumeTraceError();
+  const ledger = signedTraceLedgerSha(out, round, key);
+  if (ledger.state === "bad" || (ledger.state === "ok" && ledger.traceSha !== verified.traceSha)) throw new ResumeTraceError();
   const copy = join(runDir, "task-copy", "trace.jsonl");
   if (isRegularFile(copy)) {
     if (sha256(readFileSync(copy)) !== verified.traceSha) throw new ResumeTraceError();
