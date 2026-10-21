@@ -8,7 +8,7 @@
 
 ```
 harness-opt/
-  package.json                         依赖 pi-subagents 0.79.1
+  package.json                         依赖 pi-subagents 0.79.1。仓库根目录执行 `bun install` 时，这个目录是 workspace，依赖会一起装上
   fixed-model.json                     赛方 id、本地 id、测试 id
   extensions/harness-opt/index.ts      /harness-opt、tool、连字符命令、工作流注册
   workflows/round.js                   harnessopt.round 的脚本正文
@@ -190,7 +190,7 @@ bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once \
   --driver "$HARNESS_OPT_DRIVER"
 ```
 
-`patchActive` 为真时退出码是 0，否则是 1。`$BASE_URL`、`$TASK_DIR`、`$HARNESS_FILE`、`$HARNESS_ATTEST_KEY_FILE`、`$HARNESS_OPT_DRIVER` 由运行那台机器提供。候选 config 必须和 control 不是同一份字节。包装器不得修改 `devii_docker_v2.py`；它只负责挂载、在容器退出后复制产物，并按上面的 schema 写证明。
+`patchActive` 为真时退出码是 0，否则是 1。`$BASE_URL`、`$TASK_DIR`、`$HARNESS_FILE`、`$HARNESS_ATTEST_KEY_FILE`、`$HARNESS_OPT_DRIVER` 由运行那台机器提供。候选 config 必须和 control 不是同一份字节。仓库里的 `relay/devii_docker_v2.py` 是盒子启动器。agent 的 docker argv 只经 `hooks.container_argv` 生成，因此带 `--cap-drop NET_RAW`，容器 `BASE_URL` 指向 relay，并且拒绝挂载 `/home/box`。挂载仍是这次 run 目录、CFG，以及 `/workspace/contest-data/devii` 下原来的 data_lake（tasks2）和 checker 的 tests。同一次运行拿宿主锁，第二进程拿不到锁。计分运行缺少 relay 日志根目录会失败，不会静默跳过 checker 拷贝和签名。
 
 ## 本地闭环
 

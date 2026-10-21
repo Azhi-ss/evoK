@@ -39,6 +39,8 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
     """One serial container. Every run drops NET_RAW. Nothing under /home/box is mounted."""
     if network != DOCKER_NETWORK:
         raise ValueError(f"reject network {network}")
+    if not isinstance(env, dict):
+        raise ValueError("env")
     if any(key == "API_KEY" for key in env):
         raise ValueError("API_KEY")
     argv = [
@@ -48,6 +50,12 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
         "-e", f"BASE_URL=http://10.204.0.1:{port}/r/{run_id}/v1",
         "-e", f"HARNESS_RUN_ID={run_id}",
     ]
+    for key, value in env.items():
+        if key in ("BASE_URL", "HARNESS_RUN_ID") or not isinstance(key, str) or not key.isidentifier():
+            raise ValueError("env")
+        if not isinstance(value, str) or "\n" in value or "\x00" in value:
+            raise ValueError("env")
+        argv.extend(["-e", f"{key}={value}"])
     for mount in mounts:
         src, dst = (mount["source"], mount["target"]) if isinstance(mount, dict) else mount
         if _under_home_box(src) or _under_home_box(dst):

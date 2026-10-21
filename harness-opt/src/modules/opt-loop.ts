@@ -26,6 +26,7 @@ import {
 } from "./ewi";
 import {
   CommandOptExecutor,
+  assertScoredRelayLog,
   copyCheckerBeforeSign,
   createDryRunExecutor,
   hostRunId,
@@ -931,6 +932,7 @@ async function executeScored(
   threshold: number,
   scoreHost: { readonly now: () => number; readonly watcher: ResultWriteWatcher },
 ): Promise<ScoredRun> {
+  assertScoredRelayLog(host.relayLogRoot);
   resolveEwiIdleScript();
   if (existsSync(join(request.runDir, "result.json"))) throw new Error("run dir already exists");
   assertAttestIsolated(host.attestDir, request.runDir);

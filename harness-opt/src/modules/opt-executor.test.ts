@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEV_TASK } from "./opt-loop";
 import { createHash } from "node:crypto";
-import { CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, type OptRunRequest, type OptTask } from "./opt-executor";
+import { assertScoredRelayLog, CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, writeRunArtifacts, type OptRunRequest, type OptTask } from "./opt-executor";
 
 const TASK: OptTask = {
   id: "002",
@@ -24,6 +24,7 @@ function request(dir: string): OptRunRequest {
     attestDir: join(dir, "attest"),
     model: "deepseek-v4-1-flash-261017",
     tokenCap: tokenCap(TASK),
+    relayLogRoot: join(dir, "relay"),
   };
 }
 
@@ -109,6 +110,33 @@ writeFileSync(run + "/result.json", JSON.stringify({
     expect(argv).not.toContain("open");
     expect(argv).not.toContain("shared");
     expect(argv).not.toContain("gateway-only");
+  });
+});
+
+describe("scored relay log", () => {
+  test("a scored run without relayLogRoot fails before checker copy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-no-relay-"));
+    const bare = request(dir);
+    const { relayLogRoot: _ignored, ...missing } = bare;
+    expect(() => assertScoredRelayLog(undefined)).toThrow(/relayLogRoot/);
+    expect(() => assertScoredRelayLog("")).toThrow(/relayLogRoot/);
+    expect(() => writeRunArtifacts(missing, {
+      reward: 1,
+      tokens: 1,
+      wallS: 1,
+      timedOut: false,
+      tWrite: 1,
+      tEnd: 2,
+      assistantTs: [],
+    })).toThrow(/relayLogRoot/);
+    writeFileSync(join(dir, "config.json"), "{}\n");
+    mkdirSync(join(dir, "run"), { recursive: true });
+    writeFileSync(join(dir, "run", "result.json"), `${JSON.stringify({ reward: 1, tokens: 1, wall_s: 1, timed_out: false, score_status: "scored" })}\n`);
+    const executor = new CommandOptExecutor({
+      command: ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
+      spawn: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    await expect(executor.run(missing)).rejects.toThrow(/relayLogRoot/);
   });
 });
 

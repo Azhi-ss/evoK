@@ -43,6 +43,13 @@ export function hostRunId(): string {
   return randomBytes(16).toString("hex");
 }
 
+/** Scored runs copy and sign the checker. A missing relay log root is a failure, not a skip. */
+export function assertScoredRelayLog(relayLogRoot: string | undefined): asserts relayLogRoot is string {
+  if (typeof relayLogRoot !== "string" || relayLogRoot.trim() === "") {
+    throw new Error("scored run needs relayLogRoot");
+  }
+}
+
 export interface OptRunObservation {
   readonly reward: number | null;
   readonly scoreStatus: "scored" | "unscored";
@@ -148,7 +155,9 @@ export class CommandOptExecutor implements OptExecutor {
       const detail = `${child.stderr ?? ""}${child.stdout ?? ""}`.trim() || child.error?.message || "executor command failed";
       throw new Error(redact(detail, env));
     }
-    return readObservation(request.runDir);
+    const observation = readObservation(request.runDir);
+    if (observation.scoreStatus === "scored") assertScoredRelayLog(request.relayLogRoot);
+    return observation;
   }
 }
 
@@ -198,6 +207,7 @@ export interface RunAttestHost {
  * outside it when `attest` is set. The attestation is not derived from stdout.
  */
 export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTiming, attest?: RunAttestHost): void {
+  assertScoredRelayLog(request.relayLogRoot);
   const outputs = join(request.runDir, "outputs");
   mkdirSync(outputs, { recursive: true });
   const answer = join(outputs, "answer.txt");
@@ -249,10 +259,9 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     score_status: "scored",
     runId,
   })}\n`);
-  if (request.relayLogRoot) {
-    plantExecutorRelay(join(request.relayLogRoot, runId, "relay.jsonl"), runId, candidateHashFragment(hash));
-    copyCheckerBeforeSign(request.runDir, request.relayLogRoot, runId);
-  }
+  const relayLogRoot = request.relayLogRoot;
+  plantExecutorRelay(join(relayLogRoot, runId, "relay.jsonl"), runId, candidateHashFragment(hash));
+  copyCheckerBeforeSign(request.runDir, relayLogRoot, runId);
   if (!attest) return;
   const runPath = resolve(request.runDir);
   const meta: AttestRunMeta = {

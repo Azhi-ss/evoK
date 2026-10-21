@@ -39,7 +39,7 @@
 
 容器启动前写 `preRunLayout`（`ok`、`checks`、checks 的 sha，再加 HMAC）。`ok` 为假则记 infra `prerun_layout`，容器不启动。检查通过之后，outputs 里出现符号链接或额外目录，记 run `布局违规`。`classify` 只记录代码，不重跑。
 
-每次容器都是串行的 `docker run`，argv 含 `--cap-drop NET_RAW`。挂载源或目标落在 `/home/box` 下则拒绝。relay 日志默认在 `/home/box/.harness-relay`，这个目录不挂进容器。
+`relay/devii_docker_v2.py` 的 agent 启动走 `hooks.container_argv`。每次容器都是串行的 `docker run`，argv 含 `--cap-drop NET_RAW`，容器 `BASE_URL` 指向 relay。挂载是这次 run 目录、CFG，以及 `/workspace/contest-data/devii` 下原来的 data_lake 和 checker tests。挂载源或目标落在 `/home/box` 下则拒绝。生产路径用宿主锁保证一次只跑一个容器。relay 日志默认在 `/home/box/.harness-relay`，这个目录不挂进容器。计分时缺少 relay 日志根目录会失败，不会跳过 checker 拷贝和签名。
 
 `devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（模式 `0700`，测试可以换 relay 根）。这个目录不在任何容器挂载里。`checkerOutputSha` 和 `reward` 进入运行签名。`verify_run_record(runSig, checkerOut, reward)` 同时给 reviewer 输入和 run-notes 写入用。容器里的 `verifier/reward.txt`、`result.json` 的 reward、宿主 checker 输出或 run-notes 里展示的 reward 有一处对不上，就是 `attest_mismatch`，循环停止。run-notes 里的 reward 只作展示。
 

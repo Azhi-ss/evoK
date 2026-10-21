@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -813,6 +815,91 @@ class LoopModeCase(unittest.TestCase):
         (verifier / "reward.txt").write_bytes(b"0\n")
         with self.assertRaises(ValueError):
             hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
+
+
+class LaunchCase(unittest.TestCase):
+    def test_production_launch_uses_container_argv_and_the_host_lock(self):
+        import devii_docker_v2 as box
+        root = Path(tempfile.mkdtemp())
+        run = root / "round"
+        run_id = "ab" * 16
+        seen = []
+        real = hooks.container_argv
+
+        def spy(**kwargs):
+            seen.append(kwargs)
+            return real(**kwargs)
+
+        hooks.container_argv = spy
+        try:
+            argv = box.agent_cmd("tasks2/i014", run, "candidate", "devii-name", run_id=run_id, port=9)
+        finally:
+            hooks.container_argv = real
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["network"], "devii-004-int")
+        sources = [item[0] for item in seen[0]["mounts"]]
+        self.assertIn(str(run / "workspace"), sources)
+        self.assertIn(str(run / "public"), sources)
+        self.assertTrue(any(src.startswith(str(box.CFG)) for src in sources))
+        self.assertEqual(str(box.DATA), "/workspace/contest-data/devii")
+        self.assertEqual(box.LAKE, box.DATA / "shared" / "data_lake")
+        self.assertIn(str(box.LAKE), sources)
+        self.assertNotIn(str(box.DATA), sources)
+        checker = box.checker_cmd("tasks2/i014", run, "runs/task", "devii-name-chk", run_id="ef" * 16, port=9)
+        self.assertIn(f"{box.DATA}/tasks2/i014/tests:/tests:ro", checker)
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
+        blob = "\n".join(argv)
+        self.assertIn("HARNESS_WORKSPACE=/workspace/runs", argv)
+        self.assertIn("HARNESS_CANDIDATE_CONFIG=/cfg/candidate.json", argv)
+        self.assertIn("OMP_NUM_THREADS=4", argv)
+        self.assertIn("OPENBLAS_NUM_THREADS=4", argv)
+        self.assertIn(f"BASE_URL=http://10.204.0.1:9/r/{run_id}/v1", argv)
+        self.assertNotIn("API_KEY", blob)
+        self.assertNotIn("newapi.ai-modeling.top", blob)
+        self.assertNotIn("--add-host", argv)
+        self.assertNotIn("/home/box", blob)
+        with self.assertRaises(ValueError):
+            box.agent_cmd("tasks1/004-dims-pqn-batch-qc", "/home/box/run", "control", "nope", run_id="cd" * 16, port=9)
+        with self.assertRaises(RuntimeError):
+            box.start_agent_container(
+                "tasks2/i014", run, "candidate", "devii-name",
+                run_id=run_id, port=9, relay_log_root="", lock_path=root / "missing.lock",
+                popen=lambda *args, **kwargs: None,
+            )
+        lock = root / "one.lock"
+        calls = []
+
+        def fake_popen(argv, **kwargs):
+            calls.append(list(argv))
+            return object()
+
+        proc, fd = box.start_agent_container(
+            "tasks2/i014", run, "candidate", "devii-name",
+            run_id=run_id, port=9, relay_log_root=str(root / "relay"), lock_path=lock,
+            popen=fake_popen,
+        )
+        self.assertIsNotNone(proc)
+        self.assertEqual(calls[0][calls[0].index("--cap-drop") + 1], "NET_RAW")
+        child = subprocess.run([sys.executable, "-c", "\n".join([
+            "import sys",
+            f"sys.path.insert(0, {str(HERE)!r})",
+            "import devii_docker_v2 as box",
+            "try:",
+            f"    box.one_run_lock({str(lock)!r})",
+            "except RuntimeError:",
+            "    raise SystemExit(2)",
+            "raise SystemExit(0)",
+        ])], capture_output=True, text=True)
+        self.assertEqual(child.returncode, 2, child.stderr)
+        box.release_run_lock(fd)
+        released = subprocess.run([sys.executable, "-c", "\n".join([
+            "import sys",
+            f"sys.path.insert(0, {str(HERE)!r})",
+            "import devii_docker_v2 as box",
+            f"fd = box.one_run_lock({str(lock)!r})",
+            "box.release_run_lock(fd)",
+        ])], capture_output=True, text=True)
+        self.assertEqual(released.returncode, 0, released.stderr)
 
 
 class EwiTableCase(unittest.TestCase):

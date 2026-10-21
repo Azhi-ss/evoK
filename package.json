@@ -2,6 +2,7 @@
   "name": "evok",
   "private": true,
   "type": "module",
+  "workspaces": ["harness-opt"],
   "bin": {
     "evok": "./bin/evok.ts"
   },

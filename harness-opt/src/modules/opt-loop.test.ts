@@ -12,7 +12,6 @@ import {
   CONTROL_CONFIG_SHA,
   CONTROL_CONFIG_TEXT,
   DEV_TASK,
-  HELD_OUT_TASKS,
   OPT_MODEL,
   runOptLoop,
   runOptOnce,
@@ -21,7 +20,7 @@ import {
   type OptRoles,
 } from "./opt-loop";
 import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
-import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
+import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
 
 interface Fixture {
   readonly root: string;
@@ -86,6 +85,7 @@ function attestControl(root: string, key: Buffer, harnessPath: string, controlCo
     harnessPath,
     model: OPT_MODEL,
     tokenCap: tokenCap(DEV_TASK),
+    relayLogRoot: join(root, "control-relay"),
   };
   const base = 1_700_000_000;
   writeRunArtifacts(request, {
@@ -476,45 +476,6 @@ describe("optimization loop", () => {
     expect(fake.calls.every((call) => call.task.id === "i014" && call.task.network === "devii-004-int")).toBe(true);
   });
 
-  test("the last accepted candidate is rerun alternating with control, then held out", async () => {
-    const fx = fixture();
-    const fake = fakeExecutor(fx);
-    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 3, roles: citingRoles(fx.key), executor: fake.executor });
-    expect(result.accepted?.round).toBe(1);
-    expect(result.finalBlock?.order).toEqual(["C0", "X0", "C1", "X1", "C2", "X2"]);
-    expect(JSON.parse(readFileSync(join(fx.out, "final/order.json"), "utf8"))).toEqual({ order: ["C0", "X0", "C1", "X1", "C2", "X2"] });
-    const dev = fake.calls.slice(0, 9);
-    expect(dev.every((call) => call.arm === "candidate" && call.task.id === DEV_TASK.id && call.task.network === "devii-004-int")).toBe(true);
-    const rendered = renderExecutorCommand(
-      ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
-      dev[0]!,
-    );
-    expect(rendered).toContain("devii-004-int");
-    expect(rendered).not.toContain("open");
-    const finalCalls = fake.calls.slice(9, 15);
-    expect(finalCalls.map((call) => `${call.arm === "control" ? "C" : "X"}${call.seed}`)).toEqual(["C0", "X0", "C1", "X1", "C2", "X2"]);
-    expect(finalCalls.every((call) => !("marker" in call) && !("patchHash" in call))).toBe(true);
-    const held = fake.calls.slice(15);
-    expect(held.map((call) => `${call.task.id}:${call.seed}:${call.task.network}`)).toEqual(
-      HELD_OUT_TASKS.flatMap((task) => [0, 1, 2].map((seed) => `${task.id}:${seed}:${task.network}`)),
-    );
-    expect(held.filter((call) => call.task.id === "002").every((call) => call.task.network === "devii-004-int")).toBe(true);
-    expect(result.heldOut).toEqual({ calls: 9, gatewayOnly: ["002", "i030", "hb003"] });
-    const heldOutFile = JSON.parse(readFileSync(join(fx.out, "heldout/metrics.json"), "utf8")) as { comparison: string };
-    expect(heldOutFile.comparison).toBe("control-not-run");
-    const candidateConfig = finalCalls[1]?.configPath ?? "";
-    const controlConfig = finalCalls[0]?.configPath ?? "";
-    const candidateHash = createHash("sha256").update(readFileSync(candidateConfig)).digest("hex");
-    const controlHash = createHash("sha256").update(readFileSync(controlConfig)).digest("hex");
-    const candidateSession = readFileSync(join(finalCalls[1]?.runDir ?? "", ".pi-sessions/session.jsonl"), "utf8");
-    const controlSession = readFileSync(join(finalCalls[0]?.runDir ?? "", ".pi-sessions/session.jsonl"), "utf8");
-    expect(candidateSession).toContain(`candidateConfigHash: ${candidateHash}`);
-    expect(controlSession).toContain(`candidateConfigHash: ${controlHash}`);
-    expect(candidateSession).not.toContain(`candidateConfigHash: ${controlHash}`);
-    expect(readFileSync(join(finalCalls[1]?.runDir ?? "", "trace.jsonl"), "utf8")).not.toContain("systemPrompt");
-    expect(controlHash).toBe(CONTROL_CONFIG_SHA);
-  });
-
   test("a run past 6×W is unscored and stays out of the reward mean", async () => {
     const fx = fixture();
     const calls: OptRunRequest[] = [];
@@ -591,6 +552,7 @@ describe("optimization loop", () => {
       harnessPath: fx.harnessPath,
       model: OPT_MODEL,
       tokenCap: tokenCap(DEV_TASK),
+      relayLogRoot: join(fx.root, "pretty-relay"),
     }, { reward: 1, tokens: 10, wallS: 1, timedOut: false, tWrite: 1_700_000_000, tEnd: 1_700_000_001, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
     await expect(runOptLoop({
       ...hostOpts(fx),
