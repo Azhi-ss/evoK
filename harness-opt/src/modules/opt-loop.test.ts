@@ -691,6 +691,53 @@ describe("optimization loop", () => {
     expect(metrics.rewardMean).toBeNull();
   });
 
+  test("a null evaluator score stays unscored and keeps the evaluator reason", async () => {
+    const fx = fixture();
+    const reason = "gold labels missing for the hidden split";
+    const executor: OptExecutor = {
+      name: "fake",
+      async run(request) {
+        const script = timing(request, 0);
+        writeRunArtifacts(request, { ...script, timedOut: false, tEnd: script.tWrite + 0.5, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
+        const verifier = join(request.runDir, "verifier");
+        const checker = join(request.relayLogRoot ?? "", request.runId ?? "", "checker");
+        writeFileSync(join(verifier, ".scorer-result.json"), `${JSON.stringify({ total_score: null, reward: null, reason })}\n`);
+        writeFileSync(join(verifier, "breakdown.json"), `${JSON.stringify({
+          total_score: 0,
+          reward: 0,
+          issues: ["checker_exception: ValueError: private evaluator returned non-finite score"],
+        })}\n`);
+        const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+        const kept = spawnSync("python3", ["-c", [
+          "import sys",
+          "sys.path.insert(0, sys.argv[1])",
+          "import hooks",
+          "hooks.preserve_scorer_result(sys.argv[2], sys.argv[3])",
+        ].join("\n"), relayDir, verifier, checker], { encoding: "utf8" });
+        if (kept.status !== 0) throw new Error(kept.stderr || kept.stdout || "preserve failed");
+        unlinkSync(join(verifier, ".scorer-result.json"));
+        return observation(request, { reward: 0, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+      },
+    };
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor });
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
+      runs: { seed: number; scoreStatus: string; unscoredReason?: string; reward: number | null }[];
+      rewardMean: number | null;
+    };
+    expect(metrics.runs).toHaveLength(1);
+    expect(metrics.runs[0]).toMatchObject({ seed: 0, scoreStatus: "unscored", unscoredReason: reason, reward: null });
+    expect(metrics.rewardMean).toBeNull();
+    const review = readFileSync(join(fx.out, "round1/review-input.json"), "utf8");
+    expect(review).toContain(reason);
+    const logs = join(fx.attestRoot, "relay-logs");
+    const copied = readdirSync(logs)
+      .map((id) => join(logs, id, "checker", ".scorer-result.json"))
+      .find((file) => existsSync(file));
+    expect(copied).toBeTruthy();
+    expect(JSON.parse(readFileSync(copied ?? "", "utf8")).reason).toBe(reason);
+    expect(existsSync(join(copied ?? "", "..", "..", "run-record.json"))).toBe(false);
+  });
+
   test("execute mode refuses to start without BASE_URL or a command", async () => {
     const fx = fixture();
     await expect(runOptLoop({

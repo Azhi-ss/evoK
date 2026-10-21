@@ -5,7 +5,9 @@ classify records codes. This module does not rerun pairs or summarize ITT.
 import hashlib
 import hmac
 import json
+import math
 import os
+import threading
 from pathlib import Path
 
 from canon import append_jsonl, canonical
@@ -290,6 +292,172 @@ def _write_exact(path: Path, data: bytes) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _finite_score(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(float(value))
+
+
+def scorer_null_reason(payload) -> str | None:
+    """The evaluator's reason when total_score or reward is null, missing, or not finite.
+
+    A finite zero is a real score. A missing reason becomes 'null score'.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if "total_score" not in payload and "reward" not in payload:
+        return None
+    if _finite_score(payload.get("total_score")) and _finite_score(payload.get("reward")):
+        return None
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return "null score"
+
+
+def _read_json_object(path: Path):
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _scorer_payload(directory):
+    if not directory:
+        return None
+    root = Path(directory)
+    for name in (".scorer-result.json", "scorer-result.json"):
+        payload = _read_json_object(root / name)
+        if isinstance(payload, dict) and ("total_score" in payload or "reward" in payload):
+            return payload
+    return None
+
+
+def preserve_scorer_result(verifier_dir, dest_dir) -> bool:
+    """Copy .scorer-result.json into the relay checker dir. The source is left in place.
+
+    The checker unlinks .scorer-result.json. The copy uses that name in dest when dest
+    is a different directory, and always also writes scorer-result.json so the bytes
+    survive that unlink.
+    """
+    src = Path(verifier_dir) / ".scorer-result.json"
+    if src.is_symlink() or not src.is_file():
+        return False
+    try:
+        data = src.read_bytes()
+    except OSError:
+        return False
+    if data == b"":
+        return False
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
+    targets = [dest / "scorer-result.json"]
+    dotted = dest / ".scorer-result.json"
+    try:
+        same = dotted.resolve() == src.resolve()
+    except OSError:
+        same = False
+    if not same:
+        targets.append(dotted)
+    stable = Path(verifier_dir) / "scorer-result.json"
+    if stable.resolve() not in {item.resolve() for item in targets}:
+        targets.append(stable)
+    wrote = False
+    for target in targets:
+        if target.is_symlink():
+            continue
+        if target.is_file():
+            try:
+                if target.read_bytes() == data:
+                    wrote = True
+                    continue
+            except OSError:
+                continue
+        _write_exact(target, data)
+        wrote = True
+    return wrote
+
+
+class ScorerWatch:
+    """Poll the verifier dir and copy .scorer-result.json before the checker unlinks it."""
+
+    def __init__(self, verifier_dir, dest_dir):
+        self.verifier_dir = verifier_dir
+        self.dest_dir = dest_dir
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="scorer-watch", daemon=True)
+
+    def __enter__(self):
+        Path(self.dest_dir).mkdir(parents=True, exist_ok=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc):
+        self._stop.set()
+        self._thread.join(timeout=2)
+        preserve_scorer_result(self.verifier_dir, self.dest_dir)
+        return False
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            preserve_scorer_result(self.verifier_dir, self.dest_dir)
+            self._stop.wait(0.02)
+
+
+def _non_finite_issue(verifier_dir) -> str | None:
+    payload = _read_json_object(Path(verifier_dir) / "breakdown.json")
+    if not isinstance(payload, dict):
+        return None
+    issues = payload.get("issues")
+    if not isinstance(issues, list):
+        return None
+    for issue in issues:
+        text = str(issue)
+        if "non-finite" in text:
+            return text
+    return None
+
+
+def null_score_status(verifier_dir, checker_dir=None) -> dict:
+    """Null or missing evaluator scores are unscored. Finite scores, including 0, are not."""
+    payloads = []
+    for directory in (checker_dir, verifier_dir):
+        payload = _scorer_payload(directory)
+        if payload is not None:
+            payloads.append(payload)
+    for payload in payloads:
+        reason = scorer_null_reason(payload)
+        if reason:
+            return {"nullScore": True, "score_status": "unscored", "unscored_reason": reason, "reward": None}
+    if payloads:
+        return {"nullScore": False}
+    issue = _non_finite_issue(verifier_dir)
+    if issue:
+        return {"nullScore": True, "score_status": "unscored", "unscored_reason": issue, "reward": None}
+    return {"nullScore": False}
+
+
+def apply_score_accounting(row, verifier_dir, checker_dir=None) -> dict:
+    """Batch row: a null evaluator score stays unscored with its reason. checker_exit 0 does not make it a 0."""
+    if not isinstance(row, dict):
+        raise TypeError("row")
+    if row.get("score_status") == "unscored" and row.get("unscored_reason"):
+        return row
+    noted = null_score_status(verifier_dir, checker_dir)
+    if not noted["nullScore"]:
+        return row
+    updated = dict(row)
+    updated["score_status"] = "unscored"
+    updated["unscored_reason"] = noted["unscored_reason"]
+    updated["reward"] = None
+    updated["anomaly"] = noted["unscored_reason"]
+    return updated
 
 
 def copy_checker_before_sign(run_dir, run_id: str, relay_root=None) -> dict:

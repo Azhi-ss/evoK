@@ -1160,16 +1160,26 @@ async function executeScored(
     reward = null;
     unscoredReason = "result_runid_mismatch";
   }
+  const checkerDir = join(host.relayLogRoot, runId, "checker");
+  let evaluatorNull: string | null = null;
   if (observation.tokens > request.tokenCap) {
     scoreStatus = "unscored";
     reward = null;
     unscoredReason = "token_cap";
+  } else if (scoreStatus === "scored") {
+    evaluatorNull = readEvaluatorNullScore(request.runDir, checkerDir);
+    if (evaluatorNull) {
+      scoreStatus = "unscored";
+      reward = null;
+      unscoredReason = evaluatorNull;
+    } else if (reward === null) {
+      scoreStatus = "unscored";
+    }
   } else if (reward === null) {
     scoreStatus = "unscored";
   }
-  const checkerDir = join(host.relayLogRoot, runId, "checker");
   let runRecordPath: string | undefined;
-  if (existsSync(join(checkerDir, "reward.txt"))) {
+  if (!evaluatorNull && existsSync(join(checkerDir, "reward.txt"))) {
     const signed = signRunRecord(host.keyFile, checkerDir, request.runDir, runId);
     if (!signed) {
       scoreStatus = "unscored";
@@ -1259,6 +1269,26 @@ function unscoredRun(
     attestReasons: [reason],
     relayPatchActive,
   };
+}
+
+function readEvaluatorNullScore(runDir: string, checkerDir: string): string | null {
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const proc = spawnSync("python3", [
+    "-c",
+    [
+      "import json, sys",
+      "sys.path.insert(0, sys.argv[1])",
+      "import hooks",
+      "print(json.dumps(hooks.null_score_status(sys.argv[2], sys.argv[3])))",
+    ].join("\n"),
+    relayDir,
+    join(runDir, "verifier"),
+    checkerDir,
+  ], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "null score").trim());
+  const parsed = JSON.parse(proc.stdout) as { nullScore?: unknown; unscored_reason?: unknown };
+  if (parsed.nullScore !== true) return null;
+  return typeof parsed.unscored_reason === "string" && parsed.unscored_reason !== "" ? parsed.unscored_reason : "null score";
 }
 
 function readReward(runDir: string): { readonly reward: number | null; readonly reason?: string } {

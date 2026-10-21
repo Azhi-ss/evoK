@@ -295,9 +295,12 @@ def main():
                     res["unscored_reason"]="usage_missing" if rc=="usage_missing" else "token_cap_exceeded"
                 if staged and not token_killed:
                     rel=staged[-1].relative_to(run/"workspace")
+                    checker_dir=Path(relay_root)/relay_id/"checker"
                     # r3 rule 2: after an agent timeout the checker still runs on whatever is in outputs
-                    try: res["checker_exit"]=subprocess.run(checker_cmd(t,run,rel,name+"-chk",run_id=relay_id,port=port),stdout=open(run/"checker.log","w"),stderr=subprocess.STDOUT,timeout=lim["verifier_timeout_sec"]).returncode
-                    except subprocess.TimeoutExpired: subprocess.run(["sudo","docker","kill",name+"-chk"]); res["checker_exit"]="timeout"
+                    with hooks.ScorerWatch(run/"verifier", checker_dir):
+                        try: res["checker_exit"]=subprocess.run(checker_cmd(t,run,rel,name+"-chk",run_id=relay_id,port=port),stdout=open(run/"checker.log","w"),stderr=subprocess.STDOUT,timeout=lim["verifier_timeout_sec"]).returncode
+                        except subprocess.TimeoutExpired: subprocess.run(["sudo","docker","kill",name+"-chk"]); res["checker_exit"]="timeout"
+                    res=hooks.apply_score_accounting(res, run/"verifier", checker_dir)
                 elif token_killed:
                     res["checker_exit"]="skipped_token_cap"
                 recorded=finalize_launch(run, relay_id, relay_root, res)

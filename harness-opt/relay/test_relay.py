@@ -1482,6 +1482,92 @@ class EwiTableCase(unittest.TestCase):
         self.assertNotEqual(again["verdict"], False)
 
 
+class NullScoreCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.verifier = self.root / "verifier"
+        self.checker = self.root / "relay" / ("ab" * 16) / "checker"
+        self.verifier.mkdir(parents=True)
+        self.reason = "gold labels missing for the hidden split"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_scorer(self, payload):
+        (self.verifier / ".scorer-result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_null_score_is_copied_before_unlink_and_stays_unscored(self):
+        payload = {"total_score": None, "reward": None, "reason": self.reason}
+        self._write_scorer(payload)
+        (self.verifier / "reward.txt").write_text("0.000000\n", encoding="utf-8")
+        (self.verifier / "breakdown.json").write_text(json.dumps({
+            "total_score": 0.0,
+            "reward": 0.0,
+            "issues": ["checker_exception: ValueError: private evaluator returned non-finite score"],
+        }), encoding="utf-8")
+        self.assertTrue(hooks.preserve_scorer_result(self.verifier, self.checker))
+        source = self.verifier / ".scorer-result.json"
+        source.unlink()
+        self.assertFalse(source.exists())
+        self.assertTrue(self.verifier.is_dir())
+        copied = json.loads((self.checker / ".scorer-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(copied["reason"], self.reason)
+        stable = json.loads((self.verifier / "scorer-result.json").read_text(encoding="utf-8"))
+        self.assertEqual(stable, payload)
+        row = hooks.apply_score_accounting(
+            {"checker_exit": 0, "reward": "0.000000"},
+            self.verifier,
+            self.checker,
+        )
+        self.assertEqual(row["score_status"], "unscored")
+        self.assertEqual(row["unscored_reason"], self.reason)
+        self.assertIsNone(row["reward"])
+        self.assertEqual(row["anomaly"], self.reason)
+        self.assertEqual(row["checker_exit"], 0)
+
+    def test_watch_copies_the_scorer_file_before_it_is_deleted(self):
+        import time
+        payload = {"total_score": None, "reward": None, "reason": self.reason}
+        with hooks.ScorerWatch(self.verifier, self.checker):
+            self._write_scorer(payload)
+            copied = self.checker / ".scorer-result.json"
+            for _ in range(50):
+                if copied.is_file():
+                    break
+                time.sleep(0.02)
+            self.assertTrue(copied.is_file())
+            (self.verifier / ".scorer-result.json").unlink()
+        self.assertFalse((self.verifier / ".scorer-result.json").exists())
+        self.assertEqual(json.loads(copied.read_text(encoding="utf-8"))["reason"], self.reason)
+        noted = hooks.null_score_status(self.verifier, self.checker)
+        self.assertTrue(noted["nullScore"])
+        self.assertEqual(noted["unscored_reason"], self.reason)
+
+    def test_finite_zero_stays_scored_and_a_bare_non_finite_issue_is_unscored(self):
+        self._write_scorer({"total_score": 0, "reward": 0.0, "reason": "public contract failed"})
+        hooks.preserve_scorer_result(self.verifier, self.checker)
+        row = hooks.apply_score_accounting({"checker_exit": 0, "reward": "0.000000"}, self.verifier, self.checker)
+        self.assertNotIn("score_status", row)
+        self.assertEqual(row["reward"], "0.000000")
+        self.assertFalse(hooks.null_score_status(self.verifier, self.checker)["nullScore"])
+
+        bare = self.root / "bare"
+        bare.mkdir()
+        (bare / "reward.txt").write_text("0.000000\n", encoding="utf-8")
+        (bare / "breakdown.json").write_text(json.dumps({
+            "total_score": 0.0,
+            "reward": 0.0,
+            "issues": ["checker_exception: ValueError: private evaluator returned non-finite score"],
+        }), encoding="utf-8")
+        noted = hooks.null_score_status(bare, self.root / "missing-checker")
+        self.assertTrue(noted["nullScore"])
+        self.assertIn("non-finite", noted["unscored_reason"])
+        accounted = hooks.apply_score_accounting({"checker_exit": 0, "reward": "0.000000"}, bare, self.root / "missing-checker")
+        self.assertEqual(accounted["score_status"], "unscored")
+        self.assertIsNone(accounted["reward"])
+
+
 def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):
     import subprocess
     tmp = tempfile.TemporaryDirectory()
