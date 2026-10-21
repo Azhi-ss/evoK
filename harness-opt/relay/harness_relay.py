@@ -104,7 +104,7 @@ def _parse_args(raw):
 
 
 class Relay:
-    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None):
+    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None, plant_enabled=True):
         if os.path.realpath(upstream_key_file) == os.path.realpath(attest_key_file):
             raise RuntimeError("upstream key and attest key are the same path")
         self.upstream_key = _read_secret(upstream_key_file)
@@ -134,6 +134,7 @@ class Relay:
         self.mac_key = secrets.token_bytes(32)
         self._chain = {}
         self.loop_tokens = 0
+        self.plant_enabled = bool(plant_enabled)
         Path(self.log_root).mkdir(parents=True, exist_ok=True)
         os.chmod(self.log_root, 0o700)
 
@@ -226,6 +227,7 @@ class Relay:
             raise RuntimeError("run is not open")
         state = self._chain.get(run_id)
         if state is None or path.read_bytes() != state["body"]:
+            self._finalize_red(run_id, "attest_mismatch")
             self.open_id = None
             return self._fault_report("attest_mismatch")
         if not any(row.get("type") == "close" for row in self._mem_rows(run_id)):
@@ -263,22 +265,35 @@ class Relay:
             return
         state["saw_done"] = True
         err = obj.get("errClass")
-        if err in ("readOnlyTokenCap", "innovatorCap"):
+        refused = err in ("readOnlyTokenCap", "innovatorCap")
+        if refused:
             state["refused"] = err
-            return
-        if not _is_2xx(obj):
+        elif not _is_2xx(obj):
             return
         usage = obj.get("usage")
-        if usage is None:
-            state["usage_missing"] = True
+        if not isinstance(usage, dict):
+            if not refused:
+                state["usage_missing"] = True
             return
         weighed = weight(usage)
         if weighed is None:
-            state["usage_missing"] = True
+            if not refused:
+                state["usage_missing"] = True
             return
+        # A post-call 429 already spent these tokens at the upstream. Count them.
         state["tokens"] += weighed
         if state.get("kind") in READ_ONLY_KINDS:
             self.loop_tokens += weighed
+
+    def _finalize_red(self, run_id: str, fault: str) -> None:
+        """Append a close so this run is not still open. The file stays where it is."""
+        path = self.log_path(run_id)
+        if path.is_symlink() or not path.is_file():
+            return
+        if self._has_close(run_id):
+            return
+        ts, iso = _stamp()
+        append_jsonl(path, {"type": "close", "runId": run_id, "fault": fault, "ts": ts, "ts_iso": iso})
 
     def _mem_rows(self, run_id: str) -> list:
         state = self._chain.get(run_id)
@@ -318,6 +333,8 @@ class Relay:
     def record(self, run_id: str, row: dict) -> None:
         """Host control-plane append. The role HTTP path cannot call this."""
         with self._lock:
+            if not self.plant_enabled:
+                raise RuntimeError("control plant disabled")
             if run_id != self.open_id:
                 raise RuntimeError("run is not open")
             if not isinstance(row, dict):
@@ -326,6 +343,8 @@ class Relay:
 
     def plant_role(self, run_id: str, role: str, round_n, assistant: str, seq=1) -> None:
         with self._lock:
+            if not self.plant_enabled:
+                raise RuntimeError("control plant disabled")
             if run_id != self.open_id:
                 raise RuntimeError("run is not open")
             from plant import plant_role_done
@@ -337,6 +356,8 @@ class Relay:
 
     def plant_reads(self, run_id: str, files) -> None:
         with self._lock:
+            if not self.plant_enabled:
+                raise RuntimeError("control plant disabled")
             if run_id != self.open_id:
                 raise RuntimeError("run is not open")
             from plant import plant_read
@@ -544,9 +565,23 @@ class Relay:
 
     def _lines(self, run_id):
         path = self.log_path(run_id)
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        rows = []
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return rows
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
 
     def _was_opened(self, run_id) -> bool:
         path = self.log_path(run_id)
@@ -788,6 +823,8 @@ def _relay_from(flags) -> Relay:
     kwargs = {}
     if upstream_url:
         kwargs["upstream_url"] = upstream_url
+    if (flags.get("mode") or ["dry-run"])[-1] == "execute":
+        kwargs["plant_enabled"] = False
     return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, **kwargs)
 
 

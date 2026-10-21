@@ -109,7 +109,8 @@ class RelayCase(unittest.TestCase):
             report = self.relay.close_run(self.run)
             self.assertEqual(report["fault"], "attest_mismatch")
             self.assertFalse(path.with_name("relay.jsonl.sig").exists())
-            path.unlink()
+            self.assertTrue(path.is_file())
+            self.assertIn('"fault":"attest_mismatch"', path.read_text(encoding="utf-8"))
 
         fault_after(lambda path: path.write_text(path.read_text(encoding="utf-8").replace('"pid":', '"pid":0,'), encoding="utf-8"))
         self.run = new_run_id()
@@ -132,18 +133,20 @@ class RelayCase(unittest.TestCase):
         status, body = self.post(b'{"messages":[]}', run=run)
         self.assertEqual(status, 429)
         self.assertEqual(json.loads(body.decode())["error"], "innovatorCap")
-        self.assertEqual(self.relay.loop_tokens, 0)
+        self.assertEqual(self.relay.loop_tokens, 200_000)
         report = self.relay.close_run(run)
         self.assertIsNone(report["fault"])
         self.assertEqual(report["refused"], "innovatorCap")
-        self.assertEqual(report["tokens"], 0)
+        self.assertEqual(report["tokens"], 200_000)
         self.assertFalse(report["usageMissing"])
-        self.assertEqual(report["loopTokens"], 0)
+        self.assertEqual(report["loopTokens"], 200_000)
 
         run = new_run_id()
         self.relay.open_run(run, "role:critic", "abc")
+        forwarded = []
 
         def at_loop_cap(body, stream):
+            forwarded.append(body)
             usage = {"prompt_tokens": 30_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}
             return 200, b"{}", usage
 
@@ -151,10 +154,21 @@ class RelayCase(unittest.TestCase):
         status, body = self.post(b'{"messages":[]}', run=run)
         self.assertEqual(status, 429)
         self.assertEqual(json.loads(body.decode())["error"], "readOnlyTokenCap")
-        self.assertEqual(self.relay.loop_tokens, 0)
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(self.relay.loop_tokens, 200_000 + 30_000_000)
         report = self.relay.close_run(run)
         self.assertEqual(report["refused"], "readOnlyTokenCap")
-        self.assertEqual(report["loopTokens"], 0)
+        self.assertEqual(report["tokens"], 30_000_000)
+        self.assertEqual(report["loopTokens"], 200_000 + 30_000_000)
+
+        later = new_run_id()
+        self.relay.open_run(later, "role:innovator", "abc")
+        self.relay.upstream = lambda body, stream: forwarded.append(body) or (200, b"{}", {"prompt_tokens": 1, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}})
+        status, body = self.post(b'{"messages":[]}', run=later)
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body.decode())["error"], "readOnlyTokenCap")
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(self.relay.loop_tokens, 200_000 + 30_000_000)
 
     def test_missing_cached_field_is_usage_missing(self):
         ledger = Ledger()
@@ -177,6 +191,35 @@ class RelayCase(unittest.TestCase):
         self.assertTrue(report["usageMissing"])
         self.assertEqual(report["tokens"], 0)
         self.assertEqual(self.relay.loop_tokens, 0)
+
+    def test_mismatch_close_lets_the_next_run_open(self):
+        path = self.relay.log_path(self.run)
+        original = path.read_bytes()
+        path.write_bytes(original + b'{"type":"tamper"}\n')
+        report = self.relay.close_run(self.run)
+        self.assertEqual(report["fault"], "attest_mismatch")
+        kept = path.read_bytes()
+        self.assertTrue(path.is_file())
+        self.assertTrue(kept.startswith(original + b'{"type":"tamper"}\n'))
+        self.assertIn(b'"fault":"attest_mismatch"', kept)
+        nxt = new_run_id()
+        self.relay.open_run(nxt, "role:innovator", "abc")
+        self.assertIsNone(self.relay.close_run(nxt)["fault"])
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        again = new_run_id()
+        restarted.open_run(again, "executor", "abc")
+        self.assertIsNone(restarted.close_run(again)["fault"])
+        self.assertEqual(path.read_bytes(), kept)
+
+    def test_execute_mode_disables_plant_ops(self):
+        self.relay.plant_enabled = False
+        with self.assertRaises(RuntimeError):
+            self.relay.record(self.run, {"type": "req", "role": "innovator"})
+        with self.assertRaises(RuntimeError):
+            self.relay.plant_role(self.run, "innovator", 1, "{\"summary\":\"x\"}")
+        with self.assertRaises(RuntimeError):
+            self.relay.plant_reads(self.run, [])
+        self.assertFalse(b'"role":"innovator"' in self.relay.log_path(self.run).read_bytes())
 
     def test_control_listens_forwards_and_seals(self):
         import threading

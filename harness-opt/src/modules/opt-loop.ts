@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -401,7 +401,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const relayRoot = loopRelayRoot(options, env);
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile);
+  const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
   let readOnlyTotal = 0;
@@ -1497,7 +1497,7 @@ function prepareRole(
     relayLog: relay.relayLog,
     baseUrl: relay.baseUrl,
   });
-  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), config);
+  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), roleFacing(config));
   const argv = rolePiArgv(piBin ?? "pi", config);
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
   if (piBin) launchRolePi(piBin, config);
@@ -1577,41 +1577,6 @@ function runIdFromBase(baseUrl: string): string {
   return runId;
 }
 
-function roleRecordFault(log: string, key: Buffer): "usage_missing" | "attest_mismatch" | null {
-  let linked;
-  try {
-    linked = lstatSync(log);
-  } catch {
-    return "usage_missing";
-  }
-  if (linked.isSymbolicLink()) return "attest_mismatch";
-  if (!linked.isFile()) return "usage_missing";
-  if (!relaySealOk(log, key)) return "attest_mismatch";
-  return null;
-}
-
-function relaySealOk(log: string, key: Buffer): boolean {
-  const sigPath = `${log}.sig`;
-  let sigStat;
-  try {
-    sigStat = lstatSync(sigPath);
-  } catch {
-    return false;
-  }
-  if (!sigStat.isFile() || sigStat.isSymbolicLink()) return false;
-  const digest = createHash("sha256").update(readFileSync(log)).digest("hex");
-  let signed: { type?: unknown; relayLogSha?: unknown; hmacSha256?: unknown };
-  try {
-    signed = JSON.parse(readFileSync(sigPath, "utf8")) as { type?: unknown; relayLogSha?: unknown; hmacSha256?: unknown };
-  } catch {
-    return false;
-  }
-  if (signed.type !== "relay_log" || signed.relayLogSha !== digest || typeof signed.hmacSha256 !== "string") return false;
-  const mac = createHmac("sha256", key).update(`{"relayLogSha":"${digest}","type":"relay_log"}`).digest("hex");
-  if (mac.length !== signed.hmacSha256.length) return false;
-  return timingSafeEqual(Buffer.from(mac), Buffer.from(signed.hmacSha256));
-}
-
 function ensureUpstreamKey(attestRoot: string, attestKeyFile: string, env: NodeJS.ProcessEnv): string {
   const configured = env.RELAY_UPSTREAM_KEY_FILE;
   if (typeof configured === "string" && configured.trim() !== "" && resolve(configured) !== resolve(attestKeyFile)) return configured.trim();
@@ -1630,10 +1595,10 @@ class RelayControl {
   private stderr = "";
   private dead: Error | null = null;
 
-  constructor(root: string, port: string, bindHost: string, upstreamUrl: string, attestKeyFile: string, upstreamKeyFile: string) {
+  constructor(root: string, port: string, bindHost: string, upstreamUrl: string, attestKeyFile: string, upstreamKeyFile: string, mode: "dry-run" | "execute") {
     const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
     const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
-    const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost];
+    const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost, "--mode", mode];
     if (upstreamUrl !== "") args.push("--upstream", upstreamUrl);
     this.child = spawn("python3", args, {
       cwd: relayDir,
