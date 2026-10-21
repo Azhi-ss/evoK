@@ -138,7 +138,7 @@ describe("EWI metric", () => {
       tracePath: join(dir, "trace.jsonl"),
       outputsDir: outputs,
       batchLogPath: join(dir, "batch.log"),
-    }, 600)).toThrow(/not JSON/);
+    }, 600)).toThrow(/JSONDecodeError/);
   });
 
   test("an assistant_message without ts fails closed", () => {
@@ -190,7 +190,7 @@ describe("EWI metric", () => {
 
   test("a blank line in the middle fails closed, and a trailing newline does not", () => {
     const dir = edgeDir("blank", `${JSON.stringify({ type: "assistant_message", ts: 1_000 })}\n\n${JSON.stringify({ type: "assistant_message", ts: 2_000 })}\n`);
-    expect(() => measureCase(dir)).toThrow(/not JSON/);
+    expect(() => measureCase(dir)).toThrow(/JSONDecodeError/);
     const trailing = edgeDir("trailing", `${JSON.stringify({ type: "assistant_message", ts: 1_000 })}\n`);
     expect(measureCase(trailing).idleS).toBe(699);
   });
@@ -204,24 +204,24 @@ describe("EWI metric", () => {
 
   test("the shared edge table matches ewi_idle.py", () => {
     const rows: { readonly name: string; readonly trace: string; readonly link: boolean; readonly idle?: number; readonly error?: RegExp }[] = [
-      { name: "blank-middle", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\n\n{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false, error: /not JSON/ },
+      { name: "blank-middle", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\n\n{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false, error: /JSONDecodeError/ },
       { name: "ts-nan", trace: "{\"type\":\"assistant_message\",\"ts\":NaN}\n", link: false, error: /missing ts/ },
       { name: "ts-true", trace: "{\"type\":\"assistant_message\",\"ts\":true}\n", link: false, error: /missing ts/ },
       { name: "ts-false", trace: "{\"type\":\"assistant_message\",\"ts\":false}\n", link: false, error: /missing ts/ },
       { name: "ts-infinity", trace: "{\"type\":\"assistant_message\",\"ts\":Infinity}\n", link: false, error: /missing ts/ },
       { name: "ts-neginfinity", trace: "{\"type\":\"assistant_message\",\"ts\":-Infinity}\n", link: false, error: /missing ts/ },
       { name: "ts-string", trace: "{\"type\":\"assistant_message\",\"ts\":\"1\"}\n", link: false, error: /missing ts/ },
-      { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false, error: /not JSON/ },
+      { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false, error: /JSONDecodeError/ },
       { name: "missing-ts", trace: "{\"type\":\"assistant_message\"}\n", link: false, error: /missing ts/ },
-      { name: "non-object", trace: "[1,2]\n", link: false, error: /not an object/ },
-      { name: "non-object-null", trace: "null\n", link: false, error: /not an object/ },
+      { name: "non-object", trace: "[1,2]\n", link: false, error: /'list' object has no attribute 'get'/ },
+      { name: "non-object-null", trace: "null\n", link: false, error: /'NoneType' object has no attribute 'get'/ },
       { name: "lone-cr", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\r{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false, idle: 698 },
       { name: "symlink-output", trace: "", link: true, idle: 700 },
     ];
     for (const row of rows) {
       const dir = edgeDir(row.name, row.trace, row.link);
       if (row.idle === undefined) {
-        expect(() => measureCase(dir)).toThrow(row.error ?? /missing ts|not JSON/);
+        expect(() => measureCase(dir)).toThrow(row.error ?? /missing ts|JSONDecodeError|has no attribute 'get'/);
         const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
         expect(proc.status).not.toBe(0);
         continue;

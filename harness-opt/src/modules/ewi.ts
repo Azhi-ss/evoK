@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 export const DEFAULT_EWI_THRESHOLD_SEC = 600;
 
 /** sha256 of the packaged `scripts/ewi_idle.py`. Scoring shells out to that file. */
-export const EWI_IDLE_SHA = "478e7fb27284459b677e600d7c67e2dd5ff742c49ea9045a18520ab76d7270cb";
+export const EWI_IDLE_SHA = "8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69";
 
 /**
  * Path of `ewi_idle.py`. `EWI_IDLE_SCRIPT` wins. Otherwise the package copy.

@@ -45,6 +45,6 @@
 
 ## EWI 和轮询
 
-计分 EWI 调用仓库里的 `scripts/ewi_idle.py`。box 上曾经提到的 sha `8a4ec70f…` 不在这棵树里。仓库钉住的是当前脚本字节的 sha256 `478e7fb27284459b677e600d7c67e2dd5ff742c49ea9045a18520ab76d7270cb`。`EWI-relay-v1` 是另一套指标。
+计分 EWI 调用仓库里的 `scripts/ewi_idle.py`，字节与批准稿相同，sha256 `8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69`。`ts_of` 在列表推导里调用，非有限 `ts` 抛 `ValueError('missing ts')`。`EWI-relay-v1` 是另一套指标，不改这个文件。
 
 输出监视的单测走 2 秒内容 sha 的 `poll_once`。**未核实：** inotify。token 上限的单测直接调用 `poll_once`，不睡眠 15 秒。
