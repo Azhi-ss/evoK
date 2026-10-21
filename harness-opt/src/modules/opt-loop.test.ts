@@ -15,6 +15,7 @@ import {
   OPT_MODEL,
   runOptLoop,
   runOptOnce,
+  runRecordArgv,
   stubOptRoles,
   type OptLoopOptions,
   type OptRoles,
@@ -163,6 +164,8 @@ function rejectingRoles(fx: Fixture): OptRoles & { readonly reviews: number } {
   return {
     gap: (input) => roles.gap(input),
     innovate: (input) => roles.innovate(input),
+    critic: (input) => roles.critic(input),
+    ranker: (input) => roles.ranker(input),
     review: async (input) => {
       reviews += 1;
       hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`, fx.key);
@@ -173,7 +176,7 @@ function rejectingRoles(fx: Fixture): OptRoles & { readonly reviews: number } {
 }
 
 function plantRelayRead(log: string, runId: string, files: readonly string[]): void {
-  const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
   const proc = spawnSync("python3", [script, "plant-read", "--log", log, "--run-id", runId, ...files.flatMap((file) => ["--file", file])], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "plant-read failed").trim());
 }
@@ -194,6 +197,8 @@ function citingRoles(key: Buffer): OptRoles {
       return turn;
     },
     innovate: (input) => stub.innovate(input),
+    critic: (input) => stub.critic(input),
+    ranker: (input) => stub.ranker(input),
     review: (input) => stub.review(input),
   };
 }
@@ -226,8 +231,6 @@ describe("optimization loop", () => {
     expect(result.skippedFinal).toBe(true);
     expect(fake.calls.map((call) => `${call.task.id}:${call.seed}:${call.model}`)).toEqual([
       "i014:0:deepseek-v4-1-flash-261017",
-      "i014:1:deepseek-v4-1-flash-261017",
-      "i014:2:deepseek-v4-1-flash-261017",
     ]);
     expect(roles.reviews).toBe(1);
     expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
@@ -262,7 +265,18 @@ describe("optimization loop", () => {
     const manifest = JSON.parse(readFileSync(join(fx.out, "round1/sessions/manifest.json"), "utf8")) as {
       sessions: { role: string; file: string; sha256: string }[];
     };
-    expect(manifest.sessions.map((item) => item.role)).toEqual(["gap-finder", "innovator", "reviewer-gate"]);
+    expect(manifest.sessions.map((item) => item.role)).toEqual([
+      "gap-finder",
+      "innovator",
+      "innovator",
+      "innovator",
+      "innovator",
+      "innovator",
+      "innovator",
+      "critic",
+      "ranker",
+      "reviewer-gate",
+    ]);
     for (const item of manifest.sessions) {
       const bytes = readFileSync(join(fx.out, item.file));
       expect(createHash("sha256").update(bytes).digest("hex")).toBe(item.sha256);
@@ -312,10 +326,10 @@ describe("optimization loop", () => {
     expect(metrics.ewiThresholdLabel).toBe("新口径下未校准");
     expect(result.ewiThresholdLabel).toBe("新口径下未校准");
     expect(metrics.ewiRuns).toEqual([]);
-    expect(metrics.runs.map((run) => run.ewi)).toEqual([null, null, null]);
-    expect(metrics.runs.map((run) => run.ewiVerdict)).toEqual(["EWI不可判", "EWI不可判", "EWI不可判"]);
-    expect(metrics.runs.map((run) => run.reward)).toEqual([1, 1, 0]);
-    expect(metrics.rewardMean).toBeCloseTo(2 / 3);
+    expect(metrics.runs.map((run) => run.ewi)).toEqual([null]);
+    expect(metrics.runs.map((run) => run.ewiVerdict)).toEqual(["EWI不可判"]);
+    expect(metrics.runs.map((run) => run.reward)).toEqual([1]);
+    expect(metrics.rewardMean).toBe(1);
     expect(metrics.withoutEwi).toEqual({ count: 0, rewardMean: null, timedOut: 0 });
     expect(readFileSync(join(fx.out, "round1/run-notes.md"), "utf8")).toContain(`patchSha: ${patchHash}`);
     const reviewInput = readFileSync(join(fx.out, "round1/review-input.json"), "utf8");
@@ -352,7 +366,6 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      seeds: [0],
       roles: rejectingRoles(fx),
       executor,
       now: () => new Date(1050 * 1000),
@@ -395,7 +408,6 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      seeds: [0],
       roles: rejectingRoles(fx),
       executor,
     });
@@ -415,7 +427,6 @@ describe("optimization loop", () => {
         ...hostOpts(fx),
         mode: "dry-run",
         rounds: 1,
-        seeds: [0],
         roles: rejectingRoles(fx),
         executor: fakeExecutor(fx).executor,
       })).rejects.toThrow(/EWI_IDLE_SCRIPT/);
@@ -431,6 +442,8 @@ describe("optimization loop", () => {
     let innovateCalls = 0;
     const roles: OptRoles = {
       gap: (input) => stubOptRoles(fx.key).gap(input),
+      critic: (input) => stubOptRoles(fx.key).critic(input),
+      ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async innovate(input) {
         innovateCalls += 1;
         writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "innovator" })}\n`);
@@ -452,8 +465,8 @@ describe("optimization loop", () => {
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean; closed: boolean };
     expect(closure.reviewFedForward).toBe(false);
     expect(closure.closed).toBe(false);
-    expect(innovateCalls).toBe(2);
-    expect(fake.calls).toHaveLength(3);
+    expect(innovateCalls).toBe(12);
+    expect(fake.calls).toHaveLength(1);
     expect(existsSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"))).toBe(true);
     expect(readFileSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("duplicate summary");
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
@@ -472,7 +485,7 @@ describe("optimization loop", () => {
     expect(result.skippedFinal).toBe(true);
     expect(result.finalBlock).toBeNull();
     expect(result.heldOut).toBeNull();
-    expect(fake.calls).toHaveLength(9);
+    expect(fake.calls).toHaveLength(3);
     expect(fake.calls.every((call) => call.task.id === "i014" && call.task.network === "devii-004-int")).toBe(true);
   });
 
@@ -489,14 +502,14 @@ describe("optimization loop", () => {
         return observation(request, { reward: 1, tokens: over ? tokenCap(DEV_TASK) + 1 : 10, wallS: 10, timedOut: false });
       },
     };
-    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, seeds: [0, 1], roles: rejectingRoles(fx), executor });
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor });
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { seed: number; scoreStatus: string; unscoredReason?: string; reward: number | null }[];
-      rewardMean: number;
+      rewardMean: number | null;
     };
+    expect(metrics.runs).toHaveLength(1);
     expect(metrics.runs[0]).toMatchObject({ seed: 0, scoreStatus: "unscored", unscoredReason: "token_cap", reward: null });
-    expect(metrics.runs[1]?.reward).toBe(1);
-    expect(metrics.rewardMean).toBe(1);
+    expect(metrics.rewardMean).toBeNull();
   });
 
   test("execute mode refuses to start without BASE_URL or a command", async () => {
@@ -617,6 +630,8 @@ describe("optimization loop", () => {
         };
       },
       innovate: (input) => stubOptRoles(fx.key).innovate(input),
+      critic: (input) => stubOptRoles(fx.key).critic(input),
+      ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`, fx.key);
         return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
@@ -648,6 +663,8 @@ describe("optimization loop", () => {
         };
       },
       innovate: (input) => stubOptRoles(fx.key).innovate(input),
+      critic: (input) => stubOptRoles(fx.key).critic(input),
+      ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         expect(roleWrite(input.spawn, input.sessionPath, "forged\n")).toBe(false);
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "accept" })}\n`, fx.key);
@@ -805,13 +822,12 @@ describe("optimization loop", () => {
   test("a second loop into the same out is rejected before the executor runs", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
-    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, seeds: [0], roles: rejectingRoles(fx), executor: fake.executor });
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor: fake.executor });
     const calls = fake.calls.length;
     await expect(runOptLoop({
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      seeds: [0],
       roles: rejectingRoles(fx),
       executor: fake.executor,
     })).rejects.toThrow(/run dir already exists/);
@@ -853,7 +869,6 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      seeds: [0],
       roles: rejectingRoles(fx),
       executor: fake.executor,
     })).rejects.toThrow(/runPath/);
@@ -867,7 +882,7 @@ describe("optimization loop", () => {
     mkdirSync(runDir, { recursive: true });
     symlinkSync(fx.harnessPath, join(runDir, "outputs"));
     const fake = fakeExecutor(fx);
-    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, seeds: [0], roles: rejectingRoles(fx), executor: fake.executor });
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor: fake.executor });
     expect(fake.calls).toHaveLength(0);
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { scoreStatus: string; unscoredReason?: string; reward: number | null }[];
@@ -896,7 +911,7 @@ describe("optimization loop", () => {
         return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
       },
     };
-    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, seeds: [0], roles: rejectingRoles(fx), executor });
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor });
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { scoreStatus: string; unscoredReason?: string; reward: number | null }[];
     };
@@ -915,8 +930,7 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      seeds: [0],
-      roles: { gap: citing.gap, innovate: citing.innovate, review: rejecting.review },
+      roles: { gap: citing.gap, innovate: citing.innovate, critic: citing.critic, ranker: citing.ranker, review: rejecting.review },
       executor: fake.executor,
       round0TracePath: trace,
     });
@@ -948,7 +962,6 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 2,
-      seeds: [0],
       roles: citingRoles(fx.key),
       executor: fake.executor,
       round0TracePath: trace,
@@ -970,7 +983,6 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 2,
-      seeds: [0],
       roles: stubOptRoles(fx.key),
       executor: fake.executor,
       round0TracePath: trace,
@@ -1229,7 +1241,6 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 5,
-      seeds: [0],
       roles,
       executor: fake.executor,
     });
@@ -1254,5 +1265,76 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     expect(parked.calls).toEqual([]);
     expect(early.stopReport.reason).toBe("stop_file");
+  });
+
+  test("relay innovator usage at 30M starts no real run", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    let planted = false;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          if (!planted) {
+            planted = true;
+            const log = join(fx.out, `round${input.round}`, "relay", "innovator-0.jsonl");
+            mkdirSync(join(log, ".."), { recursive: true });
+            const usage = { prompt_tokens: 30_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+            writeFileSync(log, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
+          }
+          return stub.innovate(input);
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(fake.calls).toEqual([]);
+    expect(result.stopReport.reason).toBe("readOnlyTokenCap");
+    expect(result.skippedFinal).toBe(true);
+  });
+
+  test("a forged reviewer accept is not taken", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const citing = citingRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => citing.gap(input),
+        innovate: (input) => citing.innovate(input),
+        critic: (input) => citing.critic(input),
+        ranker: (input) => citing.ranker(input),
+        async review(input) {
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "forged" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, accept: true, reason: "forged" };
+        },
+      },
+    });
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
+    expect(activation.patchActive).toBe(true);
+    expect(closure.gapCitedTrace).toBe(true);
+    expect(fake.calls).toHaveLength(1);
+    expect(result.accepted).toBeNull();
+    expect(result.rounds[0]?.accepted).toBe(false);
+  });
+
+  test("the run-record child argv does not carry the attest key", () => {
+    const fx = fixture();
+    const argv = runRecordArgv(join(fx.root, "checker"), join(fx.root, "run"), "sign", "ab".repeat(16));
+    const flat = argv.join("\n");
+    expect(flat).not.toContain(fx.key.toString("hex"));
+    expect(flat).not.toContain(fx.keyFile);
+    expect(argv[0]).toBe("python3");
+    expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
 });

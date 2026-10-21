@@ -362,6 +362,28 @@ def read_checker_reward(checker_dir):
     return parse_reward_text(file.read_text(encoding="utf-8"))
 
 
+def relay_binding(log_path) -> dict:
+    """relayLogSha, relaySha, and bootId from the host relay log. Missing log stays blank."""
+    path = Path(log_path)
+    if not path.is_file() or path.is_symlink():
+        return {"relayLogSha": "", "relaySha": "", "bootId": ""}
+    raw = path.read_bytes()
+    relay_sha = ""
+    boot = ""
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("type") == "relay_start":
+            relay_sha = str(row.get("relaySha") or "")
+            boot = str(row.get("bootId") or "")
+            break
+    return {"relayLogSha": hashlib.sha256(raw).hexdigest(), "relaySha": relay_sha, "bootId": boot}
+
+
 def sign_run_record(key: bytes, checker_dir, *, relay_log_sha="", relay_sha="", boot_id="", network="devii-004-int", ewi_version="EWI-relay-v1", expected_run_id="") -> dict:
     """checkerOutputSha and reward enter the run signature. The checker directory is the host copy."""
     body = {
@@ -395,6 +417,10 @@ def verify_run_record(run_sig, checker_out, reward, key: bytes, container_dir=No
     mac = run_sig.get("hmacSha256") or ""
     expected = hmac.new(key, canonical(body), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(str(mac), expected):
+        return {"ok": False, "reason": "attest_mismatch"}
+    expected_run = run_sig.get("expectedRunId")
+    bound_run = Path(checker_out).parent.name
+    if not isinstance(expected_run, str) or expected_run == "" or expected_run != bound_run:
         return {"ok": False, "reason": "attest_mismatch"}
     try:
         digest = checker_tree_sha(checker_out)

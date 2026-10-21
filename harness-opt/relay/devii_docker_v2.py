@@ -48,26 +48,20 @@ TOKEN_W={
 def token_cap(task):
   if task not in TOKEN_W: raise KeyError(f"no TOKEN_W for {task}")
   return 6 * TOKEN_W[task]
-def tokens_from_usage(usage):
-  """usage: dict with input/output/cacheRead (and optional cacheWrite, ignored for cap)."""
-  u=usage or {}
-  return int(u.get("input") or 0)+int(u.get("output") or 0)+int(u.get("cacheRead") or 0)
-def tokens_from_trace(path):
-  total=0
-  p=Path(path)
-  if not p.is_file(): return 0
-  for line in p.read_text(errors="replace").splitlines():
-    line=line.strip()
-    if not line: continue
-    try: j=json.loads(line)
-    except Exception: continue
-    if j.get("type")=="assistant_message":
-      total += tokens_from_usage(j.get("usage"))
-  return total
 def check_token_cap(task, tokens_used):
   """Return (ok, cap, tokens). ok False => terminate & record unscored (budget guard, not score 0)."""
   cap=token_cap(task)
   return (tokens_used <= cap, cap, tokens_used)
+def relay_usage_tokens(relay_root, run_id):
+  """i+o+cacheRead from the relay log only. An agent trace is not a token source."""
+  from ledger import load, tokens as relay_tokens
+  path=Path(relay_root)/run_id/"relay.jsonl"
+  if not path.is_file():
+    return 0, False
+  info=relay_tokens(load(path))
+  if info["usage_missing"]:
+    return int(info["observed"] or 0), True
+  return int(info["tokens"] or 0), False
 
 TOML_MIRROR=Path("/workspace/company/evidence/2026-10-21-devii-task-toml")  # read-only copies from WSL zip, SHA256SUMS checked
 def task_toml_path(task):
@@ -264,15 +258,19 @@ def main():
                                 rc=proc.wait(timeout=15)
                                 break
                             except subprocess.TimeoutExpired:
-                                # mid-run token guard: poll newest trace.jsonl every 15s
-                                staged_live=sorted((run/"workspace/runs").glob("task-*"))
-                                if staged_live:
-                                    tokens_used=tokens_from_trace(staged_live[-1]/"trace.jsonl")
-                                    if not check_token_cap(t, tokens_used)[0]:
-                                        token_killed=True; subprocess.run(["sudo","docker","kill",name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-                                        try: proc.wait(timeout=60)
-                                        except subprocess.TimeoutExpired: proc.kill()
-                                        rc="token_cap"; break
+                                # mid-run token guard: poll the relay log every 15s
+                                tokens_used, usage_missing=relay_usage_tokens(relay_root, relay_id)
+                                if usage_missing:
+                                    token_killed=True; rc="usage_missing"
+                                    subprocess.run(["sudo","docker","kill",name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                                    try: proc.wait(timeout=60)
+                                    except subprocess.TimeoutExpired: proc.kill()
+                                    break
+                                if not check_token_cap(t, tokens_used)[0]:
+                                    token_killed=True; subprocess.run(["sudo","docker","kill",name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                                    try: proc.wait(timeout=60)
+                                    except subprocess.TimeoutExpired: proc.kill()
+                                    rc="token_cap"; break
                                 if time.time()-t0 >= lim["agent_timeout_sec"]:
                                     subprocess.run(["sudo","docker","kill",name]); timed_out=True; rc="timeout"
                                     try: proc.wait(timeout=60)
@@ -280,14 +278,16 @@ def main():
                                     break
                     except Exception:
                         proc.kill(); raise
+                tokens_used, usage_missing=relay_usage_tokens(relay_root, relay_id)
                 staged=sorted((run/"workspace/runs").glob("task-*"))
-                if staged and not token_killed:
-                    tokens_used=tokens_from_trace(staged[-1]/"trace.jsonl")
-                    if not check_token_cap(t, tokens_used)[0]:
-                        token_killed=True; rc="token_cap"
-                res={"task":t,"seed":s,"arm":arm,"exit":rc,"wall_s":round(time.time()-t0,1),"image":IMAGE,"timed_out":timed_out,"token_killed":token_killed,"tokens_used":tokens_used,"token_cap":cap,**lim,"net":net_mode(t)}
+                if not token_killed and usage_missing:
+                    token_killed=True; rc="usage_missing"
+                elif staged and not token_killed and not check_token_cap(t, tokens_used)[0]:
+                    token_killed=True; rc="token_cap"
+                res={"task":t,"seed":s,"arm":arm,"exit":rc,"wall_s":round(time.time()-t0,1),"image":IMAGE,"timed_out":timed_out,"token_killed":token_killed,"tokens":tokens_used,"tokens_used":tokens_used,"token_cap":cap,**lim,"net":net_mode(t)}
                 if token_killed:
-                    res["score_status"]="unscored"; res["unscored_reason"]="token_cap_exceeded"
+                    res["score_status"]="unscored"
+                    res["unscored_reason"]="usage_missing" if rc=="usage_missing" else "token_cap_exceeded"
                 if staged and not token_killed:
                     rel=staged[-1].relative_to(run/"workspace")
                     # r3 rule 2: after an agent timeout the checker still runs on whatever is in outputs

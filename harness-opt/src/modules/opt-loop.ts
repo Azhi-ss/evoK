@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -35,7 +35,7 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
-import { capHit, signPreRound1 } from "./loop-driver";
+import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayReadOnlyTokens, signPreRound1 } from "./loop-driver";
 import {
   buildRoleSpawn,
   hostWriteSession,
@@ -47,6 +47,9 @@ import {
 
 /** Pinned test id. Calls go out through BASE_URL; this package does not pick a host. */
 export const OPT_MODEL = "deepseek-v4-1-flash-261017";
+
+/** Innovators per round. The real run is seed 0 of the bound ranker winner. */
+const INNOVATORS_PER_ROUND = 6;
 
 export const DEV_TASK: OptTask = {
   id: "i014",
@@ -159,6 +162,43 @@ export interface RunView {
   } | null;
 }
 
+export interface CandidateView {
+  readonly id: string;
+  readonly summary: string;
+  readonly changedKeys: number;
+}
+
+export interface CriticCall {
+  readonly round: number;
+  readonly candidates: readonly CandidateView[];
+  readonly sessionPath: string;
+  readonly spawn: RoleSpawnConfig;
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
+}
+
+export interface CriticTurn {
+  readonly session: RoleSession;
+  readonly excluded: readonly string[];
+}
+
+export interface RankerCall {
+  readonly round: number;
+  readonly candidates: readonly CandidateView[];
+  readonly excluded: readonly string[];
+  readonly sessionPath: string;
+  readonly spawn: RoleSpawnConfig;
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
+}
+
+export interface RankerTurn {
+  readonly session: RoleSession;
+  readonly winnerId: string;
+}
+
 export interface ReviewCall {
   readonly round: number;
   readonly patchHash: string;
@@ -168,6 +208,9 @@ export interface ReviewCall {
   readonly ewiSeeds: readonly number[];
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
 }
 
 export interface ReviewerTurn {
@@ -179,13 +222,15 @@ export interface ReviewerTurn {
 export interface OptRoles {
   gap(input: GapCall): Promise<GapTurn>;
   innovate(input: InnovateCall): Promise<InnovatorTurn>;
+  critic(input: CriticCall): Promise<CriticTurn>;
+  ranker(input: RankerCall): Promise<RankerTurn>;
   review(input: ReviewCall): Promise<ReviewerTurn>;
 }
 
 export interface OptLoopOptions {
   readonly out: string;
+  /** Ceiling at or below the signed maxRounds. Omitted means that signed cap. */
   readonly rounds?: number;
-  readonly seeds?: readonly number[];
   readonly ewiThresholdSec?: number;
   readonly model?: string;
   readonly mode: "dry-run" | "execute";
@@ -209,7 +254,7 @@ export interface OptLoopOptions {
   readonly piBin?: string;
   /** Host watcher for the preregistered result file. Absent observation stays undecided. */
   readonly resultWatcher?: ResultWriteWatcher;
-  /** Host total of innovator+critic+ranker relay tokens. Absent means zero. */
+  /** When set, this total replaces the innovator+critic+ranker relay sum. */
   readonly readOnlyTokens?: () => number;
   /** Host read-only wall clock in seconds. Absent means the loop's own timer. */
   readonly readOnlyWallS?: () => number;
@@ -292,17 +337,15 @@ interface ClosureRecord {
   reviewFedForward: boolean | null;
 }
 
-/** One dev round: gap, one candidate, k seeds, reviewer. No model call lives in this function. */
+/** Gap, six innovators, critic, ranker, one seed-0 run, reviewer. No model call lives in this function. */
 export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult> {
-  const rounds = options.rounds ?? 3;
-  const seeds = options.seeds ?? [0, 1, 2];
+  const rounds = Math.min(options.rounds ?? LOOP_CAPS.maxRounds, LOOP_CAPS.maxRounds);
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
   const model = options.model ?? OPT_MODEL;
   if (!Number.isInteger(rounds) || rounds < 1) throw new Error("rounds must be a positive integer");
-  if (seeds.length === 0) throw new Error("seeds are empty");
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
-  const firstRun = join(options.out, "round1", "runs", DEV_TASK.id, `seed${seeds[0]}`, "candidate");
+  const firstRun = join(options.out, "round1", "runs", DEV_TASK.id, "seed0", "candidate");
   if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : undefined);
@@ -319,7 +362,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const round0Copy = options.round0TracePath
     ? { srcPath: options.round0TracePath, hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
     : undefined;
-  const preRound1 = signPreRound1(attestKey, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
+  const preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
   writeJson(join(options.out, "pre-round1.json"), preRound1);
   const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
   let round0: { readonly hostCopyPath: string; readonly srcSha256: string } | null = null;
@@ -355,7 +398,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let readOnlyWallS = 0;
   const loopCap = (startedRounds: number) => capHit({
     startedRounds,
-    readOnlyTokens: options.readOnlyTokens?.() ?? 0,
+    readOnlyTokens: options.readOnlyTokens?.() ?? relayReadOnlyTokens(relayEvents(options.out)),
     readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
     realRunWallS,
   });
@@ -416,25 +459,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
       writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
     }
-    const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, []);
-    const innovateInput: InnovateCall = {
-      round,
-      knob: gap.knob,
-      gapSummary: gap.summary,
-      triedSummaries: [...tried],
-      control,
-      sessionPath: innovatorSpawn.sessionPath,
-      spawn: innovatorSpawn,
-    };
-    assertNoHeldOutLeak(innovateInput, "innovator input");
-    writeJson(join(options.out, `round${round}`, "innovator-input.json"), innovateInput);
-    const proposed = await roles.innovate(innovateInput);
-    captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
-
-    readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
-    if (tried.includes(proposed.summary)) {
+    const closeWithoutRun = (note: string, duplicate: boolean): boolean => {
       consecutiveNoAccept += 1;
-      const note = "duplicate summary";
       const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, []);
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
@@ -447,17 +473,105 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         reviewFedForward: null,
       });
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: true, patchHash: null, ewiSeeds: [] });
+      roundSummaries.push({ round, accepted: false, duplicate, patchHash: null, ewiSeeds: [] });
       previousReview = { accept: false, reason: note };
       previousReviewSession = reviewSpawn.sessionPath;
       previousReviewSha = reviewSha;
-      const afterDuplicate = loopCap(round - 1);
-      if (afterDuplicate) {
-        stopReason = afterDuplicate;
+      const afterSkip = loopCap(round - 1);
+      if (afterSkip) stopReason = afterSkip;
+      return afterSkip !== null;
+    };
+
+    const seen = new Set(tried);
+    const proposals: { id: string; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
+    let innovatorStop: string | null = null;
+    for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
+      const sessionName = `innovator-${slot}`;
+      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], sessionName);
+      const innovateInput: InnovateCall = {
+        round,
+        knob: gap.knob,
+        gapSummary: gap.summary,
+        triedSummaries: [...tried],
+        control,
+        sessionPath: innovatorSpawn.sessionPath,
+        spawn: innovatorSpawn,
+      };
+      assertNoHeldOutLeak(innovateInput, "innovator input");
+      writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
+      const turn = await roles.innovate(innovateInput);
+      captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
+      const opened = loopCap(round - 1);
+      if (opened) {
+        innovatorStop = opened;
         break;
       }
+      if (seen.has(turn.summary)) continue;
+      seen.add(turn.summary);
+      tried.push(turn.summary);
+      proposals.push({ id: `c${slot}`, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
+    }
+    readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
+    if (innovatorStop) {
+      stopReason = innovatorStop;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    if (proposals.length === 0) {
+      if (closeWithoutRun("duplicate summary", true)) break;
       continue;
     }
+
+    const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
+    const criticRelay = roleRelay(options.out, round, "critic");
+    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, []);
+    const criticInput: CriticCall = {
+      round,
+      candidates: listed,
+      sessionPath: criticSpawn.sessionPath,
+      spawn: criticSpawn,
+      ...criticRelay,
+    };
+    assertNoHeldOutLeak(criticInput, "critic input");
+    const criticTurn = await roles.critic(criticInput);
+    captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
+    const afterCritic = loopCap(round - 1);
+    if (afterCritic) {
+      stopReason = afterCritic;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+
+    const rankerRelay = roleRelay(options.out, round, "ranker");
+    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, []);
+    const rankerInput: RankerCall = {
+      round,
+      candidates: listed,
+      excluded: criticTurn.excluded,
+      sessionPath: rankerSpawn.sessionPath,
+      spawn: rankerSpawn,
+      ...rankerRelay,
+    };
+    assertNoHeldOutLeak(rankerInput, "ranker input");
+    const rankerTurn = await roles.ranker(rankerInput);
+    captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
+    const budget = rankingBudget(roundRelayEvents(options.out, round));
+    if (budget.capHit) {
+      if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
+      continue;
+    }
+    const excluded = [...criticTurn.excluded];
+    const criticBound = bindConclusion("critic", criticRelay, { excluded });
+    const rankerBound = bindConclusion("ranker", rankerRelay, { winnerId: rankerTurn.winnerId });
+    const ranked = rankCandidates(listed.map((item) => ({ id: item.id, changedKeys: item.changedKeys })), excluded);
+    const winner = ranked.status === "winner" ? proposals.find((item) => item.id === ranked.winner) : undefined;
+    if (!criticBound || !rankerBound || !winner || ranked.winner !== rankerTurn.winnerId) {
+      if (closeWithoutRun("no_winner", false)) break;
+      continue;
+    }
+    const proposed = { summary: winner.summary, parts: winner.parts };
     const afterRoles = loopCap(round - 1);
     if (afterRoles) {
       stopReason = afterRoles;
@@ -475,17 +589,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const patchHash = sha256(readFileSync(diffPath));
     const knobValue = valueAt(candidate, gap.knob);
     const knobMatched = knobValue !== undefined && knobValue !== valueAt(control, gap.knob);
-    tried.push(proposed.summary);
 
     const runs: ScoredRun[] = [];
     let stopBeforeReview = false;
-    for (const seed of seeds) {
-      const beforeSeed = loopCap(round - 1);
-      if (beforeSeed) {
-        stopReason = beforeSeed;
-        stopBeforeReview = true;
-        break;
-      }
+    const seed = 0;
+    const beforeSeed = loopCap(round - 1);
+    if (beforeSeed) {
+      stopReason = beforeSeed;
+      stopBeforeReview = true;
+    } else {
       const seedMs = now().getTime();
       runs.push(await executeScored(executor, {
         task: DEV_TASK,
@@ -500,13 +612,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch") {
         stopReason = "anti_forgery";
         stopBeforeReview = true;
-        break;
-      }
-      const afterSeed = loopCap(round);
-      if (afterSeed) {
-        stopReason = afterSeed;
-        stopBeforeReview = true;
-        break;
+      } else {
+        const afterSeed = loopCap(round);
+        if (afterSeed) {
+          stopReason = afterSeed;
+          stopBeforeReview = true;
+        }
       }
     }
     const activation = activationRecord({
@@ -534,7 +645,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         reviewFedForward: null,
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
-      if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+      if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
         stopReason = "anti_forgery";
       }
       roundSummaries.push({
@@ -547,7 +658,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
 
-    if (runs.some((run) => run.runRecordPath !== undefined && !storedRecordOk(attestKey, run))) {
+    if (runs.some((run) => run.runRecordPath !== undefined && !storedRecordOk(options.attestKeyFile, run))) {
       stopReason = "anti_forgery";
       writeClosure(options.out, round, {
         round,
@@ -558,7 +669,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         reviewFedForward: null,
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
-      if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+      if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
         stopReason = "anti_forgery";
       }
       roundSummaries.push({
@@ -571,6 +682,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath]);
+    const reviewRelay = roleRelay(options.out, round, "reviewer");
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -580,6 +692,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
       sessionPath: reviewSpawn.sessionPath,
       spawn: reviewSpawn,
+      ...reviewRelay,
     };
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
@@ -594,7 +707,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reviewFedForward: null,
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
-    if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+    if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
       stopReason = "anti_forgery";
       roundSummaries.push({
         round,
@@ -605,15 +718,16 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
-    const take = verdict.accept && activation.patchActive && gapCitedTrace;
-    if (!verdict.accept) reviewerRejectRounds += 1;
+    const reviewBound = bindConclusion("reviewer", reviewRelay, { accept: verdict.accept, reason: verdict.reason });
+    const take = reviewBound && verdict.accept && activation.patchActive && gapCitedTrace;
+    if (!reviewBound || !verdict.accept) reviewerRejectRounds += 1;
     if (take) {
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
       consecutiveNoAccept = 0;
     } else {
       consecutiveNoAccept += 1;
     }
-    previousReview = { accept: verdict.accept, reason: verdict.reason };
+    previousReview = { accept: reviewBound && verdict.accept, reason: verdict.reason };
     previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
     previousReviewSha = reviewCaptured?.sha256 ?? null;
     traceHints = runs.flatMap((run) => {
@@ -629,107 +743,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     });
   }
 
-  const stopReport = { reason: stopReason, faultRounds, reviewerRejectRounds };
-  if (!accepted || stopReason) {
-    const result: OptLoopResult = {
-      model,
-      ewiThresholdSec: threshold,
-      ewiThresholdLabel: EWI_THRESHOLD_LABEL,
-      rounds: roundSummaries,
-      accepted,
-      finalBlock: null,
-      heldOut: null,
-      skippedFinal: true,
-      stopReport,
-    };
-    writeJson(join(options.out, "loop-result.json"), result);
-    return result;
-  }
-
-  const order: string[] = [];
-  const finalRuns: ScoredRun[] = [];
-  let halt = false;
-  for (const seed of seeds) {
-    order.push(`C${seed}`);
-    const controlRun = await executeScored(executor, {
-      task: DEV_TASK,
-      seed,
-      arm: "control",
-      configPath: controlPath,
-      runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "control"),
-      model,
-      tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold, scoreHost);
-    finalRuns.push(controlRun);
-    if (controlRun.unscoredReason === "attest_mismatch") {
-      stopReason = "anti_forgery";
-      halt = true;
-      break;
-    }
-    order.push(`X${seed}`);
-    const candidateRun = await executeScored(executor, {
-      task: DEV_TASK,
-      seed,
-      arm: "candidate",
-      configPath: accepted.configPath,
-      runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
-      model,
-      tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost);
-    finalRuns.push(candidateRun);
-    if (candidateRun.unscoredReason === "attest_mismatch") {
-      stopReason = "anti_forgery";
-      halt = true;
-      break;
-    }
-  }
-  const finalBlock = { order, control: summarize(finalRuns.filter((run) => run.arm === "control"), threshold), candidate: summarize(finalRuns.filter((run) => run.arm === "candidate"), threshold) };
-  writeJson(join(options.out, "final", "order.json"), { order });
-  writeJson(join(options.out, "final", "metrics.json"), finalBlock);
-
-  const heldRuns: ScoredRun[] = [];
-  if (!halt) {
-    for (const task of HELD_OUT_TASKS) {
-      for (const seed of seeds) {
-        const held = await executeScored(executor, {
-          task,
-          seed,
-          arm: "candidate",
-          configPath: accepted.configPath,
-          runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
-          model,
-          tokenCap: tokenCap(task),
-        }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold, scoreHost);
-        heldRuns.push(held);
-        if (held.unscoredReason === "attest_mismatch") {
-          stopReason = "anti_forgery";
-          halt = true;
-          break;
-        }
-      }
-      if (halt) break;
-    }
-  }
-  const heldOut = {
-    calls: heldRuns.length,
-    gatewayOnly: HELD_OUT_TASKS.map((task) => task.id),
-    comparison: "control-not-run",
-    byTask: HELD_OUT_TASKS.map((task) => ({
-      task: task.id,
-      network: task.network,
-      ...summarize(heldRuns.filter((run) => run.task === task.id), threshold),
-    })),
-  };
-  writeJson(join(options.out, "heldout", "metrics.json"), heldOut);
   const result: OptLoopResult = {
     model,
     ewiThresholdSec: threshold,
     ewiThresholdLabel: EWI_THRESHOLD_LABEL,
     rounds: roundSummaries,
     accepted,
-    finalBlock: { order },
-    heldOut: { calls: heldOut.calls, gatewayOnly: heldOut.gatewayOnly },
-    skippedFinal: false,
+    finalBlock: null,
+    heldOut: null,
+    skippedFinal: true,
     stopReport: { reason: stopReason, faultRounds, reviewerRejectRounds },
   };
   writeJson(join(options.out, "loop-result.json"), result);
@@ -884,9 +906,27 @@ export function stubOptRoles(key: Buffer): OptRoles {
         parts: { "agent-loop": { maxSteps } },
       };
     },
+    async critic(input) {
+      const excluded: string[] = [];
+      const body = { excluded };
+      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "critic", input.round);
+      hostWriteSession(input.spawn, sessionLines("critic", "critic"), key);
+      return { session: { jsonl: "ignored-return\n" }, excluded };
+    },
+    async ranker(input) {
+      const winnerId = [...input.candidates]
+        .filter((item) => !input.excluded.includes(item.id))
+        .sort((left, right) => left.changedKeys - right.changedKeys || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0]?.id ?? "";
+      const body = { winnerId };
+      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "ranker", input.round);
+      hostWriteSession(input.spawn, sessionLines("ranker", winnerId), key);
+      return { session: { jsonl: "ignored-return\n" }, winnerId };
+    },
     async review(input) {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
+      const body = { accept, reason };
+      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "reviewer", input.round);
       hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
@@ -989,7 +1029,7 @@ async function executeScored(
   const checkerDir = join(host.relayLogRoot, runId, "checker");
   let runRecordPath: string | undefined;
   if (existsSync(join(checkerDir, "reward.txt"))) {
-    const signed = signRunRecord(host.key, checkerDir, request.runDir, runId);
+    const signed = signRunRecord(host.keyFile, checkerDir, request.runDir, runId);
     if (!signed) {
       scoreStatus = "unscored";
       reward = null;
@@ -1248,21 +1288,96 @@ function prepareRole(
   role: RoleSpawnConfig["role"],
   piBin: string | undefined,
   allowedPaths: readonly string[],
+  sessionName: string = role,
 ): RoleSpawnConfig {
-  const cwd = join(out, `round${round}`, "roles", role);
+  const cwd = join(out, `round${round}`, "roles", sessionName);
   mkdirSync(cwd, { recursive: true });
   const config = buildRoleSpawn({
     role,
     cwd,
     allowedPaths,
-    sessionPath: sessionPath(out, round, role),
+    sessionPath: sessionPath(out, round, sessionName),
     ledgerPath: join(out, `round${round}`, "sessions", "ledger.json"),
   });
-  writeJson(join(out, `round${round}`, "sessions", `${role}.spawn.json`), config);
+  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), config);
   const argv = rolePiArgv(piBin ?? "pi", config);
-  writeJson(join(out, `round${round}`, "sessions", `${role}.argv.json`), argv);
+  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
   if (piBin) launchRolePi(piBin, config);
   return config;
+}
+
+function roleRelay(out: string, round: number, role: string): { readonly relayLog: string; readonly runId: string; readonly seq: number } {
+  return { relayLog: join(out, `round${round}`, "relay", `${role}.jsonl`), runId: hostRunId(), seq: 1 };
+}
+
+function bindConclusion(
+  role: "critic" | "ranker" | "reviewer",
+  call: { readonly relayLog: string; readonly runId: string; readonly seq: number },
+  body: unknown,
+): boolean {
+  if (!existsSync(call.relayLog)) return false;
+  return bindRoleCall(role, { seq: call.seq, runId: call.runId, outputSha: roleOutputSha(body) }, readJsonl(call.relayLog)).ok;
+}
+
+function roleOutputSha(body: unknown): string {
+  return sha256(JSON.stringify(body));
+}
+
+function plantRoleDone(log: string, runId: string, seq: number, respSha: string, role: string, round: number): void {
+  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
+  const proc = spawnSync("python3", [
+    script, "plant-role",
+    "--log", log,
+    "--run-id", runId,
+    "--seq", String(seq),
+    "--resp-sha", respSha,
+    "--role", role,
+    "--round", String(round),
+  ], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "plant-role failed").trim());
+}
+
+function readJsonl(file: string): unknown[] {
+  const events: unknown[] = [];
+  if (!existsSync(file)) return events;
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      events.push(JSON.parse(trimmed));
+    } catch {
+      continue;
+    }
+  }
+  return events;
+}
+
+function relayEvents(out: string): unknown[] {
+  const events: unknown[] = [];
+  if (!existsSync(out)) return events;
+  for (const entry of readdirSync(out)) {
+    if (!/^round\d+$/.test(entry)) continue;
+    const dir = join(out, entry, "relay");
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      events.push(...readJsonl(join(dir, name)));
+    }
+  }
+  return events;
+}
+
+function roundRelayEvents(out: string, round: number): unknown[] {
+  return relayEvents(out).filter((event) => {
+    if (!event || typeof event !== "object") return false;
+    return (event as { round?: unknown }).round === round;
+  });
+}
+
+function leafCount(parts: Readonly<Record<string, Readonly<Record<string, unknown>>>>): number {
+  let count = 0;
+  for (const section of Object.values(parts)) count += Object.keys(section).length;
+  return count;
 }
 
 function captureSession(
@@ -1288,8 +1403,9 @@ function captureSession(
   const current = existsSync(manifestPath)
     ? JSON.parse(readFileSync(manifestPath, "utf8")) as { sessions: { role: string; file: string; sha256: string }[] }
     : { sessions: [] };
-  const relative = `round${round}/sessions/${role}.jsonl`;
-  const sessions = current.sessions.filter((item) => item.role !== role);
+  const name = file.split("/").pop() ?? `${role}.jsonl`;
+  const relative = `round${round}/sessions/${name}`;
+  const sessions = current.sessions.filter((item) => item.file !== relative);
   sessions.push({ role, file: relative, sha256: sha });
   writeJson(manifestPath, { sessions });
   return { sha256: sha, text: bytes.toString("utf8") };
@@ -1472,17 +1588,28 @@ function relayActive(logPath: string, mountedSha: string): boolean {
 }
 
 const RUN_RECORD_PY = [
-  "import json, sys",
+  "import json, os, stat, sys",
+  "from pathlib import Path",
   "sys.path.insert(0, sys.argv[1])",
   "import hooks",
-  "key = bytes.fromhex(sys.argv[2])",
-  "checker = sys.argv[3]",
-  "container = sys.argv[4] or None",
-  "mode = sys.argv[5]",
-  "extra = sys.argv[6] if len(sys.argv) > 6 else ''",
+  "key_path = os.environ.get('HARNESS_ATTEST_KEY_FILE') or ''",
+  "try:",
+  "    st = os.lstat(key_path)",
+  "except OSError:",
+  "    print(json.dumps({'ok': False}))",
+  "    raise SystemExit(0)",
+  "if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600:",
+  "    print(json.dumps({'ok': False}))",
+  "    raise SystemExit(0)",
+  "key = open(key_path, 'rb').read()",
+  "checker = sys.argv[2]",
+  "container = sys.argv[3] or None",
+  "mode = sys.argv[4]",
+  "extra = sys.argv[5] if len(sys.argv) > 5 else ''",
   "if mode == 'sign':",
   "    try:",
-  "        sig = hooks.sign_run_record(key, checker, expected_run_id=extra)",
+  "        binding = hooks.relay_binding(str(Path(checker).parent / 'relay.jsonl'))",
+  "        sig = hooks.sign_run_record(key, checker, relay_log_sha=binding['relayLogSha'], relay_sha=binding['relaySha'], boot_id=binding['bootId'], expected_run_id=extra)",
   "    except Exception:",
   "        print(json.dumps({'ok': False}))",
   "        raise SystemExit(0)",
@@ -1500,10 +1627,17 @@ const RUN_RECORD_PY = [
   "    print(json.dumps({'ok': False}))",
 ].join("\n");
 
-function runRecord(key: Buffer, mode: "sign" | "verify" | "notes", checkerDir: string, containerDir: string, extra: string, input?: string): { ok?: boolean; sig?: Record<string, unknown> } | null {
+/** Argv of the run-record child. The HMAC key is read from HARNESS_ATTEST_KEY_FILE, not from this list. */
+export function runRecordArgv(checkerDir: string, containerDir: string, mode: string, extra: string): readonly string[] {
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  const proc = spawnSync("python3", ["-c", RUN_RECORD_PY, relayDir, key.toString("hex"), checkerDir, containerDir, mode, extra], {
+  return ["python3", "-c", RUN_RECORD_PY, relayDir, checkerDir, containerDir, mode, extra];
+}
+
+function runRecord(keyFile: string, mode: "sign" | "verify" | "notes", checkerDir: string, containerDir: string, extra: string, input?: string): { ok?: boolean; sig?: Record<string, unknown> } | null {
+  const argv = runRecordArgv(checkerDir, containerDir, mode, extra);
+  const proc = spawnSync(argv[0] ?? "python3", argv.slice(1), {
     encoding: "utf8",
+    env: { ...process.env, HARNESS_ATTEST_KEY_FILE: keyFile },
     ...(input !== undefined ? { input } : {}),
   });
   if (proc.status !== 0 || !proc.stdout) return null;
@@ -1514,13 +1648,13 @@ function runRecord(key: Buffer, mode: "sign" | "verify" | "notes", checkerDir: s
   }
 }
 
-function signRunRecord(key: Buffer, checkerDir: string, runDir: string, runId: string): Record<string, unknown> | null {
-  const parsed = runRecord(key, "sign", checkerDir, runDir, runId);
+function signRunRecord(keyFile: string, checkerDir: string, runDir: string, runId: string): Record<string, unknown> | null {
+  const parsed = runRecord(keyFile, "sign", checkerDir, runDir, runId);
   if (!parsed || parsed.ok !== true || !parsed.sig) return null;
   return parsed.sig;
 }
 
-function storedRecordOk(key: Buffer, run: ScoredRun): boolean {
+function storedRecordOk(keyFile: string, run: ScoredRun): boolean {
   if (!run.runRecordPath || !existsSync(run.runRecordPath)) return false;
   const raw = readFileSync(run.runRecordPath, "utf8");
   let sig: { reward?: unknown };
@@ -1531,15 +1665,15 @@ function storedRecordOk(key: Buffer, run: ScoredRun): boolean {
   }
   const checker = join(run.runRecordPath, "..", "checker");
   const reward = run.reward === null ? sig.reward : run.reward;
-  const parsed = runRecord(key, "verify", checker, run.runDir, JSON.stringify(reward), raw);
+  const parsed = runRecord(keyFile, "verify", checker, run.runDir, JSON.stringify(reward), raw);
   return parsed?.ok === true;
 }
 
-function displayedRewardOk(key: Buffer, run: ScoredRun | undefined, notesPath: string): boolean {
+function displayedRewardOk(keyFile: string, run: ScoredRun | undefined, notesPath: string): boolean {
   if (!run?.runRecordPath || run.reward === null) return true;
   if (!existsSync(run.runRecordPath) || !existsSync(notesPath)) return false;
   const checker = join(run.runRecordPath, "..", "checker");
-  const parsed = runRecord(key, "notes", checker, "", notesPath, readFileSync(run.runRecordPath, "utf8"));
+  const parsed = runRecord(keyFile, "notes", checker, "", notesPath, readFileSync(run.runRecordPath, "utf8"));
   return parsed?.ok === true;
 }
 

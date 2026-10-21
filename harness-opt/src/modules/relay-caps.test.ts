@@ -218,7 +218,7 @@ print(copied["sha"])
     const text = python(`
 import hashlib, os, stat, tempfile
 from pathlib import Path
-import harness_relay, loop_mode
+import plant, loop_mode
 from ledger import read_evidence
 key = b"k" * 32
 root = Path(tempfile.mkdtemp())
@@ -234,12 +234,12 @@ assert Path(record["hostCopyPath"]).read_bytes() == body
 assert stat.S_IMODE(dest.parent.stat().st_mode) == 0o700
 log = root / "gap.jsonl"
 run_id = "ab" * 16
-harness_relay.plant_read(log, run_id, record["hostCopyPath"])
+plant.plant_read(log, run_id, record["hostCopyPath"])
 assert read_evidence(log, record["hostCopyPath"], record["srcSha256"])["ok"]
 other = root / "unsigned.jsonl"
 other.write_bytes(body)
 ulog = root / "unsigned-log.jsonl"
-harness_relay.plant_read(ulog, run_id, other)
+plant.plant_read(ulog, run_id, other)
 assert read_evidence(ulog, record["hostCopyPath"], record["srcSha256"])["ok"] is False
 flipped = bytearray(Path(record["hostCopyPath"]).read_bytes())
 flipped[0] ^= 1

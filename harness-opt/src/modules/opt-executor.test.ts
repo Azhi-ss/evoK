@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEV_TASK } from "./opt-loop";
 import { createHash } from "node:crypto";
 import { assertScoredRelayLog, CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, writeRunArtifacts, type OptRunRequest, type OptTask } from "./opt-executor";
@@ -33,6 +34,7 @@ describe("pluggable executor command", () => {
     const dir = mkdtempSync(join(tmpdir(), "opt-cmd-"));
     const script = join(dir, "driver.mjs");
     writeFileSync(script, `
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const get = (flag) => args[args.indexOf(flag) + 1];
@@ -41,8 +43,15 @@ mkdirSync(run, { recursive: true });
 writeFileSync(run + "/argv.json", JSON.stringify(args));
 writeFileSync(run + "/base-url.txt", process.env.BASE_URL ?? "");
 writeFileSync(run + "/result.json", JSON.stringify({
-  reward: 1, tokens: 4, wall_s: 2, timed_out: false, score_status: "scored"
+  reward: 1, tokens: 999, wall_s: 2, timed_out: false, score_status: "scored"
 }));
+const plant = spawnSync("python3", ["-c", \`
+import sys
+sys.path.insert(0, sys.argv[1])
+import plant
+plant.plant_request(sys.argv[2], sys.argv[3], "system", usage={"prompt_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}})
+\`, process.env.RELAY_DIR, process.env.RELAY_LOG, process.env.RUN_ID], { encoding: "utf8" });
+if (plant.status !== 0) throw new Error(plant.stderr || plant.stdout || "plant failed");
 `);
     const executor = new CommandOptExecutor({
       command: [
@@ -56,9 +65,17 @@ writeFileSync(run + "/result.json", JSON.stringify({
         "--token-cap", "{tokenCap}",
         "--attest-dir", "{attestDir}",
       ],
-      env: { ...process.env, BASE_URL: "https://example.test/v1", API_KEY: "sk-secret", HARNESS_ATTEST_KEY_FILE: join(dir, "attest.key") },
+      env: {
+        ...process.env,
+        BASE_URL: "https://example.test/v1",
+        API_KEY: "sk-secret",
+        HARNESS_ATTEST_KEY_FILE: join(dir, "attest.key"),
+        RELAY_DIR: fileURLToPath(new URL("../../relay", import.meta.url)),
+        RELAY_LOG: join(dir, "relay", "ab".repeat(16), "relay.jsonl"),
+        RUN_ID: "ab".repeat(16),
+      },
     });
-    const observation = await executor.run(request(dir));
+    const observation = await executor.run({ ...request(dir), runId: "ab".repeat(16) });
     const argv = JSON.parse(readFileSync(join(dir, "run", "argv.json"), "utf8")) as string[];
     expect(argv).toContain("tasks1/002-bigwig-h3k27ac-igg-peak-audit");
     expect(argv).toContain("devii-004-int");

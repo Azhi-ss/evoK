@@ -13,6 +13,7 @@ from pathlib import Path
 import canon
 import ewi_relay
 import harness_relay
+import plant
 import hooks
 import loop_mode
 from harness_relay import Relay, UpstreamNetworkError, assert_bind_host, new_run_id
@@ -681,13 +682,13 @@ class LoopModeCase(unittest.TestCase):
         self.assertNotEqual(record["srcSha256"], "")
         log = root / "relay" / "gap-finder.jsonl"
         run_id = "ab" * 16
-        harness_relay.plant_read(log, run_id, record["hostCopyPath"])
+        plant.plant_read(log, run_id, record["hostCopyPath"])
         evidence = read_evidence(log, record["hostCopyPath"], record["srcSha256"])
         self.assertTrue(evidence["ok"])
         other = root / "unsigned.jsonl"
         other.write_bytes(body)
         unsigned_log = root / "relay" / "unsigned.jsonl"
-        harness_relay.plant_read(unsigned_log, run_id, other)
+        plant.plant_read(unsigned_log, run_id, other)
         missed = read_evidence(unsigned_log, record["hostCopyPath"], record["srcSha256"])
         self.assertFalse(missed["ok"])
         flipped = bytearray(Path(record["hostCopyPath"]).read_bytes())
@@ -762,6 +763,59 @@ class LoopModeCase(unittest.TestCase):
         self.assertNotIn("/home/box", blob)
         self.assertNotIn(default, blob)
         tmp.cleanup()
+
+    def test_replayed_checker_fails_verify(self):
+        import shutil
+        key = b"k" * 32
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        run = root / "run"
+        (run / "verifier").mkdir(parents=True)
+        (run / "verifier" / "reward.txt").write_text("1\n", encoding="utf-8")
+        (run / "result.json").write_text(json.dumps({"reward": 1}) + "\n", encoding="utf-8")
+        run_a = "ab" * 16
+        run_b = "cd" * 16
+        copied = hooks.copy_checker_before_sign(run, run_a, relay_root=root / "relay")
+        dest_a = Path(copied["dest"])
+        log = dest_a.parent / "relay.jsonl"
+        log.write_text(json.dumps({"type": "relay_start", "bootId": "boot-a", "relaySha": "ab" * 32}) + "\n", encoding="utf-8")
+        binding = hooks.relay_binding(log)
+        sig = hooks.sign_run_record(
+            key, dest_a,
+            relay_log_sha=binding["relayLogSha"],
+            relay_sha=binding["relaySha"],
+            boot_id=binding["bootId"],
+            expected_run_id=run_a,
+        )
+        self.assertEqual(sig["relayLogSha"], binding["relayLogSha"])
+        self.assertEqual(sig["relaySha"], binding["relaySha"])
+        self.assertEqual(sig["bootId"], "boot-a")
+        self.assertTrue(hooks.verify_run_record(sig, dest_a, 1, key, container_dir=run)["ok"])
+        dest_b = root / "relay" / run_b / "checker"
+        shutil.copytree(dest_a, dest_b)
+        replay = hooks.verify_run_record(sig, dest_b, 1, key, container_dir=run)
+        self.assertEqual(replay, {"ok": False, "reason": "attest_mismatch"})
+        tmp.cleanup()
+
+    def test_relay_usage_ignores_the_agent_trace(self):
+        import devii_docker_v2 as launcher
+        root = Path(tempfile.mkdtemp())
+        run_id = "ab" * 16
+        trace = root / "trace.jsonl"
+        trace.write_text(
+            json.dumps({"type": "assistant_message", "usage": {"input": 9_000_000, "output": 1, "cacheRead": 0}}) + "\n",
+            encoding="utf-8",
+        )
+        plant.plant_request(
+            root / run_id / "relay.jsonl",
+            run_id,
+            "system",
+            usage={"prompt_tokens": 3, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}},
+        )
+        tokens, missing = launcher.relay_usage_tokens(root, run_id)
+        self.assertFalse(missing)
+        self.assertEqual(tokens, 4)
+        self.assertGreater(trace.stat().st_size, 0)
 
     def test_bind_role_and_exclusion(self):
         run_id = "ab" * 16

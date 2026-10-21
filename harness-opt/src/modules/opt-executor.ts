@@ -155,7 +155,7 @@ export class CommandOptExecutor implements OptExecutor {
       const detail = `${child.stderr ?? ""}${child.stdout ?? ""}`.trim() || child.error?.message || "executor command failed";
       throw new Error(redact(detail, env));
     }
-    const observation = readObservation(request.runDir);
+    const observation = readObservation(request.runDir, request);
     if (observation.scoreStatus === "scored") assertScoredRelayLog(request.relayLogRoot);
     return observation;
   }
@@ -319,30 +319,61 @@ function observationOf(
   };
 }
 
-function readObservation(runDir: string): OptRunObservation {
+function readObservation(runDir: string, request: OptRunRequest): OptRunObservation {
   const file = join(runDir, "result.json");
   if (!existsSync(file)) throw new Error(`executor result is missing: ${file}`);
   const parsed = JSON.parse(readFileSync(file, "utf8")) as {
     reward?: unknown;
-    tokens?: unknown;
     wall_s?: unknown;
     timed_out?: unknown;
     score_status?: unknown;
     unscored_reason?: unknown;
   };
-  const unscored = parsed.score_status === "unscored";
+  const relay = request.relayLogRoot && request.runId
+    ? relayUsage(request.relayLogRoot, request.runId)
+    : { tokens: 0, usageMissing: false };
+  const usageMissing = relay.usageMissing;
+  const unscored = parsed.score_status === "unscored" || usageMissing;
   const reward = typeof parsed.reward === "number" && Number.isFinite(parsed.reward) ? parsed.reward : null;
+  const reason = usageMissing
+    ? "usage_missing"
+    : typeof parsed.unscored_reason === "string" ? parsed.unscored_reason : "unscored";
   return {
     reward: unscored ? null : reward,
     scoreStatus: unscored ? "unscored" : "scored",
-    ...(unscored ? { unscoredReason: typeof parsed.unscored_reason === "string" ? parsed.unscored_reason : "unscored" } : {}),
-    tokens: typeof parsed.tokens === "number" ? parsed.tokens : 0,
+    ...(unscored ? { unscoredReason: reason } : {}),
+    tokens: relay.tokens,
     wallS: typeof parsed.wall_s === "number" ? parsed.wall_s : 0,
     timedOut: parsed.timed_out === true,
     tracePath: join(runDir, "trace.jsonl"),
     outputsDir: join(runDir, "outputs"),
     batchLogPath: join(runDir, "batch.log"),
   };
+}
+
+/** Token total from the relay log. result.json tokens are ignored. A missing log is zero. */
+function relayUsage(root: string, runId: string): { readonly tokens: number; readonly usageMissing: boolean } {
+  const log = join(root, runId, "relay.jsonl");
+  if (!existsSync(log)) return { tokens: 0, usageMissing: false };
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const code = [
+    "import json, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "from ledger import load, tokens",
+    "info = tokens(load(sys.argv[2]))",
+    "print(json.dumps({'tokens': 0 if info['tokens'] is None else info['tokens'], 'usage_missing': bool(info['usage_missing'])}))",
+  ].join("\n");
+  const proc = spawnSync("python3", ["-c", code, relayDir, log], { encoding: "utf8" });
+  if (proc.status !== 0 || !proc.stdout) return { tokens: 0, usageMissing: true };
+  try {
+    const parsed = JSON.parse(proc.stdout) as { tokens?: unknown; usage_missing?: unknown };
+    return {
+      tokens: typeof parsed.tokens === "number" ? parsed.tokens : 0,
+      usageMissing: parsed.usage_missing === true,
+    };
+  } catch {
+    return { tokens: 0, usageMissing: true };
+  }
 }
 
 function isPlaceholder(name: string): name is Placeholder {
@@ -399,7 +430,7 @@ function flatten(value: Record<string, unknown>, prefix = ""): Record<string, un
 }
 
 function plantExecutorRelay(logPath: string, runId: string, systemText: string): void {
-  const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
   const proc = spawnSync("python3", [script, "plant-request", "--log", logPath, "--run-id", runId, "--system", systemText], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "relay plant failed").trim());
 }

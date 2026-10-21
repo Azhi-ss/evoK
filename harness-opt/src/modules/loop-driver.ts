@@ -94,17 +94,62 @@ export interface Round0Sign {
   readonly hostCopyPath: string;
 }
 
-export function signPreRound1(key: Buffer, ranker: unknown, critic: unknown, round0?: Round0Sign): Record<string, unknown> {
+export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown, round0?: Round0Sign): Record<string, unknown> {
   const proc = spawnSync("python3", [SCRIPT, "pre-round1"], {
     input: JSON.stringify({
-      key: key.toString("hex"),
       seed: randomBytes(32).toString("hex"),
       ranker,
       critic,
       ...(round0 ? { round0Src: round0.srcPath, hostCopyPath: round0.hostCopyPath } : {}),
     }),
     encoding: "utf8",
+    env: { ...process.env, HARNESS_ATTEST_KEY_FILE: keyFile },
   });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "pre_round1_sign failed").trim());
   return JSON.parse(proc.stdout) as Record<string, unknown>;
+}
+
+function loopMode(command: string, payload: unknown): Record<string, unknown> {
+  const proc = spawnSync("python3", [SCRIPT, command], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+  });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || command).trim());
+  return JSON.parse(proc.stdout) as Record<string, unknown>;
+}
+
+/** Innovator+critic+ranker i+o+cacheRead. A trace argument is ignored by loop_mode. */
+export function relayReadOnlyTokens(events: readonly unknown[]): number {
+  const parsed = loopMode("read-only-tokens", { events });
+  return typeof parsed.tokens === "number" ? parsed.tokens : 0;
+}
+
+export function bindRoleCall(
+  role: "critic" | "ranker" | "reviewer",
+  call: { readonly seq: number; readonly runId: string; readonly outputSha: string },
+  events: readonly unknown[],
+): { readonly ok: boolean; readonly reason?: string } {
+  const parsed = loopMode("bind-role", { role, call, events });
+  return { ok: parsed.ok === true, ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}) };
+}
+
+/** Per-round critic+ranker sub-cap. Independent of the cumulative 30M read-only cap. */
+export function rankingBudget(events: readonly unknown[]): { readonly capHit: boolean; readonly reason: string | null } {
+  const parsed = loopMode("ranking-budget", { events });
+  return {
+    capHit: parsed.capHit === true,
+    reason: typeof parsed.reason === "string" ? parsed.reason : null,
+  };
+}
+
+export function rankCandidates(
+  candidates: readonly { readonly id: string; readonly changedKeys: number; readonly configSha?: string }[],
+  excluded: readonly string[],
+): { readonly status: string; readonly winner?: string; readonly reason?: string } {
+  const parsed = loopMode("rank", { candidates, excluded });
+  return {
+    status: String(parsed.status),
+    ...(typeof parsed.winner === "string" ? { winner: parsed.winner } : {}),
+    ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}),
+  };
 }

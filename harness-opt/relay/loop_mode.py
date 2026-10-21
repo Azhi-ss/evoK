@@ -262,8 +262,10 @@ def main(argv=None) -> None:
     payload = json.load(sys.stdin)
     cmd = argv[0] if argv else ""
     if cmd == "pre-round1":
+        key_path = os.environ.get("HARNESS_ATTEST_KEY_FILE") or payload.get("keyFile") or ""
+        key_bytes = Path(key_path).read_bytes() if key_path else bytes.fromhex(payload["key"])
         signed = pre_round1_sign(
-            bytes.fromhex(payload["key"]),
+            key_bytes,
             seed=bytes.fromhex(payload["seed"]),
             ranker=payload["ranker"],
             critic=payload["critic"],
@@ -284,6 +286,15 @@ def main(argv=None) -> None:
         return
     if cmd == "read-only-tokens":
         json.dump({"tokens": read_only_tokens(payload.get("events") or [], payload.get("trace"))}, sys.stdout)
+        return
+    if cmd == "ranking-budget":
+        json.dump(ranking_budget(payload.get("events") or []), sys.stdout)
+        return
+    if cmd == "bind-role":
+        json.dump(bind_role_call(payload["role"], payload["call"], payload.get("events") or [], payload.get("session")), sys.stdout)
+        return
+    if cmd == "rank":
+        json.dump(exclude_and_recompute(payload["candidates"], payload.get("excluded") or []), sys.stdout)
         return
     raise SystemExit(f"unknown {cmd}")
 
