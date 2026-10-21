@@ -290,6 +290,10 @@ export interface OptLoopResult {
     readonly duplicate: boolean;
     readonly patchHash: string | null;
     readonly ewiSeeds: readonly number[];
+    /** Set when this round closed with no candidate to run. */
+    readonly noWinner?: string;
+    /** Key-count order. Recorded when the ranker ran. It does not pick the winner. */
+    readonly codeRank?: CodeRankRecord;
   }[];
   readonly accepted: AcceptedCandidate | null;
   readonly finalBlock: { readonly order: readonly string[] } | null;
@@ -299,6 +303,8 @@ export interface OptLoopResult {
     readonly reason: string | null;
     readonly faultRounds: number;
     readonly reviewerRejectRounds: number;
+    /** One entry for every round that closed with no candidate to run. */
+    readonly noWinner?: readonly { readonly round: number; readonly reason: string }[];
   };
 }
 
@@ -336,6 +342,12 @@ const HOST_EVIDENCE_FAULTS = new Set([
   "docker_daemon_event",
 ]);
 
+interface CodeRankRecord {
+  status: string;
+  winner?: string;
+  reason?: string;
+}
+
 interface ClosureRecord {
   round: number;
   closed: boolean;
@@ -344,6 +356,10 @@ interface ClosureRecord {
   patchActive: boolean;
   reviewFedForward: boolean | null;
   rank?: "walkover";
+  /** Why this round closed with no candidate to run. */
+  noWinner?: string;
+  /** Key-count order from `rankCandidates`. Recorded, not a veto. */
+  codeRank?: CodeRankRecord;
 }
 
 function requireLoopTask(task: OptTask | undefined): OptTask {
@@ -436,6 +452,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     stopReason = reason;
   };
   let reviewerRejectRounds = 0;
+  const noWinnerRounds: { round: number; reason: string }[] = [];
   let consecutiveNoAccept = 0;
   let realRunWallS = 0;
   let readOnlyWallS = 0;
@@ -487,6 +504,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const started = now();
     const roleMs = started.getTime();
     let roundRank: "walkover" | undefined;
+    let codeRank: CodeRankRecord | undefined;
     const takeRole = async <T>(relay: RoleRelay, run: () => Promise<T>): Promise<T | null> => {
       try {
         return await run();
@@ -568,9 +586,21 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         knobMatched: false,
         patchActive: false,
         reviewFedForward: null,
+        noWinner: note,
+        ...(roundRank ? { rank: roundRank } : {}),
+        ...(codeRank ? { codeRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate, patchHash: null, ewiSeeds: [] });
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate,
+        patchHash: null,
+        ewiSeeds: [],
+        noWinner: note,
+        ...(codeRank ? { codeRank } : {}),
+      });
+      noWinnerRounds.push({ round, reason: note });
       previousReview = { accept: false, reason: note };
       previousReviewSession = reviewSpawn.sessionPath;
       previousReviewSha = reviewSha;
@@ -776,9 +806,29 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const criticBound = bindConclusion("critic", criticRelay, { excluded: criticTurn.excluded });
       const rankerBound = bindConclusion("ranker", rankerRelay, { winnerId: rankerTurn.winnerId });
       const ranked = rankCandidates(listed.map((item) => ({ id: item.id, changedKeys: item.changedKeys })), excluded);
-      winner = ranked.status === "winner" ? proposals.find((item) => item.id === ranked.winner) : undefined;
-      if (!criticBound || !rankerBound || !winner || ranked.winner !== rankerTurn.winnerId) {
+      codeRank = {
+        status: ranked.status,
+        ...(typeof ranked.winner === "string" ? { winner: ranked.winner } : {}),
+        ...(typeof ranked.reason === "string" ? { reason: ranked.reason } : {}),
+      };
+      writeJson(join(options.out, `round${round}`, "ranking.json"), {
+        codeWinner: ranked.winner ?? null,
+        codeStatus: ranked.status,
+        rankerWinnerId: rankerTurn.winnerId,
+      });
+      const named = rankerTurn.winnerId;
+      const listedIds = proposals.map((item) => item.id);
+      if (!criticBound || !rankerBound) {
         if (closeWithoutRun("no_winner", false)) break;
+        continue;
+      }
+      if (named === "" || !listedIds.includes(named) || excluded.includes(named)) {
+        if (closeWithoutRun("no_winner:ranker_invalid", false)) break;
+        continue;
+      }
+      winner = proposals.find((item) => item.id === named);
+      if (!winner) {
+        if (closeWithoutRun("no_winner:ranker_invalid", false)) break;
         continue;
       }
     }
@@ -858,6 +908,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         patchActive: activation.patchActive,
         reviewFedForward: null,
         ...(roundRank ? { rank: roundRank } : {}),
+        ...(codeRank ? { codeRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
@@ -869,6 +920,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(codeRank ? { codeRank } : {}),
       });
       break;
     }
@@ -883,6 +935,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         patchActive: activation.patchActive,
         reviewFedForward: null,
         ...(roundRank ? { rank: roundRank } : {}),
+        ...(codeRank ? { codeRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
@@ -894,6 +947,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(codeRank ? { codeRank } : {}),
       });
       break;
     }
@@ -934,6 +988,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       patchActive: activation.patchActive,
       reviewFedForward: null,
       ...(roundRank ? { rank: roundRank } : {}),
+      ...(codeRank ? { codeRank } : {}),
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
     if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
@@ -944,6 +999,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(codeRank ? { codeRank } : {}),
       });
       break;
     }
@@ -956,6 +1012,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(codeRank ? { codeRank } : {}),
       });
       break;
     }
@@ -968,6 +1025,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         duplicate: false,
         patchHash,
         ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+        ...(codeRank ? { codeRank } : {}),
       });
       break;
     }
@@ -993,9 +1051,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       duplicate: false,
       patchHash,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      ...(codeRank ? { codeRank } : {}),
     });
     if (options.stopBeforeRun) break;
   }
+
+  if (options.stopBeforeRun) assertRankerWinnerReviewed(options.out, relayRoot);
 
   const result: OptLoopResult = {
     model,
@@ -1006,7 +1067,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     finalBlock: null,
     heldOut: null,
     skippedFinal: true,
-    stopReport: { reason: stopReason, faultRounds, reviewerRejectRounds },
+    stopReport: {
+      reason: stopReason,
+      faultRounds,
+      reviewerRejectRounds,
+      ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
+    },
   };
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -1184,8 +1250,17 @@ export function piSubagentRoles(piBin: string): OptRoles {
   };
 }
 
+function recordRoleExit(sessionPath: string, status: number | null): void {
+  if (!sessionPath.endsWith(".jsonl")) return;
+  const spawnPath = `${sessionPath.slice(0, -".jsonl".length)}.spawn.json`;
+  if (!existsSync(spawnPath)) return;
+  const current = JSON.parse(readFileSync(spawnPath, "utf8")) as Record<string, unknown>;
+  writeJson(spawnPath, { ...current, exitCode: status });
+}
+
 function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, prompt: string): string {
   const launched = launchRolePi(piBin, spawn, prompt);
+  recordRoleExit(spawn.sessionPath, launched.status);
   const text = lastDoneAssistant(baseUrl);
   if (outputHitLengthLimit(launched.status, launched.stdout, launched.stderr, text)) throw new RoleOutputTruncated(spawn.role);
   if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
@@ -2042,6 +2117,43 @@ export function assertLiveRoleCall(role: string, status: number | null, relayLog
 }
 
 /**
+ * When a ranker relay conclusion names a candidate that is still eligible,
+ * reviewer-gate must have its own relay done (tokens > 0) and a recorded verdict.
+ * An empty, unknown, or excluded winnerId is not a named winner.
+ */
+function assertRankerWinnerReviewed(out: string, relayRoot: string): void {
+  if (!existsSync(out)) return;
+  for (const name of readdirSync(out)) {
+    if (!/^round\d+$/.test(name)) continue;
+    const roundDir = join(out, name);
+    const rankerSpawnPath = join(roundDir, "sessions", "ranker.spawn.json");
+    if (!existsSync(rankerSpawnPath)) continue;
+    const rankerSpawn = JSON.parse(readFileSync(rankerSpawnPath, "utf8")) as { baseUrl?: unknown };
+    if (typeof rankerSpawn.baseUrl !== "string") continue;
+    const rankerText = lastAssistantText(join(relayRoot, runIdFromBase(rankerSpawn.baseUrl), "relay.jsonl"));
+    const winnerId = rankerText === null ? null : rankerFromAssistant(rankerText);
+    if (winnerId === null || winnerId === "") continue;
+    const inputPath = join(roundDir, "ranker-input.json");
+    if (!existsSync(inputPath)) throw new Error("ranker named a winner but reviewer-gate did not run");
+    const input = JSON.parse(readFileSync(inputPath, "utf8")) as { candidates?: { id?: unknown }[]; excluded?: unknown };
+    const ids = Array.isArray(input.candidates)
+      ? input.candidates.flatMap((item) => (typeof item.id === "string" ? [item.id] : []))
+      : [];
+    const excluded = Array.isArray(input.excluded) ? input.excluded.filter((item): item is string => typeof item === "string") : [];
+    if (!ids.includes(winnerId) || excluded.includes(winnerId)) continue;
+    const reviewSpawnPath = join(roundDir, "sessions", "reviewer-gate.spawn.json");
+    if (!existsSync(reviewSpawnPath)) throw new Error("ranker named a winner but reviewer-gate did not run");
+    const reviewSpawn = JSON.parse(readFileSync(reviewSpawnPath, "utf8")) as { baseUrl?: unknown };
+    if (typeof reviewSpawn.baseUrl !== "string") throw new Error("ranker named a winner but reviewer-gate did not run");
+    const reviewLog = join(relayRoot, runIdFromBase(reviewSpawn.baseUrl), "relay.jsonl");
+    const reviewText = lastAssistantText(reviewLog);
+    if (maxDoneTokens(reviewLog) <= 0 || reviewText === null || !reviewerFromAssistant(reviewText)) {
+      throw new Error("ranker named a winner but reviewer-gate did not run");
+    }
+  }
+}
+
+/**
  * Real round-1 chain through `optimize --execute --stop-before-run`.
  * Citation is the loop's anti_forgery check against the traces/ copies.
  * Stops before once/docker. Opt-in via LOOP_LIVE_SMOKE, PI_BIN, LOOP_LIVE_ROUND0, and LOOP_LIVE_ROUND0_SHA.
@@ -2117,6 +2229,7 @@ export async function runLiveRoleSmoke(options: {
   const rank = closure.rank === "walkover" ? "walkover" as const : null;
   if (rank !== "walkover" && !kinds.includes("role:ranker")) throw new Error("role role:ranker made no relay request");
   if (rank === "walkover" && kinds.includes("role:ranker")) throw new Error("walkover must not call ranker");
+  assertRankerWinnerReviewed(options.out, relayRoot);
   return { dockerRuns: 0, gapCitedTrace: true, rank };
 }
 
@@ -2168,6 +2281,17 @@ function relayRoleKinds(relayRoot: string): string[] {
     kinds.push(kind);
   }
   return kinds;
+}
+
+function lastAssistantText(log: string): string | null {
+  if (!existsSync(log)) return null;
+  let text: string | null = null;
+  for (const event of readJsonl(log)) {
+    if (!event || typeof event !== "object") continue;
+    const row = event as { type?: unknown; assistant?: unknown };
+    if (row.type === "done" && typeof row.assistant === "string" && row.assistant.trim() !== "") text = row.assistant;
+  }
+  return text;
 }
 
 /** Ledger weight: prompt + completion. A missing cached field is not a counted done. */

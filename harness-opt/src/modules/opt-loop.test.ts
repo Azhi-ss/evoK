@@ -219,6 +219,45 @@ function roleLog(root: string, baseUrl: string): string {
   return join(root, runIdOf(baseUrl), "relay.jsonl");
 }
 
+function equalKeyRoles(fx: Fixture, winnerId: string, options?: { readonly excluded?: readonly string[]; readonly reviewPlant?: boolean; readonly third?: boolean }): OptRoles {
+  const session = (spawn: RoleSpawnConfig, role: string) => {
+    hostWriteSession(spawn, `${JSON.stringify({ type: "session", role })}\n`, fx.key);
+  };
+  return {
+    gap: (input) => stubOptRoles(fx.key).gap(input),
+    async innovate(input) {
+      const slot = input.sessionPath.match(/innovator-(\d+)\.jsonl$/)?.[1] ?? "0";
+      const specs: Record<string, { summary: string; maxSteps: number }> = {
+        "0": { summary: "agent-loop.maxSteps=20", maxSteps: 20 },
+        "1": { summary: "agent-loop.maxSteps=21", maxSteps: 21 },
+        ...(options?.third ? { "2": { summary: "agent-loop.maxSteps=22", maxSteps: 22 } } : {}),
+      };
+      const spec = specs[slot] ?? specs["0"];
+      if (!spec) throw new Error("innovator slot");
+      await relayPlantRole(input.baseUrl, "innovator", input.round, { summary: spec.summary });
+      session(input.spawn, "innovator");
+      return { session: { jsonl: "ignored\n" }, summary: spec.summary, parts: { "agent-loop": { maxSteps: spec.maxSteps } } };
+    },
+    async critic(input) {
+      const excluded = [...(options?.excluded ?? [])];
+      await relayPlantRole(input.baseUrl, "critic", input.round, { excluded });
+      session(input.spawn, "critic");
+      return { session: { jsonl: "ignored\n" }, excluded };
+    },
+    async ranker(input) {
+      await relayPlantRole(input.baseUrl, "ranker", input.round, { winnerId });
+      session(input.spawn, "ranker");
+      return { session: { jsonl: "ignored\n" }, winnerId };
+    },
+    async review(input) {
+      const reason = "hold";
+      if (options?.reviewPlant !== false) await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: false, reason });
+      session(input.spawn, "reviewer-gate");
+      return { session: { jsonl: "ignored\n" }, accept: false, reason };
+    },
+  };
+}
+
 function secondProposal(key: Buffer, input: { readonly baseUrl: string; readonly round: number; readonly spawn: RoleSpawnConfig }): Promise<{ session: { jsonl: string }; summary: string; parts: { context: { compression: boolean } } }> {
   const summary = "context.compression=on";
   return relayPlantRole(input.baseUrl, "innovator", input.round, { summary }).then(() => {
@@ -734,7 +773,7 @@ describe("optimization loop", () => {
         return { session: { jsonl: "ignored\n" }, accept: false, reason };
       },
     };
-    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fake.executor });
+    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fake.executor });
     const gapInput = JSON.parse(readFileSync(join(fx.out, "round2/gap-input.json"), "utf8")) as { previousReview: { reason: string } };
     expect(gapInput.previousReview.reason).toBe("still idle");
     const gapSession = readFileSync(join(fx.out, "round2/sessions/gap-finder.jsonl"), "utf8");
@@ -746,6 +785,10 @@ describe("optimization loop", () => {
     expect(fake.calls).toHaveLength(1);
     expect(existsSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"))).toBe(true);
     expect(readFileSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("duplicate summary");
+    const skipped = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as { noWinner?: string };
+    expect(skipped.noWinner).toBe("duplicate summary");
+    expect(result.rounds[1]?.noWinner).toBe("duplicate summary");
+    expect(result.stopReport.noWinner).toEqual([{ round: 2, reason: "duplicate summary" }]);
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
   });
 
@@ -1759,7 +1802,8 @@ describe("optimize command", () => {
       const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null; faultRounds: number } };
       expect(loop.stopReport.reason).toBe("role_output_truncated");
       expect(loop.stopReport.faultRounds).toBe(1);
-      expect(existsSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"))).toBe(true);
+      const gapSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { exitCode?: number };
+      expect(gapSpawn.exitCode).toBe(1);
       expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
     } finally {
       if (previous.base === undefined) delete process.env.BASE_URL;
@@ -1799,6 +1843,8 @@ describe("optimize command", () => {
       expect(code).toBe(1);
       expect(stderr).toContain("role gap-finder pi exited 1");
       expect(stderr).not.toContain("role_output_truncated");
+      const gapSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { exitCode?: number };
+      expect(gapSpawn.exitCode).toBe(1);
     } finally {
       if (previous.base === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous.base;
@@ -1832,7 +1878,7 @@ describe("optimize command", () => {
       "  'gap-finder': { knob: 'agent-loop.maxSteps', failureClass: 'idle-loop', summary: 'early write then idle', citations: [] },",
       "  innovator: { summary: 'agent-loop.maxSteps=' + maxSteps, parts: { 'agent-loop': { maxSteps } } },",
       "  critic: { excluded: [] },",
-      "  ranker: { winnerId: 'c0' },",
+      "  ranker: { winnerId: 'c1' },",
       "  'reviewer-gate': { accept: false, reason: 'hold' },",
       "};",
       "const body = bodies[role];",
@@ -1882,13 +1928,27 @@ describe("optimize command", () => {
       expect(existsSync(join(fx.out, "round1/closure.json"))).toBe(true);
       const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
       expect(loop.stopReport.reason).toBeNull();
-      const ranker = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.spawn.json"), "utf8")) as { maxTokens: number };
+      const ranker = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.spawn.json"), "utf8")) as { maxTokens: number; exitCode?: number };
       const rankerArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.argv.json"), "utf8")) as { maxTokens: number; argv: string[] };
       expect(ranker.maxTokens).toBe(4096);
+      expect(ranker.exitCode).toBe(0);
       expect(rankerArgv.maxTokens).toBe(4096);
       expect(rankerArgv.argv).not.toContain("--max-tokens");
-      const gap = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { maxTokens: number };
+      const gap = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { maxTokens: number; exitCode?: number };
       expect(gap.maxTokens).toBe(16_384);
+      expect(gap.exitCode).toBe(0);
+      const reviewSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as { baseUrl?: string; exitCode?: number };
+      expect(reviewSpawn.exitCode).toBe(0);
+      const reviewLog = readFileSync(roleLog(join(fx.root, "relay-logs"), reviewSpawn.baseUrl ?? ""), "utf8");
+      expect(reviewLog).toContain("hold");
+      const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as { parts: { "agent-loop": { maxSteps: number } } };
+      expect(config.parts["agent-loop"].maxSteps).toBe(20);
+      const ranking = JSON.parse(readFileSync(join(fx.out, "round1/ranking.json"), "utf8")) as { codeWinner: string | null; rankerWinnerId: string };
+      expect(ranking.codeWinner).toBe("c0");
+      expect(ranking.rankerWinnerId).toBe("c1");
+      const closureRank = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { codeRank?: { winner?: string }; noWinner?: string };
+      expect(closureRank.codeRank?.winner).toBe("c0");
+      expect(closureRank.noWinner).toBeUndefined();
       expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.argv.json"))).toBe(true);
       expect(existsSync(join(fx.out, "round1/sessions/critic.argv.json"))).toBe(true);
     } finally {
@@ -2525,12 +2585,124 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(join(fx.out, "round1/ranker-input.json"))).toBe(false);
     const review = readFileSync(join(fx.out, "round1/sessions/reviewer-gate.jsonl"), "utf8");
     expect(review).toContain("no_winner");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { noWinner?: string };
+    expect(closure.noWinner).toBe("no_winner");
     const gap = JSON.parse(readFileSync(join(fx.out, "round2/gap-input.json"), "utf8")) as { previousReview?: { reason?: string } };
     expect(gap.previousReview?.reason).toBe("no_winner");
     expect(existsSync(join(fx.out, "round2/innovator-0-input.json"))).toBe(true);
     expect(fake.calls.map((call) => call.runDir.includes("/round2/"))).toEqual([true]);
     expect(result.rounds[0]?.accepted).toBe(false);
+    expect(result.rounds[0]?.noWinner).toBe("no_winner");
     expect(result.stopReport.reason).toBeNull();
+    expect(result.stopReport.noWinner).toEqual([{ round: 1, reason: "no_winner" }]);
+  });
+
+  test("tied changed keys: the ranker's non-first winnerId wins and the key order is only recorded", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: equalKeyRoles(fx, "c1"),
+    });
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as { parts: { "agent-loop": { maxSteps: number } } };
+    expect(config.parts["agent-loop"].maxSteps).toBe(21);
+    const ranking = JSON.parse(readFileSync(join(fx.out, "round1/ranking.json"), "utf8")) as { codeWinner: string | null; rankerWinnerId: string };
+    expect(ranking.codeWinner).toBe("c0");
+    expect(ranking.rankerWinnerId).toBe("c1");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { codeRank?: { winner?: string }; noWinner?: string };
+    expect(closure.codeRank?.winner).toBe("c0");
+    expect(closure.noWinner).toBeUndefined();
+    expect(result.rounds[0]?.codeRank?.winner).toBe("c0");
+    expect(result.rounds[0]?.noWinner).toBeUndefined();
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.stopReport.noWinner).toBeUndefined();
+    const review = readFileSync(join(fx.out, "round1/sessions/reviewer-gate.jsonl"), "utf8");
+    expect(review).not.toContain("这一轮没有候选");
+    const reviewSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as { baseUrl?: string };
+    const reviewLog = readFileSync(roleLog(join(fx.attestRoot, "relay-logs"), reviewSpawn.baseUrl ?? ""), "utf8");
+    expect(reviewLog).toContain("hold");
+  });
+
+  test("an empty ranker winnerId is no_winner:ranker_invalid in the closure, the round, and stopReport", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: equalKeyRoles(fx, ""),
+    });
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(fx.out, "round1/candidate/config.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round1/review-input.json"))).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { noWinner?: string; codeRank?: { winner?: string } };
+    expect(closure.noWinner).toBe("no_winner:ranker_invalid");
+    expect(closure.codeRank?.winner).toBe("c0");
+    expect(result.rounds[0]?.noWinner).toBe("no_winner:ranker_invalid");
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.stopReport.noWinner).toEqual([{ round: 1, reason: "no_winner:ranker_invalid" }]);
+  });
+
+  test("an unknown ranker winnerId is no_winner:ranker_invalid", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: equalKeyRoles(fx, "c9"),
+    });
+    expect(existsSync(join(fx.out, "round1/candidate/config.json"))).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { noWinner?: string };
+    expect(closure.noWinner).toBe("no_winner:ranker_invalid");
+    expect(result.rounds[0]?.noWinner).toBe("no_winner:ranker_invalid");
+    expect(result.stopReport.noWinner).toEqual([{ round: 1, reason: "no_winner:ranker_invalid" }]);
+    expect(fake.calls).toEqual([]);
+  });
+
+  test("a critic-excluded ranker winnerId is no_winner:ranker_invalid", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: equalKeyRoles(fx, "c2", { excluded: ["c2"], third: true }),
+    });
+    expect(existsSync(join(fx.out, "round1/candidate/config.json"))).toBe(false);
+    const ranking = JSON.parse(readFileSync(join(fx.out, "round1/ranking.json"), "utf8")) as { codeWinner: string | null; rankerWinnerId: string };
+    expect(ranking.codeWinner).toBe("c0");
+    expect(ranking.rankerWinnerId).toBe("c2");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { noWinner?: string };
+    expect(closure.noWinner).toBe("no_winner:ranker_invalid");
+    expect(result.rounds[0]?.noWinner).toBe("no_winner:ranker_invalid");
+    expect(result.stopReport.noWinner).toEqual([{ round: 1, reason: "no_winner:ranker_invalid" }]);
+    expect(fake.calls).toEqual([]);
+  });
+
+  test("stop-before-run fails when the ranker names a winner and reviewer-gate made no relay call", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      stopBeforeRun: true,
+      rounds: 1,
+      executor: fake.executor,
+      roles: equalKeyRoles(fx, "c1", { reviewPlant: false }),
+    })).rejects.toThrow("ranker named a winner but reviewer-gate did not run");
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
   });
 
   test("execute mode ignores a read-only token override", async () => {
@@ -2876,7 +3048,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           },
         },
       });
-      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
+      expect(result.stopReport).toEqual({
+        reason: null,
+        faultRounds: 0,
+        reviewerRejectRounds: 0,
+        noWinner: [{ round: 1, reason: "no_winner" }],
+      });
       expect(fake.calls).toEqual([]);
       expect(upstream.hits.length).toBeGreaterThan(0);
       const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
