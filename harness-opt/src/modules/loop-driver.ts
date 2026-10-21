@@ -91,16 +91,23 @@ export function driveCappedLoop(rounds: readonly DriveRound[], initial: Partial<
 
 export interface Round0Sign {
   readonly srcPath: string;
-  readonly hostCopyPath: string;
+  readonly srcSha256: string;
+  /** Set only when the host is copying a real file. Omitted leaves hostCopyPath empty. */
+  readonly hostCopyPath?: string;
 }
 
-export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown, round0?: Round0Sign): Record<string, unknown> {
+export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown, round0: Round0Sign): Record<string, unknown> {
+  if (round0.srcPath.trim() === "" || !/^[0-9a-f]{64}$/.test(round0.srcSha256)) {
+    throw new Error("pre_round1 needs round0 path and sha");
+  }
   const proc = spawnSync("python3", [SCRIPT, "pre-round1"], {
     input: JSON.stringify({
       seed: randomBytes(32).toString("hex"),
       ranker,
       critic,
-      ...(round0 ? { round0Src: round0.srcPath, hostCopyPath: round0.hostCopyPath } : {}),
+      round0Path: round0.srcPath,
+      round0Sha: round0.srcSha256,
+      ...(round0.hostCopyPath ? { round0Src: round0.srcPath, hostCopyPath: round0.hostCopyPath } : {}),
     }),
     encoding: "utf8",
     env: { ...process.env, HARNESS_ATTEST_KEY_FILE: keyFile },

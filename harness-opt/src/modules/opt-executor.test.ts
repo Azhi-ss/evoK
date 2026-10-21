@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEV_TASK } from "./opt-loop";
 import { createHash } from "node:crypto";
 import { assertScoredRelayLog, CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, writeRunArtifacts, type OptRunRequest, type OptTask } from "./opt-executor";
 
@@ -154,13 +153,20 @@ writeFileSync(run + "/result.json", JSON.stringify({
     expect(spawned).toBe(false);
   });
 
-  test("i014 is rendered on devii-004-int", () => {
-    const dir = mkdtempSync(join(tmpdir(), "opt-i014-"));
+  test("a caller-supplied task is rendered on devii-004-int", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-net-"));
+    const task: OptTask = {
+      id: "hb003",
+      path: "tasks3/hb003",
+      split: "dev",
+      network: "devii-004-int",
+      tokenW: 9_024_166,
+    };
     const argv = renderExecutorCommand(
       ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
-      { ...request(dir), task: DEV_TASK, tokenCap: tokenCap(DEV_TASK) },
+      { ...request(dir), task, tokenCap: tokenCap(task) },
     );
-    expect(DEV_TASK.network).toBe("devii-004-int");
+    expect(task.network).toBe("devii-004-int");
     expect(argv).toContain("devii-004-int");
     expect(argv).not.toContain("open");
     expect(argv).not.toContain("shared");

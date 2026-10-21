@@ -946,7 +946,14 @@ class LoopModeCase(unittest.TestCase):
     def test_11_each_cap_and_forged_trace(self):
         key = b"k" * 32
         seed = bytes.fromhex("ab" * 32)
-        signed = loop_mode.pre_round1_sign(key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]})
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]})
+        round0_path = "heldout/hb003/seed0/.../trace.jsonl"
+        round0_sha = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76"
+        signed = loop_mode.pre_round1_sign(
+            key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+            round0_path=round0_path, round0_sha=round0_sha,
+        )
         self.assertEqual(signed["seed"], 0)
         self.assertEqual(signed["innovatorCap"], 200_000)
         self.assertEqual(signed["maxRounds"], 10)
@@ -1000,8 +1007,8 @@ class LoopModeCase(unittest.TestCase):
         self.assertIsNone(mixed["reason"])
 
         record = signed["round0Record"]
-        self.assertEqual(record["srcPath"], loop_mode.ROUND0_SRC_PATH)
-        self.assertEqual(record["srcSha256"], loop_mode.ROUND0_SRC_SHA)
+        self.assertEqual(record["srcPath"], round0_path)
+        self.assertEqual(record["srcSha256"], round0_sha)
         self.assertEqual(record["hostCopyPath"], "")
         critic = {"type": "done", "role": "critic", "status": 200, "round": 1, "usage": {"prompt_tokens": 3_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}}
         ranking_only = loop_mode.budget_status([critic])
@@ -1029,10 +1036,16 @@ class LoopModeCase(unittest.TestCase):
         body = b"alpha\nbeta\ngamma\n"
         src.write_bytes(body)
         dest = root / "private" / "round0-trace.jsonl"
+        digest = hashlib.sha256(body).hexdigest()
         signed = loop_mode.pre_round1_sign(
             key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
-            round0_src=src, host_copy_path=dest,
+            round0_path=str(src), round0_sha=digest, round0_src=src, host_copy_path=dest,
         )
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(
+                key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+                round0_path=str(src), round0_sha="ab" * 32, round0_src=src, host_copy_path=dest,
+            )
         self.assertTrue(loop_mode.verify_pre_round1(signed, key))
         record = signed["round0Record"]
         self.assertEqual(record["srcSha256"], hashlib.sha256(body).hexdigest())
@@ -1296,10 +1309,15 @@ class LoopModeCase(unittest.TestCase):
         self.assertEqual(again["sha"], copied["sha"])
         self.assertEqual(str(hooks.checker_dest(run_id)), f"/home/box/.harness-relay/{run_id}/checker")
         self.assertEqual(hooks.DEFAULT_RELAY_ROOT, harness_relay.DEFAULT_LOG_ROOT)
-        self.assertEqual(hooks.ROUND0_HOST_COPY_SHA, "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c")
-        with self.assertRaises(ValueError) as rejected:
+        pinned = hashlib.sha256(b"1\n").hexdigest()
+        self.assertEqual(hooks.assert_round0_host_copy(b"1\n", pinned), pinned)
+        with self.assertRaises(TypeError):
             hooks.assert_round0_host_copy(b"1\n")
+        with self.assertRaises(ValueError) as rejected:
+            hooks.assert_round0_host_copy(b"1\n", "ab" * 32)
         self.assertIn("round-0 host copy sha", str(rejected.exception))
+        with self.assertRaises(ValueError):
+            hooks.assert_round0_host_copy(b"1\n", "")
         (verifier / "reward.txt").write_bytes(b"0\n")
         with self.assertRaises(ValueError):
             hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")

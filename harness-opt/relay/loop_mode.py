@@ -18,9 +18,7 @@ READ_ONLY_ROLES = frozenset({"innovator", "critic", "ranker"})
 RANKING_ROLES = frozenset({"critic", "ranker"})
 BIND_ROLES = frozenset({"critic", "ranker", "reviewer"})
 RANKING_ROUND_CAP = 3_000_000
-# Declared round-0 trace. seedSha is retained and is not used to order anything.
-ROUND0_SRC_PATH = "/workspace/company/runs/2026-10-21-real-executor-full/probe/i014/seed1/workspace/runs/task-g3un6z/trace.jsonl"
-ROUND0_SRC_SHA = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c"
+# seedSha is retained and is not used to order anything.
 ANTI_FORGERY = frozenset({"attest_mismatch", "reward", "round0Record"})
 
 CAPS = {
@@ -72,26 +70,47 @@ def _path_inside(path, root) -> bool:
     return child == base or child.startswith(base + os.sep)
 
 
-def declared_round0() -> dict:
-    """Pinned source identity. hostCopyPath stays empty until the host actually copies the file."""
-    return {"srcPath": ROUND0_SRC_PATH, "srcSha256": ROUND0_SRC_SHA, "hostCopyPath": ""}
+def _round0_sha(value) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError("round0Record sha")
+    return value
 
 
-def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
+def declared_round0(path, sha) -> dict:
+    """Caller-supplied source identity. hostCopyPath stays empty until the host copies the file."""
+    if not isinstance(path, str) or path.strip() == "":
+        raise ValueError("round0Record srcPath")
+    return {"srcPath": path, "srcSha256": _round0_sha(sha), "hostCopyPath": ""}
+
+
+def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
     """Sign the caps, an inert seedSha, and round0Record before round 1.
 
+    round0_path and round0_sha are required. There is no built-in trace.
     seedSha is not used to shuffle comparison order. It stays in the signed body only.
     """
     if round_started:
         raise ValueError("pre_round1_sign is before round 1")
     if not isinstance(seed, (bytes, bytearray)) or len(seed) == 0:
         raise ValueError("seed")
+    if not isinstance(round0_path, str) or round0_path.strip() == "":
+        raise ValueError("round0Record srcPath")
+    expected = _round0_sha(round0_sha)
     if round0_src:
         if not host_copy_path:
             raise ValueError("round0Record hostCopyPath")
+        src = Path(round0_src)
+        if str(src) != round0_path:
+            raise ValueError("round0Record srcPath")
+        if src.is_symlink() or not src.is_file():
+            raise ValueError("round0Record missing")
+        if hashlib.sha256(src.read_bytes()).hexdigest() != expected:
+            raise ValueError("round0Record sha")
         record = copy_round0(round0_src, host_copy_path, mounts=mounts)
+        if record["srcSha256"] != expected:
+            raise ValueError("round0Record sha")
     else:
-        record = declared_round0()
+        record = declared_round0(round0_path, expected)
     body = {
         "type": "pre_round1",
         "round0Record": record,
@@ -350,11 +369,17 @@ def main(argv=None) -> None:
         if key_path == "":
             raise SystemExit("HARNESS_ATTEST_KEY_FILE")
         key_bytes = Path(key_path).read_bytes()
+        round0_path = payload.get("round0Path")
+        round0_sha = payload.get("round0Sha")
+        if not isinstance(round0_path, str) or round0_path.strip() == "" or not isinstance(round0_sha, str) or round0_sha.strip() == "":
+            raise SystemExit("round0Path and round0Sha are required")
         signed = pre_round1_sign(
             key_bytes,
             seed=bytes.fromhex(payload["seed"]),
             ranker=payload["ranker"],
             critic=payload["critic"],
+            round0_path=round0_path,
+            round0_sha=round0_sha,
             round_started=bool(payload.get("roundStarted")),
             round0_src=payload.get("round0Src"),
             host_copy_path=payload.get("hostCopyPath"),

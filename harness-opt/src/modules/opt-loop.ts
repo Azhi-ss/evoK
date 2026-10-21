@@ -51,14 +51,6 @@ export const OPT_MODEL = "deepseek-v4-1-flash-261017";
 /** Innovators per round. The real run is seed 0 of the bound ranker winner. */
 const INNOVATORS_PER_ROUND = 6;
 
-export const DEV_TASK: OptTask = {
-  id: "i014",
-  path: "tasks2/i014",
-  split: "dev",
-  network: "devii-004-int",
-  tokenW: 1_625_811,
-};
-
 export const HELD_OUT_TASKS: readonly OptTask[] = [
   {
     id: "002",
@@ -257,8 +249,12 @@ export interface OptLoopOptions {
   readonly readOnlyWallS?: () => number;
   /** False stops the loop before the next call. */
   readonly antiForgery?: () => boolean;
-  /** Round-0 trace to copy onto a host-private path and sign before round 1. */
-  readonly round0TracePath?: string;
+  /** Target task. Required. The loop has no built-in task. */
+  readonly task: OptTask;
+  /** Round-0 trace path. Required. A missing file is signed as a declared identity. */
+  readonly round0TracePath: string;
+  /** Round-0 sha256. Required. A present file must match this pin. */
+  readonly round0TraceSha: string;
   /** Flip one byte of the host copy after it is signed. */
   readonly round0Tamper?: boolean;
 }
@@ -334,15 +330,41 @@ interface ClosureRecord {
   reviewFedForward: boolean | null;
 }
 
+function requireLoopTask(task: OptTask | undefined): OptTask {
+  if (!task || task.id.trim() === "" || task.path.trim() === "" || !Number.isFinite(task.tokenW) || task.tokenW <= 0) {
+    throw new Error("loop target task is required");
+  }
+  if (task.network !== "devii-004-int") throw new Error("task network must be devii-004-int");
+  if (task.split !== "dev") throw new Error("loop target split must be dev");
+  return task;
+}
+
+function requireRound0(path: string | undefined, sha: string | undefined): { readonly path: string; readonly sha: string } {
+  if (path === undefined || path.trim() === "") throw new Error("round-0 trace path is required");
+  if (sha === undefined || !/^[0-9a-f]{64}$/.test(sha)) throw new Error("round-0 trace sha is required");
+  return { path, sha };
+}
+
+function round0IsFile(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** Gap, six innovators, critic, ranker, one seed-0 run, reviewer. No model call lives in this function. */
 export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult> {
   const rounds = Math.min(options.rounds ?? LOOP_CAPS.maxRounds, LOOP_CAPS.maxRounds);
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
   const model = options.model ?? OPT_MODEL;
   if (!Number.isInteger(rounds) || rounds < 1) throw new Error("rounds must be a positive integer");
+  const task = requireLoopTask(options.task);
+  const round0Pin = requireRound0(options.round0TracePath, options.round0TraceSha);
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
-  const firstRun = join(options.out, "round1", "runs", DEV_TASK.id, "seed0", "candidate");
+  const firstRun = join(options.out, "round1", "runs", task.id, "seed0", "candidate");
   if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : undefined);
@@ -356,9 +378,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     watcher: options.resultWatcher ?? absentResultWatcher(),
   };
   mkdirSync(options.out, { recursive: true });
-  const round0Copy = options.round0TracePath
-    ? { srcPath: options.round0TracePath, hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
-    : undefined;
+  const round0Copy = {
+    srcPath: round0Pin.path,
+    srcSha256: round0Pin.sha,
+    ...(round0IsFile(round0Pin.path)
+      ? { hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
+      : {}),
+  };
   const preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
   writeJson(join(options.out, "pre-round1.json"), preRound1);
   const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
@@ -708,14 +734,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     } else {
       const seedMs = now().getTime();
       runs.push(await executeScored(executor, {
-        task: DEV_TASK,
+        task,
         seed,
         arm: "candidate",
         configPath,
-        runDir: join(options.out, `round${round}`, "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
+        runDir: join(options.out, `round${round}`, "runs", task.id, `seed${seed}`, "candidate"),
         model,
-        tokenCap: tokenCap(DEV_TASK),
-      }, hostFor(options, attestKey, `round${round}`, DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost));
+        tokenCap: tokenCap(task),
+      }, hostFor(options, attestKey, `round${round}`, task.id, `seed${seed}`, "candidate"), threshold, scoreHost));
       realRunWallS += Math.max(0, (now().getTime() - seedMs) / 1000);
       if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch") {
         stopReason = "anti_forgery";
@@ -907,7 +933,8 @@ export interface OptOnceOptions {
   readonly controlConfigPath: string;
   readonly knob: string;
   readonly seed?: number;
-  readonly task?: OptTask;
+  /** Target task. Required. There is no built-in task. */
+  readonly task: OptTask;
   readonly model?: string;
   readonly executor: OptExecutor;
 }
@@ -932,7 +959,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   if (!existsSync(options.controlConfigPath) || !statSync(options.controlConfigPath).isFile()) {
     throw new Error(`control config is missing: ${options.controlConfigPath}`);
   }
-  const task = options.task ?? DEV_TASK;
+  const task = requireLoopTask(options.task);
   const model = options.model ?? OPT_MODEL;
   const attestKey = loadAttestKey(options.attestKeyFile);
   assertAttestRoot(options.attestRoot, options.out);

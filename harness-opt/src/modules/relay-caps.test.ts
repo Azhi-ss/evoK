@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { driveCappedLoop, LOOP_CAPS } from "./loop-driver";
 
 const RELAY = fileURLToPath(new URL("../../relay", import.meta.url));
-const ROUND0 = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c";
+const ROUND0_PATH = "heldout/hb003/seed0/.../trace.jsonl";
+const ROUND0_SHA = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76";
 
 function python(code: string): string {
   const proc = spawnSync("python3", ["-c", code], { encoding: "utf8", cwd: RELAY });
@@ -19,7 +20,7 @@ import hashlib, json
 import loop_mode
 key = b"k" * 32
 seed = bytes.fromhex("ab" * 32)
-signed = loop_mode.pre_round1_sign(key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]})
+signed = loop_mode.pre_round1_sign(key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]}, round0_path="${ROUND0_PATH}", round0_sha="${ROUND0_SHA}")
 assert signed["seed"] == 0
 assert signed["innovatorCap"] == 200000
 assert signed["maxRounds"] == 10
@@ -236,7 +237,8 @@ body = b"alpha\\nbeta\\ngamma\\n"
 src = root / "trace.jsonl"
 src.write_bytes(body)
 dest = root / "private" / "round0-trace.jsonl"
-signed = loop_mode.pre_round1_sign(key, seed=b"s" * 32, ranker={"tools": ["read"]}, critic={"tools": ["read"]}, round0_src=src, host_copy_path=dest)
+digest = hashlib.sha256(body).hexdigest()
+signed = loop_mode.pre_round1_sign(key, seed=b"s" * 32, ranker={"tools": ["read"]}, critic={"tools": ["read"]}, round0_path=str(src), round0_sha=digest, round0_src=src, host_copy_path=dest)
 assert loop_mode.verify_pre_round1(signed, key)
 record = signed["round0Record"]
 assert record["srcSha256"] == hashlib.sha256(body).hexdigest()
@@ -261,9 +263,15 @@ forged["round0Record"]["srcSha256"] = "0" * 64
 assert loop_mode.verify_pre_round1(forged, key) is False
 stopped = loop_mode.drive([{"anti_forgery": "round0Record"}, {}])
 assert stopped["reason"] == "anti_forgery" and "role:2" not in stopped["calls"]
-declared = loop_mode.declared_round0()
-assert declared["srcSha256"] == "${ROUND0}"
+declared = loop_mode.declared_round0("${ROUND0_PATH}", "${ROUND0_SHA}")
+assert declared["srcSha256"] == "${ROUND0_SHA}"
+assert declared["srcPath"] == "${ROUND0_PATH}"
 assert declared["hostCopyPath"] == ""
+try:
+    loop_mode.pre_round1_sign(key, seed=b"s" * 32, ranker={"tools": ["read"]}, critic={"tools": ["read"]})
+    raise SystemExit("missing round0")
+except ValueError:
+    pass
 print("ok")
 `);
     expect(text).toBe("ok");

@@ -137,7 +137,7 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 ## 多轮优化环
 
-`optimize` 把 gap-finder、六名 innovator、critic、ranker 和 reviewer-gate 接到一次 Dev-II 执行上。默认协议：只做 i014，最多 10 轮。每轮先去重，再由 critic 排除、ranker 选出一个赢家，只对这个赢家跑种子 0 的一次真实运行。critic、ranker、reviewer 的最终 assistant 消息必须含结论 JSON。宿主从该 run 最后一条 done 记下的 assistant 文本解析结论，只在它和角色报告的结论一致时接受。对不上时，critic 或 ranker 记 `no_winner`，reviewer 不接受。生产循环不跑终比，也不跑 held-out。每道题的 docker 网络都是 `devii-004-int`。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
+`optimize` 把 gap-finder、六名 innovator、critic、ranker 和 reviewer-gate 接到一次 Dev-II 执行上。目标题（`--task`、`--task-path`、`--network`、`--token-w`）和 round-0 trace（`--round0-trace`、`--round0-sha`）都是必填输入，没有默认值，缺了就拒绝启动。当前盒子上操作者传入的是任务 `hb003`（`tasks3/hb003`，tokenW `9024166`，网络 `devii-004-int`）和 round-0 `heldout/hb003/seed0/.../trace.jsonl`（sha256 `3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76`，路径中间段由操作者补全）。有这份文件时，拷贝后的 sha 必须等于传入的 sha；没有文件时，签名里的 `hostCopyPath` 为空。最多 10 轮。每轮先去重，再由 critic 排除、ranker 选出一个赢家，只对这个赢家跑种子 0 的一次真实运行。critic、ranker、reviewer 的最终 assistant 消息必须含结论 JSON。宿主从该 run 最后一条 done 记下的 assistant 文本解析结论，只在它和角色报告的结论一致时接受。对不上时，critic 或 ranker 记 `no_winner`，reviewer 不接受。生产循环不跑终比，也不跑 held-out。每道题的 docker 网络都是 `devii-004-int`。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
 
 执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{runId}` `{nonce}` `{relayLog}` `{attestDir}` `{harness}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}`、`{patchHash}` 或 `{attestKey}`：环不会把补丁标记或证明密钥交给执行器，命令里写了这些占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。`{runId}` 是 16 字节随机数的 32 位十六进制，不是运行目录的 sha256。`{nonce}` 是一次性随机数，用过的 nonce 或已经写下 `result.json` 的运行目录会被拒绝。`{relayLog}` 指向这次 `{runId}` 的 relay 账本。`{attestDir}` 位于 `--attest-root` 下，并且不和 `{runDir}` 嵌套。`{network}` 展开成 `devii-004-int`。relay 的绑定地址、上游和容器可达性写在 `relay/ADAPTER.md`，类型检查扫过的 TS 源码里不出现这些地址。
 
@@ -172,7 +172,10 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 ```bash
 bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
   --attest-root /tmp/harness-opt-attest --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
-  --harness "$HARNESS_FILE" --control-attest /tmp/i014-control-attest
+  --harness "$HARNESS_FILE" --control-attest /tmp/control-attest \
+  --task hb003 --task-path tasks3/hb003 --network devii-004-int --token-w 9024166 \
+  --round0-trace 'heldout/hb003/seed0/.../trace.jsonl' \
+  --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
 `--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。`--attest-root` 必须在 `--out` 外面。
@@ -185,7 +188,7 @@ bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once \
   --attest-root /tmp/harness-opt-attest --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
   --harness "$HARNESS_FILE" --config /tmp/harness-opt-candidate.json \
   --control-config /tmp/harness-opt-control.json --knob agent-loop.maxSteps \
-  --seed 0 --task i014 --task-path "$TASK_DIR" \
+  --seed 0 --task hb003 --task-path "$TASK_DIR" --network devii-004-int --token-w 9024166 \
   --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--run-id","{runId}","--nonce","{nonce}","--model","{model}","--network","{network}","--token-cap","{tokenCap}","--harness","{harness}","--attest-dir","{attestDir}"]' \
   --driver "$HARNESS_OPT_DRIVER"
 ```

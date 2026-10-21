@@ -12,7 +12,6 @@ import {
   claimNonce,
   CONTROL_CONFIG_SHA,
   CONTROL_CONFIG_TEXT,
-  DEV_TASK,
   OPT_MODEL,
   runOptLoop,
   runOptOnce,
@@ -25,7 +24,27 @@ import {
   type OptRoles,
 } from "./opt-loop";
 import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
-import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
+import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type OptTask, type RunArtifactTiming } from "./opt-executor";
+
+/** Caller-supplied loop target. The loop itself has no built-in task. */
+const LOOP_TASK: OptTask = {
+  id: "hb003",
+  path: "tasks3/hb003",
+  split: "dev",
+  network: "devii-004-int",
+  tokenW: 9_024_166,
+};
+/** Chief's current box identity. The `...` segment is supplied by the operator; this string is the input, not a default in the loop. */
+const ROUND0_TRACE = "heldout/hb003/seed0/.../trace.jsonl";
+const ROUND0_SHA = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76";
+
+function taskFlags(): string[] {
+  return ["--task", LOOP_TASK.id, "--task-path", LOOP_TASK.path, "--network", LOOP_TASK.network, "--token-w", String(LOOP_TASK.tokenW)];
+}
+
+function round0Flags(): string[] {
+  return ["--round0-trace", ROUND0_TRACE, "--round0-sha", ROUND0_SHA];
+}
 
 interface Fixture {
   readonly root: string;
@@ -66,7 +85,7 @@ function fixture(): Fixture {
   };
 }
 
-function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath" | "env"> {
+function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath" | "env" | "task" | "round0TracePath" | "round0TraceSha"> {
   return {
     out: fx.out,
     attestRoot: fx.attestRoot,
@@ -75,6 +94,9 @@ function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "att
     controlAttests: [fx.controlAttest],
     controlConfigPath: fx.controlConfig,
     env: { HARNESS_RELAY_BIND: "127.0.0.1" },
+    task: LOOP_TASK,
+    round0TracePath: ROUND0_TRACE,
+    round0TraceSha: ROUND0_SHA,
   };
 }
 
@@ -82,7 +104,7 @@ function attestControl(root: string, key: Buffer, harnessPath: string, controlCo
   const runDir = join(root, "control-run");
   const attestDir = join(root, "control-attest");
   const request: OptRunRequest = {
-    task: DEV_TASK,
+    task: LOOP_TASK,
     seed: 0,
     arm: "control",
     configPath: controlConfig,
@@ -90,7 +112,7 @@ function attestControl(root: string, key: Buffer, harnessPath: string, controlCo
     attestDir,
     harnessPath,
     model: OPT_MODEL,
-    tokenCap: tokenCap(DEV_TASK),
+    tokenCap: tokenCap(LOOP_TASK),
     relayLogRoot: join(root, "control-relay"),
   };
   const base = 1_700_000_000;
@@ -121,7 +143,7 @@ function flattenParts(value: Record<string, unknown>, prefix = ""): Record<strin
 
 function timing(request: OptRunRequest, reward: number, tokens = 100): RunArtifactTiming {
   const base = 1_700_000_000;
-  const ewi = request.task.id === "i014" && request.arm === "candidate" && request.seed === 1 && request.runDir.includes("/round1/");
+  const ewi = request.task.id === LOOP_TASK.id && request.arm === "candidate" && request.seed === 1 && request.runDir.includes("/round1/");
   return {
     reward,
     tokens,
@@ -406,7 +428,7 @@ describe("optimization loop", () => {
     expect(result.ewiThresholdSec).toBe(600);
     expect(result.skippedFinal).toBe(true);
     expect(fake.calls.map((call) => `${call.task.id}:${call.seed}:${call.model}`)).toEqual([
-      "i014:0:deepseek-v4-1-flash-261017",
+      "hb003:0:deepseek-v4-1-flash-261017",
     ]);
     expect(roles.reviews).toBe(1);
     expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
@@ -432,8 +454,8 @@ describe("optimization loop", () => {
     expect(pre.innovatorCap).toBe(200_000);
     expect(pre.seedSha).toMatch(/^[0-9a-f]{64}$/);
     expect(pre.round0Record).toEqual({
-      srcPath: "/workspace/company/runs/2026-10-21-real-executor-full/probe/i014/seed1/workspace/runs/task-g3un6z/trace.jsonl",
-      srcSha256: "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c",
+      srcPath: ROUND0_TRACE,
+      srcSha256: ROUND0_SHA,
       hostCopyPath: "",
     });
     expect(notes).toContain("reward:");
@@ -461,7 +483,7 @@ describe("optimization loop", () => {
     expect(gapSession).toContain("\"role\":\"gap-finder\"");
     expect(gapSession).toContain("gap");
     expect(gapSession).not.toContain("ignored-return");
-    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+    expect(existsSync(join(fx.out, "baseline/hb003/seed0/trace.jsonl"))).toBe(false);
 
     const diff = readFileSync(join(fx.out, "round1/patch.diff"), "utf8");
     expect(diff).toContain('"maxSteps":25');
@@ -554,7 +576,7 @@ describe("optimization loop", () => {
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { ewi: boolean | null; idleS: number; gapMaxS: number; ewi_trace_ref: { idleS: number; ewi: boolean } | null }[];
     };
-    const runDir = join(fx.out, "round1/runs/i014/seed0/candidate");
+    const runDir = join(fx.out, "round1/runs/hb003/seed0/candidate");
     expect(existsSync(join(runDir, "summary.csv"))).toBe(false);
     expect(metrics.runs[0]?.ewi).toBe(false);
     expect(metrics.runs[0]?.idleS).toBe(40);
@@ -665,7 +687,7 @@ describe("optimization loop", () => {
     expect(result.finalBlock).toBeNull();
     expect(result.heldOut).toBeNull();
     expect(fake.calls).toHaveLength(3);
-    expect(fake.calls.every((call) => call.task.id === "i014" && call.task.network === "devii-004-int")).toBe(true);
+    expect(fake.calls.every((call) => call.task.id === "hb003" && call.task.network === "devii-004-int")).toBe(true);
   });
 
   test("a run past 6×W is unscored and stays out of the reward mean", async () => {
@@ -676,9 +698,9 @@ describe("optimization loop", () => {
       async run(request) {
         calls.push(request);
         const over = request.seed === 0;
-        const script = timing(request, 1, over ? tokenCap(DEV_TASK) + 1 : 10);
+        const script = timing(request, 1, over ? tokenCap(LOOP_TASK) + 1 : 10);
         writeRunArtifacts(request, { ...script, timedOut: false, tEnd: script.tWrite + 0.5, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
-        return observation(request, { reward: 1, tokens: over ? tokenCap(DEV_TASK) + 1 : 10, wallS: 10, timedOut: false });
+        return observation(request, { reward: 1, tokens: over ? tokenCap(LOOP_TASK) + 1 : 10, wallS: 10, timedOut: false });
       },
     };
     await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: rejectingRoles(fx), executor });
@@ -775,14 +797,14 @@ describe("optimization loop", () => {
     writeFileSync(join(fx.controlAttest, "attestation.json"), raw.replace("\"hmacSha256\": \"", "\"hmacSha256\": \"00"));
     await expect(runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles, executor })).rejects.toThrow(/hmac/);
     expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(false);
-    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+    expect(existsSync(join(fx.out, "baseline/hb003/seed0/trace.jsonl"))).toBe(false);
 
     const pretty = join(fx.root, "pretty-control.json");
     writeFileSync(pretty, `${JSON.stringify(JSON.parse(CONTROL_CONFIG_TEXT), null, 2)}\n`);
     const prettyRun = join(fx.root, "pretty-run");
     const prettyAttest = join(fx.root, "pretty-attest");
     writeRunArtifacts({
-      task: DEV_TASK,
+      task: LOOP_TASK,
       seed: 0,
       arm: "control",
       configPath: pretty,
@@ -790,7 +812,7 @@ describe("optimization loop", () => {
       attestDir: prettyAttest,
       harnessPath: fx.harnessPath,
       model: OPT_MODEL,
-      tokenCap: tokenCap(DEV_TASK),
+      tokenCap: tokenCap(LOOP_TASK),
       relayLogRoot: join(fx.root, "pretty-relay"),
     }, { reward: 1, tokens: 10, wallS: 1, timedOut: false, tWrite: 1_700_000_000, tEnd: 1_700_000_001, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
     await expect(runOptLoop({
@@ -1046,7 +1068,7 @@ describe("optimization loop", () => {
     expect(result.accepted).toBeNull();
     expect(result.skippedFinal).toBe(true);
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
-    expect(existsSync(join(fx.attestRoot, "round1", "i014", "seed0", "candidate", "attestation.json"))).toBe(false);
+    expect(existsSync(join(fx.attestRoot, "round1", "hb003", "seed0", "candidate", "attestation.json"))).toBe(false);
   });
 
   test("a second loop into the same out is rejected before the executor runs", async () => {
@@ -1082,7 +1104,7 @@ describe("optimization loop", () => {
       configPath: fx.controlConfig,
       reward: 1,
       meta: {
-        task: DEV_TASK.path,
+        task: LOOP_TASK.path,
         seed: 0,
         arm: "control",
         score_status: "scored",
@@ -1108,7 +1130,7 @@ describe("optimization loop", () => {
 
   test("a symlink in outputs before start does not launch the executor", async () => {
     const fx = fixture();
-    const runDir = join(fx.out, "round1", "runs", "i014", "seed0", "candidate");
+    const runDir = join(fx.out, "round1", "runs", "hb003", "seed0", "candidate");
     mkdirSync(runDir, { recursive: true });
     symlinkSync(fx.harnessPath, join(runDir, "outputs"));
     const fake = fakeExecutor(fx);
@@ -1163,6 +1185,7 @@ describe("optimization loop", () => {
       roles: { gap: citing.gap, innovate: citing.innovate, critic: citing.critic, ranker: citing.ranker, review: rejecting.review },
       executor: fake.executor,
       round0TracePath: trace,
+      round0TraceSha: createHash("sha256").update(body).digest("hex"),
     });
     expect(fake.calls).toHaveLength(1);
     expect(result.stopReport.reason).toBeNull();
@@ -1195,6 +1218,7 @@ describe("optimization loop", () => {
       roles: citingRoles(fx.key, fx.attestRoot),
       executor: fake.executor,
       round0TracePath: trace,
+      round0TraceSha: createHash("sha256").update("alpha\nbeta\ngamma\n").digest("hex"),
       round0Tamper: true,
     });
     expect(fake.calls).toHaveLength(0);
@@ -1216,11 +1240,53 @@ describe("optimization loop", () => {
       roles: stubOptRoles(fx.key),
       executor: fake.executor,
       round0TracePath: trace,
+      round0TraceSha: createHash("sha256").update("alpha\nbeta\ngamma\n").digest("hex"),
     });
     expect(fake.calls).toHaveLength(0);
     expect(result.rounds).toEqual([{ round: 1, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] }]);
     expect(result.stopReport.reason).toBe("anti_forgery");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("a missing task or round-0 pin is refused before any call", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      task: { ...LOOP_TASK, id: " " },
+    })).rejects.toThrow(/loop target task is required/);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      round0TracePath: " ",
+    })).rejects.toThrow(/round-0 trace path is required/);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      round0TraceSha: "",
+    })).rejects.toThrow(/round-0 trace sha is required/);
+    const trace = join(fx.root, "round0.jsonl");
+    writeFileSync(trace, "alpha\n");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      round0TracePath: trace,
+      round0TraceSha: "ab".repeat(32),
+    })).rejects.toThrow(/round0Record sha/);
+    expect(fake.calls).toHaveLength(0);
   });
 });
 
@@ -1237,6 +1303,8 @@ describe("optimize command", () => {
         "--harness", fx.harnessPath,
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
       ]);
       expect(code).toBe(0);
       expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
@@ -1259,9 +1327,46 @@ describe("optimize command", () => {
       "--attest-root", fx.attestRoot,
       "--attest-key-file", fx.keyFile,
       "--harness", fx.harnessPath,
+      ...taskFlags(),
+      ...round0Flags(),
     ]);
     expect(code).toBe(1);
-    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+    expect(existsSync(join(fx.out, "baseline/hb003/seed0/trace.jsonl"))).toBe(false);
+  });
+
+  test("optimize names a missing task or round-0 flag", async () => {
+    const fx = fixture();
+    const lines: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const bare = await main([
+        "optimize", "--out", fx.out, "--dry-run",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        ...round0Flags(),
+      ]);
+      expect(bare).toBe(1);
+      expect(lines.join("")).toContain("--task");
+      lines.length = 0;
+      const noSha = await main([
+        "optimize", "--out", fx.out, "--dry-run",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        ...taskFlags(),
+        "--round0-trace", ROUND0_TRACE,
+      ]);
+      expect(noSha).toBe(1);
+      expect(lines.join("")).toContain("--round0-sha");
+      expect(existsSync(join(fx.out, "pre-round1.json"))).toBe(false);
+    } finally {
+      process.stderr.write = write;
+    }
   });
 });
 
@@ -1347,12 +1452,13 @@ console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
         "--knob", "agent-loop.maxSteps",
         "--seed", "0",
         "--executor-cmd", JSON.stringify(command),
+        ...taskFlags(),
       ]);
       expect(code).toBe(0);
       const saved = JSON.parse(readFileSync(join(fx.out, "once/activation.json"), "utf8")) as { patchActive: boolean };
       expect(saved.patchActive).toBe(true);
       expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
-      const argv = JSON.parse(readFileSync(join(fx.out, "once/i014/seed0/candidate/argv.json"), "utf8")) as string[];
+      const argv = JSON.parse(readFileSync(join(fx.out, "once/hb003/seed0/candidate/argv.json"), "utf8")) as string[];
       expect(argv).toContain("devii-004-int");
       expect(argv).not.toContain("open");
       expect(argv).not.toContain("shared");
@@ -1407,6 +1513,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         "--control-config", echoFx.controlConfig,
         "--knob", "agent-loop.maxSteps",
         "--executor-cmd", JSON.stringify([process.execPath, echoScript, "--task", "{taskPath}", "--config", "{config}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--harness", "{harness}", "--model", "{model}", "--network", "{network}"]),
+        ...taskFlags(),
       ]);
       expect(code).toBe(1);
       const saved = JSON.parse(readFileSync(join(echoFx.out, "once/activation.json"), "utf8")) as { patchActive: boolean };
@@ -1432,6 +1539,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       controlConfigPath: fx.controlConfig,
       knob: "agent-loop.maxSteps",
       seed: 0,
+      task: LOOP_TASK,
       executor: {
         name: "honest",
         async run(request) {
@@ -1981,7 +2089,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         roles: chatRoles(fx, { reported: verdict, recorded: verdict }),
       });
       expect(upstream.hits).toBe(10);
-      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["i014:0"]);
+      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["hb003:0"]);
       expect(result.accepted?.round).toBe(1);
       expect(result.rounds[0]?.accepted).toBe(true);
       expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
@@ -2024,7 +2132,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         }),
       });
       expect(upstream.hits).toBe(10);
-      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["i014:0"]);
+      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["hb003:0"]);
       expect(result.accepted).toBeNull();
       expect(result.rounds[0]?.accepted).toBe(false);
       expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });

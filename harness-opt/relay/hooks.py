@@ -25,8 +25,6 @@ INFRA_CODES = frozenset({
 })
 POLL_INTERVAL_S = 15
 DEFAULT_RELAY_ROOT = "/home/box/.harness-relay"
-# Pinned sha256 of the declared round-0 trace. That file is not in this repo.
-ROUND0_HOST_COPY_SHA = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c"
 
 
 def _under_home_box(path) -> bool:
@@ -276,10 +274,12 @@ def host_copy_sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def assert_round0_host_copy(data: bytes) -> str:
-    """The round-0 host copy is accepted only when its sha256 is the pinned snapshot."""
+def assert_round0_host_copy(data: bytes, expected_sha: str) -> str:
+    """The round-0 host copy is accepted only when its sha256 equals the caller-supplied pin."""
+    if not isinstance(expected_sha, str) or len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha):
+        raise ValueError("round-0 host copy sha")
     digest = host_copy_sha(data)
-    if digest != ROUND0_HOST_COPY_SHA:
+    if digest != expected_sha:
         raise ValueError("round-0 host copy sha")
     return digest
 

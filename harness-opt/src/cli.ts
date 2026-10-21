@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { flag, hasFlag } from "./args";
 import { runEmpty } from "./empty-run";
-import { DEV_TASK, runOptLoop, runOptOnce } from "./modules/opt-loop";
+import { runOptLoop, runOptOnce } from "./modules/opt-loop";
 import { CommandOptExecutor, type OptTask } from "./modules/opt-executor";
 import { dispatchHarnessCommand, formatCommandResult, runClosedLoopDemo, type CommandResult } from "./session";
 
@@ -15,12 +15,12 @@ const USAGE = [
   "  start                 required unless files exist: --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score",
   "  step|status|gate|stop  continue the run in --out (default <cwd>/.harness-opt)",
   "  demo                  one closed loop on the sample trace; prints per-stage status",
-  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir>",
-  "                        i014 loop with stub roles and no model call",
-  "  optimize --execute --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --executor-cmd '<json argv>'",
+  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        one loop; task and round-0 path/sha are required and have no default",
+  "  optimize --execute --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        needs BASE_URL; every task passes --network devii-004-int",
-  "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>'",
-  "                        one candidate seed to prove activation; not the final comparison",
+  "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
+  "                        one candidate seed to prove activation; task flags are required",
 ].join("\n");
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -104,6 +104,15 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
     process.stderr.write("optimize needs --attest-root, --attest-key-file (or HARNESS_ATTEST_KEY_FILE), and --harness\n");
     return 1;
   }
+  let task: OptTask;
+  let round0: { readonly path: string; readonly sha: string };
+  try {
+    task = taskFromFlags(argv, "optimize");
+    round0 = round0FromFlags(argv);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
   try {
     const result = await runOptLoop({
       out,
@@ -112,6 +121,9 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       attestKeyFile,
       harnessPath,
       controlAttests,
+      task,
+      round0TracePath: round0.path,
+      round0TraceSha: round0.sha,
       ...(controlConfigPath ? { controlConfigPath } : {}),
       ...(rounds !== undefined ? { rounds } : {}),
       ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),
@@ -161,7 +173,7 @@ async function optimizeOneCommand(argv: readonly string[]): Promise<number> {
   }
   let task: OptTask;
   try {
-    task = taskFromFlags(argv);
+    task = taskFromFlags(argv, "optimize-one");
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
@@ -192,17 +204,27 @@ async function optimizeOneCommand(argv: readonly string[]): Promise<number> {
   }
 }
 
-function taskFromFlags(argv: readonly string[]): OptTask {
-  const id = flag(argv, "--task") ?? DEV_TASK.id;
-  const path = flag(argv, "--task-path") ?? DEV_TASK.path;
-  const network = flag(argv, "--network") ?? DEV_TASK.network;
-  if (network !== "devii-004-int") {
-    throw new Error("optimize-one --network must be devii-004-int");
-  }
-  const rawWeight = flag(argv, "--token-w");
-  const tokenW = rawWeight === undefined ? (id === DEV_TASK.id ? DEV_TASK.tokenW : Number.NaN) : Number(rawWeight);
-  if (!Number.isFinite(tokenW) || tokenW <= 0) throw new Error("optimize-one --token-w must be a positive number");
+function taskFromFlags(argv: readonly string[], command: string): OptTask {
+  const missing = ["--task", "--task-path", "--network", "--token-w"].filter((name) => flag(argv, name) === undefined);
+  if (missing.length > 0) throw new Error(`${command} needs ${missing.join(", ")}`);
+  const id = flag(argv, "--task") ?? "";
+  const path = flag(argv, "--task-path") ?? "";
+  const network = flag(argv, "--network") ?? "";
+  if (id.trim() === "" || path.trim() === "") throw new Error(`${command} needs --task and --task-path`);
+  if (network !== "devii-004-int") throw new Error(`${command} --network must be devii-004-int`);
+  const tokenW = Number(flag(argv, "--token-w"));
+  if (!Number.isFinite(tokenW) || tokenW <= 0) throw new Error(`${command} --token-w must be a positive number`);
   return { id, path, split: "dev", network, tokenW };
+}
+
+function round0FromFlags(argv: readonly string[]): { readonly path: string; readonly sha: string } {
+  const missing = ["--round0-trace", "--round0-sha"].filter((name) => flag(argv, name) === undefined);
+  if (missing.length > 0) throw new Error(`optimize needs ${missing.join(", ")}`);
+  const path = flag(argv, "--round0-trace") ?? "";
+  const sha = flag(argv, "--round0-sha") ?? "";
+  if (path.trim() === "") throw new Error("optimize needs --round0-trace");
+  if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("optimize --round0-sha must be 64 hex characters");
+  return { path, sha };
 }
 
 function seedFlag(argv: readonly string[]): number | Error {
