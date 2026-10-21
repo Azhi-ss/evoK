@@ -211,6 +211,83 @@ class RelayCase(unittest.TestCase):
         self.assertIsNone(restarted.close_run(again)["fault"])
         self.assertEqual(path.read_bytes(), kept)
 
+    def test_midline_truncate_close_is_its_own_line(self):
+        path = self.relay.log_path(self.run)
+        original = path.read_bytes()
+        self.assertTrue(original.endswith(b"\n"))
+        partial = b'{"type":"done","usage":{"prompt_tokens":12'
+        path.write_bytes(original + partial)
+        report = self.relay.close_run(self.run)
+        self.assertEqual(report["fault"], "attest_mismatch")
+        self.assertTrue(path.is_file())
+        kept = path.read_bytes()
+        self.assertTrue(kept.startswith(original + partial + b"\n"))
+        close = kept[len(original + partial) + 1:]
+        self.assertEqual(close.count(b"\n"), 1)
+        row = json.loads(close.decode())
+        self.assertEqual(row["type"], "close")
+        self.assertEqual(row["fault"], "attest_mismatch")
+        nxt = new_run_id()
+        self.relay.open_run(nxt, "role:innovator", "abc")
+        self.assertIsNone(self.relay.close_run(nxt)["fault"])
+
+        killed_id = new_run_id()
+        self.relay.open_run(killed_id, "role:critic", "abc")
+        killed = self.relay.log_path(killed_id)
+        raw = killed.read_bytes()
+        chopped = raw + partial
+        killed.write_bytes(chopped)
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        fresh = new_run_id()
+        restarted.open_run(fresh, "executor", "abc")
+        self.assertTrue(killed.is_file())
+        after = killed.read_bytes()
+        self.assertTrue(after.startswith(chopped + b"\n"))
+        parsed = json.loads(after[len(chopped) + 1:].decode())
+        self.assertEqual(parsed["type"], "close")
+        self.assertEqual(parsed["fault"], "attest_mismatch")
+        self.assertIsNone(restarted.close_run(fresh)["fault"])
+
+    def test_restart_recounts_loop_tokens_including_red_runs(self):
+        self.relay.close_run(self.run)
+        exe = new_run_id()
+        self.relay.open_run(exe, "executor", "abc")
+
+        def usage_of(prompt):
+            def upstream(body, stream):
+                return 200, b"{}", {"prompt_tokens": prompt, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}
+            return upstream
+
+        self.relay.upstream = usage_of(99999)
+        self.assertEqual(self.post(b'{"messages":[]}', run=exe)[0], 200)
+        self.assertIsNone(self.relay.close_run(exe)["fault"])
+
+        innov = new_run_id()
+        self.relay.open_run(innov, "role:innovator", "abc")
+        self.relay.upstream = usage_of(1000)
+        self.assertEqual(self.post(b'{"messages":[]}', run=innov)[0], 200)
+        self.assertIsNone(self.relay.close_run(innov)["fault"])
+
+        critic = new_run_id()
+        self.relay.open_run(critic, "role:critic", "abc")
+        self.relay.upstream = usage_of(500)
+        self.assertEqual(self.post(b'{"messages":[]}', run=critic)[0], 200)
+        path = self.relay.log_path(critic)
+        path.write_bytes(path.read_bytes() + b'{"type":"tamper"}\n')
+        self.assertEqual(self.relay.close_run(critic)["fault"], "attest_mismatch")
+
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        self.assertEqual(restarted.loop_tokens, 1500)
+        nxt = new_run_id()
+        restarted.open_run(nxt, "role:innovator", "abc")
+        span = loop_mode.READ_ONLY_TOKEN_CAP - 1500
+        restarted.upstream = usage_of(span)
+        status, body = restarted.handle(
+            "POST", f"/r/{nxt}/v1/chat/completions", b'{"messages":[]}', {"host": "10.204.0.1:9"},
+        )
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body.decode())["error"], "readOnlyTokenCap")
+
     def test_execute_mode_disables_plant_ops(self):
         self.relay.plant_enabled = False
         with self.assertRaises(RuntimeError):
@@ -220,6 +297,38 @@ class RelayCase(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.relay.plant_reads(self.run, [])
         self.assertFalse(b'"role":"innovator"' in self.relay.log_path(self.run).read_bytes())
+
+    def test_control_requires_mode(self):
+        env = os.environ.copy()
+        env["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
+        env["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        script = str(HERE / "harness_relay.py")
+        proc = subprocess.run(
+            [sys.executable, script, "control", "--log-root", str(self.root / "mode-logs")],
+            cwd=HERE, env=env, capture_output=True, text=True,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--mode", proc.stderr + proc.stdout)
+        saved_att = os.environ.get("HARNESS_ATTEST_KEY_FILE")
+        saved_up = os.environ.get("RELAY_UPSTREAM_KEY_FILE")
+        os.environ["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
+        os.environ["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        try:
+            bare = harness_relay._relay_from({"log-root": [str(self.root / "mode-logs")]})
+            self.assertFalse(bare.plant_enabled)
+            dry = harness_relay._relay_from({"log-root": [str(self.root / "mode-logs")], "mode": ["dry-run"]})
+            self.assertTrue(dry.plant_enabled)
+            execute = harness_relay._relay_from({"log-root": [str(self.root / "mode-logs")], "mode": ["execute"]})
+            self.assertFalse(execute.plant_enabled)
+        finally:
+            if saved_att is None:
+                os.environ.pop("HARNESS_ATTEST_KEY_FILE", None)
+            else:
+                os.environ["HARNESS_ATTEST_KEY_FILE"] = saved_att
+            if saved_up is None:
+                os.environ.pop("RELAY_UPSTREAM_KEY_FILE", None)
+            else:
+                os.environ["RELAY_UPSTREAM_KEY_FILE"] = saved_up
 
     def test_control_listens_forwards_and_seals(self):
         import threading
@@ -260,7 +369,7 @@ class RelayCase(unittest.TestCase):
         env["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
         script = str(HERE / "harness_relay.py")
         proc = subprocess.Popen(
-            [sys.executable, script, "control", "--log-root", str(root), "--port", str(relay_port), "--bind", "127.0.0.1", "--upstream", f"http://127.0.0.1:{upstream_port}/v1/chat/completions"],
+            [sys.executable, script, "control", "--mode", "dry-run", "--log-root", str(root), "--port", str(relay_port), "--bind", "127.0.0.1", "--upstream", f"http://127.0.0.1:{upstream_port}/v1/chat/completions"],
             cwd=HERE, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 

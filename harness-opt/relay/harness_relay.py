@@ -137,6 +137,7 @@ class Relay:
         self.plant_enabled = bool(plant_enabled)
         Path(self.log_root).mkdir(parents=True, exist_ok=True)
         os.chmod(self.log_root, 0o700)
+        self._recount_loop_tokens()
 
     def status(self) -> dict:
         return {"pid": self.pid, "bootId": self.boot_id, "relaySha": self.relay_sha}
@@ -148,32 +149,17 @@ class Relay:
         return self.log_path(run_id).with_name("relay.jsonl.sig")
 
     def _restore_open(self) -> None:
-        """A new process has no open_id. One open line without a close line is the open run."""
+        """A previous boot's unclosed or trailing-junk log is closed red. It does not block."""
         if self.open_id is not None:
             return
         root = Path(self.log_root)
         if not root.is_dir():
             return
-        found = []
         for child in root.iterdir():
             if not RUN_ID_RE.fullmatch(child.name):
                 continue
-            path = child / "relay.jsonl"
-            if path.is_symlink() or not path.is_file():
-                continue
-            opened = False
-            closed = False
-            for row in self._lines(child.name):
-                if row.get("type") == "open" and row.get("runId") == child.name:
-                    opened = True
-                elif row.get("type") == "close":
-                    closed = True
-            if opened and not closed:
-                found.append(child.name)
-        if len(found) > 1:
-            raise RuntimeError("a run is already open")
-        if len(found) == 1:
-            self.open_id = found[0]
+            if self._leftover(child.name):
+                self._finalize_red(child.name, "attest_mismatch")
 
     def _has_close(self, run_id: str) -> bool:
         return any(row.get("type") == "close" for row in self._lines(run_id))
@@ -224,7 +210,9 @@ class Relay:
                 self.open_id = None
             return self._fault_report("usage_missing")
         if self.open_id != run_id:
-            raise RuntimeError("run is not open")
+            # This process does not hold the chain. Mark the file closed red and move on.
+            self._finalize_red(run_id, "attest_mismatch")
+            return self._fault_report("attest_mismatch")
         state = self._chain.get(run_id)
         if state is None or path.read_bytes() != state["body"]:
             self._finalize_red(run_id, "attest_mismatch")
@@ -285,11 +273,71 @@ class Relay:
         if state.get("kind") in READ_ONLY_KINDS:
             self.loop_tokens += weighed
 
+    def _row_weight(self, obj: dict):
+        """Usage counted toward the loop total. None when this done does not count."""
+        if obj.get("type") != "done":
+            return None
+        refused = obj.get("errClass") in ("readOnlyTokenCap", "innovatorCap")
+        if not refused and not _is_2xx(obj):
+            return None
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        return weight(usage)
+
+    def _recount_loop_tokens(self) -> None:
+        """Rebuild the 30M total from role logs already on disk, including red runs."""
+        total = 0
+        root = Path(self.log_root)
+        if root.is_dir():
+            for child in root.iterdir():
+                if not RUN_ID_RE.fullmatch(child.name):
+                    continue
+                kind = ""
+                for row in self._lines(child.name):
+                    if row.get("type") == "open" and row.get("runId") == child.name:
+                        kind = str(row.get("kind") or "")
+                    if kind not in READ_ONLY_KINDS:
+                        continue
+                    weighed = self._row_weight(row)
+                    if isinstance(weighed, (int, float)) and not isinstance(weighed, bool):
+                        total += weighed
+        self.loop_tokens = total
+
+    def _leftover(self, run_id: str) -> bool:
+        """A log with no parseable close, including one whose last line is not JSON."""
+        path = self.log_path(run_id)
+        if path.is_symlink() or not path.is_file():
+            return False
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return False
+        if not raw or self._has_close(run_id):
+            return False
+        return True
+
+    def _break_partial_line(self, path: Path) -> None:
+        """Put a newline before the next append when the file ends mid-line."""
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return
+        if not raw or raw.endswith(b"\n"):
+            return
+        fd = os.open(path, os.O_APPEND | os.O_WRONLY)
+        try:
+            os.write(fd, b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def _finalize_red(self, run_id: str, fault: str) -> None:
         """Append a close so this run is not still open. The file stays where it is."""
         path = self.log_path(run_id)
         if path.is_symlink() or not path.is_file():
             return
+        self._break_partial_line(path)
         if self._has_close(run_id):
             return
         ts, iso = _stamp()
@@ -823,7 +871,8 @@ def _relay_from(flags) -> Relay:
     kwargs = {}
     if upstream_url:
         kwargs["upstream_url"] = upstream_url
-    if (flags.get("mode") or ["dry-run"])[-1] == "execute":
+    mode = (flags.get("mode") or [""])[-1]
+    if mode != "dry-run":
         kwargs["plant_enabled"] = False
     return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, **kwargs)
 
@@ -889,6 +938,9 @@ def main(argv=None):
         print(json.dumps(result))
         raise SystemExit(0 if result["active"] else 2)
     if cmd == "control":
+        mode = (flags.get("mode") or [""])[-1]
+        if mode not in ("dry-run", "execute"):
+            raise SystemExit("control requires --mode dry-run|execute")
         relay = _relay_from(flags)
         url = (flags.get("upstream") or [UPSTREAM_URL])[-1]
         relay.upstream_url = url
