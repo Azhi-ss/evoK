@@ -764,6 +764,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         if (spec.hardCap?.kind === "ranking") return { status: "ranking_cap" };
         return finishInnovator(new CapExceeded(), { role: spec.sessionName, exitCode: null, stderrTail: "cap_hit" }, "cap_hit");
       };
+      // A close fault is checked before any cap outcome. usage_missing stays itself.
+      // Any other close fault is an integrity fault and stops the loop as anti_forgery.
+      // Only a clean close becomes cap_hit or ranking_cap.
+      const faultBeforeCap = (closed: RelayReport): { readonly status: "stop"; readonly reason: string; readonly failure: RoleFailureInfo } | null => {
+        if (closed.fault === null) return null;
+        return {
+          status: "stop",
+          reason: closed.fault === "usage_missing" ? "usage_missing" : "anti_forgery",
+          failure: { role: spec.sessionName, exitCode: null, stderrTail: closed.fault },
+        };
+      };
       for (let n = 1; n <= ROLE_ATTEMPTS; n += 1) {
         if (n > 1) {
           if (spec.hardCap && attemptTokens + spec.hardCap.spent() >= spec.hardCap.limit) return capNow();
@@ -829,6 +840,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
             if (!isRelayReport(closed)) return closed;
             readOnlyTotal = closed.loopTokens;
             countAttempt(closed);
+            const killedFault = faultBeforeCap(closed);
+            if (killedFault) {
+              note(readSpawnExit(built.spawn.sessionPath), false, killedFault.failure.stderrTail);
+              return killedFault;
+            }
             note(readSpawnExit(built.spawn.sessionPath), false, "cap_hit");
             if (closed.refused === "readOnlyTokenCap") {
               return { status: "stop", reason: "readOnlyTokenCap", failure: { role: spec.sessionName, exitCode: null, stderrTail: "cap_hit" } };
@@ -841,6 +857,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           note(readSpawnExit(built.spawn.sessionPath), false, "");
           readOnlyTotal = closed.loopTokens;
           countAttempt(closed);
+          const capped = closed.refused === "readOnlyTokenCap" || (spec.hardCap !== undefined && (overHardCap("") || (spec.hardCap.kind === "innovator" && closed.refused === "innovatorCap")));
+          if (capped) {
+            const hidden = faultBeforeCap(closed);
+            if (hidden) return hidden;
+          }
           if (closed.refused === "readOnlyTokenCap") {
             return { status: "stop", reason: "readOnlyTokenCap", failure: { role: spec.sessionName, exitCode: null, stderrTail: "" } };
           }
@@ -854,6 +875,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           const failure = failureFrom(error, relay.relayLog);
           note(failure.exitCode, failure.transient, failure.stderrTail);
           const info: RoleFailureInfo = { role: spec.sessionName, exitCode: failure.exitCode, stderrTail: failure.stderrTail };
+          const capped = closed.refused === "readOnlyTokenCap" || failure.cap !== null || (spec.hardCap !== undefined && (attemptTokens + spec.hardCap.spent() >= spec.hardCap.limit || (spec.continuing && closed.refused === "innovatorCap")));
+          if (capped) {
+            const hidden = faultBeforeCap(closed);
+            if (hidden) return hidden;
+          }
           if (closed.refused === "readOnlyTokenCap" || failure.cap === "readOnlyTokenCap") {
             return { status: "stop", reason: "readOnlyTokenCap", failure: info };
           }
@@ -3076,7 +3102,8 @@ let activeRelay: RelayControl | null = null;
 let activeRelayRoot: string | null = null;
 
 interface RelayReport {
-  readonly fault: "usage_missing" | "attest_mismatch" | null;
+  /** `usage_missing`, an integrity fault such as `attest_mismatch`, or null on a clean close. */
+  readonly fault: string | null;
   readonly tokens: number;
   readonly usageMissing: boolean;
   readonly refused: "readOnlyTokenCap" | "innovatorCap" | null;
@@ -3089,7 +3116,7 @@ function isRelayReport(closed: RelayReport | { readonly status: "stop" }): close
 
 async function closeRelay(runId: string): Promise<RelayReport> {
   const reply = await relayRpc({ op: "close", runId });
-  const fault = reply.fault === "usage_missing" || reply.fault === "attest_mismatch" ? reply.fault : null;
+  const fault = typeof reply.fault === "string" && reply.fault !== "" ? reply.fault : null;
   const refused = reply.refused === "readOnlyTokenCap" || reply.refused === "innovatorCap" ? reply.refused : null;
   return {
     fault,

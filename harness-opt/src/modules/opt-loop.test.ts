@@ -4476,6 +4476,49 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(closure.invalidCandidates?.some((item) => item.id === "c0" && item.reason === "cap_hit")).toBe(true);
   });
 
+  test("a cap kill whose close reports an integrity fault stops as anti_forgery", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const fake = fakeExecutor(fx);
+    let innovators = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          innovators += 1;
+          if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+          const usage = { prompt_tokens: 200_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+          await relayRecord(input.baseUrl, { type: "done", role: "innovator", status: 200, round: input.round, usage });
+          appendFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), "{\"type\":\"tamper\"}\n");
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=20", parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(innovators).toBe(1);
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    expect(result.stopReport.reason).toBe("anti_forgery");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reason?: string;
+      roleFailure?: { stderrTail?: string };
+      invalidCandidates?: { reason: string }[];
+    };
+    expect(closure.reason).toBe("anti_forgery");
+    expect(closure.roleFailure?.stderrTail).toBe("attest_mismatch");
+    expect(closure.invalidCandidates ?? []).toEqual([]);
+    const saved = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
+    expect(saved.stopReport.reason).toBe("anti_forgery");
+  });
+
   test("critic plus ranker already at 3M is not retried", async () => {
     const fx = fixture();
     const stub = stubOptRoles(fx.key);
