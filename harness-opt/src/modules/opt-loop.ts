@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { inspectRunActivation, sha256File, type ActivationInspection } from "./activation";
+import { join, resolve, sep } from "node:path";
+import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
+import {
+  assertAttestIsolated,
+  assertAttestRoot,
+  loadAttestKey,
+  sha256File,
+  verifyHostAttestation,
+  type VerifiedAttestation,
+} from "./attestation";
 import { assertNoHeldOutLeak } from "./proposer";
 import { DEFAULT_EWI_THRESHOLD_SEC, measureRunEwi, type EwiMetrics } from "./ewi";
 import {
@@ -43,6 +51,14 @@ export const CONTROL_CONFIG = {
   },
 } as const;
 
+/**
+ * Compact bytes of that control file. On the box this sha is
+ * 3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c.
+ * The loop hashes the host file it was given. A different serialization does not match.
+ */
+export const CONTROL_CONFIG_TEXT = "{\"parts\":{\"agent-loop\":{\"maxSteps\":25}}}\n";
+export const CONTROL_CONFIG_SHA = "3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c";
+
 export interface RoleSession {
   readonly jsonl: string;
 }
@@ -50,6 +66,8 @@ export interface RoleSession {
 export interface TraceHint {
   readonly file: string;
   readonly line: number;
+  /** Host hash of `file`. A role-returned path does not supply this. */
+  readonly sha256: string;
 }
 
 export interface ReviewNote {
@@ -61,8 +79,10 @@ export interface GapCall {
   readonly round: number;
   readonly traces: readonly TraceHint[];
   readonly previousReview: ReviewNote | null;
-  /** Previous reviewer Pi session. The next gap has to read this file. */
+  /** Previous reviewer Pi session captured by the host. The next gap has to read this file. */
   readonly previousReviewSession: string | null;
+  /** Host-assigned session file. The role writes here. The return text is ignored. */
+  readonly sessionPath: string;
 }
 
 export interface GapTurn {
@@ -79,6 +99,7 @@ export interface InnovateCall {
   readonly gapSummary: string;
   readonly triedSummaries: readonly string[];
   readonly control: unknown;
+  readonly sessionPath: string;
 }
 
 export interface InnovatorTurn {
@@ -108,6 +129,7 @@ export interface ReviewCall {
   readonly knob: string;
   readonly runs: readonly RunView[];
   readonly ewiSeeds: readonly number[];
+  readonly sessionPath: string;
 }
 
 export interface ReviewerTurn {
@@ -129,8 +151,16 @@ export interface OptLoopOptions {
   readonly ewiThresholdSec?: number;
   readonly model?: string;
   readonly mode: "dry-run" | "execute";
-  /** Real control-arm trace files for round 1. The loop does not invent one. */
-  readonly controlTraces: readonly string[];
+  /** Directory outside `out`. The loop assigns `{attestDir}` under it before spawn. */
+  readonly attestRoot: string;
+  /** Host key file. Also read by the wrapper from `HARNESS_ATTEST_KEY_FILE`. Never placed on argv. */
+  readonly attestKeyFile: string;
+  /** Harness file the wrapper mounts. Its sha is checked against `mountedHarnessSha` when set. */
+  readonly harnessPath: string;
+  /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
+  readonly controlConfigPath?: string;
+  /** Host attestation directories for the round-1 control runs. Not trace paths and not stdout. */
+  readonly controlAttests: readonly string[];
   readonly roles?: OptRoles;
   readonly executor?: OptExecutor;
   readonly executorCommand?: readonly string[];
@@ -180,6 +210,8 @@ interface ScoredRun {
   readonly ewi: EwiMetrics;
   readonly runDir: string;
   readonly tracePath: string;
+  readonly verified: VerifiedAttestation | null;
+  readonly attestReasons: readonly string[];
 }
 
 interface ClosureRecord {
@@ -203,53 +235,71 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles() : undefined);
   if (!roles) throw new Error("execute mode needs roles");
-  const executor = options.executor ?? executorFor(options, env);
-  const controlTraces = requireControlTraces(options.controlTraces);
+  const attestKey = loadAttestKey(options.attestKeyFile);
+  assertAttestRoot(options.attestRoot, options.out);
+  assertKeyOutside(options.attestKeyFile, [options.out]);
+  const executor = options.executor ?? executorFor(options, env, attestKey);
   const now = options.now ?? (() => new Date());
   mkdirSync(options.out, { recursive: true });
 
-  const control = controlConfig();
   const controlPath = join(options.out, "control", "config.json");
-  writeJson(controlPath, control);
+  const controlBytes = options.controlConfigPath ? readFileSync(options.controlConfigPath) : Buffer.from(CONTROL_CONFIG_TEXT);
+  writeText(controlPath, controlBytes.toString("utf8"));
+  const control = JSON.parse(controlBytes.toString("utf8")) as ConfigFile;
   const controlSha = sha256File(controlPath);
+  const traces = loadControlAttests(options.controlAttests, controlPath, attestKey, options.harnessPath);
+  let traceHints: TraceHint[] = traces;
 
   const tried: string[] = [];
   let accepted: AcceptedCandidate | null = null;
-  let traces: TraceHint[] = controlTraces.map((file) => ({ file, line: 1 }));
   let previousReview: ReviewNote | null = null;
   let previousReviewSession: string | null = null;
+  let previousReviewSha: string | null = null;
   const roundSummaries: OptLoopResult["rounds"][number][] = [];
 
   for (let round = 1; round <= rounds; round += 1) {
     const started = now();
-    const gapInput: GapCall = { round, traces, previousReview, previousReviewSession };
+    const gapSessionPath = sessionPath(options.out, round, "gap-finder");
+    const gapInput: GapCall = {
+      round,
+      traces: traceHints,
+      previousReview,
+      previousReviewSession,
+      sessionPath: gapSessionPath,
+    };
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     const gap = await roles.gap(gapInput);
-    writeSession(options.out, round, "gap-finder", gap.session.jsonl);
-    const gapSession = readFileSync(join(options.out, `round${round}`, "sessions", "gap-finder.jsonl"), "utf8");
-    const gapCitedTrace = citedByRead(gapSession, traces.map((hint) => hint.file), options.out);
-    if (round > 1 && previousReviewSession) {
-      const fed = citedByRead(gapSession, [previousReviewSession], options.out);
+    const gapCaptured = captureSession(options.out, round, "gap-finder", gapSessionPath);
+    const gapCitedTrace = gapCaptured
+      ? citedByCapturedRead(gapCaptured.text, traceHints, options.out)
+      : false;
+    if (round > 1 && previousReviewSession && previousReviewSha) {
+      const fed = gapCaptured
+        ? citedByCapturedRead(gapCaptured.text, [{ file: previousReviewSession, line: 1, sha256: previousReviewSha }], options.out)
+        : false;
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
       writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
     }
-
+    const innovatorPath = sessionPath(options.out, round, "innovator");
     const innovateInput: InnovateCall = {
       round,
       knob: gap.knob,
       gapSummary: gap.summary,
       triedSummaries: [...tried],
       control,
+      sessionPath: innovatorPath,
     };
     assertNoHeldOutLeak(innovateInput, "innovator input");
     writeJson(join(options.out, `round${round}`, "innovator-input.json"), innovateInput);
     const proposed = await roles.innovate(innovateInput);
-    writeSession(options.out, round, "innovator", proposed.session.jsonl);
+    captureSession(options.out, round, "innovator", innovatorPath);
 
     if (tried.includes(proposed.summary)) {
       const note = "duplicate summary";
-      writeSession(options.out, round, "reviewer-gate", sessionLines("reviewer-gate", note));
+      const reviewPath = sessionPath(options.out, round, "reviewer-gate");
+      writeText(reviewPath, sessionLines("reviewer-gate", note));
+      const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewPath)?.sha256 ?? null;
       writeClosure(options.out, round, {
         round,
         closed: false,
@@ -261,7 +311,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: true, patchHash: null, ewiSeeds: [] });
       previousReview = { accept: false, reason: note };
-      previousReviewSession = join(options.out, `round${round}`, "sessions", "reviewer-gate.jsonl");
+      previousReviewSession = reviewPath;
+      previousReviewSha = reviewSha;
       continue;
     }
 
@@ -286,7 +337,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         runDir: join(options.out, `round${round}`, "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
         model,
         tokenCap: tokenCap(DEV_TASK),
-      }, threshold));
+      }, hostFor(options, attestKey, `round${round}`, DEV_TASK.id, `seed${seed}`, "candidate"), threshold));
     }
     const activation = activationRecord({
       runs,
@@ -300,6 +351,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const metrics = summarize(runs, threshold);
     writeJson(join(options.out, `round${round}`, "metrics.json"), metrics);
 
+    const reviewPath = sessionPath(options.out, round, "reviewer-gate");
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -307,11 +359,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       knob: gap.knob,
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      sessionPath: reviewPath,
     };
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     const verdict = await roles.review(reviewInput);
-    writeSession(options.out, round, "reviewer-gate", verdict.session.jsonl);
+    const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewPath);
     writeClosure(options.out, round, {
       round,
       closed: false,
@@ -321,13 +374,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reviewFedForward: null,
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
-    const take = verdict.accept && activation.patchActive;
+    const take = verdict.accept && activation.patchActive && gapCitedTrace;
     if (take) {
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
     }
     previousReview = { accept: verdict.accept, reason: verdict.reason };
-    previousReviewSession = join(options.out, `round${round}`, "sessions", "reviewer-gate.jsonl");
-    traces = runs.map((run) => ({ file: relativeTo(options.out, run.tracePath), line: 1 }));
+    previousReviewSession = reviewCaptured ? reviewPath : null;
+    previousReviewSha = reviewCaptured?.sha256 ?? null;
+    traceHints = runs.flatMap((run) => {
+      if (!run.verified?.traceSha || !run.verified.tracePath) return [];
+      return [{ file: run.verified.tracePath, line: 1, sha256: run.verified.traceSha }];
+    });
     roundSummaries.push({
       round,
       accepted: take,
@@ -363,7 +420,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "control"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, threshold));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold));
     order.push(`X${seed}`);
     finalRuns.push(await executeScored(executor, {
       task: DEV_TASK,
@@ -373,7 +430,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, threshold));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold));
   }
   const finalBlock = { order, control: summarize(finalRuns.filter((run) => run.arm === "control"), threshold), candidate: summarize(finalRuns.filter((run) => run.arm === "candidate"), threshold) };
   writeJson(join(options.out, "final", "order.json"), { order });
@@ -390,7 +447,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
         model,
         tokenCap: tokenCap(task),
-      }, threshold));
+      }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold));
     }
   }
   const heldOut = {
@@ -419,6 +476,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
 export interface OptOnceOptions {
   readonly out: string;
+  readonly attestRoot: string;
+  readonly attestKeyFile: string;
+  readonly harnessPath: string;
   readonly configPath: string;
   readonly controlConfigPath: string;
   readonly knob: string;
@@ -449,8 +509,14 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     throw new Error(`control config is missing: ${options.controlConfigPath}`);
   }
   const task = options.task ?? DEV_TASK;
+  if (task.id === DEV_TASK.id && task.network !== "shared") throw new Error("i014 network must be shared");
   const model = options.model ?? OPT_MODEL;
+  const attestKey = loadAttestKey(options.attestKeyFile);
+  assertAttestRoot(options.attestRoot, options.out);
+  assertKeyOutside(options.attestKeyFile, [options.out]);
   const runDir = join(options.out, "once", task.id, `seed${seed}`, "candidate");
+  const attestDir = join(options.attestRoot, "once", task.id, `seed${seed}`, "candidate");
+  assertAttestIsolated(attestDir, runDir);
   mkdirSync(runDir, { recursive: true });
   const request: OptRunRequest = {
     task,
@@ -458,6 +524,8 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     arm: "candidate",
     configPath: options.configPath,
     runDir,
+    attestDir,
+    harnessPath: options.harnessPath,
     model,
     tokenCap: tokenCap(task),
   };
@@ -465,11 +533,18 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   const candidateSha = sha256File(options.configPath);
   const controlSha = sha256File(options.controlConfigPath);
   const knobValue = valueAt(JSON.parse(readFileSync(options.configPath, "utf8")) as ConfigFile, options.knob);
+  const verified = verifyHostAttestation({
+    attestDir,
+    key: attestKey,
+    configPath: options.configPath,
+    harnessPath: options.harnessPath,
+    runDir,
+  });
   const activation = {
     seed,
-    ...inspectRunActivation({
-      runDir,
-      tracePath: join(runDir, "trace.jsonl"),
+    ...inspectAttestedActivation({
+      verified: verified.ok ? verified : null,
+      ...(verified.ok ? {} : { rejection: verified.reasons }),
       candidateSha,
       controlSha,
       knob: options.knob,
@@ -494,11 +569,11 @@ export function stubOptRoles(): OptRoles {
     async gap(input) {
       const files = input.traces.map((hint) => hint.file);
       if (input.previousReviewSession) files.push(input.previousReviewSession);
-      const reads = files.map((file, index) => toolRead(file, index)).join("");
-      const prior = input.previousReview ? ` previous ${input.previousReview.reason}` : "";
+      const reads = files.map((file, index) => toolExchange(file, index)).join("");
+      writeText(input.sessionPath, `${sessionLines("gap-finder", "gap")}${reads}`);
       return {
-        session: { jsonl: `${sessionLines("gap-finder", `knob agent-loop.maxSteps${prior}`)}${reads}` },
-        citations: files,
+        session: { jsonl: "ignored-return\n" },
+        citations: [],
         knob: "agent-loop.maxSteps",
         failureClass: "idle-loop",
         summary: "early write then idle",
@@ -507,8 +582,9 @@ export function stubOptRoles(): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
+      writeText(input.sessionPath, sessionLines("innovator", summary));
       return {
-        session: { jsonl: sessionLines("innovator", summary) },
+        session: { jsonl: "ignored-return\n" },
         summary,
         parts: { "agent-loop": { maxSteps } },
       };
@@ -516,13 +592,14 @@ export function stubOptRoles(): OptRoles {
     async review(input) {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
-      return { session: { jsonl: sessionLines("reviewer-gate", reason) }, accept, reason };
+      writeText(input.sessionPath, sessionLines("reviewer-gate", reason));
+      return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
   };
 }
 
-function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv): OptExecutor {
-  if (options.mode === "dry-run") return createDryRunExecutor();
+function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv, key: Buffer): OptExecutor {
+  if (options.mode === "dry-run") return createDryRunExecutor({ key, harnessPath: options.harnessPath });
   if (!options.executorCommand || options.executorCommand.length === 0) {
     throw new Error("execute mode needs an executor command");
   }
@@ -533,9 +610,40 @@ function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv): OptExecut
   });
 }
 
-async function executeScored(executor: OptExecutor, request: OptRunRequest, threshold: number): Promise<ScoredRun> {
+interface AttestHost {
+  readonly attestDir: string;
+  readonly key: Buffer;
+  readonly harnessPath: string;
+}
+
+function hostFor(options: OptLoopOptions, key: Buffer, ...parts: string[]): AttestHost {
+  return {
+    attestDir: join(options.attestRoot, ...parts),
+    key,
+    harnessPath: options.harnessPath,
+  };
+}
+
+async function executeScored(
+  executor: OptExecutor,
+  request: Omit<OptRunRequest, "attestDir" | "harnessPath">,
+  host: AttestHost,
+  threshold: number,
+): Promise<ScoredRun> {
+  if (request.task.id === DEV_TASK.id && request.task.network !== "shared") {
+    throw new Error("i014 network must be shared");
+  }
+  assertAttestIsolated(host.attestDir, request.runDir);
+  const full: OptRunRequest = { ...request, attestDir: host.attestDir, harnessPath: host.harnessPath };
   mkdirSync(request.runDir, { recursive: true });
-  const observation = await executor.run(request);
+  const observation = await executor.run(full);
+  const verified = verifyHostAttestation({
+    attestDir: host.attestDir,
+    key: host.key,
+    configPath: request.configPath,
+    harnessPath: host.harnessPath,
+    runDir: request.runDir,
+  });
   const rewardFile = readReward(request.runDir);
   let scoreStatus = observation.scoreStatus;
   let reward = scoreStatus === "unscored" ? null : rewardFile.reward;
@@ -569,6 +677,8 @@ async function executeScored(executor: OptExecutor, request: OptRunRequest, thre
     ewi,
     runDir: request.runDir,
     tracePath: observation.tracePath,
+    verified: verified.ok ? verified : null,
+    attestReasons: verified.ok ? [] : verified.reasons,
   };
 }
 
@@ -600,9 +710,9 @@ function activationRecord(input: {
 } {
   const runs = input.runs.map((run) => ({
     seed: run.seed,
-    ...inspectRunActivation({
-      runDir: run.runDir,
-      tracePath: run.tracePath,
+    ...inspectAttestedActivation({
+      verified: run.verified,
+      rejection: run.attestReasons,
       candidateSha: input.candidateSha,
       controlSha: input.controlSha,
       knob: input.knob,
@@ -663,10 +773,6 @@ function mean(values: readonly number[]): number | null {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function controlConfig(): ConfigFile {
-  return { parts: { "agent-loop": { maxSteps: CONTROL_CONFIG.parts["agent-loop"].maxSteps } } };
-}
-
 function mergeConfig(control: ConfigFile, parts: Readonly<Record<string, Readonly<Record<string, unknown>>>>): ConfigFile {
   const next = structuredClone(control);
   for (const [part, values] of Object.entries(parts)) {
@@ -706,19 +812,37 @@ function linesOf(text: string): string[] {
   return trimmed === "" ? [] : trimmed.split("\n");
 }
 
-function writeSession(out: string, round: number, role: string, jsonl: string): void {
-  const relative = `round${round}/sessions/${role}.jsonl`;
-  const body = jsonl.endsWith("\n") ? jsonl : `${jsonl}\n`;
-  writeText(join(out, relative), body);
+function sessionPath(out: string, round: number, role: string): string {
+  const file = join(out, `round${round}`, "sessions", `${role}.jsonl`);
+  mkdirSync(join(file, ".."), { recursive: true });
+  return file;
+}
+
+function captureSession(
+  out: string,
+  round: number,
+  role: string,
+  file: string,
+): { readonly sha256: string; readonly text: string } | null {
+  if (!existsSync(file)) return null;
+  let linked;
+  try {
+    linked = statSync(file);
+  } catch {
+    return null;
+  }
+  if (!linked.isFile()) return null;
+  const bytes = readFileSync(file);
+  const sha = sha256(bytes);
   const manifestPath = join(out, `round${round}`, "sessions", "manifest.json");
   const current = existsSync(manifestPath)
     ? JSON.parse(readFileSync(manifestPath, "utf8")) as { sessions: { role: string; file: string; sha256: string }[] }
     : { sessions: [] };
-  const file = relative;
-  const sha = sha256(readFileSync(join(out, relative)));
+  const relative = `round${round}/sessions/${role}.jsonl`;
   const sessions = current.sessions.filter((item) => item.role !== role);
-  sessions.push({ role, file, sha256: sha });
+  sessions.push({ role, file: relative, sha256: sha });
   writeJson(manifestPath, { sessions });
+  return { sha256: sha, text: bytes.toString("utf8") };
 }
 
 function writeClosure(out: string, round: number, record: ClosureRecord): void {
@@ -728,22 +852,50 @@ function writeClosure(out: string, round: number, record: ClosureRecord): void {
   });
 }
 
-function requireControlTraces(traces: readonly string[] | undefined): string[] {
-  if (!traces || traces.length === 0) throw new Error("round 1 needs control trace paths");
-  for (const file of traces) {
-    if (!existsSync(file) || !statSync(file).isFile()) throw new Error(`control trace is missing: ${file}`);
-  }
-  return [...traces];
+function loadControlAttests(
+  attestDirs: readonly string[],
+  controlPath: string,
+  key: Buffer,
+  harnessPath: string,
+): TraceHint[] {
+  if (attestDirs.length === 0) throw new Error("round 1 needs control attestations");
+  return attestDirs.map((attestDir) => {
+    const verified = verifyHostAttestation({
+      attestDir,
+      key,
+      configPath: controlPath,
+      harnessPath,
+    });
+    if (!verified.ok) throw new Error(`control attestation rejected: ${verified.reasons.join(",")}`);
+    if (verified.arm !== "control") throw new Error("control attestation rejected: arm");
+    if (!verified.tracePath || !verified.traceSha) throw new Error("control attestation rejected: trace");
+    if (verified.mountedConfigSha !== sha256File(controlPath)) throw new Error("control attestation rejected: config");
+    const recorded = runStartConfigHash(verified.tracePath);
+    if (recorded !== verified.mountedConfigSha) {
+      throw new Error("control trace candidateConfigHash does not match the attested config");
+    }
+    return { file: verified.tracePath, line: 1, sha256: verified.traceSha };
+  });
 }
 
-function citedByRead(jsonl: string, files: readonly string[], root: string): boolean {
-  if (files.length === 0) return false;
-  const reads = readToolPaths(jsonl);
-  return files.every((file) => reads.some((item) => sameFile(root, item, file)));
+function citedByCapturedRead(jsonl: string, targets: readonly TraceHint[], root: string): boolean {
+  if (targets.length === 0) return false;
+  const reads = successfulReads(jsonl);
+  return targets.every((target) => {
+    let hostSha: string;
+    try {
+      hostSha = sha256File(target.file);
+    } catch {
+      return false;
+    }
+    if (hostSha !== target.sha256) return false;
+    return reads.some((read) => sameFile(root, read.path, target.file) && sha256(read.text) === target.sha256);
+  });
 }
 
-function readToolPaths(jsonl: string): string[] {
-  const paths: string[] = [];
+function successfulReads(jsonl: string): { readonly path: string; readonly text: string }[] {
+  const calls = new Map<string, string>();
+  const reads: { path: string; text: string }[] = [];
   for (const raw of jsonl.split("\n")) {
     const trimmed = raw.trim();
     if (!trimmed) continue;
@@ -755,17 +907,45 @@ function readToolPaths(jsonl: string): string[] {
     }
     const message = entry && typeof entry === "object" ? (entry as { message?: unknown }).message : undefined;
     if (!message || typeof message !== "object") continue;
-    const record = message as { role?: unknown; content?: unknown };
-    if (record.role !== "assistant" || !Array.isArray(record.content)) continue;
-    for (const block of record.content) {
-      if (!block || typeof block !== "object") continue;
-      const tool = block as { type?: unknown; name?: unknown; arguments?: unknown };
-      if (tool.type !== "toolCall" || tool.name !== "read" || !tool.arguments || typeof tool.arguments !== "object") continue;
-      const path = (tool.arguments as { path?: unknown }).path;
-      if (typeof path === "string" && path !== "") paths.push(path);
+    const record = message as {
+      role?: unknown;
+      content?: unknown;
+      toolCallId?: unknown;
+      toolName?: unknown;
+      isError?: unknown;
+    };
+    if (record.role === "assistant" && Array.isArray(record.content)) {
+      for (const block of record.content) {
+        if (!block || typeof block !== "object") continue;
+        const tool = block as { type?: unknown; name?: unknown; id?: unknown; arguments?: unknown };
+        if (tool.type !== "toolCall" || tool.name !== "read" || typeof tool.id !== "string") continue;
+        if (!tool.arguments || typeof tool.arguments !== "object") continue;
+        const path = (tool.arguments as { path?: unknown }).path;
+        if (typeof path !== "string" || path === "") continue;
+        calls.set(tool.id, path);
+      }
     }
+    if (record.role !== "toolResult" || record.toolName !== "read" || record.isError !== false) continue;
+    if (typeof record.toolCallId !== "string") continue;
+    const path = calls.get(record.toolCallId);
+    if (!path) continue;
+    const text = toolResultText(record.content);
+    if (text === null) continue;
+    reads.push({ path, text });
   }
-  return paths;
+  return reads;
+}
+
+function toolResultText(content: unknown): string | null {
+  if (!Array.isArray(content) || content.length === 0) return null;
+  let out = "";
+  for (const block of content) {
+    if (!block || typeof block !== "object") return null;
+    const item = block as { type?: unknown; text?: unknown };
+    if (item.type !== "text" || typeof item.text !== "string") return null;
+    out += item.text;
+  }
+  return out;
 }
 
 function sameFile(root: string, left: string, right: string): boolean {
@@ -779,18 +959,43 @@ function sameFile(root: string, left: string, right: string): boolean {
   }
 }
 
-function toolRead(file: string, index: number): string {
-  return `${JSON.stringify({
+function toolExchange(file: string, index: number): string {
+  const text = readFileSync(file, "utf8");
+  const callId = `c${index}`;
+  const call = {
     type: "message",
     id: `r${index}`,
     parentId: null,
     timestamp: "2026-10-21T00:00:00.000Z",
     message: {
       role: "assistant",
-      content: [{ type: "toolCall", id: `c${index}`, name: "read", arguments: { path: file } }],
+      content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: file } }],
       timestamp: 0,
     },
-  })}\n`;
+  };
+  const result = {
+    type: "message",
+    id: `t${index}`,
+    parentId: `r${index}`,
+    timestamp: "2026-10-21T00:00:00.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: "read",
+      isError: false,
+      content: [{ type: "text", text }],
+      timestamp: 0,
+    },
+  };
+  return `${JSON.stringify(call)}\n${JSON.stringify(result)}\n`;
+}
+
+function assertKeyOutside(keyFile: string, dirs: readonly string[]): void {
+  const key = resolve(keyFile);
+  for (const dir of dirs) {
+    const root = resolve(dir);
+    if (key === root || key.startsWith(root + sep)) throw new Error("attest key must stay outside the loop output directory");
+  }
 }
 
 function writeNotes(
@@ -815,11 +1020,6 @@ function writeNotes(
 
 function sessionLines(role: string, text: string): string {
   return `${JSON.stringify({ type: "session", role })}\n${JSON.stringify({ type: "message", role: "assistant", text })}\n`;
-}
-
-function relativeTo(root: string, file: string): string {
-  const prefix = root.endsWith("/") ? root : `${root}/`;
-  return file.startsWith(prefix) ? file.slice(prefix.length) : file;
 }
 
 function sha256(bytes: Buffer | string): string {

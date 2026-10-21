@@ -153,25 +153,93 @@ function latestOutputMtime(outputsDir: string): number {
   return latest;
 }
 
+/**
+ * Lines the way `for line in open(trace)` yields them.
+ * A trailing newline does not add an extra empty line. A blank line in the
+ * middle is a real line and must fail `json.loads`, same as ewi_idle.py.
+ */
+function pythonLines(text: string): string[] {
+  if (text === "") return [];
+  const lines = text.split("\n");
+  if (text.endsWith("\n")) lines.pop();
+  return lines;
+}
+
 function assistantTimestamps(tracePath: string): number[] {
   const stamps: number[] = [];
-  const lines = readFileSync(tracePath, "utf8").split("\n");
+  const lines = pythonLines(readFileSync(tracePath, "utf8"));
   for (let index = 0; index < lines.length; index += 1) {
-    const trimmed = lines[index]?.trim() ?? "";
-    if (!trimmed) continue;
-    let parsed: { type?: unknown; ts?: unknown };
-    try {
-      parsed = JSON.parse(trimmed) as { type?: unknown; ts?: unknown };
-    } catch {
-      throw new Error(`trace.jsonl line ${index + 1} is not JSON`);
-    }
-    if (parsed.type !== "assistant_message") continue;
-    if (typeof parsed.ts !== "number" || !Number.isFinite(parsed.ts)) {
+    const parsed = parsePythonJsonLine(lines[index] ?? "", index);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const record = parsed as { type?: unknown; ts?: unknown };
+    if (record.type !== "assistant_message") continue;
+    if (typeof record.ts !== "number") {
       throw new Error(`assistant_message on line ${index + 1} is missing ts`);
     }
-    stamps.push(parsed.ts / 1000);
+    stamps.push(record.ts / 1000);
   }
   return stamps;
+}
+
+/** Python `json.loads` accepts NaN, Infinity, and -Infinity. NaN is not missing. */
+function parsePythonJsonLine(line: string, index: number): unknown {
+  try {
+    return JSON.parse(rewritePythonNonFinite(line), (_key, value) => {
+      if (value === "__PY_NAN__") return Number.NaN;
+      if (value === "__PY_INF__") return Infinity;
+      if (value === "__PY_NINF__") return -Infinity;
+      return value;
+    });
+  } catch {
+    throw new Error(`trace.jsonl line ${index + 1} is not JSON`);
+  }
+}
+
+function rewritePythonNonFinite(line: string): string {
+  let out = "";
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index] ?? "";
+    if (char === "\"") {
+      let end = index + 1;
+      while (end < line.length) {
+        if (line[end] === "\\") {
+          end += 2;
+          continue;
+        }
+        if (line[end] === "\"") {
+          end += 1;
+          break;
+        }
+        end += 1;
+      }
+      out += line.slice(index, end);
+      index = end;
+      continue;
+    }
+    if (line.startsWith("NaN", index) && !isWord(line[index + 3])) {
+      out += "\"__PY_NAN__\"";
+      index += 3;
+      continue;
+    }
+    if (line.startsWith("-Infinity", index) && !isWord(line[index + 9])) {
+      out += "\"__PY_NINF__\"";
+      index += 9;
+      continue;
+    }
+    if (line.startsWith("Infinity", index) && !isWord(line[index + 8])) {
+      out += "\"__PY_INF__\"";
+      index += 8;
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
+function isWord(char: string | undefined): boolean {
+  return char !== undefined && /[A-Za-z0-9_]/.test(char);
 }
 
 function readBatchDone(log: string, runNumber: number): number {

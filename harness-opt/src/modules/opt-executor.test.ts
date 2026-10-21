@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEV_TASK } from "./opt-loop";
 import { CommandOptExecutor, renderExecutorCommand, tokenCap, type OptRunRequest, type OptTask } from "./opt-executor";
 
 const TASK: OptTask = {
@@ -19,6 +20,7 @@ function request(dir: string): OptRunRequest {
     arm: "candidate",
     configPath: join(dir, "config.json"),
     runDir: join(dir, "run"),
+    attestDir: join(dir, "attest"),
     model: "deepseek-v4-1-flash-261017",
     tokenCap: tokenCap(TASK),
   };
@@ -50,8 +52,9 @@ writeFileSync(run + "/result.json", JSON.stringify({
         "--config", "{config}",
         "--network", "{network}",
         "--token-cap", "{tokenCap}",
+        "--attest-dir", "{attestDir}",
       ],
-      env: { ...process.env, BASE_URL: "https://example.test/v1", API_KEY: "sk-secret" },
+      env: { ...process.env, BASE_URL: "https://example.test/v1", API_KEY: "sk-secret", HARNESS_ATTEST_KEY_FILE: join(dir, "attest.key") },
     });
     const observation = await executor.run(request(dir));
     const argv = JSON.parse(readFileSync(join(dir, "run", "argv.json"), "utf8")) as string[];
@@ -61,6 +64,8 @@ writeFileSync(run + "/result.json", JSON.stringify({
     expect(argv).toContain(join(dir, "config.json"));
     expect(argv).toContain(String(tokenCap(TASK)));
     expect(argv.join(" ")).not.toContain("sk-secret");
+    expect(argv.join(" ")).not.toContain("attest.key");
+    expect(argv.join(" ")).not.toContain("HARNESS_ATTEST_KEY_FILE");
     expect(readFileSync(join(dir, "run", "base-url.txt"), "utf8")).toBe("https://example.test/v1");
     expect(observation.reward).toBe(1);
     expect(observation.tokens).toBe(4);
@@ -68,7 +73,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
 
   test("a marker placeholder is refused before spawn", () => {
     expect(() => renderExecutorCommand(
-      ["python3", "--task", "{task}", "--run-dir", "{runDir}", "--marker", "{marker}"],
+      ["python3", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--marker", "{marker}"],
       request("/tmp"),
       "driver.py",
     )).toThrow(/marker/);
@@ -76,9 +81,12 @@ writeFileSync(run + "/result.json", JSON.stringify({
 
   test("a missing driver placeholder fails before spawn", async () => {
     let spawned = false;
-    expect(() => renderExecutorCommand(["{driver}", "--task", "{task}", "--run-dir", "{runDir}"], request("/tmp"))).toThrow(/HARNESS_OPT_DRIVER/);
+    expect(() => renderExecutorCommand(
+      ["{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
+      request("/tmp"),
+    )).toThrow(/HARNESS_OPT_DRIVER/);
     const executor = new CommandOptExecutor({
-      command: ["{driver}", "--task", "{task}", "--run-dir", "{runDir}"],
+      command: ["{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
       env: {},
       spawn: () => {
         spawned = true;
@@ -88,14 +96,27 @@ writeFileSync(run + "/result.json", JSON.stringify({
     await expect(executor.run(request("/tmp"))).rejects.toThrow(/HARNESS_OPT_DRIVER/);
     expect(spawned).toBe(false);
   });
+
+  test("i014 is rendered as network shared", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-i014-"));
+    const argv = renderExecutorCommand(
+      ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
+      { ...request(dir), task: DEV_TASK, tokenCap: tokenCap(DEV_TASK) },
+    );
+    expect(DEV_TASK.network).toBe("shared");
+    expect(argv).toContain("shared");
+    expect(argv).not.toContain("open");
+    expect(argv).not.toContain("gateway-only");
+  });
 });
 
 describe("executor command source", () => {
   test("does not bake box paths into the loop", () => {
-    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts", "activation.ts", "../cli.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
+    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts", "activation.ts", "attestation.ts", "../cli.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
     expect(sources).not.toContain("/workspace/harness-opt-runs");
     expect(sources).not.toContain("/workspace/contest-data");
     expect(sources).not.toContain("pi-bio-harness@sha256");
     expect(sources).not.toContain("newapi.ai-modeling.top");
+    expect(sources).not.toContain("/home/box");
   });
 });

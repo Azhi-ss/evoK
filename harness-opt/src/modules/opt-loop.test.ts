@@ -1,20 +1,99 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../cli";
-import { DEV_TASK, HELD_OUT_TASKS, OPT_MODEL, runOptLoop, runOptOnce, stubOptRoles, type OptRoles } from "./opt-loop";
-import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
+import { writeHostAttestation } from "./attestation";
+import {
+  CONTROL_CONFIG_SHA,
+  CONTROL_CONFIG_TEXT,
+  DEV_TASK,
+  HELD_OUT_TASKS,
+  OPT_MODEL,
+  runOptLoop,
+  runOptOnce,
+  stubOptRoles,
+  type OptLoopOptions,
+  type OptRoles,
+} from "./opt-loop";
+import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
 
-function outDir(): string {
-  return mkdtempSync(join(tmpdir(), "opt-loop-"));
+interface Fixture {
+  readonly root: string;
+  readonly out: string;
+  readonly attestRoot: string;
+  readonly keyFile: string;
+  readonly harnessPath: string;
+  readonly key: Buffer;
+  readonly controlConfig: string;
+  readonly controlAttest: string;
+  readonly controlTrace: string;
 }
 
-function givenControl(dir: string): string[] {
-  const file = join(dir, "control-trace.jsonl");
-  writeFileSync(file, `${JSON.stringify({ type: "run_start", source: "control" })}\n`);
-  return [file];
+function fixture(): Fixture {
+  const root = mkdtempSync(join(tmpdir(), "opt-loop-"));
+  const keyFile = join(root, "attest.key");
+  const key = Buffer.alloc(32, 9);
+  writeFileSync(keyFile, key);
+  chmodSync(keyFile, 0o600);
+  const harnessPath = join(root, "harness.mjs");
+  writeFileSync(harnessPath, "/* host harness */\n");
+  const out = join(root, "out");
+  const attestRoot = join(root, "attest");
+  mkdirSync(attestRoot, { recursive: true });
+  const controlConfig = join(root, "control.json");
+  writeFileSync(controlConfig, CONTROL_CONFIG_TEXT);
+  const control = attestControl(root, key, harnessPath, controlConfig);
+  return {
+    root,
+    out,
+    attestRoot,
+    keyFile,
+    harnessPath,
+    key,
+    controlConfig,
+    controlAttest: control.attestDir,
+    controlTrace: control.tracePath,
+  };
+}
+
+function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath"> {
+  return {
+    out: fx.out,
+    attestRoot: fx.attestRoot,
+    attestKeyFile: fx.keyFile,
+    harnessPath: fx.harnessPath,
+    controlAttests: [fx.controlAttest],
+    controlConfigPath: fx.controlConfig,
+  };
+}
+
+function attestControl(root: string, key: Buffer, harnessPath: string, controlConfig: string): { readonly attestDir: string; readonly tracePath: string } {
+  const runDir = join(root, "control-run");
+  const attestDir = join(root, "control-attest");
+  const request: OptRunRequest = {
+    task: DEV_TASK,
+    seed: 0,
+    arm: "control",
+    configPath: controlConfig,
+    runDir,
+    attestDir,
+    harnessPath,
+    model: OPT_MODEL,
+    tokenCap: tokenCap(DEV_TASK),
+  };
+  const base = 1_700_000_000;
+  writeRunArtifacts(request, {
+    reward: 1,
+    tokens: 10,
+    wallS: 1,
+    timedOut: false,
+    tWrite: base,
+    tEnd: base + 1,
+    assistantTs: [],
+  }, { key, harnessPath });
+  return { attestDir, tracePath: join(runDir, "trace.jsonl") };
 }
 
 function flattenParts(value: Record<string, unknown>, prefix = ""): Record<string, unknown> {
@@ -44,7 +123,20 @@ function timing(request: OptRunRequest, reward: number, tokens = 100): RunArtifa
   };
 }
 
-function fakeExecutor(): { readonly calls: OptRunRequest[]; readonly executor: OptExecutor } {
+function observation(request: OptRunRequest, fields: { readonly reward: number; readonly tokens: number; readonly wallS: number; readonly timedOut: boolean }) {
+  return {
+    reward: fields.reward,
+    scoreStatus: "scored" as const,
+    tokens: fields.tokens,
+    wallS: fields.wallS,
+    timedOut: fields.timedOut,
+    tracePath: join(request.runDir, "trace.jsonl"),
+    outputsDir: join(request.runDir, "outputs"),
+    batchLogPath: join(request.runDir, "batch.log"),
+  };
+}
+
+function fakeExecutor(fx: Fixture): { readonly calls: OptRunRequest[]; readonly executor: OptExecutor } {
   const calls: OptRunRequest[] = [];
   return {
     calls,
@@ -54,17 +146,8 @@ function fakeExecutor(): { readonly calls: OptRunRequest[]; readonly executor: O
         calls.push(request);
         const reward = request.seed === 2 && request.runDir.includes("/round1/") ? 0 : 1;
         const script = timing(request, reward);
-        writeRunArtifacts(request, script);
-        return {
-          reward,
-          scoreStatus: "scored" as const,
-          tokens: script.tokens,
-          wallS: script.wallS,
-          timedOut: script.timedOut,
-          tracePath: join(request.runDir, "trace.jsonl"),
-          outputsDir: join(request.runDir, "outputs"),
-          batchLogPath: join(request.runDir, "batch.log"),
-        };
+        writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+        return observation(request, { reward, tokens: script.tokens, wallS: script.wallS, timedOut: script.timedOut });
       },
     },
   };
@@ -78,26 +161,36 @@ function rejectingRoles(): OptRoles & { readonly reviews: number } {
     innovate: (input) => roles.innovate(input),
     review: async (input) => {
       reviews += 1;
-      return { session: { jsonl: `{"type":"session","role":"reviewer-gate"}\n{"type":"message","text":"still idle"}\n` }, accept: false, reason: "still idle" };
+      writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+      return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
     },
     get reviews() { return reviews; },
   };
 }
 
+function perfectRead(file: string, text: string): string {
+  const call = {
+    type: "message",
+    message: { role: "assistant", content: [{ type: "toolCall", id: "c0", name: "read", arguments: { path: file } }], timestamp: 0 },
+  };
+  const result = {
+    type: "message",
+    message: { role: "toolResult", toolCallId: "c0", toolName: "read", isError: false, content: [{ type: "text", text }], timestamp: 0 },
+  };
+  return `${JSON.stringify(call)}\n${JSON.stringify(result)}\n`;
+}
+
 describe("optimization loop", () => {
+  test("the box control file is the compact config", () => {
+    expect(createHash("sha256").update(CONTROL_CONFIG_TEXT).digest("hex")).toBe(CONTROL_CONFIG_SHA);
+    expect(createHash("sha256").update(`${JSON.stringify(JSON.parse(CONTROL_CONFIG_TEXT), null, 2)}\n`).digest("hex")).not.toBe(CONTROL_CONFIG_SHA);
+  });
+
   test("one round persists sessions, the patch, and the Pi session that loaded the candidate", async () => {
-    const out = outDir();
-    const fake = fakeExecutor();
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
     const roles = rejectingRoles();
-    const traces = givenControl(out);
-    const result = await runOptLoop({
-      out,
-      mode: "dry-run",
-      rounds: 1,
-      controlTraces: traces,
-      roles,
-      executor: fake.executor,
-    });
+    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles, executor: fake.executor });
     expect(result.model).toBe(OPT_MODEL);
     expect(result.ewiThresholdSec).toBe(600);
     expect(result.skippedFinal).toBe(true);
@@ -108,35 +201,37 @@ describe("optimization loop", () => {
     ]);
     expect(roles.reviews).toBe(1);
 
-    const manifest = JSON.parse(readFileSync(join(out, "round1/sessions/manifest.json"), "utf8")) as {
+    const manifest = JSON.parse(readFileSync(join(fx.out, "round1/sessions/manifest.json"), "utf8")) as {
       sessions: { role: string; file: string; sha256: string }[];
     };
     expect(manifest.sessions.map((item) => item.role)).toEqual(["gap-finder", "innovator", "reviewer-gate"]);
     for (const item of manifest.sessions) {
-      const bytes = readFileSync(join(out, item.file));
+      const bytes = readFileSync(join(fx.out, item.file));
       expect(createHash("sha256").update(bytes).digest("hex")).toBe(item.sha256);
     }
-    const gapSession = readFileSync(join(out, "round1/sessions/gap-finder.jsonl"), "utf8");
+    const gapSession = readFileSync(join(fx.out, "round1/sessions/gap-finder.jsonl"), "utf8");
     expect(gapSession).toContain('"name":"read"');
-    expect(gapSession).toContain(traces[0]);
-    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+    expect(gapSession).toContain(fx.controlTrace);
+    expect(gapSession).not.toContain("ignored-return");
+    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
 
-    const diff = readFileSync(join(out, "round1/patch.diff"), "utf8");
-    expect(diff).toContain('"maxSteps": 25');
+    const diff = readFileSync(join(fx.out, "round1/patch.diff"), "utf8");
+    expect(diff).toContain('"maxSteps":25');
     expect(diff).toContain('"maxSteps": 24');
-    const patchHash = createHash("sha256").update(readFileSync(join(out, "round1/patch.diff"))).digest("hex");
-    const activation = JSON.parse(readFileSync(join(out, "round1/activation.json"), "utf8")) as {
+    const patchHash = createHash("sha256").update(readFileSync(join(fx.out, "round1/patch.diff"))).digest("hex");
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as {
       patchHash: string;
       differsFromControl: boolean;
       patchActive: boolean;
       candidateConfigSha: string;
-      runs: { seed: number; tracePath: string; hashInSystemMessage: boolean; active: boolean }[];
+      runs: { seed: number; tracePath: string; hashInSystemMessage: boolean; active: boolean; attestOk: boolean }[];
     };
     expect(activation.patchHash).toBe(patchHash);
     expect(activation).not.toHaveProperty("marker");
     expect(activation.differsFromControl).toBe(true);
     expect(activation.patchActive).toBe(true);
     for (const run of activation.runs) {
+      expect(run.attestOk).toBe(true);
       const line = readFileSync(run.tracePath, "utf8").split("\n")[0] ?? "";
       const start = JSON.parse(line) as { systemPrompt?: string; candidateConfigHash?: string };
       expect(start.systemPrompt).toBeUndefined();
@@ -147,7 +242,7 @@ describe("optimization loop", () => {
       expect(run.active).toBe(true);
     }
 
-    const metrics = JSON.parse(readFileSync(join(out, "round1/metrics.json"), "utf8")) as {
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       ewiThresholdSec: number;
       runs: { seed: number; reward: number | null; ewi: boolean }[];
       ewiRuns: { seed: number; reward: number | null }[];
@@ -160,62 +255,55 @@ describe("optimization loop", () => {
     expect(metrics.runs.map((run) => run.reward)).toEqual([1, 1, 0]);
     expect(metrics.rewardMean).toBeCloseTo(2 / 3);
     expect(metrics.withoutEwi).toEqual({ count: 2, rewardMean: 0.5, timedOut: 0 });
-    expect(readFileSync(join(out, "round1/run-notes.md"), "utf8")).toContain(`patchSha: ${patchHash}`);
-    const reviewInput = readFileSync(join(out, "round1/review-input.json"), "utf8");
+    expect(readFileSync(join(fx.out, "round1/run-notes.md"), "utf8")).toContain(`patchSha: ${patchHash}`);
+    const reviewInput = readFileSync(join(fx.out, "round1/review-input.json"), "utf8");
     expect(reviewInput).not.toContain("i030");
     expect(reviewInput).not.toContain("hb003");
     expect(reviewInput).not.toContain("held-out");
   });
 
   test("the next gap input receives the reviewer reason, and a repeated summary is not run", async () => {
-    const out = outDir();
-    const fake = fakeExecutor();
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
     let innovateCalls = 0;
     const roles: OptRoles = {
       gap: (input) => stubOptRoles().gap(input),
       async innovate(input) {
         innovateCalls += 1;
+        writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "innovator" })}\n`);
         if (input.round > 1) {
-          return {
-            session: { jsonl: `{"type":"session","role":"innovator"}\n{"type":"message","text":"same"}\n` },
-            summary: "agent-loop.maxSteps=24",
-            parts: { "agent-loop": { maxSteps: 24 } },
-          };
+          return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
         }
         return stubOptRoles().innovate(input);
       },
-      review: async () => ({
-        session: { jsonl: `{"type":"session","role":"reviewer-gate"}\n{"type":"message","text":"still idle"}\n` },
-        accept: false,
-        reason: "still idle",
-      }),
+      review: async (input) => {
+        writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+        return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
+      },
     };
-    await runOptLoop({ out, mode: "dry-run", rounds: 2, controlTraces: givenControl(out), roles, executor: fake.executor });
-    const gapInput = JSON.parse(readFileSync(join(out, "round2/gap-input.json"), "utf8")) as {
-      previousReview: { reason: string };
-    };
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fake.executor });
+    const gapInput = JSON.parse(readFileSync(join(fx.out, "round2/gap-input.json"), "utf8")) as { previousReview: { reason: string } };
     expect(gapInput.previousReview.reason).toBe("still idle");
-    const gapSession = readFileSync(join(out, "round2/sessions/gap-finder.jsonl"), "utf8");
-    expect(gapSession).toContain(join(out, "round1/sessions/reviewer-gate.jsonl"));
+    const gapSession = readFileSync(join(fx.out, "round2/sessions/gap-finder.jsonl"), "utf8");
+    expect(gapSession).toContain(join(fx.out, "round1/sessions/reviewer-gate.jsonl"));
     expect(gapSession).toContain('"name":"read"');
-    const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean; closed: boolean };
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean; closed: boolean };
     expect(closure.reviewFedForward).toBe(true);
     expect(closure.closed).toBe(true);
     expect(innovateCalls).toBe(2);
     expect(fake.calls).toHaveLength(3);
-    expect(existsSync(join(out, "round2/sessions/reviewer-gate.jsonl"))).toBe(true);
-    expect(readFileSync(join(out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("duplicate summary");
-    expect(existsSync(join(out, "final/order.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"))).toBe(true);
+    expect(readFileSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("duplicate summary");
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
   });
 
   test("three rejected rounds skip the final block and held-out", async () => {
-    const out = outDir();
-    const fake = fakeExecutor();
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
     const result = await runOptLoop({
-      out,
+      ...hostOpts(fx),
       mode: "dry-run",
       rounds: 3,
-      controlTraces: givenControl(out),
       roles: rejectingRoles(),
       executor: fake.executor,
     });
@@ -223,25 +311,24 @@ describe("optimization loop", () => {
     expect(result.finalBlock).toBeNull();
     expect(result.heldOut).toBeNull();
     expect(fake.calls).toHaveLength(9);
-    expect(fake.calls.every((call) => call.task.id === "i014")).toBe(true);
+    expect(fake.calls.every((call) => call.task.id === "i014" && call.task.network === "shared")).toBe(true);
   });
 
   test("the last accepted candidate is rerun alternating with control, then held out", async () => {
-    const out = outDir();
-    const fake = fakeExecutor();
-    const result = await runOptLoop({
-      out,
-      mode: "dry-run",
-      rounds: 3,
-      controlTraces: givenControl(out),
-      roles: stubOptRoles(),
-      executor: fake.executor,
-    });
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 3, roles: stubOptRoles(), executor: fake.executor });
     expect(result.accepted?.round).toBe(1);
     expect(result.finalBlock?.order).toEqual(["C0", "X0", "C1", "X1", "C2", "X2"]);
-    expect(JSON.parse(readFileSync(join(out, "final/order.json"), "utf8"))).toEqual({ order: ["C0", "X0", "C1", "X1", "C2", "X2"] });
+    expect(JSON.parse(readFileSync(join(fx.out, "final/order.json"), "utf8"))).toEqual({ order: ["C0", "X0", "C1", "X1", "C2", "X2"] });
     const dev = fake.calls.slice(0, 9);
-    expect(dev.every((call) => call.arm === "candidate" && call.task.id === DEV_TASK.id)).toBe(true);
+    expect(dev.every((call) => call.arm === "candidate" && call.task.id === DEV_TASK.id && call.task.network === "shared")).toBe(true);
+    const rendered = renderExecutorCommand(
+      ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
+      dev[0]!,
+    );
+    expect(rendered).toContain("shared");
+    expect(rendered).not.toContain("open");
     const finalCalls = fake.calls.slice(9, 15);
     expect(finalCalls.map((call) => `${call.arm === "control" ? "C" : "X"}${call.seed}`)).toEqual(["C0", "X0", "C1", "X1", "C2", "X2"]);
     expect(finalCalls.every((call) => !("marker" in call) && !("patchHash" in call))).toBe(true);
@@ -251,7 +338,7 @@ describe("optimization loop", () => {
     );
     expect(held.filter((call) => call.task.id === "002").every((call) => call.task.network === "gateway-only")).toBe(true);
     expect(result.heldOut).toEqual({ calls: 9, gatewayOnly: ["002"] });
-    const heldOutFile = JSON.parse(readFileSync(join(out, "heldout/metrics.json"), "utf8")) as { comparison: string };
+    const heldOutFile = JSON.parse(readFileSync(join(fx.out, "heldout/metrics.json"), "utf8")) as { comparison: string };
     expect(heldOutFile.comparison).toBe("control-not-run");
     const candidateConfig = finalCalls[1]?.configPath ?? "";
     const controlConfig = finalCalls[0]?.configPath ?? "";
@@ -263,10 +350,11 @@ describe("optimization loop", () => {
     expect(controlSession).toContain(`candidateConfigHash: ${controlHash}`);
     expect(candidateSession).not.toContain(`candidateConfigHash: ${controlHash}`);
     expect(readFileSync(join(finalCalls[1]?.runDir ?? "", "trace.jsonl"), "utf8")).not.toContain("systemPrompt");
+    expect(controlHash).toBe(CONTROL_CONFIG_SHA);
   });
 
   test("a run past 6×W is unscored and stays out of the reward mean", async () => {
-    const out = outDir();
+    const fx = fixture();
     const calls: OptRunRequest[] = [];
     const executor: OptExecutor = {
       name: "fake",
@@ -274,29 +362,12 @@ describe("optimization loop", () => {
         calls.push(request);
         const over = request.seed === 0;
         const script = timing(request, 1, over ? tokenCap(DEV_TASK) + 1 : 10);
-        writeRunArtifacts(request, { ...script, timedOut: false, tEnd: script.tWrite + 0.5, assistantTs: [] });
-        return {
-          reward: 1,
-          scoreStatus: "scored" as const,
-          tokens: over ? tokenCap(DEV_TASK) + 1 : 10,
-          wallS: 10,
-          timedOut: false,
-          tracePath: join(request.runDir, "trace.jsonl"),
-          outputsDir: join(request.runDir, "outputs"),
-          batchLogPath: join(request.runDir, "batch.log"),
-        };
+        writeRunArtifacts(request, { ...script, timedOut: false, tEnd: script.tWrite + 0.5, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
+        return observation(request, { reward: 1, tokens: over ? tokenCap(DEV_TASK) + 1 : 10, wallS: 10, timedOut: false });
       },
     };
-    await runOptLoop({
-      out,
-      mode: "dry-run",
-      rounds: 1,
-      seeds: [0, 1],
-      controlTraces: givenControl(out),
-      roles: rejectingRoles(),
-      executor,
-    });
-    const metrics = JSON.parse(readFileSync(join(out, "round1/metrics.json"), "utf8")) as {
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, seeds: [0, 1], roles: rejectingRoles(), executor });
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { seed: number; scoreStatus: string; unscoredReason?: string; reward: number | null }[];
       rewardMean: number;
     };
@@ -306,88 +377,115 @@ describe("optimization loop", () => {
   });
 
   test("execute mode refuses to start without BASE_URL or a command", async () => {
-    const out = outDir();
-    const trace = givenControl(out);
+    const fx = fixture();
     await expect(runOptLoop({
-      out,
+      ...hostOpts(fx),
       mode: "execute",
       rounds: 1,
-      controlTraces: trace,
       env: {},
       roles: stubOptRoles(),
-      executorCommand: ["python3", "{driver}", "--task", "{task}", "--run-dir", "{runDir}"],
-      driver: join(out, "driver.py"),
+      executorCommand: ["python3", "{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
+      driver: join(fx.root, "driver.py"),
     })).rejects.toThrow(/BASE_URL/);
     await expect(runOptLoop({
-      out: outDir(),
+      ...hostOpts(fx),
       mode: "execute",
       rounds: 1,
-      controlTraces: trace,
       env: { BASE_URL: "https://example.test/v1" },
       roles: stubOptRoles(),
     })).rejects.toThrow(/executor command/);
   });
 
-  test("round 1 refuses to invent a prior trace", async () => {
-    const out = outDir();
+  test("round 1 refuses a missing, forged, or mis-bound control attestation", async () => {
+    const fx = fixture();
+    const roles = stubOptRoles();
+    const executor = fakeExecutor(fx).executor;
+    await expect(runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, controlAttests: [], roles, executor })).rejects.toThrow(/control attestation/);
     await expect(runOptLoop({
-      out,
+      ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      controlTraces: [],
-      roles: stubOptRoles(),
-      executor: fakeExecutor().executor,
-    })).rejects.toThrow(/control trace/);
+      controlAttests: [join(fx.root, "missing-attest")],
+      roles,
+      executor,
+    })).rejects.toThrow(/control attestation/);
+    const raw = readFileSync(join(fx.controlAttest, "attestation.json"), "utf8");
+    writeFileSync(join(fx.controlAttest, "attestation.json"), raw.replace("\"hmacSha256\": \"", "\"hmacSha256\": \"00"));
+    await expect(runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles, executor })).rejects.toThrow(/hmac/);
+    expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(false);
+    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+
+    const pretty = join(fx.root, "pretty-control.json");
+    writeFileSync(pretty, `${JSON.stringify(JSON.parse(CONTROL_CONFIG_TEXT), null, 2)}\n`);
+    const prettyRun = join(fx.root, "pretty-run");
+    const prettyAttest = join(fx.root, "pretty-attest");
+    writeRunArtifacts({
+      task: DEV_TASK,
+      seed: 0,
+      arm: "control",
+      configPath: pretty,
+      runDir: prettyRun,
+      attestDir: prettyAttest,
+      harnessPath: fx.harnessPath,
+      model: OPT_MODEL,
+      tokenCap: tokenCap(DEV_TASK),
+    }, { reward: 1, tokens: 10, wallS: 1, timedOut: false, tWrite: 1_700_000_000, tEnd: 1_700_000_001, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
     await expect(runOptLoop({
-      out,
+      ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      controlTraces: [join(out, "missing-control.jsonl")],
-      roles: stubOptRoles(),
-      executor: fakeExecutor().executor,
-    })).rejects.toThrow(/control trace is missing/);
-    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+      controlAttests: [prettyAttest],
+      roles,
+      executor,
+    })).rejects.toThrow(/config/);
   });
 
   test("a path mentioned in the gap text is not a read of the trace", async () => {
-    const out = outDir();
-    const traces = givenControl(out);
-    const file = traces[0] ?? "";
-    await runOptLoop({
-      out,
+    const fx = fixture();
+    const result = await runOptLoop({
+      ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
-      controlTraces: traces,
-      executor: fakeExecutor().executor,
+      executor: fakeExecutor(fx).executor,
       roles: {
         ...stubOptRoles(),
-        async gap() {
+        async gap(input) {
+          const file = input.traces[0]?.file ?? "";
+          const text = readFileSync(file, "utf8");
+          writeFileSync(input.sessionPath, `${JSON.stringify({ type: "message", role: "assistant", text: `cited ${file}:1` })}\n`);
           return {
-            session: { jsonl: `${JSON.stringify({ type: "message", role: "assistant", text: `cited ${file}:1` })}\n` },
+            session: { jsonl: perfectRead(file, text) },
             citations: [`${file}:1`],
             knob: "agent-loop.maxSteps",
             failureClass: "idle-loop",
             summary: "early write then idle",
           };
         },
-        async review() {
-          return { session: { jsonl: "{\"type\":\"message\",\"text\":\"no\"}\n" }, accept: false, reason: "no" };
+        async review(input) {
+          writeFileSync(input.sessionPath, "{\"type\":\"message\",\"text\":\"accept\"}\n");
+          return { session: { jsonl: perfectRead(input.sessionPath, "nope") }, accept: true, reason: "accept" };
         },
       },
     });
-    const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
-    expect(readFileSync(join(out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain(`${file}:1`);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
+    expect(readFileSync(join(fx.out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain(`${fx.controlTrace}:1`);
     expect(closure.gapCitedTrace).toBe(false);
+    expect(result.accepted).toBeNull();
+    expect(result.skippedFinal).toBe(true);
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
   });
 
   test("feed-forward reads the reviewer session and ignores the loop's gap input", async () => {
-    const out = outDir();
+    const fx = fixture();
     const roles: OptRoles = {
       async gap(input) {
         if (input.round === 1) return stubOptRoles().gap(input);
+        const file = input.previousReviewSession ?? "";
+        const real = readFileSync(file, "utf8");
         const reason = input.previousReview?.reason ?? "";
+        writeFileSync(input.sessionPath, perfectRead(file, reason));
         return {
-          session: { jsonl: `${JSON.stringify({ type: "message", role: "assistant", text: `echo ${reason}` })}\n` },
+          session: { jsonl: perfectRead(file, real) },
           citations: [],
           knob: "agent-loop.maxSteps",
           failureClass: "idle-loop",
@@ -395,27 +493,21 @@ describe("optimization loop", () => {
         };
       },
       innovate: (input) => stubOptRoles().innovate(input),
-      async review() {
-        return { session: { jsonl: "{\"type\":\"message\",\"text\":\"still idle\"}\n" }, accept: false, reason: "still idle" };
+      async review(input) {
+        writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+        return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
       },
     };
-    await runOptLoop({
-      out,
-      mode: "dry-run",
-      rounds: 2,
-      controlTraces: givenControl(out),
-      roles,
-      executor: fakeExecutor().executor,
-    });
-    const gapInput = JSON.parse(readFileSync(join(out, "round2/gap-input.json"), "utf8")) as { previousReview: { reason: string } };
+    await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fakeExecutor(fx).executor });
+    const gapInput = JSON.parse(readFileSync(join(fx.out, "round2/gap-input.json"), "utf8")) as { previousReview: { reason: string } };
     expect(gapInput.previousReview.reason).toBe("still idle");
-    expect(readFileSync(join(out, "round2/sessions/gap-finder.jsonl"), "utf8")).toContain("still idle");
-    const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean };
+    expect(readFileSync(join(fx.out, "round2/sessions/gap-finder.jsonl"), "utf8")).toContain("still idle");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean };
     expect(closure.reviewFedForward).toBe(false);
   });
 
   test("an executor that echoes request fields cannot activate or be accepted", async () => {
-    const out = outDir();
+    const fx = fixture();
     const calls: OptRunRequest[] = [];
     const executor: OptExecutor = {
       name: "echo",
@@ -454,83 +546,133 @@ describe("optimization loop", () => {
         writeFileSync(join(request.runDir, "result.json"), `${JSON.stringify({
           reward: 1, tokens: 10, wall_s: 1, timed_out: false, score_status: "scored",
         })}\n`);
-        return {
-          reward: 1,
-          scoreStatus: "scored" as const,
-          tokens: 10,
-          wallS: 1,
-          timedOut: false,
-          tracePath: join(request.runDir, "trace.jsonl"),
-          outputsDir: join(request.runDir, "outputs"),
-          batchLogPath: join(request.runDir, "batch.log"),
-        };
+        return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
       },
     };
-    const result = await runOptLoop({
-      out,
-      mode: "dry-run",
-      rounds: 1,
-      controlTraces: givenControl(out),
-      roles: stubOptRoles(),
-      executor,
-    });
+    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: stubOptRoles(), executor });
     expect(calls[0]).not.toHaveProperty("marker");
     expect(calls[0]).not.toHaveProperty("patchHash");
-    const activation = JSON.parse(readFileSync(join(out, "round1/activation.json"), "utf8")) as {
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as {
       patchActive: boolean;
-      runs: { hashInSystemMessage: boolean; candidateConfigHash: string | null }[];
+      runs: { hashInSystemMessage: boolean; attestOk: boolean; active: boolean }[];
     };
-    expect(activation.runs.every((run) => run.candidateConfigHash !== null && run.hashInSystemMessage === false)).toBe(true);
+    expect(activation.runs.every((run) => run.attestOk === false && run.hashInSystemMessage === false && run.active === false)).toBe(true);
     expect(activation.patchActive).toBe(false);
     expect(result.accepted).toBeNull();
     expect(result.rounds[0]?.accepted).toBe(false);
     expect(result.skippedFinal).toBe(true);
     expect(result.finalBlock).toBeNull();
     expect(result.heldOut).toBeNull();
-    expect(existsSync(join(out, "final/order.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
     expect(calls).toHaveLength(3);
+  });
+
+  test("a forged Pi session and a stdout attestation path cannot activate", async () => {
+    const fx = fixture();
+    const calls: OptRunRequest[] = [];
+    const executor: OptExecutor = {
+      name: "sessforge",
+      async run(request) {
+        calls.push(request);
+        const script = timing(request, 1, 10);
+        writeRunArtifacts(request, { ...script, timedOut: false, tEnd: script.tWrite + 0.5, assistantTs: [] });
+        const side = join(fx.root, "side-attest", `${request.seed}`);
+        const resultPath = join(request.runDir, "result.json");
+        const result = JSON.parse(readFileSync(resultPath, "utf8")) as { attestation?: string };
+        result.attestation = join(side, "attestation.json");
+        writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
+        writeHostAttestation({
+          attestDir: side,
+          runDir: request.runDir,
+          key: fx.key,
+          harnessPath: fx.harnessPath,
+          configPath: request.configPath,
+          reward: 1,
+          meta: {
+            task: request.task.path,
+            seed: request.seed,
+            arm: request.arm,
+            score_status: "scored",
+            tokens: 10,
+            exit: 0,
+            runDir: request.runDir,
+            at: "2026-10-21T00:00:00+09:00",
+          },
+        });
+        writeFileSync(join(request.runDir, "attestation.json"), readFileSync(join(side, "attestation.json")));
+        return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
+      },
+    };
+    const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 1, roles: stubOptRoles(), executor });
+    const session = readFileSync(join(calls[0]?.runDir ?? "", ".pi-sessions/session.jsonl"), "utf8");
+    const candidate = createHash("sha256").update(readFileSync(calls[0]?.configPath ?? "")).digest("hex");
+    expect(session).toContain(`candidateConfigHash: ${candidate}`);
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as {
+      patchActive: boolean;
+      runs: { attestOk: boolean; active: boolean }[];
+    };
+    expect(activation.runs.every((run) => run.attestOk === false && run.active === false)).toBe(true);
+    expect(activation.patchActive).toBe(false);
+    expect(result.accepted).toBeNull();
+    expect(result.skippedFinal).toBe(true);
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
+    expect(existsSync(join(fx.attestRoot, "round1", "i014", "seed0", "candidate", "attestation.json"))).toBe(false);
   });
 });
 
 describe("optimize command", () => {
   test("dry-run finishes a round without a model process", async () => {
-    const out = outDir();
-    const trace = givenControl(out)[0] ?? "";
-    const code = await main(["optimize", "--out", out, "--dry-run", "--rounds", "1", "--control-trace", trace]);
+    const fx = fixture();
+    const code = await main([
+      "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
+      "--attest-root", fx.attestRoot,
+      "--attest-key-file", fx.keyFile,
+      "--harness", fx.harnessPath,
+      "--control-config", fx.controlConfig,
+      "--control-attest", fx.controlAttest,
+    ]);
     expect(code).toBe(0);
-    expect(existsSync(join(out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
-    expect(existsSync(join(out, "round1/patch.diff"))).toBe(true);
-    const activation = JSON.parse(readFileSync(join(out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
+    expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
+    expect(existsSync(join(fx.out, "round1/patch.diff"))).toBe(true);
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
     expect(activation.patchActive).toBe(true);
-    expect(JSON.parse(readFileSync(join(out, "final/order.json"), "utf8"))).toEqual({
+    expect(JSON.parse(readFileSync(join(fx.out, "final/order.json"), "utf8"))).toEqual({
       order: ["C0", "X0", "C1", "X1", "C2", "X2"],
     });
   });
 
-  test("dry-run without a control trace does not write a stub baseline", async () => {
-    const out = outDir();
-    const code = await main(["optimize", "--out", out, "--dry-run", "--rounds", "1"]);
+  test("dry-run without a control attestation does not write a stub baseline", async () => {
+    const fx = fixture();
+    const code = await main([
+      "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
+      "--attest-root", fx.attestRoot,
+      "--attest-key-file", fx.keyFile,
+      "--harness", fx.harnessPath,
+    ]);
     expect(code).toBe(1);
-    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+    expect(existsSync(join(fx.out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
   });
 });
 
 describe("optimize-one command", () => {
   test("one honest candidate run can be active, and an echoing command cannot", async () => {
-    const out = outDir();
-    const control = join(out, "control.json");
-    const candidate = join(out, "candidate.json");
-    writeFileSync(control, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 25 } } })}\n`);
-    writeFileSync(candidate, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 24 } } })}\n`);
-    const honest = join(out, "honest.mjs");
+    const fx = fixture();
+    const candidate = join(fx.root, "candidate.json");
+    writeFileSync(candidate, "{\"parts\":{\"agent-loop\":{\"maxSteps\":24}}}\n");
+    const honest = join(fx.root, "honest.mjs");
+    const attestModule = new URL("./attestation.ts", import.meta.url).href;
     writeFileSync(honest, `
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeHostAttestation } from ${JSON.stringify(attestModule)};
 const args = process.argv.slice(2);
 const get = (flag) => args[args.indexOf(flag) + 1];
 const run = get("--run-dir");
-const bytes = readFileSync(get("--config"));
+const config = get("--config");
+mkdirSync(run, { recursive: true });
+writeFileSync(join(run, "argv.json"), JSON.stringify(args));
+const bytes = readFileSync(config);
 const hash = createHash("sha256").update(bytes).digest("hex");
 const parts = JSON.parse(bytes.toString()).parts ?? {};
 const effective = {};
@@ -552,83 +694,128 @@ writeFileSync(join(run, ".pi-sessions", "session.jsonl"), JSON.stringify({
   message: { role: "system", content: "", sections: { preamble }, timestamp: 0 },
 }) + "\\n");
 writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored" }) + "\\n");
+writeHostAttestation({
+  attestDir: get("--attest-dir"),
+  runDir: run,
+  key: readFileSync(process.env.HARNESS_ATTEST_KEY_FILE),
+  harnessPath: get("--harness"),
+  configPath: config,
+  reward: 1,
+  meta: { task: get("--task"), seed: Number(get("--seed")), arm: get("--arm"), score_status: "scored", tokens: 4, exit: 0, runDir: run, at: "2026-10-21T00:00:00+09:00" },
+});
+console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
 `);
     const previous = process.env.BASE_URL;
+    const previousKey = process.env.HARNESS_ATTEST_KEY_FILE;
     process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_ATTEST_KEY_FILE = fx.keyFile;
+    const command = [
+      process.execPath, honest,
+      "--task", "{taskPath}",
+      "--seed", "{seed}",
+      "--arm", "{arm}",
+      "--config", "{config}",
+      "--run-dir", "{runDir}",
+      "--attest-dir", "{attestDir}",
+      "--harness", "{harness}",
+      "--model", "{model}",
+      "--network", "{network}",
+      "--token-cap", "{tokenCap}",
+    ];
     try {
       const code = await main([
         "optimize-one",
-        "--out", out,
+        "--out", fx.out,
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
         "--config", candidate,
-        "--control-config", control,
+        "--control-config", fx.controlConfig,
         "--knob", "agent-loop.maxSteps",
         "--seed", "0",
-        "--executor-cmd", JSON.stringify([process.execPath, honest, "--task", "{taskPath}", "--seed", "{seed}", "--arm", "{arm}", "--config", "{config}", "--run-dir", "{runDir}", "--model", "{model}"]),
+        "--executor-cmd", JSON.stringify(command),
       ]);
       expect(code).toBe(0);
-      const saved = JSON.parse(readFileSync(join(out, "once/activation.json"), "utf8")) as { patchActive: boolean };
+      const saved = JSON.parse(readFileSync(join(fx.out, "once/activation.json"), "utf8")) as { patchActive: boolean };
       expect(saved.patchActive).toBe(true);
-      expect(existsSync(join(out, "final/order.json"))).toBe(false);
+      expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
+      const argv = JSON.parse(readFileSync(join(fx.out, "once/i014/seed0/candidate/argv.json"), "utf8")) as string[];
+      expect(argv).toContain("shared");
+      expect(argv).not.toContain("open");
+      expect(argv.join(" ")).not.toContain(fx.keyFile);
     } finally {
       if (previous === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous;
+      if (previousKey === undefined) delete process.env.HARNESS_ATTEST_KEY_FILE;
+      else process.env.HARNESS_ATTEST_KEY_FILE = previousKey;
     }
 
-    const echoOut = outDir();
-    const echoScript = join(echoOut, "echo.mjs");
+    const echoFx = fixture();
+    const echoScript = join(echoFx.root, "echo.mjs");
     writeFileSync(echoScript, `
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const args = process.argv.slice(2);
 const get = (flag) => args[args.indexOf(flag) + 1];
 const run = get("--run-dir");
-const echoed = args.join(" ");
+const bytes = readFileSync(get("--config"));
+const hash = createHash("sha256").update(bytes).digest("hex");
 mkdirSync(join(run, "outputs"), { recursive: true });
 const answer = join(run, "outputs", "answer.txt");
 writeFileSync(answer, "echo\\n");
 utimesSync(answer, 1700000000, 1700000000);
-writeFileSync(join(run, "trace.jsonl"), JSON.stringify({ type: "run_start", systemPrompt: echoed, candidateConfigHash: echoed, effective: {} }) + "\\n");
+writeFileSync(join(run, "trace.jsonl"), JSON.stringify({ type: "run_start", candidateConfigHash: hash, effective: { "agent-loop.maxSteps": 24 } }) + "\\n");
 writeFileSync(join(run, "batch.log"), "2026-10-21T00:00:01.000Z run 1 done\\n");
 mkdirSync(join(run, "verifier"), { recursive: true });
 writeFileSync(join(run, "verifier", "reward.txt"), "1\\n");
 mkdirSync(join(run, ".pi-sessions"), { recursive: true });
+const preamble = "\\n\\n### Loaded candidate config\\ncandidateConfigHash: " + hash + "\\n";
 writeFileSync(join(run, ".pi-sessions", "session.jsonl"), JSON.stringify({
   type: "message",
-  message: { role: "system", content: echoed, timestamp: 0 },
+  message: { role: "system", content: "", sections: { preamble }, timestamp: 0 },
 }) + "\\n");
-writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored" }) + "\\n");
+writeFileSync(join(run, "attestation.json"), "{\\"hmacSha256\\":\\"00\\"}\\n");
+writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored", attestation: join(run, "attestation.json") }) + "\\n");
+console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
 `);
-    writeFileSync(join(echoOut, "control.json"), readFileSync(control));
-    writeFileSync(join(echoOut, "candidate.json"), readFileSync(candidate));
+    writeFileSync(join(echoFx.root, "candidate.json"), readFileSync(candidate));
     process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_ATTEST_KEY_FILE = echoFx.keyFile;
     try {
       const code = await main([
         "optimize-one",
-        "--out", echoOut,
-        "--config", join(echoOut, "candidate.json"),
-        "--control-config", join(echoOut, "control.json"),
+        "--out", echoFx.out,
+        "--attest-root", echoFx.attestRoot,
+        "--attest-key-file", echoFx.keyFile,
+        "--harness", echoFx.harnessPath,
+        "--config", join(echoFx.root, "candidate.json"),
+        "--control-config", echoFx.controlConfig,
         "--knob", "agent-loop.maxSteps",
-        "--executor-cmd", JSON.stringify([process.execPath, echoScript, "--task", "{taskPath}", "--config", "{config}", "--run-dir", "{runDir}", "--model", "{model}"]),
+        "--executor-cmd", JSON.stringify([process.execPath, echoScript, "--task", "{taskPath}", "--config", "{config}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--harness", "{harness}", "--model", "{model}", "--network", "{network}"]),
       ]);
       expect(code).toBe(1);
-      const saved = JSON.parse(readFileSync(join(echoOut, "once/activation.json"), "utf8")) as { patchActive: boolean };
+      const saved = JSON.parse(readFileSync(join(echoFx.out, "once/activation.json"), "utf8")) as { patchActive: boolean };
       expect(saved.patchActive).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous;
+      if (previousKey === undefined) delete process.env.HARNESS_ATTEST_KEY_FILE;
+      else process.env.HARNESS_ATTEST_KEY_FILE = previousKey;
     }
   });
 
   test("the direct once helper does not run the final block", async () => {
-    const out = outDir();
-    const control = join(out, "control.json");
-    const candidate = join(out, "candidate.json");
-    writeFileSync(control, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 25 } } })}\n`);
-    writeFileSync(candidate, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 24 } } })}\n`);
+    const fx = fixture();
+    const candidate = join(fx.root, "candidate.json");
+    writeFileSync(candidate, "{\"parts\":{\"agent-loop\":{\"maxSteps\":24}}}\n");
     const result = await runOptOnce({
-      out,
+      out: fx.out,
+      attestRoot: fx.attestRoot,
+      attestKeyFile: fx.keyFile,
+      harnessPath: fx.harnessPath,
       configPath: candidate,
-      controlConfigPath: control,
+      controlConfigPath: fx.controlConfig,
       knob: "agent-loop.maxSteps",
       seed: 0,
       executor: {
@@ -642,22 +829,13 @@ writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, w
             tWrite: 1_700_000_000,
             tEnd: 1_700_000_001,
             assistantTs: [],
-          });
-          return {
-            reward: 1,
-            scoreStatus: "scored",
-            tokens: 10,
-            wallS: 1,
-            timedOut: false,
-            tracePath: join(request.runDir, "trace.jsonl"),
-            outputsDir: join(request.runDir, "outputs"),
-            batchLogPath: join(request.runDir, "batch.log"),
-          };
+          }, { key: fx.key, harnessPath: fx.harnessPath });
+          return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
         },
       },
     });
     expect(result.patchActive).toBe(true);
-    expect(existsSync(join(out, "final/order.json"))).toBe(false);
-    expect(existsSync(join(out, "round1"))).toBe(false);
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round1"))).toBe(false);
   });
 });

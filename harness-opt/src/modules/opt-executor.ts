@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { candidateHashFragment } from "./activation";
+import { writeHostAttestation, type AttestRunMeta } from "./attestation";
 
 export interface OptTask {
   readonly id: string;
@@ -22,6 +23,10 @@ export interface OptRunRequest {
   readonly arm: "control" | "candidate";
   readonly configPath: string;
   readonly runDir: string;
+  /** Host directory for `{attestDir}/attestation.json`. Never taken from stdout. */
+  readonly attestDir: string;
+  /** Host harness file mounted over the image harness. Optional unless `{harness}` is used. */
+  readonly harnessPath?: string;
   readonly model: string;
   readonly tokenCap: number;
 }
@@ -69,6 +74,8 @@ const PLACEHOLDERS = [
   "arm",
   "config",
   "runDir",
+  "attestDir",
+  "harness",
   "model",
   "network",
   "tokenCap",
@@ -90,9 +97,12 @@ export function renderExecutorCommand(
   if (text.includes("{marker}") || text.includes("{patchHash}")) {
     throw new Error("executor command must not receive {marker} or {patchHash}");
   }
+  if (text.includes("{attestKey}") || text.includes("HARNESS_ATTEST_KEY_FILE")) {
+    throw new Error("executor command must not receive the attest key path");
+  }
   const namesTask = text.includes("{task}") || text.includes("{taskPath}");
-  if (!namesTask || !text.includes("{runDir}")) {
-    throw new Error("executor command must include {task} or {taskPath}, and {runDir}");
+  if (!namesTask || !text.includes("{runDir}") || !text.includes("{attestDir}")) {
+    throw new Error("executor command must include {task} or {taskPath}, {runDir}, and {attestDir}");
   }
   return template.map((arg) => arg.replace(/\{([A-Za-z]+)\}/g, (whole, name: string) => {
     if (!isPlaceholder(name)) return whole;
@@ -124,8 +134,13 @@ export class CommandOptExecutor implements OptExecutor {
   }
 }
 
-/** In-process executor for `--dry-run`. It writes the artifact contract and does not spawn. */
-export function createDryRunExecutor(): OptExecutor {
+export interface DryRunHost {
+  readonly key: Buffer;
+  readonly harnessPath: string;
+}
+
+/** In-process executor for `--dry-run`. It writes artifacts and the host attestation. It does not spawn. */
+export function createDryRunExecutor(host: DryRunHost): OptExecutor {
   return {
     name: "dry-run",
     async run(request) {
@@ -138,7 +153,7 @@ export function createDryRunExecutor(): OptExecutor {
         tWrite: base,
         tEnd: base + 1,
         assistantTs: [base + 0.2],
-      });
+      }, { key: host.key, harnessPath: host.harnessPath });
       return observationOf(request, { reward: 1, tokens: 100, wallS: 10, timedOut: false });
     },
   };
@@ -154,8 +169,17 @@ export interface RunArtifactTiming {
   readonly assistantTs: readonly number[];
 }
 
-/** Files a real driver must leave behind: trace, outputs, batch.log, reward.txt, result.json. */
-export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTiming): void {
+export interface RunAttestHost {
+  readonly key: Buffer;
+  readonly harnessPath: string;
+  readonly at?: string;
+}
+
+/**
+ * Files a real driver leaves in the run directory, plus the host attestation
+ * outside it when `attest` is set. The attestation is not derived from stdout.
+ */
+export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTiming, attest?: RunAttestHost): void {
   const outputs = join(request.runDir, "outputs");
   mkdirSync(outputs, { recursive: true });
   const answer = join(outputs, "answer.txt");
@@ -204,8 +228,27 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     wall_s: timing.wallS,
     timed_out: timing.timedOut,
     score_status: "scored",
-    session_file: sessionFile,
   })}\n`);
+  if (!attest) return;
+  const meta: AttestRunMeta = {
+    task: request.task.path,
+    seed: request.seed,
+    arm: request.arm,
+    score_status: "scored",
+    tokens: timing.tokens,
+    exit: 0,
+    runDir: resolve(request.runDir),
+    at: attest.at ?? "2026-10-21T00:00:00+09:00",
+  };
+  writeHostAttestation({
+    attestDir: request.attestDir,
+    runDir: request.runDir,
+    key: attest.key,
+    harnessPath: attest.harnessPath,
+    configPath: request.configPath,
+    reward: timing.reward,
+    meta,
+  });
 }
 
 function observationOf(
@@ -260,13 +303,18 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!driver) throw new Error("executor command needs HARNESS_OPT_DRIVER or --driver for {driver}");
     return driver;
   }
-  const values: Record<Exclude<Placeholder, "driver">, string> = {
+  if (name === "harness") {
+    if (!request.harnessPath) throw new Error("executor command needs --harness for {harness}");
+    return request.harnessPath;
+  }
+  const values: Record<Exclude<Placeholder, "driver" | "harness">, string> = {
     task: request.task.id,
     taskPath: request.task.path,
     seed: String(request.seed),
     arm: request.arm,
     config: request.configPath,
     runDir: request.runDir,
+    attestDir: request.attestDir,
     model: request.model,
     network: request.task.network,
     tokenCap: String(request.tokenCap),
@@ -289,7 +337,7 @@ function flatten(value: Record<string, unknown>, prefix = ""): Record<string, un
 
 function redact(text: string, env: NodeJS.ProcessEnv): string {
   let out = text;
-  for (const secret of [env.API_KEY, env.BOHR_ACCESS_KEY]) {
+  for (const secret of [env.API_KEY, env.BOHR_ACCESS_KEY, env.HARNESS_ATTEST_KEY_FILE]) {
     if (secret) out = out.split(secret).join("[REDACTED]");
   }
   return out;

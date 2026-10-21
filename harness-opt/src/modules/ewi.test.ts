@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_EWI_THRESHOLD_SEC, measureEwi, measureRunEwi, roundTenth } from "./ewi";
+
+const EWI_SCRIPT = fileURLToPath(new URL("../../scripts/ewi_idle.py", import.meta.url));
 
 describe("EWI metric", () => {
   test("rounds the first decimal the way Python 3 round does", () => {
@@ -179,4 +183,84 @@ describe("EWI metric", () => {
     expect(metrics.idleS).toBe(700);
     expect(metrics.postWriteS).toBe(700);
   });
+
+  test("a blank line in the middle fails closed, and a trailing newline does not", () => {
+    const dir = edgeDir("blank", `${JSON.stringify({ type: "assistant_message", ts: 1_000 })}\n\n${JSON.stringify({ type: "assistant_message", ts: 2_000 })}\n`);
+    expect(() => measureCase(dir)).toThrow(/not JSON/);
+    const trailing = edgeDir("trailing", `${JSON.stringify({ type: "assistant_message", ts: 1_000 })}\n`);
+    expect(measureCase(trailing).idleS).toBe(699);
+  });
+
+  test("an assistant NaN timestamp is kept out of the idle window", () => {
+    const dir = edgeDir("nan", "{\"type\":\"assistant_message\",\"ts\":NaN}\n");
+    expect(measureCase(dir).idleS).toBe(700);
+    expect(measureCase(dir).postWriteS).toBe(700);
+  });
+
+  test("the shared edge table matches ewi_idle.py", () => {
+    const rows: { readonly name: string; readonly trace: string; readonly link: boolean; readonly idle?: number }[] = [
+      { name: "blank-middle", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\n\n{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false },
+      { name: "ts-nan", trace: "{\"type\":\"assistant_message\",\"ts\":NaN}\n", link: false, idle: 700 },
+      { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false },
+      { name: "missing-ts", trace: "{\"type\":\"assistant_message\"}\n", link: false },
+      { name: "symlink-output", trace: "", link: true, idle: 700 },
+    ];
+    for (const row of rows) {
+      const dir = edgeDir(row.name, row.trace, row.link);
+      if (row.idle === undefined) {
+        expect(() => measureCase(dir)).toThrow();
+        const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
+        expect(proc.status).not.toBe(0);
+        continue;
+      }
+      expect(measureCase(dir).idleS).toBe(row.idle);
+      expect(pythonIdle(dir)).toBe(row.idle);
+    }
+  });
 });
+
+function measureCase(dir: string) {
+  return measureRunEwi({
+    task: "i014",
+    seed: "0",
+    timedOut: false,
+    tracePath: join(dir, "trace.jsonl"),
+    outputsDir: join(dir, "outputs"),
+    batchLogPath: join(dir, "batch.log"),
+  }, 600);
+}
+
+function edgeDir(name: string, trace: string, link = false): string {
+  const dir = mkdtempSync(join(tmpdir(), `ewi-${name}-`));
+  const outputs = join(dir, "outputs");
+  mkdirSync(outputs, { recursive: true });
+  const real = join(dir, "answer.txt");
+  writeFileSync(real, "x\n");
+  utimesSync(real, 0, 0);
+  if (link) {
+    symlinkSync(real, join(outputs, "answer.txt"));
+    const nested = join(dir, "nested");
+    mkdirSync(nested, { recursive: true });
+    const decoy = join(nested, "later.txt");
+    writeFileSync(decoy, "later\n");
+    utimesSync(decoy, 5_000, 5_000);
+    symlinkSync(nested, join(outputs, "linked-dir"));
+  } else {
+    const written = join(outputs, "answer.txt");
+    writeFileSync(written, "x\n");
+    utimesSync(written, 0, 0);
+  }
+  const tracePath = join(dir, "trace.jsonl");
+  writeFileSync(tracePath, trace);
+  writeFileSync(join(dir, "batch.log"), "1970-01-01T00:11:40.000Z run 1 done\n");
+  writeFileSync(join(dir, "summary.csv"), `task,seed,n,timed_out,trace\ni014,0,1,False,${tracePath}\n`);
+  return dir;
+}
+
+function pythonIdle(dir: string): number {
+  const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error(proc.stderr || proc.stdout || "ewi_idle.py failed");
+  const line = proc.stdout.split("\n").find((item) => item.startsWith("{"));
+  if (!line) throw new Error(proc.stdout || "ewi_idle.py printed nothing");
+  return (JSON.parse(line) as { idle: number }).idle;
+}

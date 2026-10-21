@@ -15,9 +15,11 @@ const USAGE = [
   "  start                 required unless files exist: --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score",
   "  step|status|gate|stop  continue the run in --out (default <cwd>/.harness-opt)",
   "  demo                  one closed loop on the sample trace; prints per-stage status",
-  "  optimize --dry-run --control-trace <file>   i014 loop with stub roles and no model call",
-  "  optimize --execute --control-trace <file> --executor-cmd '<json argv>'   needs BASE_URL",
-  "  optimize-one --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>'",
+  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir>",
+  "                        i014 loop with stub roles and no model call",
+  "  optimize --execute --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --executor-cmd '<json argv>'",
+  "                        needs BASE_URL; i014 passes --network shared",
+  "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>'",
   "                        one candidate seed to prove activation; not the final comparison",
 ].join("\n");
 
@@ -93,12 +95,24 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
     }
   }
   const driver = flag(argv, "--driver");
-  const controlTraces = repeatFlag(argv, "--control-trace");
+  const attestRoot = flag(argv, "--attest-root");
+  const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
+  const harnessPath = flag(argv, "--harness");
+  const controlConfigPath = flag(argv, "--control-config");
+  const controlAttests = repeatFlag(argv, "--control-attest");
+  if (!attestRoot || !attestKeyFile || !harnessPath) {
+    process.stderr.write("optimize needs --attest-root, --attest-key-file (or HARNESS_ATTEST_KEY_FILE), and --harness\n");
+    return 1;
+  }
   try {
     const result = await runOptLoop({
       out,
       mode: dry ? "dry-run" : "execute",
-      controlTraces,
+      attestRoot,
+      attestKeyFile,
+      harnessPath,
+      controlAttests,
+      ...(controlConfigPath ? { controlConfigPath } : {}),
       ...(rounds !== undefined ? { rounds } : {}),
       ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),
       ...(executorCommand ? { executorCommand } : {}),
@@ -121,8 +135,11 @@ async function optimizeOneCommand(argv: readonly string[]): Promise<number> {
   const controlConfigPath = flag(argv, "--control-config");
   const knob = flag(argv, "--knob");
   const rawCommand = flag(argv, "--executor-cmd");
-  if (!configPath || !controlConfigPath || !knob || !rawCommand) {
-    process.stderr.write("optimize-one needs --config, --control-config, --knob, and --executor-cmd\n");
+  const attestRoot = flag(argv, "--attest-root");
+  const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
+  const harnessPath = flag(argv, "--harness");
+  if (!configPath || !controlConfigPath || !knob || !rawCommand || !attestRoot || !attestKeyFile || !harnessPath) {
+    process.stderr.write("optimize-one needs --config, --control-config, --knob, --executor-cmd, --attest-root, --attest-key-file, and --harness\n");
     return 1;
   }
   let executorCommand: string[];
@@ -154,6 +171,9 @@ async function optimizeOneCommand(argv: readonly string[]): Promise<number> {
   try {
     const result = await runOptOnce({
       out,
+      attestRoot,
+      attestKeyFile,
+      harnessPath,
       configPath,
       controlConfigPath,
       knob,
@@ -179,6 +199,7 @@ function taskFromFlags(argv: readonly string[]): OptTask {
   if (network !== "gateway-only" && network !== "shared") {
     throw new Error("optimize-one --network must be gateway-only or shared");
   }
+  if (id === DEV_TASK.id && network !== "shared") throw new Error("i014 network must be shared");
   const rawWeight = flag(argv, "--token-w");
   const tokenW = rawWeight === undefined ? (id === DEV_TASK.id ? DEV_TASK.tokenW : Number.NaN) : Number(rawWeight);
   if (!Number.isFinite(tokenW) || tokenW <= 0) throw new Error("optimize-one --token-w must be a positive number");

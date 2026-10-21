@@ -139,25 +139,56 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 `optimize` 把 gap-finder、innovator、reviewer-gate 接到一次 Dev-II 执行上。默认协议：只做 i014，3 轮，每轮 1 个候选，dev 种子 0/1/2。三轮里最后一个被接受的候选，再和 control 按 `C0,X0,C1,X1,C2,X2` 交替重跑 i014，然后 held-out 跑 002、i030、hb003 各 3 个种子。002 的网络是 gateway-only。三轮都没有接受的候选时，不跑终比，也不跑 held-out。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
 
-执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}` 或 `{patchHash}`：环不会把补丁标记交给执行器，命令里写了这两个占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。驱动要在 `{runDir}` 留下 harness 自己写的 `trace.jsonl`（`run_start` 带它读完候选 config 后算出的 `candidateConfigHash` 和 `effective`）、`{runDir}/.pi-sessions/*.jsonl`（Pi 会话里的 system message，`sections.preamble` 或 `content` 含 harness 追加的 `candidateConfigHash: <同一哈希>`）、`outputs/`、`batch.log`（`<时间> run 1 done`）、`verifier/reward.txt`、`result.json`。`result.json` 的 `session_file` 如果指向会话文件，也会被核对。trace 里自称的 `systemPrompt` 不作为证据。单次 tokens 超过该题 `6×W` 记 unscored。
+执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{attestDir}` `{harness}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}`、`{patchHash}` 或 `{attestKey}`：环不会把补丁标记或证明密钥交给执行器，命令里写了这些占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。`{attestDir}` 由环在拉起执行器之前分配，位于 `--attest-root` 下，并且不和 `{runDir}` 嵌套。i014 的 `task.toml` 允许联网，box 上把这个模式叫 `open`；环传给执行器的仍是 `--network shared`（适配器自己把 `shared` 映射成 `open`）。002 仍是 `gateway-only`。
 
-第一轮的上一轮 trace 必须用 `--control-trace <文件>` 传入，而且文件要已经存在。环不写 `baseline/` 桩。`gapCitedTrace` 只认 gap 会话里对那些 trace 文件的 `read` 工具调用。`reviewFedForward` 只认下一轮 gap 会话里对上一轮 `reviewer-gate.jsonl` 的 `read` 工具调用，不读环自己写的 `gap-input.json`。`patchActive` 为 false，或会话里没有这条哈希，本轮不能被接受，终比和 held-out 不跑。
+驱动在容器退出之后，把 `{attestDir}/attestation.json` 写到任何挂载之外。环只读这个它自己分配的路径，不读执行器 stdout，也不读 `result.json` 里的路径。schema 是 `devii-opt-attest/v1`，字段与包装器的 `ATTEST_FIELDS` 一一对应，没有第二套名字：
 
-每一轮落下三个角色的 Pi session jsonl 和 sha、`patch.diff`、以及 `activation.json`。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。坏掉的 trace 行和缺少 `ts` 的 `assistant_message` 跟 `ewi_idle.py` 一样失败关闭；`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。
+| 包装器键 | JSON 字段 |
+| --- | --- |
+| schema | `schema` |
+| harness | `mountedHarnessSha` |
+| config | `mountedConfigSha` |
+| trace | `traceSha` |
+| sessions | `piSessionShas` |
+| outputs | `outputShas` |
+| reward | `reward` |
+| rewardFile | `rewardFileSha` |
+| result | `resultSha` |
+| meta | `run` |
+| mac | `hmacSha256` |
+
+`hmacSha256` 是 HMAC-SHA256，覆盖除它自己以外的对象。待签字节等于 Python `json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`。密钥是 `HARNESS_ATTEST_KEY_FILE` 指向的文件的原始字节，模式 `0600`，至少 32 字节。这个环境变量可以由包装进程继承，但不得出现在 argv 里，也不得传进容器。`piSessionShas` 和 `outputShas` 只含普通文件的相对路径，不含 symlink。环会重算 trace、sessions、outputs、`verifier/reward.txt` 和 `result.json` 的 sha256，并核对 `mountedConfigSha` 等于宿主交给执行器的那份 config 文件。缺文件、哈希不符或 MAC 不符都失败关闭。`result.json` 的 `session_file` 不是证据。
+
+`patchActive` 为真需要三件事同时成立：已验证证明里的 `mountedConfigSha` 等于宿主候选 config 的 sha256，已证明的 trace 里 `run_start.candidateConfigHash` 等于这个 sha，并且已证明的某个 `.pi-sessions` 文件的 system message（`content` 或 `sections`）含有 harness 追加的 `candidateConfigHash: <同一哈希>`。候选 sha 还必须和 control 不同，`effective` 里的旋钮值要等于候选 config。做不到就不能接受，终比和 held-out 不跑。
+
+第一轮的 control trace 用 `--control-attest <目录>` 传入，目录里要有上述证明，而且 `run.arm` 是 `control`。环核对 `mountedConfigSha` 等于宿主 control 文件的 sha256，再核对 trace 里的 `run_start.candidateConfigHash` 等于这个 sha。预注册那份紧凑 control（`{"parts":{"agent-loop":{"maxSteps":25}}}\n`）的 sha256 是 `3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c`。环不把这个常数当成唯一合法值；换一份字节不同的 control 文件，证明对不上就拒绝。环不写 `baseline/` 桩。
+
+`gapCitedTrace` 和 `reviewFedForward` 只读环在调用角色之前分配的会话文件。角色函数的返回文本、它自己报的路径，都不算。会话里要有一次成功的 `read`：assistant 的 `toolCall`（`name` 为 `read`，`arguments.path` 指向目标文件）以及之后 `role` 为 `toolResult`、`toolName` 为 `read`、`isError` 为 false 的结果，结果文本的 sha256 必须等于宿主已经记下的那个文件哈希。目标是 control / 上一轮已证明的 trace，或上一轮 reviewer 会话。
+
+每一轮落下三个角色的 Pi session jsonl 和宿主算出的 sha、`patch.diff`、以及 `activation.json`。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。实现和 `scripts/ewi_idle.py` 对齐：空行在文件中间会失败，文件末尾换行不会多出一行；`ts` 为 `NaN` 时按 Python 接受并从 idle 窗口去掉；截断行和缺少 `ts` 的 `assistant_message` 失败关闭。`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。单次 tokens 超过该题 `6×W` 记 unscored。
 
 ```bash
-bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run --control-trace /tmp/i014-control-seed0.jsonl
+bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
+  --attest-root /tmp/harness-opt-attest --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
+  --harness "$HARNESS_FILE" --control-attest /tmp/i014-control-attest
 ```
 
-`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。`--attest-root` 必须在 `--out` 外面。
 
-下面这条只跑一个候选种子，用来在真镜像和真模型上证明激活可以为真。它不是预注册的终比，也不会跑 `C0,X0,...` 或 held-out。镜像里的 harness 必须是这份补丁：它自己读候选 config，把 sha256 写进 `run_start`，并追加到 lead system prompt，Pi 再把这段写进 `.pi-sessions/*.jsonl`。驱动要把该会话留在 `{runDir}/.pi-sessions/`。
+下面这条只跑一个候选种子，用来在真镜像和真模型上证明激活可以为真。它不是预注册的终比，也不会跑 `C0,X0,...` 或 held-out。镜像里的 harness 必须是这份补丁：它自己读候选 config，把 sha256 写进 `run_start`，并追加到 lead system prompt，Pi 再把这段写进 `.pi-sessions/*.jsonl`。包装器在容器退出后把这些文件留在 `{runDir}`，并把证明写到 `{attestDir}/attestation.json`。i014 会带上 `--network shared`。
 
 ```bash
-BASE_URL="$BASE_URL" bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once --config /tmp/harness-opt-candidate.json --control-config /tmp/harness-opt-control.json --knob agent-loop.maxSteps --seed 0 --task i014 --task-path "$TASK_DIR" --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--model","{model}","--network","{network}","--token-cap","{tokenCap}"]' --driver "$HARNESS_OPT_DRIVER"
+BASE_URL="$BASE_URL" HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" \
+bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once \
+  --attest-root /tmp/harness-opt-attest --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
+  --harness "$HARNESS_FILE" --config /tmp/harness-opt-candidate.json \
+  --control-config /tmp/harness-opt-control.json --knob agent-loop.maxSteps \
+  --seed 0 --task i014 --task-path "$TASK_DIR" \
+  --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--model","{model}","--network","{network}","--token-cap","{tokenCap}","--harness","{harness}","--attest-dir","{attestDir}"]' \
+  --driver "$HARNESS_OPT_DRIVER"
 ```
 
-`patchActive` 为真时退出码是 0，否则是 1。`$BASE_URL`、`$TASK_DIR`、`$HARNESS_OPT_DRIVER` 由运行那台机器提供。候选 config 必须和 control 不是同一份字节。
+`patchActive` 为真时退出码是 0，否则是 1。`$BASE_URL`、`$TASK_DIR`、`$HARNESS_FILE`、`$HARNESS_ATTEST_KEY_FILE`、`$HARNESS_OPT_DRIVER` 由运行那台机器提供。候选 config 必须和 control 不是同一份字节。包装器不得修改 `devii_docker_v2.py`；它只负责挂载、在容器退出后复制产物，并按上面的 schema 写证明。
 
 ## 本地闭环
 
