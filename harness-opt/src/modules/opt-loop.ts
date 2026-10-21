@@ -38,7 +38,7 @@ import {
 } from "./opt-executor";
 import { EFFECTIVE_KNOBS, flatDottedKeys, formatKnobLine, harnessEffectiveKeys, isEffectiveKnob, knobCatalog, leafKnobPaths, noopKeys } from "./effective-knobs";
 import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
-import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec } from "./reviewer-gates";
+import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec, patchTookEffect } from "./reviewer-gates";
 import {
   buildRoleSpawn,
   hostWriteSession,
@@ -596,6 +596,8 @@ interface CampaignDisk {
   previousReview: ReviewNote | null;
   accepted: AcceptedCandidate | null;
   gapRound: number | null;
+  /** Absent on a campaign written before this field existed. */
+  baselineEffective?: Record<string, unknown> | null;
 }
 
 interface ResumeState {
@@ -612,6 +614,7 @@ interface ResumeState {
   readonly consecutiveNoAccept: number;
   readonly previousReview: ReviewNote | null;
   readonly accepted: AcceptedCandidate | null;
+  readonly baselineEffective: Record<string, unknown> | null;
 }
 
 class ResumeTraceError extends Error {
@@ -661,7 +664,15 @@ function readCampaign(out: string): CampaignDisk | null {
       : null,
     accepted: parsed.accepted && typeof parsed.accepted.round === "number" ? parsed.accepted : null,
     gapRound: typeof parsed.gapRound === "number" ? parsed.gapRound : null,
+    ...("baselineEffective" in parsed
+      ? { baselineEffective: plainRecord(parsed.baselineEffective) }
+      : {}),
   };
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
 }
 
 function priorRoundSummaries(out: string, nextRound: number): OptLoopResult["rounds"][number][] {
@@ -838,6 +849,9 @@ function loadResume(options: OptLoopOptions, key: Buffer, relayRoot: string): Re
     consecutiveNoAccept: disk?.consecutiveNoAccept ?? 0,
     previousReview: disk?.previousReview ?? null,
     accepted: disk?.accepted ?? null,
+    baselineEffective: disk && "baselineEffective" in disk
+      ? disk.baselineEffective ?? null
+      : readRunEdges(gap.path).effective,
   };
 }
 
@@ -924,6 +938,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     : loadedControl?.hints ?? [];
   let baselineReward: number | null = resume ? resume.baselineReward : loadedControl?.reward ?? null;
   let latestGapRound: number | null = resume?.gapRound ?? null;
+  const controlTrace = loadedControl?.hints[0]?.file;
+  const round0Effective = round0 ? readRunEdges(round0.hostCopyPath).effective : null;
+  let baselineEffective: Record<string, unknown> | null = resume
+    ? resume.baselineEffective
+    : round0Effective ?? (controlTrace ? readRunEdges(controlTrace).effective : null);
 
   const tried: string[] = [];
   let accepted: AcceptedCandidate | null = resume?.accepted ?? null;
@@ -1680,7 +1699,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         }
       }
     }
-    const activation = activationRecord({
+    let activation = activationRecord({
       runs,
       patchHash,
       controlSha,
@@ -1756,6 +1775,17 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const seeded = runs[0];
     const edges = readRunEdges(seeded?.verified?.tracePath ?? seeded?.tracePath ?? "");
     const changed = changedLeaves(control, candidate);
+    const tookEffect = patchTookEffect({
+      evidenceActive: activation.patchActive,
+      changed,
+      effective: edges.effective,
+      baselineEffective,
+      runEnd: edges.runEnd,
+    });
+    if (!options.stopBeforeRun) {
+      activation = { ...activation, patchActive: tookEffect };
+      writeJson(join(options.out, `round${round}`, "activation.json"), activation);
+    }
     let harnessText = "";
     try {
       harnessText = readFileSync(options.harnessPath, "utf8");
@@ -1789,6 +1819,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           reward: seeded?.reward ?? null,
           baselineReward,
           patchActive: activation.patchActive,
+          baselineEffective,
         });
     const reviewerGates = preflight
       ? { gates: preflight.gates, preflight: true as const, final: false as const }
@@ -1970,6 +2001,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       writeText(baselinePath, nextText);
       control = JSON.parse(nextText) as ConfigFile;
       controlSha = sha256File(baselinePath);
+      if (edges.effective) baselineEffective = edges.effective;
     } else {
       consecutiveNoAccept += 1;
     }
@@ -2029,6 +2061,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     previousReview,
     accepted,
     gapRound: latestGapRound,
+    baselineEffective,
   });
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -3827,6 +3860,10 @@ function captureSession(
 }
 
 function writeClosure(out: string, round: number, record: ClosureRecord): void {
+  if (!record.preflight) {
+    const g2 = record.gates?.find((gate) => gate.id === "G2");
+    if (g2 && g2.pass !== record.patchActive) throw new Error("G2 and patchActive disagree");
+  }
   writeJson(join(out, `round${round}`, "closure.json"), {
     ...record,
     closed: record.gapCitedTrace && record.knobMatched && record.patchActive && record.reviewFedForward === true,

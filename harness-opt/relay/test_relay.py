@@ -1175,17 +1175,24 @@ class HookCase(unittest.TestCase):
         self.assertEqual(watcher.t_last_write, 40)
         tmp.cleanup()
 
-    def test_10_patch_active_needs_every_request(self):
+    def test_10_patch_active_ignores_hashless_requests(self):
         sha = "ab" * 32
+        other = "cd" * 32
         ledger = Ledger()
         ledger.reqs = [
             {"systemConfigHashes": [sha]},
             {"systemConfigHashes": []},
+            {"systemConfigHashes": []},
+            {"systemConfigHashes": []},
+            {"systemConfigHashes": []},
         ]
-        self.assertFalse(patch_active(ledger, sha)["active"])
-        self.assertEqual(patch_active(ledger, sha)["requests"], 2)
-        ledger.reqs[1]["systemConfigHashes"] = [sha]
         self.assertTrue(patch_active(ledger, sha)["active"])
+        self.assertEqual(patch_active(ledger, sha)["requests"], 5)
+        ledger.reqs.append({"systemConfigHashes": [other]})
+        self.assertFalse(patch_active(ledger, sha)["active"])
+        hashless = Ledger()
+        hashless.reqs = [{"systemConfigHashes": []}]
+        self.assertFalse(patch_active(hashless, sha)["active"])
         self.assertFalse(patch_active(Ledger(), sha)["active"])
 
     def test_10c_kinds_and_reconcile(self):

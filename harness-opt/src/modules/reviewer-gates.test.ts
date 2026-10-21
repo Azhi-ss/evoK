@@ -17,6 +17,7 @@ function input(over: Partial<ReviewerGateInput> = {}): ReviewerGateInput {
     reward: 1,
     baselineReward: 1,
     patchActive: true,
+    baselineEffective: null,
     ...over,
   };
 }
@@ -43,6 +44,15 @@ describe("reviewer gates", () => {
 
   test("G2 rejects when patchActive is false even though the effective value matches", () => {
     const report = evaluateReviewerGates(input({ patchActive: false }));
+    expect(report.verdict).toBe("reject");
+    expect(report.rejectCode).toBe("inactive_key");
+    expect(report.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+  });
+
+  test("G2 rejects a leaf that repeats the previous round's effective value", () => {
+    const report = evaluateReviewerGates(input({
+      baselineEffective: { "agent-loop.maxSteps": 20 },
+    }));
     expect(report.verdict).toBe("reject");
     expect(report.rejectCode).toBe("inactive_key");
     expect(report.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });

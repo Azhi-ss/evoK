@@ -28,11 +28,15 @@ export interface ReviewerGateInput {
   readonly reward: number | null;
   readonly baselineReward: number | null;
   /**
-   * Host activation. False when the relay, mounted config, session hash, or
-   * effective knob does not prove the patch was loaded. A matching effective
-   * value alone is not enough.
+   * Relay, mount, and session evidence. Hashless requests, such as compaction,
+   * are already ignored. A matching effective value alone is not enough.
    */
   readonly patchActive: boolean;
+  /**
+   * Effective config of the previous round, the baseline this run is compared
+   * against. A changed leaf equal to this value did not take effect.
+   */
+  readonly baselineEffective: Readonly<Record<string, unknown>> | null;
 }
 
 export interface ReviewerGateReport {
@@ -89,19 +93,42 @@ function withinOfficialTimeout(wallS: number | null, timeoutSec: number | null):
   return wallS < timeoutSec;
 }
 
-function activeLeaves(input: ReviewerGateInput): { readonly pass: boolean; readonly code?: string } {
-  if (!input.patchActive) return { pass: false, code: "inactive_key" };
-  if (input.changed.length === 0) return { pass: false, code: "inactive_key" };
+function repeatsBaseline(baseline: Readonly<Record<string, unknown>> | null, leaf: ChangedLeaf): boolean {
+  if (!baseline || !Object.prototype.hasOwnProperty.call(baseline, leaf.path)) return false;
+  return sameValue(baseline[leaf.path], leaf.value);
+}
+
+/**
+ * The single activation measure. G2 passes exactly when this is true, and
+ * closure.patchActive stores the same boolean.
+ */
+export function patchTookEffect(input: {
+  readonly evidenceActive: boolean;
+  readonly changed: readonly ChangedLeaf[];
+  readonly effective: Readonly<Record<string, unknown>> | null;
+  readonly baselineEffective: Readonly<Record<string, unknown>> | null;
+  readonly runEnd: Readonly<Record<string, unknown>> | null;
+}): boolean {
+  if (!input.evidenceActive) return false;
+  if (input.changed.length === 0) return false;
   for (const leaf of input.changed) {
-    if (!input.effective || !sameValue(input.effective[leaf.path], leaf.value)) {
-      return { pass: false, code: "inactive_key" };
-    }
+    if (repeatsBaseline(input.baselineEffective, leaf)) return false;
+    if (!input.effective || !sameValue(input.effective[leaf.path], leaf.value)) return false;
     const bound = RUN_END_BOUNDS[leaf.path];
-    if (bound && (!input.runEnd || !bound(leaf.value, input.runEnd))) {
-      return { pass: false, code: "inactive_key" };
-    }
+    if (bound && (!input.runEnd || !bound(leaf.value, input.runEnd))) return false;
   }
-  return { pass: true };
+  return true;
+}
+
+function activeLeaves(input: ReviewerGateInput): { readonly pass: boolean; readonly code?: string } {
+  const pass = patchTookEffect({
+    evidenceActive: input.patchActive,
+    changed: input.changed,
+    effective: input.effective,
+    baselineEffective: input.baselineEffective,
+    runEnd: input.runEnd,
+  });
+  return pass ? { pass: true } : { pass: false, code: "inactive_key" };
 }
 
 /** Host verdict. G0 failure is anti_forgery. Later failures reject. The first failure wins. */

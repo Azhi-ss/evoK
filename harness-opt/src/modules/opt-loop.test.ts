@@ -5303,6 +5303,89 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const result = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { rounds: { round: number }[] };
     expect(result.rounds.map((round) => round.round)).toEqual([1, 2]);
   });
+
+  test("round 2 shape: hashless compaction is ignored and a repeated effective value fails G2 and patchActive together", async () => {
+    const fx = fixture();
+    const runDir = join(fx.root, "control-run");
+    const tracePath = join(runDir, "trace.jsonl");
+    const lines = readFileSync(tracePath, "utf8").split("\n").filter((line) => line.trim() !== "");
+    const start = JSON.parse(lines[0] ?? "{}") as { effective?: Record<string, unknown> };
+    start.effective = { ...(start.effective ?? {}), "agent-loop.maxSteps": 20 };
+    lines[0] = JSON.stringify(start);
+    writeFileSync(tracePath, `${lines.join("\n")}\n`);
+    const recorded = JSON.parse(readFileSync(join(runDir, "result.json"), "utf8")) as { runId: string };
+    writeHostAttestation({
+      attestDir: fx.controlAttest,
+      runDir,
+      key: fx.key,
+      harnessPath: fx.harnessPath,
+      configPath: fx.controlConfig,
+      reward: 1,
+      meta: {
+        task: LOOP_TASK.path,
+        seed: 0,
+        arm: "control",
+        score_status: "scored",
+        tokens: 10,
+        exit: 0,
+        runDir: resolve(runDir),
+        runId: recorded.runId,
+        runPath: resolve(runDir),
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const usage = { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } };
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: {
+        gap: (input) => cited.gap(input),
+        async innovate(input) {
+          const summary = "agent-loop.maxSteps=20";
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => cited.critic(input),
+        ranker: (input) => cited.ranker(input),
+        review: (input) => cited.review(input),
+      },
+      executor: {
+        name: "compaction",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          const result = JSON.parse(readFileSync(join(request.runDir, "result.json"), "utf8")) as { runId: string };
+          const log = join(request.relayLogRoot ?? "", result.runId, "relay.jsonl");
+          const rows: string[] = [];
+          for (let seq = 2; seq <= 5; seq += 1) {
+            rows.push(JSON.stringify({ type: "req", seq, runId: result.runId, systemConfigHashes: [], toolResults: [], compaction: true }));
+            rows.push(JSON.stringify({ type: "done", seq, status: 200, usage, role: "executor" }));
+          }
+          appendFileSync(log, `${rows.join("\n")}\n`);
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      patchActive: boolean;
+      rejectCode?: string;
+      gates: { id: string; pass: boolean; code?: string }[];
+    };
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as {
+      patchActive: boolean;
+      runs: { active: boolean; effectiveKnob: unknown }[];
+    };
+    expect(activation.runs[0]?.active).toBe(true);
+    expect(activation.runs[0]?.effectiveKnob).toBe(20);
+    expect(activation.patchActive).toBe(false);
+    expect(closure.gates.find((gate) => gate.id === "G2")).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    expect(closure.patchActive).toBe(false);
+    expect(closure.patchActive).toBe(closure.gates.find((gate) => gate.id === "G2")?.pass);
+    expect(closure.rejectCode).toBe("inactive_key");
+  });
 });
 
 function mirrorTaskCopy(runDir: string): string {

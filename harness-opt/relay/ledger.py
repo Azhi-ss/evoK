@@ -249,10 +249,19 @@ def classify(ledger: Ledger, host=None) -> dict:
 
 
 def patch_active(ledger: Ledger, mounted_sha: str) -> dict:
+    """Activation counts only requests that carry a config hash.
+
+    A request with no hash, such as compaction, is ignored. It is not forgery.
+    A request that carries some other hash still fails the check. If nothing
+    carries a hash, the patch was not shown to the model.
+    """
     reqs = ledger.reqs
-    if not reqs or not mounted_sha:
+    if not mounted_sha:
         return {"active": False, "requests": len(reqs)}
-    active = all(mounted_sha in (req.get("systemConfigHashes") or []) for req in reqs)
+    carrying = [req for req in reqs if req.get("systemConfigHashes")]
+    if not carrying:
+        return {"active": False, "requests": len(reqs)}
+    active = all(mounted_sha in (req.get("systemConfigHashes") or []) for req in carrying)
     return {"active": active, "requests": len(reqs)}
 
 
