@@ -352,6 +352,10 @@ class Relay:
             "status": status,
             "usage": usage,
         }
+        assistant = _assistant_text(resp or b"")
+        if assistant:
+            row["assistant"] = assistant
+            row["assistantSha"] = hashlib.sha256(assistant.encode()).hexdigest()
         if error:
             row["error"] = error
         if err_class:
@@ -424,6 +428,47 @@ def _prepare(incoming: dict):
             patched = True
     raw = json.dumps(forward, ensure_ascii=False, separators=(",", ":")).encode()
     return raw, stream, patched
+
+
+def _assistant_text(resp: bytes) -> str:
+    """Assistant text from a chat-completion body. Empty when the body has none."""
+    if not resp:
+        return ""
+    if resp.lstrip().startswith(b"data:"):
+        parts = []
+        for line in resp.splitlines():
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if data == b"[DONE]":
+                continue
+            try:
+                obj = json.loads(data.decode())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            for choice in obj.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("delta") if isinstance(choice.get("delta"), dict) else choice.get("message")
+                if isinstance(message, dict):
+                    piece = _content_text(message.get("content"))
+                    if piece:
+                        parts.append(piece)
+        return "".join(parts)
+    try:
+        parsed = json.loads(resp.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    choices = parsed.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[-1], dict):
+        message = choices[-1].get("message")
+        if isinstance(message, dict):
+            return _content_text(message.get("content"))
+    return ""
 
 
 def _usage_from_stream(resp: bytes):

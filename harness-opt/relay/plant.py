@@ -80,8 +80,8 @@ def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None) -> No
         append_jsonl(path, {"type": "done", "seq": conclusion_seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}, "role": "gap"})
 
 
-def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1) -> None:
-    """One req/done pair whose respSha is the role conclusion. Tests and dry-run only."""
+def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1, assistant="") -> None:
+    """One req/done pair. assistant is the conclusion JSON. Tests and dry-run only."""
     path = Path(log_path)
     ts, iso = _stamp()
     if not path.is_file():
@@ -92,11 +92,15 @@ def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1) -> None:
         "reqSha": resp_sha, "systemSha": "0" * 64, "systemConfigHashes": [], "stream": False,
         "streamPatched": False, "toolResults": [], "role": role, "round": round,
     })
-    append_jsonl(path, {
+    done = {
         "type": "done", "seq": seq, "runId": run_id, "ts_resp_end": ts, "ts_iso": iso,
         "respSha": resp_sha, "status": 200, "role": role, "round": round,
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}},
-    })
+    }
+    if assistant:
+        done["assistant"] = assistant
+        done["assistantSha"] = hashlib.sha256(assistant.encode()).hexdigest()
+    append_jsonl(path, done)
 
 
 def _rewrite(path: Path, rows) -> None:
@@ -135,7 +139,7 @@ def main(argv=None) -> None:
             plant_read(one("log"), one("run-id"), file, seq=index)
         return
     if cmd == "plant-role":
-        plant_role_done(one("log"), one("run-id"), int(one("seq")), one("resp-sha"), one("role"), int(one("round")) if flags.get("round") else 1)
+        plant_role_done(one("log"), one("run-id"), int(one("seq")), one("resp-sha"), one("role"), int(one("round")) if flags.get("round") else 1, (flags.get("assistant") or [""])[-1])
         return
     raise SystemExit(f"unknown {cmd}")
 

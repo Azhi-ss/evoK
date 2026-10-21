@@ -246,28 +246,87 @@ def drive(rounds, *, caps=None, read_only_tokens_n=0, read_only_wall_s=0, real_r
     }
 
 
+def _json_objects(text: str):
+    found = []
+    start = None
+    depth = 0
+    in_str = False
+    esc = False
+    for index, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    obj = json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    found.append(obj)
+                start = None
+    return found
+
+
+def _conclusion_shape(role: str, obj):
+    if not isinstance(obj, dict):
+        return None
+    if role == "critic" and isinstance(obj.get("excluded"), list) and all(isinstance(item, str) for item in obj["excluded"]):
+        return {"excluded": list(obj["excluded"])}
+    if role == "ranker" and isinstance(obj.get("winnerId"), str):
+        return {"winnerId": obj["winnerId"]}
+    if role == "reviewer" and isinstance(obj.get("accept"), bool) and isinstance(obj.get("reason"), str):
+        return {"accept": obj["accept"], "reason": obj["reason"]}
+    return None
+
+
+def _conclusion_in_text(role: str, text: str):
+    found = None
+    for obj in _json_objects(text):
+        shaped = _conclusion_shape(role, obj)
+        if shaped is not None:
+            found = shaped
+    return found
+
+
 def bind_role_call(role: str, call, relay_events, session_text=None) -> dict:
-    """Critic, ranker, and reviewer each need their own relay req/done. respSha matches the stored output."""
+    """Critic, ranker, and reviewer bind to the conclusion in the run's last done.
+
+    The relay stores the assistant text. The host parses that text and accepts
+    only when it equals the conclusion the role reported. Session text is ignored.
+    """
     if role not in BIND_ROLES:
         raise ValueError("role kind rejected")
     if not relay_events:
         return {"ok": False, "reason": "missing_relay_record"}
     del session_text
-    seq = call["seq"]
-    run_id = call["runId"]
-    reqs = [row for row in relay_events if row.get("type") == "req" and row.get("seq") == seq]
-    mine = [row for row in reqs if row.get("runId") == run_id]
-    if not mine:
-        if reqs:
+    run_id = call.get("runId")
+    reqs = [row for row in relay_events if row.get("type") == "req" and row.get("runId") == run_id]
+    if not reqs:
+        if any(row.get("type") == "req" for row in relay_events):
             return {"ok": False, "reason": "wrong_runId"}
         return {"ok": False, "reason": "missing_relay_record"}
-    dones = [row for row in relay_events if row.get("type") == "done" and row.get("seq") == seq and row.get("role", role) == role]
-    if not dones:
-        dones = [row for row in relay_events if row.get("type") == "done" and row.get("seq") == seq]
+    seqs = {row.get("seq") for row in reqs}
+    dones = [row for row in relay_events if row.get("type") == "done" and row.get("seq") in seqs]
     if not dones:
         return {"ok": False, "reason": "missing_relay_record"}
-    if dones[0].get("respSha") != call.get("outputSha"):
-        return {"ok": False, "reason": "respSha_mismatch"}
+    text = dones[-1].get("assistant")
+    recorded = _conclusion_in_text(role, text) if isinstance(text, str) else None
+    reported = _conclusion_shape(role, call.get("conclusion"))
+    if recorded is None or reported is None or recorded != reported:
+        return {"ok": False, "reason": "conclusion_mismatch"}
     return {"ok": True}
 
 

@@ -1501,11 +1501,7 @@ function bindConclusion(
   body: unknown,
 ): boolean {
   if (!existsSync(call.relayLog)) return false;
-  return bindRoleCall(role, { seq: call.seq, runId: call.runId, outputSha: roleOutputSha(body) }, readJsonl(call.relayLog)).ok;
-}
-
-function roleOutputSha(body: unknown): string {
-  return sha256(JSON.stringify(body));
+  return bindRoleCall(role, { seq: call.seq, runId: call.runId, conclusion: body }, readJsonl(call.relayLog)).ok;
 }
 
 let activeRelay: RelayControl | null = null;
@@ -1529,6 +1525,7 @@ function plantStubDone(baseUrl: string, role: string, round: number, body: unkno
     "--run-id", runId,
     "--seq", "1",
     "--resp-sha", sha256(JSON.stringify(body)),
+    "--assistant", JSON.stringify(body),
     "--role", role,
     "--round", String(round),
   ], { encoding: "utf8" });

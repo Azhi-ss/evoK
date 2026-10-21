@@ -114,7 +114,10 @@ class RelayCase(unittest.TestCase):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length") or 0)
                 seen.append(self.rfile.read(length))
-                raw = json.dumps({"usage": usage}).encode()
+                raw = json.dumps({
+                    "choices": [{"message": {"role": "assistant", "content": "{\"winnerId\":\"c0\"}"}}],
+                    "usage": usage,
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
@@ -187,6 +190,7 @@ class RelayCase(unittest.TestCase):
         self.assertIn('"type":"done"', text)
         self.assertIn('"type":"open"', text)
         self.assertIn('"prompt_tokens":11', text)
+        self.assertIn('"assistant":"{\\"winnerId\\":\\"c0\\"}"', text)
         self.assertNotIn("plant-boot", text)
         self.assertNotIn(self.up.read_bytes().decode(), text)
 
@@ -1011,23 +1015,31 @@ class LoopModeCase(unittest.TestCase):
 
     def test_bind_role_and_exclusion(self):
         run_id = "ab" * 16
-        call = {"seq": 1, "runId": run_id, "outputSha": "aa" * 32}
+        conclusion = {"excluded": []}
+        call = {"seq": 1, "runId": run_id, "conclusion": conclusion}
         events = [
             {"type": "req", "seq": 1, "runId": run_id},
-            {"type": "done", "seq": 1, "role": "critic", "respSha": "aa" * 32},
+            {"type": "done", "seq": 1, "role": "critic", "assistant": json.dumps(conclusion)},
         ]
         self.assertTrue(loop_mode.bind_role_call("critic", call, events, session_text="forged")["ok"])
         self.assertEqual(loop_mode.bind_role_call("ranker", call, [], "session only")["reason"], "missing_relay_record")
-        wrong = loop_mode.bind_role_call("reviewer", call, [
+        wrong = loop_mode.bind_role_call("reviewer", {"seq": 1, "runId": run_id, "conclusion": {"accept": True, "reason": "x"}}, [
             {"type": "req", "seq": 1, "runId": "cd" * 16},
-            {"type": "done", "seq": 1, "respSha": "aa" * 32},
+            {"type": "done", "seq": 1, "assistant": "{\"accept\":true,\"reason\":\"x\"}"},
         ])
         self.assertEqual(wrong["reason"], "wrong_runId")
         mismatch = loop_mode.bind_role_call("critic", call, [
             {"type": "req", "seq": 1, "runId": run_id},
-            {"type": "done", "seq": 1, "respSha": "bb" * 32},
+            {"type": "done", "seq": 1, "assistant": "{\"excluded\":[\"c0\"]}"},
         ])
-        self.assertEqual(mismatch["reason"], "respSha_mismatch")
+        self.assertEqual(mismatch["reason"], "conclusion_mismatch")
+        later = loop_mode.bind_role_call("critic", call, [
+            {"type": "req", "seq": 1, "runId": run_id},
+            {"type": "done", "seq": 1, "assistant": "{\"excluded\":[\"old\"]}"},
+            {"type": "req", "seq": 2, "runId": run_id},
+            {"type": "done", "seq": 2, "assistant": "final {\"excluded\":[]}"},
+        ])
+        self.assertTrue(later["ok"])
         with self.assertRaises(ValueError):
             loop_mode.bind_role_call("gap", call, events)
         one = loop_mode.exclude_and_recompute(

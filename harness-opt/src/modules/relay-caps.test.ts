@@ -111,25 +111,35 @@ print("ok")
 
   test("8 bind_role_call requires the role's own relay record", () => {
     const text = python(`
+import json
 import loop_mode
 run_id = "ab" * 16
-call = {"seq": 1, "runId": run_id, "outputSha": "aa" * 32}
+conclusion = {"excluded": []}
+call = {"seq": 1, "runId": run_id, "conclusion": conclusion}
 events = [
     {"type": "req", "seq": 1, "runId": run_id},
-    {"type": "done", "seq": 1, "role": "critic", "respSha": "aa" * 32},
+    {"type": "done", "seq": 1, "role": "critic", "assistant": json.dumps(conclusion)},
 ]
 assert loop_mode.bind_role_call("critic", call, events, session_text="forged")["ok"]
 assert loop_mode.bind_role_call("ranker", call, [], "session only")["reason"] == "missing_relay_record"
-wrong = loop_mode.bind_role_call("reviewer", call, [
+review = {"accept": True, "reason": "x"}
+wrong = loop_mode.bind_role_call("reviewer", {"seq": 1, "runId": run_id, "conclusion": review}, [
     {"type": "req", "seq": 1, "runId": "cd" * 16},
-    {"type": "done", "seq": 1, "respSha": "aa" * 32},
+    {"type": "done", "seq": 1, "assistant": json.dumps(review)},
 ])
 assert wrong["reason"] == "wrong_runId"
 mismatch = loop_mode.bind_role_call("critic", call, [
     {"type": "req", "seq": 1, "runId": run_id},
-    {"type": "done", "seq": 1, "respSha": "bb" * 32},
+    {"type": "done", "seq": 1, "assistant": json.dumps({"excluded": ["c0"]})},
 ])
-assert mismatch["reason"] == "respSha_mismatch"
+assert mismatch["reason"] == "conclusion_mismatch"
+later = loop_mode.bind_role_call("critic", call, [
+    {"type": "req", "seq": 1, "runId": run_id},
+    {"type": "done", "seq": 1, "assistant": json.dumps({"excluded": ["old"]})},
+    {"type": "req", "seq": 2, "runId": run_id},
+    {"type": "done", "seq": 2, "assistant": "final " + json.dumps(conclusion)},
+])
+assert later["ok"]
 try:
     loop_mode.bind_role_call("gap", call, events)
     raise SystemExit("gap")

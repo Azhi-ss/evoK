@@ -143,7 +143,7 @@ export function relayCallUsage(events: readonly unknown[]): RelayUsage {
 
 export function bindRoleCall(
   role: "critic" | "ranker" | "reviewer",
-  call: { readonly seq: number; readonly runId: string; readonly outputSha: string },
+  call: { readonly seq: number; readonly runId: string; readonly conclusion: unknown },
   events: readonly unknown[],
 ): { readonly ok: boolean; readonly reason?: string } {
   const parsed = loopMode("bind-role", { role, call, events });

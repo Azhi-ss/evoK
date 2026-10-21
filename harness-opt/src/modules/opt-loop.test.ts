@@ -202,6 +202,7 @@ function plantRole(
     "--run-id", runIdOf(input.baseUrl),
     "--seq", "1",
     "--resp-sha", createHash("sha256").update(JSON.stringify(body)).digest("hex"),
+    "--assistant", JSON.stringify(body),
     "--role", role,
     "--round", String(input.round),
   ], { encoding: "utf8" });
@@ -246,6 +247,97 @@ async function postRole(baseUrl: string): Promise<void> {
   });
   if (!response.ok) throw new Error(`relay ${response.status}`);
   await response.arrayBuffer();
+}
+
+function listenEchoUpstream(): Promise<{ readonly url: string; readonly hits: number; close(): Promise<void> }> {
+  let hits = 0;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      hits += 1;
+      let content = "{}";
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { messages?: { content?: string }[] };
+        content = body.messages?.[body.messages.length - 1]?.content ?? content;
+      } catch {
+        content = "{}";
+      }
+      const payload = JSON.stringify({
+        choices: [{ message: { role: "assistant", content } }],
+        usage: UPSTREAM_USAGE,
+      });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
+      res.end(payload);
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        reject(new Error("upstream port"));
+        return;
+      }
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/v1/chat/completions`,
+        get hits() { return hits; },
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
+async function postConclusion(baseUrl: string, conclusion: unknown): Promise<void> {
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: JSON.stringify(conclusion) }] }),
+  });
+  if (!response.ok) throw new Error(`relay ${response.status}`);
+  await response.arrayBuffer();
+}
+
+function chatRoles(
+  fx: Fixture,
+  review: { readonly reported: { readonly accept: boolean; readonly reason: string }; readonly recorded: { readonly accept: boolean; readonly reason: string } },
+): OptRoles {
+  const session = (input: { spawn: RoleSpawnConfig }, role: string) => {
+    hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role })}\n`, fx.key);
+  };
+  return {
+    async gap(input) {
+      const turn = await stubOptRoles(fx.key).gap(input);
+      const files = input.traces.map((hint) => hint.file);
+      if (files.length > 0) plantRelayRead(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), runIdOf(input.baseUrl), files);
+      return turn;
+    },
+    async innovate(input) {
+      await postConclusion(input.baseUrl, { summary: "agent-loop.maxSteps=24" });
+      session(input, "innovator");
+      return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
+    },
+    async critic(input) {
+      const body = { excluded: [] as string[] };
+      await postConclusion(input.baseUrl, body);
+      session(input, "critic");
+      return { session: { jsonl: "ignored\n" }, excluded: body.excluded };
+    },
+    async ranker(input) {
+      const winnerId = input.candidates[0]?.id ?? "";
+      await postConclusion(input.baseUrl, { winnerId });
+      session(input, "ranker");
+      return { session: { jsonl: "ignored\n" }, winnerId };
+    },
+    async review(input) {
+      await postConclusion(input.baseUrl, review.recorded);
+      session(input, "reviewer-gate");
+      return { session: { jsonl: "ignored\n" }, accept: review.reported.accept, reason: review.reported.reason };
+    },
+  };
+}
+
+function lastDone(log: string): { assistant?: string; usage?: unknown } | undefined {
+  return readFileSync(log, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => JSON.parse(line) as { type?: string; assistant?: string; usage?: unknown }).filter((row) => row.type === "done").at(-1);
 }
 
 function plantRelayRead(log: string, runId: string, files: readonly string[]): void {
@@ -1739,6 +1831,80 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         expect(text).not.toContain(fx.keyFile);
         expect(text).toContain("baseUrl");
       }
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("execute path binds critic, ranker, and reviewer from the last assistant message", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const upstream = await listenEchoUpstream();
+    const relayRoot = join(fx.attestRoot, "relay-logs");
+    const verdict = { accept: true, reason: "accept the idle cap" };
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "execute",
+        env: {
+          BASE_URL: "https://example.test/v1",
+          HARNESS_RELAY_LOG_ROOT: relayRoot,
+          HARNESS_RELAY_BIND: "127.0.0.1",
+          HARNESS_RELAY_UPSTREAM: upstream.url,
+        },
+        rounds: 1,
+        executor: fake.executor,
+        roles: chatRoles(fx, { reported: verdict, recorded: verdict }),
+      });
+      expect(upstream.hits).toBe(9);
+      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["i014:0"]);
+      expect(result.accepted?.round).toBe(1);
+      expect(result.rounds[0]?.accepted).toBe(true);
+      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
+      const critic = JSON.parse(readFileSync(join(fx.out, "round1/sessions/critic.spawn.json"), "utf8")) as RoleSpawnConfig;
+      const ranker = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.spawn.json"), "utf8")) as RoleSpawnConfig;
+      const criticDone = lastDone(critic.relayLog ?? "");
+      const rankerDone = lastDone(ranker.relayLog ?? "");
+      expect(criticDone?.assistant).toBe(JSON.stringify({ excluded: [] }));
+      expect(criticDone?.usage).toEqual(UPSTREAM_USAGE);
+      expect(rankerDone?.assistant).toBe(JSON.stringify({ winnerId: "c0" }));
+      expect(rankerDone?.usage).toEqual(UPSTREAM_USAGE);
+      expect(critic.relayLog ?? "").not.toContain("/home/box");
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("a reviewer conclusion that differs from the relay assistant text is rejected", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const upstream = await listenEchoUpstream();
+    const relayRoot = join(fx.attestRoot, "relay-logs");
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "execute",
+        env: {
+          BASE_URL: "https://example.test/v1",
+          HARNESS_RELAY_LOG_ROOT: relayRoot,
+          HARNESS_RELAY_BIND: "127.0.0.1",
+          HARNESS_RELAY_UPSTREAM: upstream.url,
+        },
+        rounds: 1,
+        executor: fake.executor,
+        roles: chatRoles(fx, {
+          recorded: { accept: false, reason: "hold" },
+          reported: { accept: true, reason: "forged" },
+        }),
+      });
+      expect(upstream.hits).toBe(9);
+      expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["i014:0"]);
+      expect(result.accepted).toBeNull();
+      expect(result.rounds[0]?.accepted).toBe(false);
+      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+      const review = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as RoleSpawnConfig;
+      expect(lastDone(review.relayLog ?? "")?.assistant).toBe(JSON.stringify({ accept: false, reason: "hold" }));
+      expect(review.relayLog ?? "").not.toContain("/home/box");
     } finally {
       await upstream.close();
     }
