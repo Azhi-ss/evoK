@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { pinPackageAgentDir } from "../pi/agent-dirs";
 
 /** Read-only evidence roles. Critic and ranker launch the same way as gap and reviewer. */
 export const EVIDENCE_ROLES = ["gap-finder", "reviewer-gate", "critic", "ranker"] as const;
@@ -134,6 +135,7 @@ export function launchRolePi(piBin: string, config: RoleSpawnConfig): { readonly
   delete env.HARNESS_RELAY_LOG_ROOT;
   delete env.RELAY_UPSTREAM_KEY_FILE;
   if (config.baseUrl) env.BASE_URL = config.baseUrl;
+  pinPackageAgentDir(env);
   const child = spawnSync(bin, args, {
     encoding: "utf8",
     cwd: config.cwd,

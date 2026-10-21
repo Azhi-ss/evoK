@@ -17,8 +17,8 @@ const USAGE = [
   "  demo                  one closed loop on the sample trace; prints per-stage status",
   "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        one loop; task and round-0 path/sha are required and have no default",
-  "  optimize --execute --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
-  "                        needs BASE_URL; the default real run is devii_docker_v2.py once; every task passes --network devii-004-int",
+  "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
   "                        one candidate seed to prove activation; task flags are required",
 ].join("\n");
@@ -93,6 +93,7 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
     }
   }
   const driver = flag(argv, "--driver");
+  const piBin = flag(argv, "--pi-bin");
   const attestRoot = flag(argv, "--attest-root");
   const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
   const harnessPath = flag(argv, "--harness");
@@ -127,6 +128,7 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),
       ...(executorCommand ? { executorCommand } : {}),
       ...(driver ? { driver } : {}),
+      ...(execute && piBin ? { piBin } : {}),
     });
     process.stdout.write(`${JSON.stringify({ out, ...result }, null, 2)}\n`);
     return 0;

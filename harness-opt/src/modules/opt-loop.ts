@@ -240,7 +240,7 @@ export interface OptLoopOptions {
   readonly driver?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => Date;
-  /** When set, gap and reviewer are exec'd with this binary and `--tools read`. */
+  /** When set on execute, each role is this binary after the relay run is open. Dry-run keeps the stubs. */
   readonly piBin?: string;
   /** Host watcher for the preregistered result file. Absent observation stays undecided. */
   readonly resultWatcher?: ResultWriteWatcher;
@@ -370,7 +370,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const firstRun = join(options.out, "round1", "runs", task.id, "seed0", "candidate");
   if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
-  const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : undefined);
+  const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : options.piBin ? piSubagentRoles(options.piBin) : undefined);
   if (!roles) throw new Error("execute mode needs roles");
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
@@ -1053,6 +1053,193 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   return result;
 }
 
+const IGNORED_SESSION: RoleSession = { jsonl: "ignored-return\n" };
+
+/**
+ * Execute roles. Each call runs the existing Pi argv after the relay run is open.
+ * Conclusions come from that run's last done assistant text. No new prompt is added.
+ */
+export function piSubagentRoles(piBin: string): OptRoles {
+  return {
+    async gap(input) {
+      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const turn = gapFromAssistant(text);
+      if (!turn) throw new Error("role gap-finder returned no conclusion");
+      return { session: IGNORED_SESSION, ...turn };
+    },
+    async innovate(input) {
+      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const turn = innovatorFromAssistant(text);
+      if (!turn) throw new Error("role innovator returned no conclusion");
+      return { session: IGNORED_SESSION, ...turn };
+    },
+    async critic(input) {
+      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const excluded = criticFromAssistant(text);
+      if (!excluded) throw new Error("role critic returned no conclusion");
+      return { session: IGNORED_SESSION, excluded };
+    },
+    async ranker(input) {
+      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const winnerId = rankerFromAssistant(text);
+      if (winnerId === null) throw new Error("role ranker returned no conclusion");
+      return { session: IGNORED_SESSION, winnerId };
+    },
+    async review(input) {
+      const text = piConclusion(piBin, input.spawn, input.baseUrl);
+      const verdict = reviewerFromAssistant(text);
+      if (!verdict) throw new Error("role reviewer-gate returned no conclusion");
+      return { session: IGNORED_SESSION, ...verdict };
+    },
+  };
+}
+
+function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string): string {
+  const launched = launchRolePi(piBin, spawn);
+  if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
+  const text = lastDoneAssistant(baseUrl);
+  if (text === null) throw new Error(`role ${spawn.role} returned no conclusion`);
+  return text;
+}
+
+function gapFromAssistant(text: string): { knob: string; failureClass: string; summary: string; citations: string[] } | null {
+  let found: { knob: string; failureClass: string; summary: string; citations: string[] } | null = null;
+  for (const obj of jsonObjects(text)) {
+    if (typeof obj.knob !== "string" || obj.knob === "") continue;
+    if (typeof obj.failureClass === "string" && typeof obj.summary === "string") {
+      found = {
+        knob: obj.knob,
+        failureClass: obj.failureClass,
+        summary: obj.summary,
+        citations: stringList(obj.citations),
+      };
+      continue;
+    }
+    const gaps = Array.isArray(obj.gaps) ? obj.gaps : [];
+    const first = gaps[0];
+    if (!first || typeof first !== "object" || Array.isArray(first)) continue;
+    const gap = first as Record<string, unknown>;
+    if (typeof gap.failureClass !== "string" || typeof gap.summary !== "string") continue;
+    found = {
+      knob: obj.knob,
+      failureClass: gap.failureClass,
+      summary: gap.summary,
+      citations: stringList(gap.traceIds),
+    };
+  }
+  return found;
+}
+
+function innovatorFromAssistant(text: string): { summary: string; parts: Readonly<Record<string, Readonly<Record<string, unknown>>>> } | null {
+  let found: { summary: string; parts: Readonly<Record<string, Readonly<Record<string, unknown>>>> } | null = null;
+  for (const obj of jsonObjects(text)) {
+    if (typeof obj.summary !== "string" || obj.summary === "") continue;
+    const parts = asParts(obj.parts);
+    if (parts && Object.keys(parts).length > 0) {
+      found = { summary: obj.summary, parts };
+      continue;
+    }
+    if (typeof obj.part !== "string" || obj.part === "") continue;
+    const changes = asRecord(obj.changes);
+    if (!changes) continue;
+    found = { summary: obj.summary, parts: { [obj.part]: changes } };
+  }
+  return found;
+}
+
+function criticFromAssistant(text: string): string[] | null {
+  let found: string[] | null = null;
+  for (const obj of jsonObjects(text)) {
+    if (Array.isArray(obj.excluded) && obj.excluded.every((item) => typeof item === "string")) found = [...obj.excluded];
+  }
+  return found;
+}
+
+function rankerFromAssistant(text: string): string | null {
+  let found: string | null = null;
+  for (const obj of jsonObjects(text)) {
+    if (typeof obj.winnerId === "string") found = obj.winnerId;
+  }
+  return found;
+}
+
+function reviewerFromAssistant(text: string): { accept: boolean; reason: string } | null {
+  let found: { accept: boolean; reason: string } | null = null;
+  for (const obj of jsonObjects(text)) {
+    if (typeof obj.accept === "boolean" && typeof obj.reason === "string") found = { accept: obj.accept, reason: obj.reason };
+  }
+  return found;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function asParts(value: unknown): Record<string, Record<string, unknown>> | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const parts: Record<string, Record<string, unknown>> = {};
+  for (const [key, child] of Object.entries(record)) {
+    const section = asRecord(child);
+    if (!section) return null;
+    parts[key] = section;
+  }
+  return parts;
+}
+
+function jsonObjects(text: string): Record<string, unknown>[] {
+  const found: Record<string, unknown>[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") inString = true;
+    else if (ch === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (ch === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try {
+          const parsed = JSON.parse(text.slice(start, index + 1)) as unknown;
+          const record = asRecord(parsed);
+          if (record) found.push(record);
+        } catch {
+          // skip a brace pair that is not JSON
+        }
+        start = -1;
+      }
+    }
+  }
+  return found;
+}
+
+function lastDoneAssistant(baseUrl: string): string | null {
+  if (!activeRelayRoot) return null;
+  const runId = runIdFromBase(baseUrl);
+  let text: string | null = null;
+  for (const event of readJsonl(join(activeRelayRoot, runId, "relay.jsonl"))) {
+    if (!event || typeof event !== "object") continue;
+    const row = event as { type?: unknown; assistant?: unknown };
+    if (row.type === "done" && typeof row.assistant === "string" && row.assistant.trim() !== "") text = row.assistant;
+  }
+  return text;
+}
+
 /** Dry-run roles. The host writes the session. It does not fabricate a read. */
 export function stubOptRoles(key: Buffer): OptRoles {
   return {
@@ -1639,8 +1826,63 @@ function prepareRole(
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), roleFacing(config));
   const argv = rolePiArgv(piBin ?? "pi", config);
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
-  if (piBin) launchRolePi(piBin, config);
   return config;
+}
+
+const LIVE_ROLES = [
+  { role: "gap-finder", session: "gap-finder", kind: "role:gap-finder" },
+  { role: "innovator", session: "innovator-0", kind: "role:innovator" },
+  { role: "critic", session: "critic", kind: "role:critic" },
+  { role: "ranker", session: "ranker", kind: "role:ranker" },
+  { role: "reviewer-gate", session: "reviewer-gate", kind: "role:reviewer" },
+] as const;
+
+/**
+ * One real Pi launch per role, through the same relay open the loop uses.
+ * Stops before any scored docker run. Opt-in via LOOP_LIVE_SMOKE and PI_BIN.
+ */
+export async function runLiveRoleSmoke(options: {
+  readonly out: string;
+  readonly attestRoot: string;
+  readonly attestKeyFile: string;
+  readonly piBin: string;
+  readonly env?: NodeJS.ProcessEnv;
+}): Promise<{ readonly launches: Readonly<Record<(typeof LIVE_ROLES)[number]["role"], number>>; readonly dockerRuns: number }> {
+  const env = options.env ?? process.env;
+  if (!env.BASE_URL) throw new Error("execute mode needs BASE_URL");
+  loadAttestKey(options.attestKeyFile);
+  assertAttestRoot(options.attestRoot, options.out);
+  assertKeyOutside(options.attestKeyFile, [options.out]);
+  mkdirSync(options.out, { recursive: true });
+  const relayRoot = typeof env.HARNESS_RELAY_LOG_ROOT === "string" && env.HARNESS_RELAY_LOG_ROOT.trim() !== ""
+    ? env.HARNESS_RELAY_LOG_ROOT.trim()
+    : defaultRelayRoot();
+  const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
+  const relayCtl = new RelayControl(relayRoot, relayListenPort(env), relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, "execute");
+  activeRelay = relayCtl;
+  activeRelayRoot = relayRoot;
+  const launches = {
+    "gap-finder": 0,
+    innovator: 0,
+    critic: 0,
+    ranker: 0,
+    "reviewer-gate": 0,
+  };
+  try {
+    for (const spec of LIVE_ROLES) {
+      const relay = roleRelay(relayRoot, env);
+      const spawn = prepareRole(options.out, 1, spec.role, options.piBin, [], relay, spec.session);
+      await relayRpc({ op: "open", runId: relay.runId, kind: spec.kind, expectedSha: "0".repeat(64) });
+      launchRolePi(options.piBin, spawn);
+      launches[spec.role] += 1;
+      await closeRelay(relay.runId);
+    }
+    return { launches, dockerRuns: 0 };
+  } finally {
+    activeRelay = null;
+    activeRelayRoot = null;
+    await relayCtl.shutdown();
+  }
 }
 
 function bindConclusion(

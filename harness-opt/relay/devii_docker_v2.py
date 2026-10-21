@@ -10,6 +10,7 @@ Usage:
   devii_docker_v2.py groups                    # print probe/heldout/minloop task lists
   devii_docker_v2.py plan <probe|heldout|minloop|all> [k]
   devii_docker_v2.py once --task <id> --seed <n> --arm control|candidate --config <file> --run-dir <dir> --harness <file>
+  devii_docker_v2.py attest --run-dir <dir> --harness <file> --config <file> --attest-dir <dir>
 The batch execute path requires API_KEY in the host environment and does not pass that value into the container.
 `once` does not read the host API_KEY. The agent container receives only hooks.PLACEHOLDER_API_KEY.
 The relay replaces Authorization with the key from RELAY_UPSTREAM_KEY_FILE. The container BASE_URL is the relay.
@@ -354,6 +355,54 @@ def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta
     attest.mkdir(parents=True, exist_ok=True)
     (attest/"attestation.json").write_text(json.dumps(signed, indent=2, ensure_ascii=False)+"\n")
     return signed
+
+def attest_from_run(run, harness, config, attest_dir):
+    """Host attestation for a finished once run. Same writer as once --attest-dir. Does not start docker."""
+    from datetime import datetime, timezone
+    run_dir=Path(run)
+    if run_dir.is_symlink() or not run_dir.is_dir():
+        raise OnceError("run dir")
+    result_path=run_dir/"result.json"
+    if result_path.is_symlink() or not result_path.is_file():
+        raise OnceError("result.json")
+    try:
+        recorded=json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OnceError("result.json") from exc
+    if not isinstance(recorded, dict):
+        raise OnceError("result.json")
+    arm=recorded.get("arm")
+    if arm not in ("control", "candidate"):
+        raise OnceError("arm")
+    seed=recorded.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise OnceError("seed")
+    run_id=recorded.get("runId") or recorded.get("relay_id")
+    if not isinstance(run_id, str) or len(run_id)!=32:
+        raise OnceError("run id")
+    reward=recorded.get("reward") if recorded.get("score_status")=="scored" else None
+    if reward is not None and isinstance(reward, bool):
+        raise OnceError("reward")
+    if reward is not None and not isinstance(reward, (int, float)):
+        raise OnceError("reward")
+    tokens=recorded.get("tokens") if recorded.get("tokens") is not None else 0
+    if isinstance(tokens, bool) or not isinstance(tokens, (int, float)):
+        raise OnceError("tokens")
+    meta={
+        "arm": arm,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "exit": recorded.get("exit") if recorded.get("exit") is not None else 0,
+        "runDir": os.path.abspath(run_dir),
+        "runId": run_id,
+        "runPath": os.path.abspath(run_dir),
+        "score_status": recorded.get("score_status") or "unscored",
+        "seed": seed,
+        "task": str(recorded.get("task") or ""),
+        "tokens": int(tokens),
+    }
+    return write_run_attestation(
+        attest_dir, run_dir, key=_attest_key(), harness=harness, config=config, reward=reward, meta=meta,
+    )
 
 def hmac_sha(key, payload):
     import hmac as hmac_mod
@@ -775,6 +824,17 @@ def main():
     elif a[:1]==["once"]:
         try:
             print(json.dumps(once_from_flags(a[1:])), flush=True)
+        except OnceError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
+    elif a[:1]==["attest"]:
+        try:
+            flags=_once_args(a[1:])
+            missing=[name for name in ("run-dir","harness","config","attest-dir") if name not in flags]
+            if missing:
+                raise OnceError("attest needs "+", ".join("--"+name for name in missing))
+            attest_from_run(flags["run-dir"], flags["harness"], flags["config"], flags["attest-dir"])
+            print(json.dumps({"attestation": str(Path(flags["attest-dir"])/"attestation.json")}), flush=True)
         except OnceError as exc:
             print(str(exc), file=sys.stderr)
             raise SystemExit(1)

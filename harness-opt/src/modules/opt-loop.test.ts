@@ -15,6 +15,7 @@ import {
   OPT_MODEL,
   realRunCommand,
   reconcilePrereg,
+  runLiveRoleSmoke,
   runOptLoop,
   runOptOnce,
   runRecordArgv,
@@ -1339,6 +1340,53 @@ describe("optimization loop", () => {
   });
 });
 
+function onceStyleAttest(fx: Fixture, candidateConfigHash: string): string {
+  const run = join(fx.root, `once-run-${candidateConfigHash.slice(0, 8)}`);
+  mkdirSync(join(run, "verifier"), { recursive: true });
+  mkdirSync(join(run, "outputs"), { recursive: true });
+  mkdirSync(join(run, ".pi-sessions"), { recursive: true });
+  writeFileSync(join(run, "trace.jsonl"), `${JSON.stringify({ type: "run_start", candidateConfigHash })}\n`);
+  writeFileSync(join(run, "verifier", "reward.txt"), "1\n");
+  writeFileSync(join(run, "outputs", "answer.txt"), "ok\n");
+  writeFileSync(join(run, ".pi-sessions", "session.jsonl"), "{}\n");
+  writeFileSync(join(run, "result.json"), `${JSON.stringify({
+    task: LOOP_TASK.path,
+    seed: 9,
+    arm: "control",
+    score_status: "scored",
+    reward: 1,
+    tokens: 10,
+    exit: 0,
+    runId: "ab".repeat(16),
+  })}\n`);
+  const attest = join(fx.root, `once-attest-${candidateConfigHash.slice(0, 8)}`);
+  const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
+  const proc = spawnSync("python3", [
+    script, "attest",
+    "--run-dir", run,
+    "--harness", fx.harnessPath,
+    "--config", fx.controlConfig,
+    "--attest-dir", attest,
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, HARNESS_ATTEST_KEY_FILE: fx.keyFile },
+  });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "attest").trim());
+  return attest;
+}
+
+function captureStderr(run: () => Promise<number>): Promise<{ readonly code: number; readonly stderr: string }> {
+  const lines: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return run().then((code) => ({ code, stderr: lines.join("") })).finally(() => {
+    process.stderr.write = write;
+  });
+}
+
 describe("optimize command", () => {
   test("dry-run finishes a round without a model process", async () => {
     const fx = fixture();
@@ -1417,7 +1465,192 @@ describe("optimize command", () => {
       process.stderr.write = write;
     }
   });
+
+  test("execute with --pi-bin launches the pi role and stops before docker", async () => {
+    const fx = fixture();
+    const recorded = join(fx.root, "pi-argv.txt");
+    const bin = join(fx.root, "pi");
+    writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(recorded)}\n`);
+    chmodSync(bin, 0o755);
+    const previous = {
+      base: process.env.BASE_URL,
+      bind: process.env.HARNESS_RELAY_BIND,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+    };
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    process.env.HARNESS_RELAY_LOG_ROOT = join(fx.root, "relay-logs");
+    try {
+      const { code, stderr } = await captureStderr(() => main([
+        "optimize", "--out", fx.out, "--execute", "--rounds", "1",
+        "--pi-bin", bin,
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]));
+      expect(code).toBe(1);
+      expect(stderr).toContain("role gap-finder returned no conclusion");
+      const argv = readFileSync(recorded, "utf8");
+      expect(argv).toContain("--tools");
+      expect(argv).toContain("read");
+      expect(argv).not.toContain("write");
+      expect(argv).not.toContain("bash");
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { relayLog?: string; baseUrl?: string };
+      expect(spawn.relayLog).toBeUndefined();
+      expect(spawn.baseUrl).toContain("127.0.0.1");
+      const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { type?: string; innovatorCap?: number; hmacSha256?: string };
+      expect(pre.type).toBe("pre_round1");
+      expect(pre.innovatorCap).toBe(200000);
+      expect(typeof pre.hmacSha256).toBe("string");
+      expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    } finally {
+      if (previous.base === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous.base;
+      if (previous.bind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previous.bind;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+    }
+  });
+
+  test("execute without --pi-bin still needs roles", async () => {
+    const fx = fixture();
+    const marker = join(fx.root, "pi-launched");
+    const bin = join(fx.root, "pi");
+    writeFileSync(bin, `#!/bin/sh\nprintf launched > ${JSON.stringify(marker)}\n`);
+    chmodSync(bin, 0o755);
+    const previous = process.env.BASE_URL;
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    try {
+      const { code, stderr } = await captureStderr(() => main([
+        "optimize", "--out", fx.out, "--execute", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]));
+      expect(code).toBe(1);
+      expect(stderr).toContain("execute mode needs roles");
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(join(fx.out, "pre-round1.json"))).toBe(false);
+      expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous;
+    }
+  });
+
+  test("control-attest accepts an once attestation and rejects a tampered or mismatched one", async () => {
+    const fx = fixture();
+    const hash = createHash("sha256").update(readFileSync(fx.controlConfig)).digest("hex");
+    const attest = onceStyleAttest(fx, hash);
+    const previousBind = process.env.HARNESS_RELAY_BIND;
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    try {
+      const code = await main([
+        "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", attest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]);
+      expect(code).toBe(0);
+      expect(existsSync(join(fx.out, "round1/patch.diff"))).toBe(true);
+    } finally {
+      if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previousBind;
+    }
+
+    const tamperedFx = fixture();
+    const tampered = onceStyleAttest(tamperedFx, hash);
+    const signed = JSON.parse(readFileSync(join(tampered, "attestation.json"), "utf8")) as { hmacSha256: string };
+    signed.hmacSha256 = "0".repeat(64);
+    writeFileSync(join(tampered, "attestation.json"), `${JSON.stringify(signed, null, 2)}\n`);
+    const tamper = await captureStderr(() => main([
+      "optimize", "--out", tamperedFx.out, "--dry-run", "--rounds", "1",
+      "--attest-root", tamperedFx.attestRoot,
+      "--attest-key-file", tamperedFx.keyFile,
+      "--harness", tamperedFx.harnessPath,
+      "--control-config", tamperedFx.controlConfig,
+      "--control-attest", tampered,
+      ...taskFlags(),
+      ...round0Flags(),
+    ]));
+    expect(tamper.code).toBe(1);
+    expect(tamper.stderr).toContain("control attestation rejected");
+    expect(tamper.stderr).toContain("hmac");
+
+    const mismatchedFx = fixture();
+    const mismatched = onceStyleAttest(mismatchedFx, "ab".repeat(32));
+    const mismatch = await captureStderr(() => main([
+      "optimize", "--out", mismatchedFx.out, "--dry-run", "--rounds", "1",
+      "--attest-root", mismatchedFx.attestRoot,
+      "--attest-key-file", mismatchedFx.keyFile,
+      "--harness", mismatchedFx.harnessPath,
+      "--control-config", mismatchedFx.controlConfig,
+      "--control-attest", mismatched,
+      ...taskFlags(),
+      ...round0Flags(),
+    ]));
+    expect(mismatch.code).toBe(1);
+    expect(mismatch.stderr).toContain("candidateConfigHash");
+  });
 });
+
+const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env.PI_BIN);
+(liveRoleSmoke ? test : test.skip)(
+  "live role smoke launches each role once and does not start docker",
+  async () => {
+    const fx = fixture();
+    const previous = {
+      base: process.env.BASE_URL,
+      bind: process.env.HARNESS_RELAY_BIND,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+    };
+    if (!process.env.BASE_URL) process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    process.env.HARNESS_RELAY_LOG_ROOT = join(fx.root, "relay-logs");
+    try {
+      const report = await runLiveRoleSmoke({
+        out: fx.out,
+        attestRoot: fx.attestRoot,
+        attestKeyFile: fx.keyFile,
+        piBin: process.env.PI_BIN ?? "",
+      });
+      expect(report.dockerRuns).toBe(0);
+      expect(report.launches).toEqual({
+        "gap-finder": 1,
+        innovator: 1,
+        critic: 1,
+        ranker: 1,
+        "reviewer-gate": 1,
+      });
+      expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+      const innovatorArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as string[];
+      expect(innovatorArgv).toEqual([process.env.PI_BIN, "--tools", "read", "--tools", "write"]);
+      const gapArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[];
+      expect(gapArgv).toEqual([process.env.PI_BIN, "--tools", "read"]);
+    } finally {
+      if (previous.base === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous.base;
+      if (previous.bind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previous.bind;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+    }
+  },
+  1_800_000,
+);
 
 describe("optimize-one command", () => {
   test("one honest candidate run can be active, and an echoing command cannot", async () => {

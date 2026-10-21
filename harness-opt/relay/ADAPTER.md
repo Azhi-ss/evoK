@@ -45,7 +45,42 @@
 
 `hooks.reconcile_first_run` 的题来自独立的 `--expected-task`（预注册），没有默认题，也不从 `--task` 填。空的 `expected_task` 直接拒绝。只有配置的任务、control 配置 sha、seed 9、`control` 臂、`reconcile` 为真、并且还没有接受过，才记 `purpose=reconcile` 并从统计里排除。零条 relay 请求、agent 非 0 退出、或没有 `task-*` 目录时，`accepted` 为假，运行 unscored 且不签名。`once --reconcile` 和环里种子 9 的已计分 control 真实运行都走这个判断。
 
-`devii_docker_v2.py once` 跑一题、一个 seed、一条臂（`control` 或 `candidate`）。task 可以是 `hb003`，解析成 `tasks3/hb003`。它复用 `agent_cmd` → `hooks.container_argv`，不再包一层 sudo。容器内无真实密钥，只有固定占位符 `API_KEY=relay-placeholder-not-a-key`（r14）。其它 `API_KEY` 在 docker 之前拒绝。中继转发时丢掉客户端 `Authorization`，换成 `RELAY_UPSTREAM_KEY_FILE`。`once` 的 `_standalone_relay` 和环的 `harness_relay.py control` 用同一个 `use_network_upstream`：默认 `UPSTREAM_URL`，密钥是 `RELAY_UPSTREAM_KEY_FILE`。请求头固定 `User-Agent: Mozilla/5.0`，与 `Authorization`、`Content-Type` 一起发出，不能改。生产路径如果上游是 `_default_upstream` 或其它假上游，拒绝启动或 `open_run`，并在日志根的 `reject.jsonl` 记下 `fake_upstream`。假上游只接受构造参数 `allow_fake_upstream=True`。真实上游冒烟默认跳过。在 `harness-opt/relay` 下设置 `RELAY_LIVE_SMOKE=1` 和 `RELAY_UPSTREAM_KEY_FILE` 后跑 `python3 -m unittest test_relay.LiveUpstreamSmoke.test_one_chat_reaches_the_real_upstream`。它不 bind `10.204.0.1`，经 `handle` 发一条非流式 chat，要求 `choices` 非空，且 `usage` 的 prompt 与 completion 都是整数、两者之和大于 0。启动 agent 前，若固定名的容器还在，用 `container_argv` 同一条 `sudo -E docker` 先 `kill` 再 `rm -f`，把 name 和 id 写入 `devii_one.log`，运行照常计分。`BASE_URL` 是 `http://10.204.0.1:<port>/r/<runId>/v1`。故障行的 `tokens` 取 `close_run` 报告里的内存值，没有这条链时为 null。宿主分配 runId。单独运行时这个进程自己 `Relay` 监听、`open_run`（kind `executor`）、docker、checker、`close_run`。这次 `close_run` 若是 `attest_mismatch` 或 `usage_missing`，运行记为故障：unscored、不签名、也不当作预注册对账。环里的真实运行把同一个命令加上 `--relay-external`：环已经打开这次 run，子进程不 bind、不 open、不 close。tokens 只来自 `relay_usage_tokens`。缺日志或空 runId 是 `usage_missing`。挂载的 harness 必须是 sha256 `4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c`，否则 docker 之前拒绝，并把这个 sha 写进 `result.json` 的 `mountedHarnessSha`。checker 之后调用 `copy_checker_before_sign` 再 `sign_run_record`（`checkerOutputSha`、`reward`、`relayLogSha`、`relaySha`、`bootId`）。评估器 null 分是 unscored，reward 留空，原因从 `.scorer-result.json` 保留。有 `--attest-dir` 时，在 `result.json` 写完之后写 `devii-opt-attest/v1`。
+`devii_docker_v2.py once` 跑一题、一个 seed、一条臂（`control` 或 `candidate`）。task 可以是 `hb003`，解析成 `tasks3/hb003`。它复用 `agent_cmd` → `hooks.container_argv`，不再包一层 sudo。容器内无真实密钥，只有固定占位符 `API_KEY=relay-placeholder-not-a-key`（r14）。其它 `API_KEY` 在 docker 之前拒绝。中继转发时丢掉客户端 `Authorization`，换成 `RELAY_UPSTREAM_KEY_FILE`。`once` 的 `_standalone_relay` 和环的 `harness_relay.py control` 用同一个 `use_network_upstream`：默认 `UPSTREAM_URL`，密钥是 `RELAY_UPSTREAM_KEY_FILE`。请求头固定 `User-Agent: Mozilla/5.0`，与 `Authorization`、`Content-Type` 一起发出，不能改。生产路径如果上游是 `_default_upstream` 或其它假上游，拒绝启动或 `open_run`，并在日志根的 `reject.jsonl` 记下 `fake_upstream`。假上游只接受构造参数 `allow_fake_upstream=True`。真实上游冒烟默认跳过。在 `harness-opt/relay` 下设置 `RELAY_LIVE_SMOKE=1` 和 `RELAY_UPSTREAM_KEY_FILE` 后跑 `python3 -m unittest test_relay.LiveUpstreamSmoke.test_one_chat_reaches_the_real_upstream`。它不 bind `10.204.0.1`，经 `handle` 发一条非流式 chat，要求 `choices` 非空，且 `usage` 的 prompt 与 completion 都是整数、两者之和大于 0。启动 agent 前，若固定名的容器还在，用 `container_argv` 同一条 `sudo -E docker` 先 `kill` 再 `rm -f`，把 name 和 id 写入 `devii_one.log`，运行照常计分。`BASE_URL` 是 `http://10.204.0.1:<port>/r/<runId>/v1`。故障行的 `tokens` 取 `close_run` 报告里的内存值，没有这条链时为 null。宿主分配 runId。单独运行时这个进程自己 `Relay` 监听、`open_run`（kind `executor`）、docker、checker、`close_run`。这次 `close_run` 若是 `attest_mismatch` 或 `usage_missing`，运行记为故障：unscored、不签名、也不当作预注册对账。环里的真实运行把同一个命令加上 `--relay-external`：环已经打开这次 run，子进程不 bind、不 open、不 close。tokens 只来自 `relay_usage_tokens`。缺日志或空 runId 是 `usage_missing`。挂载的 harness 必须是 sha256 `4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c`，否则 docker 之前拒绝，并把这个 sha 写进 `result.json` 的 `mountedHarnessSha`。checker 之后调用 `copy_checker_before_sign` 再 `sign_run_record`（`checkerOutputSha`、`reward`、`relayLogSha`、`relaySha`、`bootId`）。评估器 null 分是 unscored，reward 留空，原因从 `.scorer-result.json` 保留。有 `--attest-dir` 时，在 `result.json` 写完之后写 `devii-opt-attest/v1`。这个目录不能和 run 目录嵌套。`optimize --control-attest` 读的就是这份 `attestation.json`。relay 日志和 `run-record.json` 留在 `HARNESS_RELAY_LOG_ROOT/<runId>/`。已经落地、当时没写证明的 control 运行用 `devii_docker_v2.py attest --run-dir <run> --harness <file> --config <file> --attest-dir <dir>` 补写，调用同一个 `write_run_attestation`，不启动 docker。trace 的 `run_start.candidateConfigHash` 必须等于 control 文件的 sha256，转换器不改 trace。
+
+生成 control-r5 的证明目录：
+
+```bash
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
+python3 harness-opt/relay/devii_docker_v2.py once \
+  --task hb003 --seed 9 --arm control --reconcile --expected-task hb003 \
+  --config /workspace/harness-opt-runs/config/control.json \
+  --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5 \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
+  --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest
+```
+
+第 1 轮：
+
+```bash
+BASE_URL="$BASE_URL" \
+RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" \
+HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
+bun harness-opt/src/cli.ts optimize --execute --rounds 1 \
+  --out /tmp/harness-opt-loop \
+  --pi-bin "$PI_BIN" \
+  --attest-root /tmp/harness-opt-attest \
+  --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
+  --control-config /workspace/harness-opt-runs/config/control.json \
+  --control-attest /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest \
+  --task hb003 --task-path tasks3/hb003 --network devii-004-int --token-w 9024166 \
+  --round0-trace 'heldout/hb003/seed0/.../trace.jsonl' \
+  --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
+```
+
+`LOOP_LIVE_SMOKE=1` 且 `PI_BIN` 设置时，`bun test harness-opt/src/modules/opt-loop.test.ts -t "live role smoke"` 让每个角色经真实 Pi 跑一次后停，不启动 docker。没设这两个变量就跳过。`--execute` 没有 `--pi-bin` 时仍以 `execute mode needs roles` 失败。`pre_round1` 只由环自己签。
 
 `devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（模式 `0700`，测试可以换 relay 根）。这个目录不在任何容器挂载里。`checkerOutputSha` 和 `reward` 进入运行签名。`verify_run_record(runSig, checkerOut, reward)` 同时给 reviewer 输入和 run-notes 写入用。容器里的 `verifier/reward.txt`、`result.json` 的 reward、宿主 checker 输出或 run-notes 里展示的 reward 有一处对不上，就是 `attest_mismatch`，循环停止。run-notes 里的 reward 只作展示。
 

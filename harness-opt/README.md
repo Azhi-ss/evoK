@@ -178,7 +178,7 @@ bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会拉起真实运行。省略 `--executor-cmd` 时，这一步就是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 要带 `--pi-bin <path>`。环在每次 relay `open` 之后，用这份二进制拉起已有的 pi-subagents 角色：gap-finder、innovator、reviewer-gate 读 `harness-opt/agents` 里的定义（子进程的 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 指向这个目录），critic 和 ranker 走同一条只读 argv，不另写提示词。argv 仍是证据角色的 `--tools read`，innovator 再加 `--tools write`。argv 里不放 runId。子进程拿到这次调用的 `BASE_URL`；证明密钥、relay 日志根和上游密钥不进入这个环境。结论取该 run 最后一条 done 的 assistant 文本。对不上环要的字段就停，不会进 docker。没给 `--pi-bin` 时，`--execute` 仍然以 `execute mode needs roles` 失败。`pre_round1` 仍由 `runOptLoop` 在第 1 轮之前签名，没有第二条签名路径。innovator 单次 20 万和只读 3000 万仍由这条 relay 记账，`sessions/*.spawn.json` 仍是 roleFacing，不含 `relayLog`。省略 `--executor-cmd` 时，种子 0 的真实运行才是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
 
 单独跑一题一种子一臂（盒子上 hb003、seed 9、control 的对账）不经过环，由这条命令自己监听 relay、分配 runId、打开并关闭：
 
@@ -190,6 +190,58 @@ python3 harness-opt/relay/devii_docker_v2.py once \
   --config /workspace/harness-opt-runs/config/control.json \
   --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control \
   --harness /workspace/harness-opt-runs/config/harness.pr202.mjs
+```
+
+`--control-attest` 读的是宿主证明目录，里面要有 `attestation.json`（`devii-opt-attest/v1`）。`once` 只在带了 `--attest-dir` 时写它，并且这个目录不能和 `--run-dir` 嵌套。relay 日志和签名后的 `run-record.json` 仍在 `HARNESS_RELAY_LOG_ROOT/<runId>/`（盒子上是 `/home/box/.harness-relay/<runId>/`），不拷进证明目录。trace 里的 `run_start.candidateConfigHash` 必须等于这份 control 文件的 sha256。生成 control-r5 的证明目录：
+
+```bash
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
+python3 harness-opt/relay/devii_docker_v2.py once \
+  --task hb003 --seed 9 --arm control --reconcile --expected-task hb003 \
+  --config /workspace/harness-opt-runs/config/control.json \
+  --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5 \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
+  --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest
+```
+
+已经跑完、目录里还没有 `attestation.json` 的 control-r5，用同一个写入器补证明，不启动 docker：
+
+```bash
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" \
+python3 harness-opt/relay/devii_docker_v2.py attest \
+  --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5 \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
+  --config /workspace/harness-opt-runs/config/control.json \
+  --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest
+```
+
+第 1 轮把上面的证明目录交给 `--control-attest`。`--pi-bin` 是本机的 Pi。环自己签 `pre_round1`。
+
+```bash
+BASE_URL="$BASE_URL" \
+RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+HARNESS_ATTEST_KEY_FILE="$HARNESS_ATTEST_KEY_FILE" \
+HARNESS_RELAY_LOG_ROOT=/home/box/.harness-relay \
+bun harness-opt/src/cli.ts optimize --execute --rounds 1 \
+  --out /tmp/harness-opt-loop \
+  --pi-bin "$PI_BIN" \
+  --attest-root /tmp/harness-opt-attest \
+  --attest-key-file "$HARNESS_ATTEST_KEY_FILE" \
+  --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
+  --control-config /workspace/harness-opt-runs/config/control.json \
+  --control-attest /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest \
+  --task hb003 --task-path tasks3/hb003 --network devii-004-int --token-w 9024166 \
+  --round0-trace 'heldout/hb003/seed0/.../trace.jsonl' \
+  --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
+```
+
+角色冒烟默认跳过。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN` 都设置时，每个角色经真实 Pi 拉起一次（gap-finder、innovator、critic、ranker、reviewer-gate），然后停，不启动 docker。测试自己把 relay 绑到 `127.0.0.1`，日志放在临时目录。上游密钥沿用 `RELAY_UPSTREAM_KEY_FILE`。
+
+```bash
+LOOP_LIVE_SMOKE=1 PI_BIN="$PI_BIN" \
+RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+bun test harness-opt/src/modules/opt-loop.test.ts -t "live role smoke"
 ```
 
 `--harness` 的 sha256 必须是 `4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c`，否则在 docker 之前拒绝。容器 argv 只来自 `hooks.container_argv`（已有的 `sudo -E docker`）。容器里没有真实密钥，只有固定占位符 `API_KEY=relay-placeholder-not-a-key`；其它 `API_KEY` 在 docker 之前拒绝。中继转发时丢掉客户端 `Authorization`，换成 `RELAY_UPSTREAM_KEY_FILE`。`once` 和环启动的 `harness_relay.py control` 都走 `_network_upstream`（默认 `UPSTREAM_URL`）。上游请求固定带 `User-Agent: Mozilla/5.0`，与 `Authorization`、`Content-Type` 一起发出。生产路径上的 `_default_upstream` 或其它假上游会拒绝启动，并在 `reject.jsonl` 记下 `fake_upstream`。假上游只在测试里用 `allow_fake_upstream=True`。启动 agent 前，若固定名（如 `devii-once-hb003-9-control`）的容器还在，用同一条 `sudo -E docker` 先 `kill` 再 `rm -f`，把 name 和 id 写入 `devii_one.log`。这不是运行故障。`BASE_URL` 指向 `http://10.204.0.1:8642/r/<runId>/v1`，网络是 `devii-004-int`。`--reconcile` 必须另带 `--expected-task`。零条 relay 请求、agent 非 0 退出、或没有 `task-*` 目录，都是未计分故障，不接受对账，也不签名。tokens 只读 relay usage。checker 之后先 `copy_checker_before_sign` 再 `sign_run_record`。评估器 null 分记为 unscored，原因留在 relay 的 checker 目录里。挂上的 harness sha 写在 `result.json` 的 `mountedHarnessSha`。
