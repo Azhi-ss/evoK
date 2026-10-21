@@ -80,7 +80,15 @@ bun harness-opt/src/cli.ts optimize --execute --rounds 1 \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-`LOOP_LIVE_SMOKE=1` 且 `PI_BIN` 设置时，`bun test harness-opt/src/modules/opt-loop.test.ts -t "live role smoke"` 让每个角色经真实 Pi 跑一次后停，不启动 docker。每个角色都要退出码 0，并且自己的 relay 账本里至少有一条 done，usage 折成的 tokens 大于 0。只拉起进程不算通过。没设这两个变量就跳过。盒子上的 Pi 是 `/home/box/.local/bin/pi`（CLI 1.3.0），PATH 里要有 Node 22（`~/.nvm/versions/node/v22.23.3/bin`）。`--execute` 用 `--print`、`--system-prompt harness-opt/agents/<role>.md` 和这一轮的任务提示拉起角色。证据角色的 `--tools` 只有 `read`，innovator 是一条 `--tools read,write`。没有 `--pi-bin` 时仍以 `execute mode needs roles` 失败。`pre_round1` 只由环自己签。
+gap-finder 启动前，环把 round-0 trace 和已验证的 control trace 以 `0444` 拷进该角色 cwd 的 `traces/`，文件名不含 `private`。sha 对不上就停。任务提示和 `relayCited` 只用这些拷贝。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN`、`LOOP_LIVE_ROUND0`、`LOOP_LIVE_ROUND0_SHA` 都设置时，`bun test harness-opt/src/modules/opt-loop.test.ts -t "live role smoke"` 用真实 Pi 跑 gap-finder、innovator、critic、ranker（或 walkover）和 reviewer-gate，然后停，不调用 `once`，不启动 docker。引用检查失败则测试失败。每个跑过的角色都要退出码 0，并且自己的 relay 账本里至少有一条 done，usage 折成的 tokens 大于 0。没设这些变量就跳过。盒子上的 Pi 是 `/home/box/.local/bin/pi`（CLI 1.3.0），PATH 里要有 Node 22（`~/.nvm/versions/node/v22.23.3/bin`）。`--execute` 用 `--print`、`--system-prompt harness-opt/agents/<role>.md` 和这一轮的任务提示拉起角色。证据角色的 `--tools` 只有 `read`，innovator 是一条 `--tools read,write`。没有 `--pi-bin` 时仍以 `execute mode needs roles` 失败。`pre_round1` 只由环自己签。
+
+```bash
+LOOP_LIVE_SMOKE=1 PI_BIN="$PI_BIN" \
+LOOP_LIVE_ROUND0=/path/to/round0-trace.jsonl \
+LOOP_LIVE_ROUND0_SHA=<sha256> \
+RELAY_UPSTREAM_KEY_FILE="$RELAY_UPSTREAM_KEY_FILE" \
+bun test harness-opt/src/modules/opt-loop.test.ts -t "live role smoke"
+```
 
 `devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（模式 `0700`，测试可以换 relay 根）。这个目录不在任何容器挂载里。`checkerOutputSha` 和 `reward` 进入运行签名。`verify_run_record(runSig, checkerOut, reward)` 同时给 reviewer 输入和 run-notes 写入用。容器里的 `verifier/reward.txt`、`result.json` 的 reward、宿主 checker 输出或 run-notes 里展示的 reward 有一处对不上，就是 `attest_mismatch`，循环停止。run-notes 里的 reward 只作展示。
 

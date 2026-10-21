@@ -17,6 +17,7 @@ import {
   reconcilePrereg,
   assertLiveRoleCall,
   runLiveRoleSmoke,
+  stageGapTrace,
   runOptLoop,
   runOptOnce,
   runRecordArgv,
@@ -914,7 +915,8 @@ describe("optimization loop", () => {
       },
     });
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
-    expect(readFileSync(join(fx.out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain(`${fx.controlTrace}:1`);
+    expect(readFileSync(join(fx.out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain("/traces/control-trace.jsonl:1");
+    expect(readFileSync(join(fx.out, "round1/sessions/gap-finder.jsonl"), "utf8")).not.toContain(fx.controlTrace);
     expect(closure.gapCitedTrace).toBe(false);
     expect(result.accepted).toBeNull();
     expect(result.skippedFinal).toBe(true);
@@ -1261,8 +1263,25 @@ describe("optimization loop", () => {
     const gap = JSON.parse(readFileSync(join(fx.out, "round1/gap-input.json"), "utf8")) as {
       traces: { file: string; sha256: string }[];
     };
-    expect(gap.traces[0]?.file).toBe(pre.round0Record.hostCopyPath);
-    expect(gap.traces[0]?.sha256).toBe(pre.round0Record.srcSha256);
+    const record = JSON.parse(readFileSync(join(fx.out, "round1/gap-traces.json"), "utf8")) as {
+      traces: { file: string; sha256: string }[];
+    };
+    expect(record.traces).toEqual(gap.traces);
+    const round0Copy = gap.traces.find((hint) => hint.file.endsWith("/traces/round0-trace.jsonl"));
+    const controlCopy = gap.traces.find((hint) => hint.file.endsWith("/traces/control-trace.jsonl"));
+    expect(round0Copy?.sha256).toBe(pre.round0Record.srcSha256);
+    expect(controlCopy?.sha256).toBe(createHash("sha256").update(readFileSync(fx.controlTrace)).digest("hex"));
+    expect(round0Copy?.file.includes("private")).toBe(false);
+    expect(controlCopy?.file.includes("private")).toBe(false);
+    expect(round0Copy && readFileSync(round0Copy.file, "utf8")).toBe(body);
+    expect(round0Copy && (statSync(round0Copy.file).mode & 0o777)).toBe(0o444);
+    expect(controlCopy && (statSync(controlCopy.file).mode & 0o777)).toBe(0o444);
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[]).at(-1) ?? "";
+    expect(prompt).toContain("/traces/round0-trace.jsonl");
+    expect(prompt).toContain("/traces/control-trace.jsonl");
+    expect(prompt).not.toContain("private");
+    expect(prompt).not.toContain(pre.round0Record.hostCopyPath);
+    expect(prompt).not.toContain(fx.controlTrace);
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
     expect(closure.gapCitedTrace).toBe(true);
   });
@@ -1348,6 +1367,24 @@ describe("optimization loop", () => {
       round0TraceSha: "ab".repeat(32),
     })).rejects.toThrow(/round0Record sha/);
     expect(fake.calls).toHaveLength(0);
+  });
+
+  test("a gap trace sha mismatch is rejected and the copy is not cited", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gap-trace-"));
+    const src = join(dir, "src.jsonl");
+    const body = "alpha\nbeta\ngamma\n";
+    writeFileSync(src, body);
+    const dest = join(dir, "roles", "gap-finder", "traces", "round0-trace.jsonl");
+    expect(() => stageGapTrace(src, dest, "ab".repeat(32))).toThrow(/gap trace sha mismatch/);
+    expect(existsSync(dest)).toBe(false);
+    const sha = createHash("sha256").update(body).digest("hex");
+    stageGapTrace(src, dest, sha);
+    expect(readFileSync(dest, "utf8")).toBe(body);
+    expect(createHash("sha256").update(readFileSync(dest)).digest("hex")).toBe(sha);
+    expect(statSync(dest).mode & 0o777).toBe(0o444);
+    expect(dest.endsWith(join("traces", "round0-trace.jsonl"))).toBe(true);
+    expect(dest.includes("private")).toBe(false);
+    expect(() => stageGapTrace(src, join(dir, "roles", "gap-finder", "traces", "private-trace.jsonl"), sha)).toThrow(/gap trace name/);
   });
 });
 
@@ -1738,8 +1775,13 @@ test("a live role call needs a done line with tokens and exit 0", () => {
 
 const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env.PI_BIN);
 (liveRoleSmoke ? test : test.skip)(
-  "live role smoke requires a relay done with tokens and does not start docker",
+  "live role smoke runs the role chain on a real round-0 trace and stops before docker",
   async () => {
+    const round0TracePath = process.env.LOOP_LIVE_ROUND0 ?? "";
+    const round0TraceSha = process.env.LOOP_LIVE_ROUND0_SHA ?? "";
+    if (round0TracePath === "" || !/^[0-9a-f]{64}$/.test(round0TraceSha)) {
+      throw new Error("live chain needs LOOP_LIVE_ROUND0 and LOOP_LIVE_ROUND0_SHA");
+    }
     const fx = fixture();
     const previous = {
       base: process.env.BASE_URL,
@@ -1755,28 +1797,29 @@ const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env
         attestRoot: fx.attestRoot,
         attestKeyFile: fx.keyFile,
         piBin: process.env.PI_BIN ?? "",
+        harnessPath: fx.harnessPath,
+        controlAttests: [fx.controlAttest],
+        controlConfigPath: fx.controlConfig,
+        task: LOOP_TASK,
+        round0TracePath,
+        round0TraceSha,
       });
       expect(report.dockerRuns).toBe(0);
-      expect(report.launches).toEqual({
-        "gap-finder": 1,
-        innovator: 1,
-        critic: 1,
-        ranker: 1,
-        "reviewer-gate": 1,
-      });
+      expect(report.gapCitedTrace).toBe(true);
       expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
-      const innovatorArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as string[];
       const gapArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[];
-      expect(innovatorArgv[0]).toBe(process.env.PI_BIN);
-      expect(gapArgv[0]).toBe(process.env.PI_BIN);
+      const prompt = gapArgv.at(-1) ?? "";
+      expect(prompt).toContain("/traces/round0-trace.jsonl");
+      expect(prompt).toContain("/traces/control-trace.jsonl");
+      expect(prompt).not.toContain("private");
       expect(gapArgv).toContain("--print");
-      expect(innovatorArgv).toContain("--print");
       expect(gapArgv[gapArgv.indexOf("--tools") + 1]).toBe("read");
-      expect(innovatorArgv[innovatorArgv.indexOf("--tools") + 1]).toBe("read,write");
       expect(gapArgv[gapArgv.indexOf("--system-prompt") + 1]?.endsWith("/agents/gap-finder.md")).toBe(true);
-      expect(innovatorArgv[innovatorArgv.indexOf("--system-prompt") + 1]?.endsWith("/agents/innovator.md")).toBe(true);
-      expect(gapArgv.at(-1)?.includes("knob")).toBe(true);
       expect(gapArgv.join("\n")).not.toContain("bash");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { rank?: string };
+      if (report.rank === "walkover") expect(closure.rank).toBe("walkover");
+      else expect(existsSync(join(fx.out, "round1/sessions/ranker.argv.json"))).toBe(true);
+      expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.argv.json"))).toBe(true);
     } finally {
       if (previous.base === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous.base;

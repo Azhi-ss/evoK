@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
 import {
@@ -259,6 +259,11 @@ export interface OptLoopOptions {
   readonly round0TraceSha: string;
   /** Flip one byte of the host copy after it is signed. */
   readonly round0Tamper?: boolean;
+  /**
+   * Live chain only. After the roles finish, skip once/docker and still run reviewer-gate.
+   * The production CLI does not set this.
+   */
+  readonly stopBeforeRun?: boolean;
 }
 
 export interface AcceptedCandidate {
@@ -476,9 +481,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const started = now();
     const roleMs = started.getTime();
     let roundRank: "walkover" | undefined;
-    const gapTraces = round === 1 && round0
-      ? [{ file: round0.hostCopyPath, line: 1, sha256: round0.srcSha256 }, ...traceHints]
-      : traceHints;
+    const gapCwd = join(options.out, `round${round}`, "roles", "gap-finder");
+    let gapTraces: TraceHint[];
+    try {
+      gapTraces = stageGapTraces(gapCwd, gapTraceSources(round, round0, traceHints));
+    } catch (error) {
+      if (!(error instanceof GapTraceShaError)) throw error;
+      stopReason = "anti_forgery";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    writeJson(join(options.out, `round${round}`, "gap-traces.json"), { traces: gapTraces });
     const gapRelay = roleRelay(relayRoot, env);
     const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview });
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
@@ -510,7 +524,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
     const gapLog = gapRelay.relayLog;
     const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
-    if (round === 1 && round0 && !relayCited(gapLog, round0.hostCopyPath, round0.srcSha256)) {
+    const round0Copy = gapTraces.find((hint) => basename(hint.file) === "round0-trace.jsonl");
+    if (round === 1 && round0 && (!round0Copy || !relayCited(gapLog, round0Copy.file, round0.srcSha256))) {
       stopReason = "anti_forgery";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
@@ -766,8 +781,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const runs: ScoredRun[] = [];
     let stopBeforeReview = false;
     const seed = 0;
-    const beforeSeed = loopCap(round - 1);
-    if (beforeSeed) {
+    const beforeSeed = options.stopBeforeRun ? null : loopCap(round - 1);
+    if (options.stopBeforeRun) {
+      // Reviewer still runs below. once/docker does not.
+    } else if (beforeSeed) {
       assignStop(beforeSeed);
       stopBeforeReview = true;
     } else {
@@ -952,6 +969,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       patchHash,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
     });
+    if (options.stopBeforeRun) break;
   }
 
   const result: OptLoopResult = {
@@ -1149,12 +1167,64 @@ function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, pr
   return text;
 }
 
+export class GapTraceShaError extends Error {
+  constructor() {
+    super("gap trace sha mismatch");
+  }
+}
+
+/** Read-only copy under gap-finder's traces/. The notice and the private host path stay out. */
+export function stageGapTrace(src: string, dest: string, expectedSha: string): void {
+  const name = basename(dest);
+  if (basename(dirname(dest)) !== "traces" || name.includes("..") || name.toLowerCase().includes("private")) {
+    throw new Error("gap trace name");
+  }
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(src);
+  } catch {
+    throw new GapTraceShaError();
+  }
+  if (sha256(bytes) !== expectedSha) throw new GapTraceShaError();
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, bytes);
+  chmodSync(dest, 0o444);
+  if (sha256File(dest) !== expectedSha) throw new GapTraceShaError();
+}
+
+function gapTraceSources(
+  round: number,
+  round0: { readonly hostCopyPath: string; readonly srcSha256: string } | null,
+  hints: readonly TraceHint[],
+): { readonly file: string; readonly sha256: string; readonly name: string }[] {
+  const sources: { file: string; sha256: string; name: string }[] = [];
+  if (round === 1 && round0) sources.push({ file: round0.hostCopyPath, sha256: round0.srcSha256, name: "round0-trace.jsonl" });
+  hints.forEach((hint, index) => {
+    const name = round === 1
+      ? (hints.length === 1 ? "control-trace.jsonl" : `control-trace-${index}.jsonl`)
+      : `trace-${index}.jsonl`;
+    sources.push({ file: hint.file, sha256: hint.sha256, name });
+  });
+  return sources;
+}
+
+function stageGapTraces(
+  cwd: string,
+  sources: readonly { readonly file: string; readonly sha256: string; readonly name: string }[],
+): TraceHint[] {
+  return sources.map((source) => {
+    const dest = join(cwd, "traces", source.name);
+    stageGapTrace(source.file, dest, source.sha256);
+    return { file: dest, line: 1, sha256: source.sha256 };
+  });
+}
+
 function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null }): string {
   const traces = input.traces.map((hint) => `${hint.file} sha256=${hint.sha256} line=${hint.line}`).join("\n");
   const review = input.previousReview ? JSON.stringify({ accept: input.previousReview.accept, reason: input.previousReview.reason }) : "无";
   return [
     `第 ${input.round} 轮 gap-finder。`,
-    "根据下面的 trace 归纳一个共同失败模式。",
+    "只读下面列出的 traces/ 文件，归纳一个共同失败模式。",
     traces || "没有附带 trace。",
     `上一轮评语：${review}`,
     "最后一条 assistant 消息只放一个 JSON 对象，字段为 knob、failureClass、summary、citations。",
@@ -1935,99 +2005,100 @@ function prepareRole(
   return config;
 }
 
-const LIVE_ROLES = [
-  { role: "gap-finder", session: "gap-finder", kind: "role:gap-finder" },
-  { role: "innovator", session: "innovator-0", kind: "role:innovator" },
-  { role: "critic", session: "critic", kind: "role:critic" },
-  { role: "ranker", session: "ranker", kind: "role:ranker" },
-  { role: "reviewer-gate", session: "reviewer-gate", kind: "role:reviewer" },
-] as const;
-
 /**
- * One real Pi launch per role, through the same relay open the loop uses.
- * Each role must exit 0 and leave a done line whose usage weighs to tokens > 0.
- * Stops before any scored docker run. Opt-in via LOOP_LIVE_SMOKE and PI_BIN.
+ * A Pi launch counts only with exit 0 and a done line whose usage weighs to tokens > 0.
  */
 export function assertLiveRoleCall(role: string, status: number | null, relayLog: string): void {
   if (status !== 0) throw new Error(`role ${role} pi exited ${status ?? "null"}`);
   if (maxDoneTokens(relayLog) <= 0) throw new Error(`role ${role} made no relay request`);
 }
 
+/**
+ * Real round-1 chain: gap-finder, innovators, critic, ranker or walkover, reviewer-gate.
+ * Citation is the loop's anti_forgery check against the traces/ copies.
+ * Stops before once/docker. Opt-in via LOOP_LIVE_SMOKE, PI_BIN, LOOP_LIVE_ROUND0, and LOOP_LIVE_ROUND0_SHA.
+ */
 export async function runLiveRoleSmoke(options: {
   readonly out: string;
   readonly attestRoot: string;
   readonly attestKeyFile: string;
   readonly piBin: string;
+  readonly harnessPath: string;
+  readonly controlAttests: readonly string[];
+  readonly controlConfigPath: string;
+  readonly task: OptTask;
+  readonly round0TracePath: string;
+  readonly round0TraceSha: string;
   readonly env?: NodeJS.ProcessEnv;
-}): Promise<{ readonly launches: Readonly<Record<(typeof LIVE_ROLES)[number]["role"], number>>; readonly dockerRuns: number }> {
+}): Promise<{ readonly dockerRuns: number; readonly gapCitedTrace: boolean; readonly rank: "walkover" | null }> {
   const env = options.env ?? process.env;
   if (!env.BASE_URL) throw new Error("execute mode needs BASE_URL");
-  loadAttestKey(options.attestKeyFile);
-  assertAttestRoot(options.attestRoot, options.out);
-  assertKeyOutside(options.attestKeyFile, [options.out]);
-  mkdirSync(options.out, { recursive: true });
+  if (!existsSync(options.round0TracePath)) throw new Error("live chain round-0 trace is missing");
+  const pinned = sha256(readFileSync(options.round0TracePath));
+  if (pinned !== options.round0TraceSha) throw new Error("live chain round-0 sha mismatch");
+  let dockerRuns = 0;
+  const result = await runOptLoop({
+    out: options.out,
+    attestRoot: options.attestRoot,
+    attestKeyFile: options.attestKeyFile,
+    harnessPath: options.harnessPath,
+    controlAttests: options.controlAttests,
+    controlConfigPath: options.controlConfigPath,
+    task: options.task,
+    round0TracePath: options.round0TracePath,
+    round0TraceSha: options.round0TraceSha,
+    mode: "execute",
+    piBin: options.piBin,
+    rounds: 1,
+    stopBeforeRun: true,
+    env,
+    executor: {
+      name: "no-docker",
+      async run() {
+        dockerRuns += 1;
+        throw new Error("docker must not start");
+      },
+    },
+  });
+  if (dockerRuns !== 0) throw new Error("docker must not start");
+  if (result.stopReport.reason) throw new Error(`live chain stopped: ${result.stopReport.reason}`);
+  const closurePath = join(options.out, "round1", "closure.json");
+  if (!existsSync(closurePath)) throw new Error("live chain citation check failed");
+  const closure = JSON.parse(readFileSync(closurePath, "utf8")) as { gapCitedTrace?: boolean; rank?: string };
+  if (closure.gapCitedTrace !== true) throw new Error("live chain citation check failed");
   const relayRoot = typeof env.HARNESS_RELAY_LOG_ROOT === "string" && env.HARNESS_RELAY_LOG_ROOT.trim() !== ""
     ? env.HARNESS_RELAY_LOG_ROOT.trim()
     : defaultRelayRoot();
-  const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const relayCtl = new RelayControl(relayRoot, relayListenPort(env), relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, "execute");
-  activeRelay = relayCtl;
-  activeRelayRoot = relayRoot;
-  const launches = {
-    "gap-finder": 0,
-    innovator: 0,
-    critic: 0,
-    ranker: 0,
-    "reviewer-gate": 0,
-  };
-  try {
-    for (const spec of LIVE_ROLES) {
-      const relay = roleRelay(relayRoot, env);
-      const prompt = liveRolePrompt(spec.role);
-      const spawn = prepareRole(options.out, 1, spec.role, options.piBin, [], relay, prompt, spec.session);
-      await relayRpc({ op: "open", runId: relay.runId, kind: spec.kind, expectedSha: "0".repeat(64) });
-      const launched = launchRolePi(options.piBin, spawn, prompt);
-      assertLiveRoleCall(spec.role, launched.status, relay.relayLog);
-      launches[spec.role] += 1;
-      await closeRelay(relay.runId);
-    }
-    return { launches, dockerRuns: 0 };
-  } finally {
-    activeRelay = null;
-    activeRelayRoot = null;
-    await relayCtl.shutdown();
+  const kinds = relayRoleKinds(relayRoot);
+  for (const kind of ["role:gap-finder", "role:critic", "role:reviewer"] as const) {
+    if (!kinds.includes(kind)) throw new Error(`role ${kind} made no relay request`);
   }
+  if (kinds.filter((kind) => kind === "role:innovator").length !== INNOVATORS_PER_ROUND) {
+    throw new Error("role role:innovator made no relay request");
+  }
+  const rank = closure.rank === "walkover" ? "walkover" as const : null;
+  if (rank !== "walkover" && !kinds.includes("role:ranker")) throw new Error("role role:ranker made no relay request");
+  if (rank === "walkover" && kinds.includes("role:ranker")) throw new Error("walkover must not call ranker");
+  return { dockerRuns, gapCitedTrace: true, rank };
 }
 
-function liveRolePrompt(role: (typeof LIVE_ROLES)[number]["role"]): string {
-  if (role === "gap-finder") return gapTaskPrompt({ round: 1, traces: [], previousReview: null });
-  if (role === "innovator") {
-    return innovatorTaskPrompt({
-      round: 1,
-      knob: "agent-loop.maxSteps",
-      gapSummary: "steps run long",
-      triedSummaries: [],
-      control: { parts: { "agent-loop": { maxSteps: 25 } } },
-    });
+function relayRoleKinds(relayRoot: string): string[] {
+  if (!existsSync(relayRoot)) throw new Error("live chain made no relay request");
+  const kinds: string[] = [];
+  for (const runId of readdirSync(relayRoot)) {
+    const log = join(relayRoot, runId, "relay.jsonl");
+    if (!existsSync(log)) continue;
+    let kind = "";
+    for (const event of readJsonl(log)) {
+      if (!event || typeof event !== "object") continue;
+      const row = event as { type?: unknown; kind?: unknown };
+      if (row.type === "open" && typeof row.kind === "string") kind = row.kind;
+    }
+    if (!kind.startsWith("role:")) continue;
+    assertLiveRoleCall(kind, 0, log);
+    kinds.push(kind);
   }
-  if (role === "critic") {
-    return criticTaskPrompt({ round: 1, candidates: [{ id: "c0", summary: "lower the step cap", changedKeys: 1 }] });
-  }
-  if (role === "ranker") {
-    return rankerTaskPrompt({
-      round: 1,
-      candidates: [{ id: "c0", summary: "lower the step cap", changedKeys: 1 }],
-      excluded: [],
-    });
-  }
-  return reviewerTaskPrompt({
-    round: 1,
-    patchHash: "0".repeat(64),
-    summary: "lower the step cap",
-    knob: "agent-loop.maxSteps",
-    runs: [],
-    ewiSeeds: [],
-  });
+  return kinds;
 }
 
 /** Ledger weight: prompt + completion. A missing cached field is not a counted done. */
