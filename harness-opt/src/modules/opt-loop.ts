@@ -290,6 +290,8 @@ export interface OptLoopResult {
     readonly duplicate: boolean;
     readonly patchHash: string | null;
     readonly ewiSeeds: readonly number[];
+    /** Visible stop for this round, such as a citation failure. */
+    readonly reason?: string;
     /** Set when this round closed with no candidate to run. */
     readonly noWinner?: string;
     /** Key-count order. Recorded when the ranker ran. It does not pick the winner. */
@@ -356,6 +358,8 @@ interface ClosureRecord {
   patchActive: boolean;
   reviewFedForward: boolean | null;
   rank?: "walkover";
+  /** Why this round stopped, when the stop is a citation failure. */
+  reason?: string;
   /** Why this round closed with no candidate to run. */
   noWinner?: string;
   /** Key-count order from `rankCandidates`. Recorded, not a veto. */
@@ -561,16 +565,25 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
     const gapLog = gapRelay.relayLog;
-    const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
+    const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256, gapSpawn.cwd));
     const round0Copy = gapTraces.find((hint) => basename(hint.file) === "round0-trace.jsonl");
-    if (round === 1 && round0 && (!round0Copy || !relayCited(gapLog, round0Copy.file, round0.srcSha256))) {
+    if (round === 1 && round0 && (!round0Copy || !relayCited(gapLog, round0Copy.file, round0.srcSha256, gapSpawn.cwd))) {
       stopReason = "anti_forgery";
+      writeClosure(options.out, round, {
+        round,
+        closed: false,
+        gapCitedTrace,
+        knobMatched: false,
+        patchActive: false,
+        reviewFedForward: null,
+        reason: "anti_forgery",
+      });
       writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [], reason: "anti_forgery" });
       break;
     }
     if (round > 1 && previousReviewSession && previousReviewSha) {
-      const fed = relayCited(gapLog, previousReviewSession, previousReviewSha);
+      const fed = relayCited(gapLog, previousReviewSession, previousReviewSha, gapSpawn.cwd);
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
       writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
     }
@@ -2831,16 +2844,37 @@ function displayedRewardOk(keyFile: string, run: ScoredRun | undefined, notesPat
   return parsed?.ok === true;
 }
 
-function relayCited(logPath: string, hostFile: string, sha: string): boolean {
-  if (!existsSync(logPath) || !existsSync(hostFile)) return false;
+export interface CiteEvidence {
+  readonly ok: boolean;
+  readonly reason?: string;
+  readonly startLine?: number;
+  readonly endLine?: number;
+}
+
+/** Offline citation check. Relative reads resolve against `cwd`, not the process cwd. */
+export function citeEvidence(input: { readonly log: string; readonly file: string; readonly sha: string; readonly cwd: string }): CiteEvidence {
+  return readEvidence(input.log, input.file, input.sha, input.cwd);
+}
+
+function relayCited(logPath: string, hostFile: string, sha: string, roleCwd: string): boolean {
+  return readEvidence(logPath, hostFile, sha, roleCwd).ok;
+}
+
+function readEvidence(logPath: string, hostFile: string, sha: string, roleCwd: string): CiteEvidence {
+  if (!existsSync(logPath) || !existsSync(hostFile)) return { ok: false, reason: "missing" };
   const script = fileURLToPath(new URL("../../relay/ledger.py", import.meta.url));
-  const proc = spawnSync("python3", [script, "read-evidence", "--log", logPath, "--file", hostFile, "--sha", sha], { encoding: "utf8" });
-  if (!proc.stdout) return false;
+  const proc = spawnSync("python3", [script, "read-evidence", "--log", logPath, "--file", hostFile, "--sha", sha, "--cwd", roleCwd], { encoding: "utf8" });
+  if (!proc.stdout) return { ok: false, reason: "no_segment" };
   try {
-    const parsed = JSON.parse(proc.stdout) as { ok?: unknown };
-    return parsed.ok === true;
+    const parsed = JSON.parse(proc.stdout) as { ok?: unknown; reason?: unknown; startLine?: unknown; endLine?: unknown };
+    return {
+      ok: parsed.ok === true,
+      ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}),
+      ...(typeof parsed.startLine === "number" ? { startLine: parsed.startLine } : {}),
+      ...(typeof parsed.endLine === "number" ? { endLine: parsed.endLine } : {}),
+    };
   } catch {
-    return false;
+    return { ok: false, reason: "no_segment" };
   }
 }
 

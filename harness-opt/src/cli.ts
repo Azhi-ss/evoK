@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { flag, hasFlag } from "./args";
 import { runEmpty } from "./empty-run";
-import { runOptLoop, runOptOnce } from "./modules/opt-loop";
+import { citeEvidence, runOptLoop, runOptOnce } from "./modules/opt-loop";
 import { CommandOptExecutor, type OptTask } from "./modules/opt-executor";
 import type { OptRoleName } from "./modules/role-spawn";
 import { dispatchHarnessCommand, formatCommandResult, runClosedLoopDemo, type CommandResult } from "./session";
 
 const USAGE = [
-  "usage: harness-opt <empty|run|start|step|status|gate|stop|demo|optimize|optimize-one> [--out dir]",
+  "usage: harness-opt <empty|run|start|step|status|gate|stop|demo|optimize|optimize-one|cite-check> [--out dir]",
   "  empty                 fixture round; held-out is written to sealed/heldout-score.json",
   "  run --dev <dir>       one real round over that task bank; thresholds are required",
   "  start                 required unless files exist: --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score",
@@ -22,6 +22,8 @@ const USAGE = [
   "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails; --stop-before-run writes the closure and stops before once/docker",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
   "                        one candidate seed to prove activation; task flags are required",
+  "  cite-check --log <relay.jsonl> --cwd <role cwd> --file <path> --sha <sha>",
+  "                        offline citation replay; relative reads resolve against the role cwd",
 ].join("\n");
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -30,6 +32,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (command === "demo") return demoCommand(rest);
   if (command === "optimize") return optimizeCommand(rest);
   if (command === "optimize-one") return optimizeOneCommand(rest);
+  if (command === "cite-check") return citeCheckCommand(rest);
   if (command === "run") return runCommand(rest);
   if (command === "start" || command === "step" || command === "status" || command === "gate" || command === "stop") {
     const commandResult = await dispatchHarnessCommand([command, ...rest], { cwd: process.cwd() });
@@ -38,6 +41,20 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   process.stderr.write(`${USAGE}\n`);
   return 1;
+}
+
+function citeCheckCommand(argv: readonly string[]): number {
+  const log = flag(argv, "--log");
+  const roleCwd = flag(argv, "--cwd");
+  const file = flag(argv, "--file");
+  const sha = flag(argv, "--sha");
+  if (!log || !roleCwd || !file || !sha) {
+    process.stderr.write("cite-check needs --log, --cwd, --file, and --sha\n");
+    return 1;
+  }
+  const result = citeEvidence({ log, cwd: roleCwd, file, sha });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  return result.ok ? 0 : 1;
 }
 
 async function emptyCommand(argv: readonly string[]): Promise<number> {

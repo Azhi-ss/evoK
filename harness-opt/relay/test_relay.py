@@ -1067,6 +1067,49 @@ class EvidenceCase(unittest.TestCase):
         self.assertFalse(hooks.innovator_check(empty, host, digest, "cand", "cand", 24, 24)["ok"])
 
 
+class RelativeRoleReadCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.role = self.root / "role"
+        (self.role / "traces").mkdir(parents=True)
+        self.body = "alpha\nbeta\ngamma\n"
+        self.digest = hashlib.sha256(self.body.encode()).hexdigest()
+        self.copy = self.role / "traces" / "round0-trace.jsonl"
+        self.copy.write_text(self.body, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_relative_read_matches_from_the_role_cwd(self):
+        ledger = _read_ledger("traces/round0-trace.jsonl", self.body)
+        got = read_evidence(ledger, self.copy, self.digest, role_cwd=self.role)
+        self.assertTrue(got["ok"], got)
+        self.assertFalse(read_evidence(ledger, self.copy, self.digest)["ok"])
+
+    def test_parent_escape_is_rejected(self):
+        secret = self.root / "secret.jsonl"
+        secret.write_text(self.body, encoding="utf-8")
+        ledger = _read_ledger("../secret.jsonl", self.body)
+        got = read_evidence(ledger, secret, self.digest, role_cwd=self.role)
+        self.assertFalse(got["ok"])
+        self.assertEqual(got["reason"], "no_segment")
+
+    def test_symlink_out_is_rejected(self):
+        secret = self.root / "secret.jsonl"
+        secret.write_text(self.body, encoding="utf-8")
+        link = self.role / "traces" / "leak.jsonl"
+        link.symlink_to(secret)
+        ledger = _read_ledger("traces/leak.jsonl", self.body)
+        self.assertFalse(read_evidence(ledger, secret, self.digest, role_cwd=self.role)["ok"])
+        self.assertFalse(read_evidence(ledger, self.copy, self.digest, role_cwd=self.role)["ok"])
+
+    def test_absolute_read_still_matches(self):
+        ledger = _read_ledger(self.copy, self.body)
+        self.assertTrue(read_evidence(ledger, self.copy, self.digest, role_cwd=self.role)["ok"])
+        self.assertTrue(read_evidence(ledger, self.copy, self.digest)["ok"])
+
+
 class HookCase(unittest.TestCase):
     def test_06_and_08b_argv(self):
         executor = new_run_id()

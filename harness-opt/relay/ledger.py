@@ -298,6 +298,53 @@ def _same_path(left, right) -> bool:
         return os.path.abspath(left) == os.path.abspath(right)
 
 
+def _within(child, root) -> bool:
+    return child == root or child.startswith(root + os.sep)
+
+
+def _role_relative_realpath(tool_path, role_cwd):
+    """Resolve a relative tool path against the role cwd.
+
+    ``..`` that leaves the cwd, and a symlink whose realpath leaves the cwd,
+    are rejected. A path that stays inside is returned so the caller can
+    require it to be the attested copy. Absolute paths are not handled here.
+    """
+    if os.path.isabs(tool_path) or not role_cwd:
+        return None
+    try:
+        cwd_real = os.path.realpath(role_cwd)
+    except OSError:
+        return None
+    if not os.path.isdir(cwd_real):
+        return None
+    lexical = os.path.normpath(os.path.join(cwd_real, tool_path))
+    if not _within(lexical, cwd_real):
+        return None
+    try:
+        resolved = os.path.realpath(lexical)
+    except OSError:
+        return None
+    if not _within(resolved, cwd_real):
+        return None
+    return resolved
+
+
+def _read_path_matches(tool_path, host_file_path, role_cwd) -> bool:
+    """Absolute tool paths compare as before. Relative ones use the role cwd."""
+    if not isinstance(tool_path, str) or tool_path == "":
+        return False
+    if os.path.isabs(tool_path):
+        return _same_path(tool_path, host_file_path)
+    resolved = _role_relative_realpath(tool_path, role_cwd)
+    if resolved is None:
+        return False
+    try:
+        attested = os.path.realpath(host_file_path)
+    except OSError:
+        attested = os.path.abspath(host_file_path)
+    return resolved == attested
+
+
 def _expand_cited(cited):
     lines = []
     for item in cited:
@@ -353,7 +400,7 @@ def _cited_ok(cited, span, host_text) -> bool:
     return any(0 < line <= len(file_lines) and file_lines[line - 1].strip() != "" for line in lines)
 
 
-def read_evidence(role_ledger, host_file_path, expected_file_sha, cited_lines=None) -> dict:
+def read_evidence(role_ledger, host_file_path, expected_file_sha, cited_lines=None, *, role_cwd=None) -> dict:
     """A segment counts only when (a)(b)(c)(d) and cited-line rule (f) all hold."""
     data = Path(host_file_path).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -370,7 +417,7 @@ def read_evidence(role_ledger, host_file_path, expected_file_sha, cited_lines=No
             if tool.get("toolName") not in READ_TOOLS:
                 continue
             path = _args_path(tool.get("args"))
-            if not path or not _same_path(path, host_file_path):
+            if not path or not _read_path_matches(path, host_file_path, role_cwd):
                 continue
             raw = ledger.tool_text(tool.get("sha256"))
             if raw is None:
@@ -398,7 +445,7 @@ def main(argv=None):
     import sys
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] != "read-evidence":
-        raise SystemExit("usage: ledger.py read-evidence --log PATH --file PATH --sha HEX [--cited 1,2]")
+        raise SystemExit("usage: ledger.py read-evidence --log PATH --file PATH --sha HEX [--cited 1,2] [--cwd DIR]")
     flags = {}
     key = None
     for arg in argv[1:]:
@@ -411,7 +458,8 @@ def main(argv=None):
     cited = None
     if flags.get("cited"):
         cited = [int(part) for part in flags["cited"].split(",") if part]
-    result = read_evidence(flags["log"], flags["file"], flags["sha"], cited)
+    cwd = flags.get("cwd") or None
+    result = read_evidence(flags["log"], flags["file"], flags["sha"], cited, role_cwd=cwd)
     print(json.dumps(result))
     raise SystemExit(0 if result["ok"] else 2)
 

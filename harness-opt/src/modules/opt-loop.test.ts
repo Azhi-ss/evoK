@@ -1427,8 +1427,10 @@ describe("optimization loop", () => {
       round0TraceSha: createHash("sha256").update("alpha\nbeta\ngamma\n").digest("hex"),
     });
     expect(fake.calls).toHaveLength(0);
-    expect(result.rounds).toEqual([{ round: 1, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] }]);
+    expect(result.rounds).toEqual([{ round: 1, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [], reason: "anti_forgery" }]);
     expect(result.stopReport.reason).toBe("anti_forgery");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+    expect(closure.reason).toBe("anti_forgery");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
   });
 
@@ -1615,7 +1617,103 @@ describe("optimization loop role caps", () => {
   });
 });
 
+function relayReadLog(dir: string, toolPath: string, body: string): { readonly log: string; readonly sha: string } {
+  const sha = createHash("sha256").update(body).digest("hex");
+  mkdirSync(join(dir, "tool"), { recursive: true });
+  writeFileSync(join(dir, "tool", sha), body);
+  const runId = "ab".repeat(16);
+  const log = join(dir, "relay.jsonl");
+  const rows = [
+    { type: "relay_start", bootId: "b", pid: 1, relaySha: "x", ts: 1, ts_iso: "t" },
+    { type: "open", runId, kind: "role:gap-finder" },
+    { type: "req", seq: 1, runId, toolResults: [{ sha256: sha, tool_call_id: "c0", toolName: "read", args: { path: toolPath } }] },
+  ];
+  writeFileSync(log, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+  return { log, sha };
+}
+
+function captureStdout(run: () => Promise<number>): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const writeOut = process.stdout.write.bind(process.stdout);
+  const writeErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    out.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    err.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  return run().then((code) => ({ code, stdout: out.join(""), stderr: err.join("") })).finally(() => {
+    process.stdout.write = writeOut;
+    process.stderr.write = writeErr;
+  });
+}
+
 describe("optimize command", () => {
+  test("cite-check accepts a relative read inside the role cwd", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    const body = "alpha\nbeta\ngamma\n";
+    const file = join(role, "traces", "round0-trace.jsonl");
+    mkdirSync(join(role, "traces"), { recursive: true });
+    writeFileSync(file, body);
+    const saved = relayReadLog(join(fx.root, "saved"), "traces/round0-trace.jsonl", body);
+    const replay = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", saved.log, "--cwd", role, "--file", file, "--sha", saved.sha,
+    ])));
+    expect(replay.code).toBe(0);
+    expect(JSON.parse(replay.stdout).ok).toBe(true);
+  });
+
+  test("cite-check rejects a relative path that leaves the role cwd", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    mkdirSync(role, { recursive: true });
+    const body = "alpha\nbeta\ngamma\n";
+    const outside = join(fx.root, "secret.jsonl");
+    writeFileSync(outside, body);
+    const saved = relayReadLog(join(fx.root, "saved"), "../secret.jsonl", body);
+    const replay = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", saved.log, "--cwd", role, "--file", outside, "--sha", saved.sha,
+    ])));
+    expect(replay.code).toBe(1);
+    expect(JSON.parse(replay.stdout).ok).toBe(false);
+  });
+
+  test("cite-check rejects a symlink that leaves the role cwd", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    mkdirSync(join(role, "traces"), { recursive: true });
+    const body = "alpha\nbeta\ngamma\n";
+    const outside = join(fx.root, "secret.jsonl");
+    writeFileSync(outside, body);
+    const link = join(role, "traces", "leak.jsonl");
+    symlinkSync(outside, link);
+    const saved = relayReadLog(join(fx.root, "saved"), "traces/leak.jsonl", body);
+    const replay = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", saved.log, "--cwd", role, "--file", outside, "--sha", saved.sha,
+    ])));
+    expect(replay.code).toBe(1);
+    expect(JSON.parse(replay.stdout).ok).toBe(false);
+  });
+
+  test("cite-check still accepts an absolute read path", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    const body = "alpha\nbeta\ngamma\n";
+    const file = join(role, "traces", "round0-trace.jsonl");
+    mkdirSync(join(role, "traces"), { recursive: true });
+    writeFileSync(file, body);
+    const saved = relayReadLog(join(fx.root, "saved"), file, body);
+    const replay = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", saved.log, "--cwd", role, "--file", file, "--sha", saved.sha,
+    ])));
+    expect(replay.code).toBe(0);
+    expect(JSON.parse(replay.stdout).ok).toBe(true);
+  });
+
   test("dry-run finishes a round without a model process", async () => {
     const fx = fixture();
     const previousBind = process.env.HARNESS_RELAY_BIND;
