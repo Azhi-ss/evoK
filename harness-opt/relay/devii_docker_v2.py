@@ -203,6 +203,41 @@ def checker_cmd(task, run, actual_rel, name, *, run_id, port):
         mounts=mounts, command=["/tests/test.sh"], expose_relay=False,
     )
     return _with_run_flags(argv, name, workdir="/root/code", entrypoint="bash")
+def copy_task_tree(run, task_dir, name, *, run_id, port, call, timeout):
+    """Copy one task dir into `<run>/task-copy` via container_argv. The source mount is read-only.
+
+    The container runs `cp -a` and chowns the copy to the invoking uid/gid.
+    Python hashes that copy and does not read or write the original task dir.
+    """
+    import shlex
+    run=Path(run)
+    workspace=run/"workspace"
+    try:
+        rel=Path(task_dir).relative_to(workspace)
+    except ValueError as exc:
+        raise OnceError("task copy") from exc
+    dest=run/"task-copy"
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        dest.unlink()
+    elif dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    script="cp -a "+shlex.quote("/src/"+rel.as_posix())+"/. /dst/ && chown -R \"$COPY_UID:$COPY_GID\" /dst"
+    argv=hooks.container_argv(
+        image=IMAGE, run_id=run_id, port=port, network="devii-004-int",
+        env={"COPY_UID": str(os.getuid()), "COPY_GID": str(os.getgid())},
+        mounts=[(str(workspace), "/src:ro"), (str(dest), "/dst")],
+        command=["-lc", script], expose_relay=False,
+    )
+    wrapped=_with_run_flags(argv, name, workdir="/", entrypoint="bash")
+    try:
+        with open(run/"task-copy.log", "w") as clog:
+            completed=call(wrapped, stdout=clog, stderr=subprocess.STDOUT, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise OnceError("task copy") from exc
+    if getattr(completed, "returncode", None)!=0:
+        raise OnceError("task copy")
+    return _task_copy_sha(dest)
 def _docker_network_present(network):
     completed=subprocess.run(["sudo","docker","network","inspect",network],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     return completed.returncode==0
@@ -296,27 +331,38 @@ def _once_args(argv):
 
 def _file_sha(path):
     file=Path(path)
-    if file.is_symlink() or not file.is_file():
-        return None
-    return hashlib.sha256(file.read_bytes()).hexdigest()
+    try:
+        if file.is_symlink() or not file.is_file():
+            return None
+        return hashlib.sha256(file.read_bytes()).hexdigest()
+    except PermissionError as exc:
+        raise OnceError(f"attest cannot read {file}") from exc
 
 def _tree_shas(root):
     base=Path(root)
-    if base.is_symlink() or not base.is_dir():
-        return {}
-    out={}
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        kept=[]
-        for name in dirnames:
-            if not (Path(dirpath)/name).is_symlink():
-                kept.append(name)
-        dirnames[:] = kept
-        for name in filenames:
-            path=Path(dirpath)/name
-            if path.is_symlink() or not path.is_file():
-                continue
-            out[path.relative_to(base).as_posix()]=hashlib.sha256(path.read_bytes()).hexdigest()
-    return out
+    try:
+        if base.is_symlink() or not base.is_dir():
+            return {}
+        out={}
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            kept=[]
+            for name in dirnames:
+                if not (Path(dirpath)/name).is_symlink():
+                    kept.append(name)
+            dirnames[:] = kept
+            for name in filenames:
+                path=Path(dirpath)/name
+                if path.is_symlink() or not path.is_file():
+                    continue
+                out[path.relative_to(base).as_posix()]=hashlib.sha256(path.read_bytes()).hexdigest()
+        return out
+    except PermissionError as exc:
+        raise OnceError(f"attest cannot read {base}") from exc
+
+def _task_copy_sha(root):
+    """sha256 of the canonical path→sha map. Hashes the readable copy, not the agent original."""
+    blob=json.dumps(_tree_shas(root), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 def _attest_key():
     import harness_relay
@@ -330,23 +376,39 @@ def _attest_key():
 
 def _is_regular_file(path):
     file=Path(path)
-    return (not file.is_symlink()) and file.is_file()
+    try:
+        return (not file.is_symlink()) and file.is_file()
+    except PermissionError as exc:
+        raise OnceError(f"attest cannot read {file}") from exc
 
 def _task_trace(run_dir):
     """Last regular trace under workspace/runs/task-*, by directory name. Read-only."""
     root=Path(run_dir)/"workspace"/"runs"
-    if root.is_symlink() or not root.is_dir():
-        return None
-    found=None
-    for child in sorted(root.iterdir(), key=lambda item: item.name):
-        if child.is_symlink() or not child.is_dir() or not child.name.startswith("task-"):
-            continue
-        trace=child/"trace.jsonl"
-        if _is_regular_file(trace):
-            found=trace
-    return found
+    try:
+        if root.is_symlink() or not root.is_dir():
+            return None
+        found=None
+        for child in sorted(root.iterdir(), key=lambda item: item.name):
+            if child.is_symlink() or not child.is_dir() or not child.name.startswith("task-"):
+                continue
+            trace=child/"trace.jsonl"
+            if _is_regular_file(trace):
+                found=trace
+        return found
+    except PermissionError as exc:
+        raise OnceError(f"attest cannot read {root}") from exc
+
+def _attest_copy(run_dir):
+    """`<run>/task-copy` when once left a regular trace there. Sessions and outputs stay in that dir."""
+    root=Path(run_dir)/"task-copy"
+    if _is_regular_file(root/"trace.jsonl"):
+        return root
+    return None
 
 def _attest_trace_path(run_dir):
+    copied=_attest_copy(run_dir)
+    if copied is not None:
+        return copied/"trace.jsonl"
     top=Path(run_dir)/"trace.jsonl"
     if _is_regular_file(top):
         return top
@@ -354,6 +416,9 @@ def _attest_trace_path(run_dir):
     return nested if nested is not None else top
 
 def _attest_tree(run_dir, name):
+    copied=_attest_copy(run_dir)
+    if copied is not None:
+        return copied/name
     top=Path(run_dir)/name
     if _tree_shas(top):
         return top
@@ -365,9 +430,10 @@ def _attest_tree(run_dir, name):
 def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta):
     """Host attestation outside the run dir. HMAC bytes match canon.canonical.
 
-    A top-level trace.jsonl is hashed when it is a regular file. Otherwise the
-    trace is the last workspace/runs/task-* trace. Sessions and outputs follow
-    the same rule. Nothing under the run dir is written or copied.
+    A regular `<run>/task-copy/trace.jsonl` is hashed when once left one.
+    Otherwise a top-level trace.jsonl wins, then the last workspace/runs/task-*
+    trace. Sessions and outputs follow that same directory. This writer does
+    not modify the run dir.
     """
     import canon
     attest=Path(attest_dir)
@@ -627,6 +693,12 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             res["reward"]=None
             res["unscored_reason"]="checker_missing"
             res["checker_exit"]="skipped"
+        if staged:
+            res["taskCopyDir"]="task-copy"
+            res["taskCopySha"]=copy_task_tree(
+                run, staged[-1], name+"-copy",
+                run_id=run_id, port=port, call=call, timeout=lim["verifier_timeout_sec"],
+            )
         recorded=finalize_launch(run, run_id, root, res)
         fault=None
         report={}
@@ -876,6 +948,9 @@ def main():
             print(json.dumps({"attestation": str(Path(flags["attest-dir"])/"attestation.json")}), flush=True)
         except OnceError as exc:
             print(str(exc), file=sys.stderr)
+            raise SystemExit(1)
+        except PermissionError:
+            print("attest cannot read the run dir", file=sys.stderr)
             raise SystemExit(1)
     else: print(__doc__)
 if __name__=="__main__": main()

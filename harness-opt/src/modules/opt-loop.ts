@@ -1150,7 +1150,7 @@ function criticTaskPrompt(input: { readonly round: number; readonly candidates: 
   const lines = input.candidates.map((item) => `${item.id} changedKeys=${item.changedKeys} ${item.summary}`);
   return [
     `第 ${input.round} 轮 critic。`,
-    "找出候选里的缺陷。",
+    "只看候选改了什么。",
     lines.join("\n") || "没有候选。",
     "最后一条 assistant 消息只放一个 JSON 对象：excluded 是要排除的候选 id 数组。没有要排除的就用空数组。",
   ].join("\n");
@@ -1160,7 +1160,7 @@ function rankerTaskPrompt(input: { readonly round: number; readonly candidates: 
   const lines = input.candidates.map((item) => `${item.id} changedKeys=${item.changedKeys} ${item.summary}`);
   return [
     `第 ${input.round} 轮 ranker。`,
-    "对候选做两两比较。分不出高下就记平局。",
+    "每一对比较两次：A 对 B 和 B 对 A 各一次，按总胜场选赢家。平局或无法决定时没有赢家。",
     lines.join("\n") || "没有候选。",
     `已排除：${input.excluded.join(" ") || "无"}`,
     "最后一条 assistant 消息只放一个 JSON 对象：winnerId 是字符串。平局或无法决定时 winnerId 为空字符串。",

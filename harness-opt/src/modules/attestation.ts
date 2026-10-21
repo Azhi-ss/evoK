@@ -356,11 +356,21 @@ function hashOrEmpty(file: string): string {
 }
 
 /**
- * Top-level `trace.jsonl` wins when it is a regular file.
- * Otherwise the lexicographically last `workspace/runs/task-*` trace is used.
- * Session and output trees stay at the top level when they already have files.
+ * `task-copy/trace.jsonl` wins when once left a regular file there.
+ * Sessions and outputs then come from that same directory.
+ * Otherwise top-level `trace.jsonl` wins, then the lexicographically last
+ * `workspace/runs/task-*` trace. Session and output trees stay at the top
+ * level when they already have files.
  */
 function attestLayout(runDir: string): { readonly trace: string; readonly sessions: string; readonly outputs: string } {
+  const copied = taskCopyDir(runDir);
+  if (copied) {
+    return {
+      trace: join(copied, "trace.jsonl"),
+      sessions: join(copied, ".pi-sessions"),
+      outputs: join(copied, "outputs"),
+    };
+  }
   const topTrace = join(runDir, "trace.jsonl");
   const nested = taskTrace(runDir);
   const taskDir = nested ? resolve(nested, "..") : null;
@@ -369,6 +379,11 @@ function attestLayout(runDir: string): { readonly trace: string; readonly sessio
     sessions: artifactTree(runDir, ".pi-sessions", taskDir),
     outputs: artifactTree(runDir, "outputs", taskDir),
   };
+}
+
+function taskCopyDir(runDir: string): string | null {
+  const root = join(runDir, "task-copy");
+  return isRegularFile(join(root, "trace.jsonl")) ? root : null;
 }
 
 function artifactTree(runDir: string, name: string, taskDir: string | null): string {

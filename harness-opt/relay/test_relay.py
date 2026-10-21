@@ -2039,7 +2039,7 @@ class OnceCase(unittest.TestCase):
         def drop_log(argv, **kwargs):
             (missing / "verifier").mkdir(parents=True, exist_ok=True)
             (missing / "verifier" / "reward.txt").write_text("1\n")
-            (missing_root / missing_id / "relay.jsonl").unlink()
+            (missing_root / missing_id / "relay.jsonl").unlink(missing_ok=True)
             return Done()
 
         # The helper always reads self.root / "relay". Drive this case through run_once directly.
@@ -2170,6 +2170,154 @@ class OnceCase(unittest.TestCase):
         self.assertEqual(seen_absent[0][:4], ["sudo", "-E", "docker", "run"])
         self.assertEqual(quiet["score_status"], "scored")
         self.assertEqual(quiet["reward"], 1)
+
+    def test_once_copies_the_task_tree_and_attest_reads_the_copy(self):
+        relay = self._relay()
+        run = self.root / "copy"
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+        run_id = "ab" * 16
+        planted = {}
+        copy_argvs = []
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        class Done:
+            returncode = 0
+
+        def popen(argv, **kwargs):
+            task = run / "workspace" / "runs" / "task-plant"
+            (task / "outputs").mkdir(parents=True)
+            (task / ".pi-sessions").mkdir()
+            (task / "trace.jsonl").write_text('{"type":"run_start","candidateConfigHash":"copy"}\n')
+            (task / "outputs" / "out.txt").write_text("output\n")
+            (task / ".pi-sessions" / "s.jsonl").write_text("session\n")
+            (run / "trace.jsonl").write_text("decoy-trace\n")
+            (run / ".pi-sessions").mkdir(parents=True, exist_ok=True)
+            (run / ".pi-sessions" / "decoy.jsonl").write_text("decoy-session\n")
+            for path in task.rglob("*"):
+                if path.is_file() and not path.is_symlink():
+                    planted[path] = (path.read_bytes(), path.stat().st_mtime_ns)
+            relay.record(run_id, {"type": "req", "seq": 1, "runId": run_id})
+            relay.record(run_id, {"type": "done", "status": 200, "usage": dict(USAGE)})
+            return Proc()
+
+        def call(argv, **kwargs):
+            text = "\n".join(argv) if isinstance(argv, (list, tuple)) else ""
+            if "cp -a " not in text:
+                (run / "verifier").mkdir(parents=True, exist_ok=True)
+                (run / "verifier" / "reward.txt").write_text("1\n")
+                return Done()
+            copy_argvs.append(list(argv))
+            volumes = [argv[index + 1] for index, item in enumerate(argv) if item == "-v"]
+            src_mount = next(item for item in volumes if item.endswith(":/src:ro"))
+            dst_mount = next(item for item in volumes if item.endswith(":/dst"))
+            host_src = Path(src_mount[: -len(":/src:ro")])
+            host_dst = Path(dst_mount[: -len(":/dst")])
+            script = next(item for item in argv if item.startswith("cp -a "))
+            inner = script.split(" ", 2)[2].split("/. ", 1)[0]
+            if len(inner) >= 2 and inner[0] == inner[-1] == "'":
+                inner = inner[1:-1]
+            origin = host_src / inner[len("/src/"):]
+            for path in origin.rglob("*"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                target = host_dst / path.relative_to(origin)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+            return Done()
+
+        attest = self.root / "copy-attest"
+        recorded = self.box.once_from_flags([
+            "--task", "hb003", "--seed", "9", "--arm", "control",
+            "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
+            "--run-id", run_id, "--nonce", "cd" * 16, "--attest-dir", str(attest),
+        ], popen=popen, call=call, preflight=lambda **_kwargs: None,
+           stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
+           limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
+           relay=relay, listen=False, lock_path=self.root / "copy.lock")
+        self.assertEqual(len(copy_argvs), 1)
+        argv = copy_argvs[0]
+        blob = "\n".join(argv)
+        self.assertEqual(argv[:4], ["sudo", "-E", "docker", "run"])
+        self.assertEqual(argv[argv.index("--network") + 1], "devii-004-int")
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
+        self.assertNotIn("BASE_URL", blob)
+        self.assertNotIn("API_KEY", blob)
+        self.assertIn(f"COPY_UID={os.getuid()}", argv)
+        self.assertIn(f"COPY_GID={os.getgid()}", argv)
+        self.assertIn(f"{run / 'workspace'}:/src:ro", argv)
+        self.assertIn(f"{run / 'task-copy'}:/dst", argv)
+        self.assertIn("chown -R", blob)
+        task = run / "workspace" / "runs" / "task-plant"
+        for path, (body, mtime) in planted.items():
+            self.assertEqual(path.read_bytes(), body)
+            self.assertEqual(path.stat().st_mtime_ns, mtime)
+        copied = run / "task-copy"
+        self.assertEqual((copied / "trace.jsonl").read_bytes(), (task / "trace.jsonl").read_bytes())
+        self.assertEqual((copied / "outputs" / "out.txt").read_bytes(), b"output\n")
+        self.assertEqual((copied / ".pi-sessions" / "s.jsonl").read_bytes(), b"session\n")
+        self.assertEqual(recorded["taskCopyDir"], "task-copy")
+        self.assertEqual(recorded["taskCopySha"], self.box._task_copy_sha(task))
+        self.assertEqual(recorded["taskCopySha"], self.box._task_copy_sha(copied))
+        disk = json.loads((run / "result.json").read_text())
+        self.assertEqual(disk["taskCopySha"], recorded["taskCopySha"])
+        self.assertEqual(recorded["score_status"], "scored")
+        self.assertEqual(recorded["reward"], 1)
+        verified = self._verify(attest, run, run_id)
+        self.assertTrue(verified["ok"], verified)
+        self.assertTrue(str(verified["tracePath"]).endswith("/task-copy/trace.jsonl"))
+        self.assertEqual(verified["traceSha"], hashlib.sha256((copied / "trace.jsonl").read_bytes()).hexdigest())
+        self.assertNotEqual(verified["traceSha"], hashlib.sha256((run / "trace.jsonl").read_bytes()).hexdigest())
+        self.assertTrue(all("/task-copy/.pi-sessions/" in item for item in verified["sessionFiles"]))
+        self.assertNotIn("decoy.jsonl", verified["piSessionShas"])
+
+    def test_attest_unreadable_dir_fails_closed(self):
+        import contextlib
+        import io
+        run = self.root / "locked"
+        run.mkdir()
+        (run / ".pi-sessions").mkdir()
+        (run / "result.json").write_text(json.dumps({
+            "arm": "control", "seed": 9, "runId": "ab" * 16, "score_status": "unscored",
+            "reward": None, "tokens": 0, "exit": 0, "task": "tasks3/hb003",
+        }))
+        original = os.walk
+
+        def boom(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(run / ".pi-sessions"))
+
+        os.walk = boom
+        try:
+            with self.assertRaises(self.box.OnceError) as caught:
+                self.box.attest_from_run(run, self.harness, self.config, self.root / "locked-attest")
+            self.assertIn("attest cannot read", str(caught.exception))
+            self.assertNotIn("PermissionError", str(caught.exception))
+            self.assertNotIn("Traceback", str(caught.exception))
+            stderr = io.StringIO()
+            argv = sys.argv
+            sys.argv = [
+                "devii_docker_v2.py", "attest",
+                "--run-dir", str(run), "--harness", str(self.harness), "--config", str(self.config),
+                "--attest-dir", str(self.root / "locked-attest-cli"),
+            ]
+            try:
+                with contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exited:
+                        self.box.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(exited.exception.code, 1)
+            text = stderr.getvalue()
+            self.assertIn("attest cannot read", text)
+            self.assertNotIn("PermissionError", text)
+            self.assertNotIn("Traceback", text)
+        finally:
+            os.walk = original
 
     def test_once_relay_upstream_is_the_network_upstream(self):
         self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
