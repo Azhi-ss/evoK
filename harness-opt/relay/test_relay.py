@@ -721,7 +721,16 @@ class LoopModeCase(unittest.TestCase):
         copied = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
         dest = Path(copied["dest"])
         self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o700)
-        sig = hooks.sign_run_record(key, dest, expected_run_id=run_id)
+        log = dest.parent / "relay.jsonl"
+        log.write_text(json.dumps({"type": "relay_start", "bootId": "boot-a", "relaySha": "ab" * 32}) + "\n", encoding="utf-8")
+        binding = hooks.relay_binding(log)
+        sig = hooks.sign_run_record(
+            key, dest,
+            relay_log_sha=binding["relayLogSha"],
+            relay_sha=binding["relaySha"],
+            boot_id=binding["bootId"],
+            expected_run_id=run_id,
+        )
         self.assertEqual(sig["checkerOutputSha"], copied["sha"])
         self.assertEqual(sig["reward"], 1)
         self.assertIn("relayLogSha", sig)
@@ -762,6 +771,20 @@ class LoopModeCase(unittest.TestCase):
         blob = "\n".join(argv)
         self.assertNotIn("/home/box", blob)
         self.assertNotIn(default, blob)
+        raw = log.read_bytes()
+        log.write_bytes(raw + b'{"type":"done","usage":{"prompt_tokens":9}}\n')
+        edited = hooks.verify_run_record(sig, dest, 1, key, container_dir=run)
+        self.assertEqual(edited, {"ok": False, "reason": "attest_mismatch"})
+        log.write_bytes(raw)
+        self.assertTrue(hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"])
+        with self.assertRaises(ValueError):
+            hooks.relay_binding(root / "missing-relay.jsonl")
+        with self.assertRaises(ValueError):
+            hooks.sign_run_record(key, dest, relay_log_sha="", relay_sha="ab" * 32, boot_id="boot-a", expected_run_id=run_id)
+        blank = root / "blank.jsonl"
+        blank.write_text(json.dumps({"type": "relay_start", "bootId": "", "relaySha": ""}) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            hooks.relay_binding(blank)
         tmp.cleanup()
 
     def test_replayed_checker_fails_verify(self):
@@ -816,6 +839,12 @@ class LoopModeCase(unittest.TestCase):
         self.assertFalse(missing)
         self.assertEqual(tokens, 4)
         self.assertGreater(trace.stat().st_size, 0)
+        missing_tokens, missing_flag = launcher.relay_usage_tokens(root, "cd" * 16)
+        self.assertEqual(missing_tokens, 0)
+        self.assertTrue(missing_flag)
+        blank_tokens, blank_flag = launcher.relay_usage_tokens(root, "  ")
+        self.assertEqual(blank_tokens, 0)
+        self.assertTrue(blank_flag)
 
     def test_bind_role_and_exclusion(self):
         run_id = "ab" * 16

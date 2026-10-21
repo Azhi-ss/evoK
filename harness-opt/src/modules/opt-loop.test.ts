@@ -1328,6 +1328,60 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.rounds[0]?.accepted).toBe(false);
   });
 
+  test("an innovator over the signed 200k cap is excluded", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          const name = input.sessionPath.split("/").pop() ?? "";
+          if (name === "innovator-0.jsonl") {
+            const log = join(fx.out, `round${input.round}`, "relay", "innovator-0.jsonl");
+            mkdirSync(join(log, ".."), { recursive: true });
+            const usage = { prompt_tokens: 200_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
+            writeFileSync(log, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+            return { session: { jsonl: "ignored\n" }, summary: "over-cap", parts: { "agent-loop": { maxSteps: 20 } } };
+          }
+          if (name === "innovator-1.jsonl") {
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+            return { session: { jsonl: "ignored\n" }, summary: "under-cap", parts: { "agent-loop": { maxSteps: 21 } } };
+          }
+          return stub.innovate(input);
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(fake.calls).toHaveLength(1);
+    const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as { parts: { "agent-loop": { maxSteps: number } } };
+    expect(config.parts["agent-loop"].maxSteps).toBe(21);
+    expect(result.stopReport.reason).toBeNull();
+  });
+
+  test("execute mode ignores a read-only token override", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "execute",
+      env: { BASE_URL: "https://example.test/v1" },
+      rounds: 1,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      readOnlyTokens: () => 30_000_000,
+    });
+    expect(fake.calls).toHaveLength(1);
+    expect(result.stopReport.reason).toBeNull();
+  });
+
   test("the run-record child argv does not carry the attest key", () => {
     const fx = fixture();
     const argv = runRecordArgv(join(fx.root, "checker"), join(fx.root, "run"), "sign", "ab".repeat(16));

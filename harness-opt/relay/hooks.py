@@ -363,10 +363,10 @@ def read_checker_reward(checker_dir):
 
 
 def relay_binding(log_path) -> dict:
-    """relayLogSha, relaySha, and bootId from the host relay log. Missing log stays blank."""
+    """relayLogSha, relaySha, and bootId from the host relay log. A missing log or blank identity is refused."""
     path = Path(log_path)
     if not path.is_file() or path.is_symlink():
-        return {"relayLogSha": "", "relaySha": "", "bootId": ""}
+        raise ValueError("relay log")
     raw = path.read_bytes()
     relay_sha = ""
     boot = ""
@@ -381,11 +381,17 @@ def relay_binding(log_path) -> dict:
             relay_sha = str(row.get("relaySha") or "")
             boot = str(row.get("bootId") or "")
             break
+    if relay_sha == "" or boot == "":
+        raise ValueError("relaySha")
     return {"relayLogSha": hashlib.sha256(raw).hexdigest(), "relaySha": relay_sha, "bootId": boot}
 
 
 def sign_run_record(key: bytes, checker_dir, *, relay_log_sha="", relay_sha="", boot_id="", network="devii-004-int", ewi_version="EWI-relay-v1", expected_run_id="") -> dict:
     """checkerOutputSha and reward enter the run signature. The checker directory is the host copy."""
+    if not isinstance(relay_log_sha, str) or relay_log_sha == "":
+        raise ValueError("relay log")
+    if not isinstance(relay_sha, str) or relay_sha == "" or not isinstance(boot_id, str) or boot_id == "":
+        raise ValueError("relaySha")
     body = {
         "type": "run_record",
         "checkerOutputSha": checker_tree_sha(checker_dir),
@@ -421,6 +427,14 @@ def verify_run_record(run_sig, checker_out, reward, key: bytes, container_dir=No
     expected_run = run_sig.get("expectedRunId")
     bound_run = Path(checker_out).parent.name
     if not isinstance(expected_run, str) or expected_run == "" or expected_run != bound_run:
+        return {"ok": False, "reason": "attest_mismatch"}
+    signed_log = run_sig.get("relayLogSha")
+    signed_relay = run_sig.get("relaySha")
+    signed_boot = run_sig.get("bootId")
+    if not isinstance(signed_log, str) or signed_log == "" or not isinstance(signed_relay, str) or signed_relay == "" or not isinstance(signed_boot, str) or signed_boot == "":
+        return {"ok": False, "reason": "attest_mismatch"}
+    log = Path(checker_out).parent / "relay.jsonl"
+    if not log.is_file() or log.is_symlink() or hashlib.sha256(log.read_bytes()).hexdigest() != signed_log:
         return {"ok": False, "reason": "attest_mismatch"}
     try:
         digest = checker_tree_sha(checker_out)

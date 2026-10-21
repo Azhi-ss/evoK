@@ -53,11 +53,16 @@ def check_token_cap(task, tokens_used):
   cap=token_cap(task)
   return (tokens_used <= cap, cap, tokens_used)
 def relay_usage_tokens(relay_root, run_id):
-  """i+o+cacheRead from the relay log only. An agent trace is not a token source."""
+  """i+o+cacheRead from the relay log only. An agent trace is not a token source.
+
+  A missing log or a blank run id is usage_missing, not a zero-token scored run.
+  """
   from ledger import load, tokens as relay_tokens
+  if not isinstance(run_id, str) or run_id.strip() == "":
+    return 0, True
   path=Path(relay_root)/run_id/"relay.jsonl"
   if not path.is_file():
-    return 0, False
+    return 0, True
   info=relay_tokens(load(path))
   if info["usage_missing"]:
     return int(info["observed"] or 0), True

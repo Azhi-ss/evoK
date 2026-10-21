@@ -90,6 +90,44 @@ if (plant.status !== 0) throw new Error(plant.stderr || plant.stdout || "plant f
     expect(observation.tokens).toBe(4);
   });
 
+  test("a scored run with no relay log or run id is usage_missing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opt-usage-missing-"));
+    const script = join(dir, "driver.mjs");
+    writeFileSync(script, `
+import { mkdirSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const run = get("--run-dir");
+mkdirSync(run, { recursive: true });
+writeFileSync(run + "/result.json", JSON.stringify({
+  reward: 1, tokens: 0, wall_s: 1, timed_out: false, score_status: "scored"
+}));
+`);
+    const executor = new CommandOptExecutor({
+      command: [
+        process.execPath, script,
+        "--task", "{taskPath}",
+        "--seed", "{seed}",
+        "--run-dir", "{runDir}",
+        "--model", "{model}",
+        "--config", "{config}",
+        "--network", "{network}",
+        "--token-cap", "{tokenCap}",
+        "--attest-dir", "{attestDir}",
+      ],
+      env: process.env,
+    });
+    const missingLog = await executor.run({ ...request(dir), runId: "ab".repeat(16) });
+    expect(missingLog.scoreStatus).toBe("unscored");
+    expect(missingLog.unscoredReason).toBe("usage_missing");
+    expect(missingLog.tokens).toBe(0);
+    expect(missingLog.reward).toBeNull();
+    const missingId = await executor.run({ ...request(dir), runDir: join(dir, "run-2") });
+    expect(missingId.scoreStatus).toBe("unscored");
+    expect(missingId.unscoredReason).toBe("usage_missing");
+    expect(missingId.tokens).toBe(0);
+  });
+
   test("a marker placeholder is refused before spawn", () => {
     expect(() => renderExecutorCommand(
       ["python3", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--marker", "{marker}"],

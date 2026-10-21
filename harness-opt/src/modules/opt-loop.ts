@@ -254,7 +254,7 @@ export interface OptLoopOptions {
   readonly piBin?: string;
   /** Host watcher for the preregistered result file. Absent observation stays undecided. */
   readonly resultWatcher?: ResultWriteWatcher;
-  /** When set, this total replaces the innovator+critic+ranker relay sum. */
+  /** Dry-run tests only. Execute mode always sums the relay log. */
   readonly readOnlyTokens?: () => number;
   /** Host read-only wall clock in seconds. Absent means the loop's own timer. */
   readonly readOnlyWallS?: () => number;
@@ -396,9 +396,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let consecutiveNoAccept = 0;
   let realRunWallS = 0;
   let readOnlyWallS = 0;
+  const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
+  const relayTokens = () => relayReadOnlyTokens(relayEvents(options.out));
   const loopCap = (startedRounds: number) => capHit({
     startedRounds,
-    readOnlyTokens: options.readOnlyTokens?.() ?? relayReadOnlyTokens(relayEvents(options.out)),
+    readOnlyTokens: options.mode === "dry-run" && options.readOnlyTokens ? options.readOnlyTokens() : relayTokens(),
     readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
     realRunWallS,
   });
@@ -483,7 +485,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     };
 
     const seen = new Set(tried);
-    const proposals: { id: string; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
+    const proposals: { id: string; slot: number; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
     let innovatorStop: string | null = null;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
@@ -509,7 +511,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (seen.has(turn.summary)) continue;
       seen.add(turn.summary);
       tried.push(turn.summary);
-      proposals.push({ id: `c${slot}`, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
+      proposals.push({ id: `c${slot}`, slot, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
     }
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
     if (innovatorStop) {
@@ -524,6 +526,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
 
     const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
+    const capExcluded = proposals
+      .filter((item) => innovatorCallTokens(options.out, round, item.slot) >= innovatorCap)
+      .map((item) => item.id);
     const criticRelay = roleRelay(options.out, round, "critic");
     const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, []);
     const criticInput: CriticCall = {
@@ -546,10 +551,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
     const rankerRelay = roleRelay(options.out, round, "ranker");
     const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, []);
+    const excluded = [...new Set([...criticTurn.excluded, ...capExcluded])];
     const rankerInput: RankerCall = {
       round,
       candidates: listed,
-      excluded: criticTurn.excluded,
+      excluded,
       sessionPath: rankerSpawn.sessionPath,
       spawn: rankerSpawn,
       ...rankerRelay,
@@ -562,8 +568,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
       continue;
     }
-    const excluded = [...criticTurn.excluded];
-    const criticBound = bindConclusion("critic", criticRelay, { excluded });
+    const criticBound = bindConclusion("critic", criticRelay, { excluded: criticTurn.excluded });
     const rankerBound = bindConclusion("ranker", rankerRelay, { winnerId: rankerTurn.winnerId });
     const ranked = rankCandidates(listed.map((item) => ({ id: item.id, changedKeys: item.changedKeys })), excluded);
     const winner = ranked.status === "winner" ? proposals.find((item) => item.id === ranked.winner) : undefined;
@@ -1365,6 +1370,10 @@ function relayEvents(out: string): unknown[] {
     }
   }
   return events;
+}
+
+function innovatorCallTokens(out: string, round: number, slot: number): number {
+  return relayReadOnlyTokens(readJsonl(join(out, `round${round}`, "relay", `innovator-${slot}.jsonl`)));
 }
 
 function roundRelayEvents(out: string, round: number): unknown[] {

@@ -275,7 +275,10 @@ run_id = "ab" * 16
 copied = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
 dest = Path(copied["dest"])
 assert stat.S_IMODE(dest.stat().st_mode) == 0o700
-sig = hooks.sign_run_record(key, dest, expected_run_id=run_id)
+log = dest.parent / "relay.jsonl"
+log.write_text(json.dumps({"type": "relay_start", "bootId": "boot-a", "relaySha": "ab" * 32}) + "\\n", encoding="utf-8")
+binding = hooks.relay_binding(log)
+sig = hooks.sign_run_record(key, dest, relay_log_sha=binding["relayLogSha"], relay_sha=binding["relaySha"], boot_id=binding["bootId"], expected_run_id=run_id)
 assert hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"]
 assert hooks.verify_notes_reward("reward: 1\\n", sig, dest, key)["ok"]
 (verifier / "reward.txt").write_text("0\\n", encoding="utf-8")
@@ -289,6 +292,10 @@ assert hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)
 (dest / "reward.txt").write_text("1\\n", encoding="utf-8")
 assert hooks.verify_notes_reward("reward: 0\\n", sig, dest, key)["reason"] == "attest_mismatch"
 assert hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"]
+raw = log.read_bytes()
+log.write_bytes(raw + b'{"type":"done","usage":{"prompt_tokens":9}}\\n')
+assert hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["reason"] == "attest_mismatch"
+log.write_bytes(raw)
 stopped = loop_mode.drive([{"anti_forgery": "attest_mismatch"}, {}])
 assert stopped["reason"] == "anti_forgery" and stopped["calls"] == ["role:1", "real:1"]
 default = str(hooks.checker_dest(run_id))

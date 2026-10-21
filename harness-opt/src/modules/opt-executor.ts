@@ -329,9 +329,13 @@ function readObservation(runDir: string, request: OptRunRequest): OptRunObservat
     score_status?: unknown;
     unscored_reason?: unknown;
   };
-  const relay = request.relayLogRoot && request.runId
-    ? relayUsage(request.relayLogRoot, request.runId)
-    : { tokens: 0, usageMissing: false };
+  const runId = typeof request.runId === "string" ? request.runId.trim() : "";
+  const scored = parsed.score_status !== "unscored";
+  const relay = request.relayLogRoot && runId
+    ? relayUsage(request.relayLogRoot, runId)
+    : scored && request.relayLogRoot
+      ? { tokens: 0, usageMissing: true }
+      : { tokens: 0, usageMissing: false };
   const usageMissing = relay.usageMissing;
   const unscored = parsed.score_status === "unscored" || usageMissing;
   const reward = typeof parsed.reward === "number" && Number.isFinite(parsed.reward) ? parsed.reward : null;
@@ -351,10 +355,10 @@ function readObservation(runDir: string, request: OptRunRequest): OptRunObservat
   };
 }
 
-/** Token total from the relay log. result.json tokens are ignored. A missing log is zero. */
+/** Token total from the relay log. result.json tokens are ignored. A missing log is usage_missing. */
 function relayUsage(root: string, runId: string): { readonly tokens: number; readonly usageMissing: boolean } {
   const log = join(root, runId, "relay.jsonl");
-  if (!existsSync(log)) return { tokens: 0, usageMissing: false };
+  if (runId.trim() === "" || !existsSync(log)) return { tokens: 0, usageMissing: true };
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
   const code = [
     "import json, sys",
