@@ -5,6 +5,7 @@ import { delimiter, join, resolve } from "node:path";
 import { createHarnessOptExtension } from "../../extensions/harness-opt/index";
 import { runClosedLoopDemo } from "../session";
 import { EXTRA_AGENT_DIRS_ENV, PACKAGE_AGENT_DIR, pinPackageAgentDir, splitExtraAgentDirs } from "./agent-dirs";
+import { piSubagentsFile } from "./pi-subagents-file";
 
 const ROLES = ["gap-finder", "innovator", "reviewer-gate"] as const;
 
@@ -68,7 +69,7 @@ function isolateUserAgentDirs(): void {
 }
 
 async function discoveryApi(): Promise<DiscoveryApi> {
-  const agentsUrl = new URL("../../node_modules/pi-subagents/src/agents/agents.js", import.meta.url);
+  const agentsUrl = piSubagentsFile("src/agents/agents.js");
   return await import(agentsUrl.href) as DiscoveryApi;
 }
 

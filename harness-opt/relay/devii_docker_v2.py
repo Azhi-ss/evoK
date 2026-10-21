@@ -10,8 +10,10 @@ Usage:
   devii_docker_v2.py groups                    # print probe/heldout/minloop task lists
   devii_docker_v2.py plan <probe|heldout|minloop|all> [k]
 The host execute path requires API_KEY in the environment and does not pass it into the container.
-Agent and checker argv come from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL."""
-import fcntl, json, os, secrets, shutil, subprocess, sys, time, hashlib, tomllib
+Agent argv comes from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL.
+The checker uses the same builder with expose_relay=False, so it has no model access.
+Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1."""
+import fcntl, json, os, secrets, shutil, socket, subprocess, sys, time, hashlib, tomllib
 from pathlib import Path
 import hooks
 IMAGE="registry.bohrium.dp.tech/dptech/dp/native/prod-4721445/4644300/pi-bio-harness@sha256:b87d5c47f5231cc91a71d0ba5e03ea7a1ecbe12d0e4e7685761d91018213ab9c"
@@ -166,12 +168,29 @@ def checker_cmd(task, run, actual_rel, name, *, run_id, port):
         mounts.append((str(LAKE), "/shared/data_lake:ro"))
     argv=hooks.container_argv(
         image=IMAGE, run_id=run_id, port=port, network="devii-004-int", env={},
-        mounts=mounts, command=["/tests/test.sh"],
+        mounts=mounts, command=["/tests/test.sh"], expose_relay=False,
     )
     return _with_run_flags(argv, name, workdir="/root/code", entrypoint="bash")
-def start_agent_container(task, run, arm, name, *, run_id, port, relay_log_root, lock_path, popen=subprocess.Popen, popen_kwargs=None):
-    """Production launch: refuse a scored run without a relay log root, hold the host lock, then build argv via container_argv."""
+def _docker_network_present(network):
+    completed=subprocess.run(["sudo","docker","network","inspect",network],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    return completed.returncode==0
+def _relay_reachable(host, port):
+    with socket.create_connection((host, int(port)), timeout=2):
+        return None
+def assert_task_network(network="devii-004-int", host="10.204.0.1", port=8642, *, inspect=None, connect=None):
+    """Fail before docker when the task network is missing or the relay is not listening."""
+    present=(inspect or _docker_network_present)(network)
+    if not present:
+        raise RuntimeError(f"docker network {network} is missing")
+    try:
+        (connect or _relay_reachable)(host, int(port))
+    except OSError as exc:
+        raise RuntimeError(f"relay is not listening on {host}:{port}") from exc
+def start_agent_container(task, run, arm, name, *, run_id, port, relay_log_root, lock_path, popen=subprocess.Popen, popen_kwargs=None, preflight=None):
+    """Production launch: refuse a scored run without a relay log root, check the network, hold the host lock, then build argv via container_argv."""
     require_relay_log_root(relay_log_root)
+    check=preflight or assert_task_network
+    check(network="devii-004-int", host="10.204.0.1", port=port)
     fd=one_run_lock(lock_path)
     try:
         argv=agent_cmd(task, run, arm, name, run_id=run_id, port=port)
@@ -180,6 +199,22 @@ def start_agent_container(task, run, arm, name, *, run_id, port, relay_log_root,
         release_run_lock(fd)
         raise
     return proc, fd
+def finalize_launch(run, relay_id, relay_log_root, res):
+    """Record the host run id and copy checker output under that id before result.json is written."""
+    root=require_relay_log_root(relay_log_root)
+    if not isinstance(relay_id, str) or len(relay_id)!=32:
+        raise ValueError("run id")
+    recorded=dict(res)
+    recorded["relay_id"]=relay_id
+    recorded["runId"]=relay_id
+    recorded["relayLogRoot"]=root
+    if "checker_exit" in recorded and recorded["checker_exit"]!="skipped_token_cap":
+        copied=hooks.copy_checker_before_sign(run, relay_id, relay_root=root)
+        recorded["checkerOutputSha"]=copied["sha"]
+        recorded["checkerDest"]=copied["dest"]
+    path=Path(run)/"result.json"
+    path.write_text(json.dumps(recorded, indent=1))
+    return recorded
 def main():
     a=sys.argv[1:]
     if a[:1]==["groups"]:
@@ -260,8 +295,8 @@ def main():
                     except subprocess.TimeoutExpired: subprocess.run(["sudo","docker","kill",name+"-chk"]); res["checker_exit"]="timeout"
                 elif token_killed:
                     res["checker_exit"]="skipped_token_cap"
-                (run/"result.json").write_text(json.dumps(res,indent=1))
-                print(json.dumps(res),flush=True)
+                recorded=finalize_launch(run, relay_id, relay_root, res)
+                print(json.dumps(recorded),flush=True)
             finally:
                 if lock_fd is not None:
                     release_run_lock(lock_fd)

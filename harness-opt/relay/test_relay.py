@@ -847,6 +847,10 @@ class LaunchCase(unittest.TestCase):
         self.assertNotIn(str(box.DATA), sources)
         checker = box.checker_cmd("tasks2/i014", run, "runs/task", "devii-name-chk", run_id="ef" * 16, port=9)
         self.assertIn(f"{box.DATA}/tasks2/i014/tests:/tests:ro", checker)
+        checker_blob = "\n".join(checker)
+        self.assertNotIn("BASE_URL", checker_blob)
+        self.assertNotIn("HARNESS_RUN_ID", checker_blob)
+        self.assertEqual(checker[checker.index("--cap-drop") + 1], "NET_RAW")
         self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
         blob = "\n".join(argv)
         self.assertIn("HARNESS_WORKSPACE=/workspace/runs", argv)
@@ -876,7 +880,7 @@ class LaunchCase(unittest.TestCase):
         proc, fd = box.start_agent_container(
             "tasks2/i014", run, "candidate", "devii-name",
             run_id=run_id, port=9, relay_log_root=str(root / "relay"), lock_path=lock,
-            popen=fake_popen,
+            popen=fake_popen, preflight=lambda **_kwargs: None,
         )
         self.assertIsNotNone(proc)
         self.assertEqual(calls[0][calls[0].index("--cap-drop") + 1], "NET_RAW")
@@ -900,6 +904,58 @@ class LaunchCase(unittest.TestCase):
             "box.release_run_lock(fd)",
         ])], capture_output=True, text=True)
         self.assertEqual(released.returncode, 0, released.stderr)
+
+    def test_preflight_fails_closed_and_the_result_binds_the_host_run_id(self):
+        import devii_docker_v2 as box
+        with self.assertRaises(RuntimeError) as missing:
+            box.assert_task_network(inspect=lambda _network: False, connect=lambda _host, _port: None)
+        self.assertIn("devii-004-int", str(missing.exception))
+        seen = []
+
+        def connect(host, port):
+            seen.append((host, port))
+            raise ConnectionRefusedError("down")
+
+        with self.assertRaises(RuntimeError) as silent:
+            box.assert_task_network(port=8642, inspect=lambda network: network == "devii-004-int", connect=connect)
+        self.assertEqual(seen, [("10.204.0.1", 8642)])
+        self.assertIn("10.204.0.1:8642", str(silent.exception))
+
+        root = Path(tempfile.mkdtemp())
+        run = root / "round"
+        run_id = "ab" * 16
+        popped = []
+        real = box.assert_task_network
+
+        def down(**kwargs):
+            raise RuntimeError(f"relay is not listening on {kwargs['host']}:{kwargs['port']}")
+
+        box.assert_task_network = down
+        try:
+            with self.assertRaises(RuntimeError) as blocked:
+                box.start_agent_container(
+                    "tasks2/i014", run, "candidate", "devii-name",
+                    run_id=run_id, port=9, relay_log_root=str(root / "relay"), lock_path=root / "lock",
+                    popen=lambda *_args, **_kwargs: popped.append(1),
+                )
+        finally:
+            box.assert_task_network = real
+        self.assertIn("10.204.0.1:9", str(blocked.exception))
+        self.assertEqual(popped, [])
+
+        verifier = run / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.txt").write_bytes(b"1\n")
+        relay = root / "relay"
+        recorded = box.finalize_launch(run, run_id, str(relay), {"task": "tasks2/i014", "checker_exit": 0})
+        written = json.loads((run / "result.json").read_text())
+        self.assertEqual(written["runId"], run_id)
+        self.assertEqual(written["relay_id"], run_id)
+        self.assertEqual(recorded["checkerDest"], str(relay / run_id / "checker"))
+        self.assertEqual((relay / run_id / "checker" / "reward.txt").read_bytes(), b"1\n")
+        skipped = box.finalize_launch(run, run_id, str(relay), {"task": "tasks2/i014", "checker_exit": "skipped_token_cap"})
+        self.assertEqual(skipped["runId"], run_id)
+        self.assertNotIn("checkerDest", skipped)
 
 
 class EwiTableCase(unittest.TestCase):

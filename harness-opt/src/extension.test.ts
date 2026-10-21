@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHarnessOptExtension, resolveRoundWorkflow, ROUND_TOKEN_HARD } from "../extensions/harness-opt/index";
+import { piSubagentsFile } from "./pi/pi-subagents-file";
 import { DEFAULT_DELEGATION_TIMEOUT_MS } from "./pi/delegate";
 import { ATTRIBUTION_LABELS } from "./types";
 import { HARNESSOPT_ROUND_SCRIPT } from "../workflows/round.js";
@@ -62,7 +63,7 @@ describe("pi extension", () => {
       cwd: "/tmp",
       ui: { notify() {}, setWidget() {}, setStatus() {} },
     });
-    const workflowUrl = new URL("../node_modules/pi-subagents/src/workflows/workflow-resources.js", import.meta.url);
+    const workflowUrl = piSubagentsFile("src/workflows/workflow-resources.js");
     const workflow = await import(workflowUrl.href) as {
       resolveWorkflowResource: (
         name: string,
@@ -118,7 +119,7 @@ describe("pi extension", () => {
     }) as { isError?: boolean; content: { text: string }[] };
     expect(toolResult.isError).toBe(true);
     expect(toolResult.content[0]?.text).toContain("no session");
-    const requiredUrl = new URL("../node_modules/pi-subagents/src/shared/required-child-extensions.js", import.meta.url);
+    const requiredUrl = piSubagentsFile("src/shared/required-child-extensions.js");
     const required = await import(requiredUrl.href) as {
       resolveRequiredChildExtensions: (sessionId: string) => readonly { id: string; path: string; requireForAllRunners?: true }[];
     };

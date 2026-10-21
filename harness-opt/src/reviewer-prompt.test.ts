@@ -2,14 +2,37 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  applyIntercomBridgeToAgent,
-  resolveIntercomBridge,
-} from "../node_modules/pi-subagents/src/intercom/intercom-bridge.js";
 import { roleGuardExtension } from "../extensions/harness-opt/role-guard";
+import { piSubagentsFile } from "./pi/pi-subagents-file";
 import { isReviewerGatePrompt, reviewerGateSystemPrompt } from "./reviewer-prompt";
 
-type BridgeAgent = Parameters<typeof applyIntercomBridgeToAgent>[0];
+type BridgeAgent = {
+  name: string;
+  description?: string;
+  systemPromptMode?: string;
+  inheritProjectContext?: boolean;
+  inheritGlobalContext?: boolean;
+  inheritSkills?: boolean;
+  systemPrompt?: string;
+  source?: string;
+  filePath?: string;
+  tools?: string[];
+};
+
+type BridgeState = { active: boolean; instruction: string };
+
+const {
+  applyIntercomBridgeToAgent,
+  resolveIntercomBridge,
+} = await import(piSubagentsFile("src/intercom/intercom-bridge.js").href) as {
+  applyIntercomBridgeToAgent: (agent: BridgeAgent, bridge: BridgeState) => BridgeAgent;
+  resolveIntercomBridge: (input: {
+    config: undefined;
+    context: string;
+    orchestratorTarget: string;
+    override?: { mode: string };
+  }) => BridgeState;
+};
 
 const agentFile = join(dirname(fileURLToPath(import.meta.url)), "..", "agents", "reviewer-gate.md");
 

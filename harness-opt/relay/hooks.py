@@ -35,8 +35,12 @@ def _under_home_box(path) -> bool:
     return resolved == "/home/box" or resolved.startswith("/home/box" + os.sep)
 
 
-def container_argv(*, image, run_id, port, network, env, mounts, command, role_run_ids=()):
-    """One serial container. Every run drops NET_RAW. Nothing under /home/box is mounted."""
+def container_argv(*, image, run_id, port, network, env, mounts, command, role_run_ids=(), expose_relay=True):
+    """One serial container. Every run drops NET_RAW. Nothing under /home/box is mounted.
+
+    expose_relay is for the agent. The checker passes False so it gets no relay
+    BASE_URL and no HARNESS_RUN_ID.
+    """
     if network != DOCKER_NETWORK:
         raise ValueError(f"reject network {network}")
     if not isinstance(env, dict):
@@ -47,9 +51,12 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
         "docker", "run", "--rm",
         "--network", DOCKER_NETWORK,
         "--cap-drop", "NET_RAW",
-        "-e", f"BASE_URL=http://10.204.0.1:{port}/r/{run_id}/v1",
-        "-e", f"HARNESS_RUN_ID={run_id}",
     ]
+    if expose_relay:
+        argv.extend([
+            "-e", f"BASE_URL=http://10.204.0.1:{port}/r/{run_id}/v1",
+            "-e", f"HARNESS_RUN_ID={run_id}",
+        ])
     for key, value in env.items():
         if key in ("BASE_URL", "HARNESS_RUN_ID") or not isinstance(key, str) or not key.isidentifier():
             raise ValueError("env")
