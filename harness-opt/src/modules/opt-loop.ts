@@ -1,9 +1,9 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
+import { inspectAttestedActivation, relayRequestsActive, runStartConfigHash, type ActivationInspection } from "./activation";
 import {
   assertAttestIsolated,
   assertAttestRoot,
@@ -420,6 +420,8 @@ interface ClosureRecord {
   final?: boolean;
   rejectCode?: string;
   reviewReason?: string;
+  /** Host accept bit. `closed` is this bit, so a rejected round stays open. */
+  accepted?: boolean;
 }
 
 const RANKING_ROUND_CAP = 3_000_000;
@@ -598,6 +600,8 @@ interface CampaignDisk {
   gapRound: number | null;
   /** Absent on a campaign written before this field existed. */
   baselineEffective?: Record<string, unknown> | null;
+  /** Absent on a campaign written before this field existed. */
+  previousEffective?: Record<string, unknown> | null;
 }
 
 interface ResumeState {
@@ -615,6 +619,7 @@ interface ResumeState {
   readonly previousReview: ReviewNote | null;
   readonly accepted: AcceptedCandidate | null;
   readonly baselineEffective: Record<string, unknown> | null;
+  readonly previousEffective: Record<string, unknown> | null;
 }
 
 class ResumeTraceError extends Error {
@@ -666,6 +671,9 @@ function readCampaign(out: string): CampaignDisk | null {
     gapRound: typeof parsed.gapRound === "number" ? parsed.gapRound : null,
     ...("baselineEffective" in parsed
       ? { baselineEffective: plainRecord(parsed.baselineEffective) }
+      : {}),
+    ...("previousEffective" in parsed
+      ? { previousEffective: plainRecord(parsed.previousEffective) }
       : {}),
   };
 }
@@ -720,7 +728,41 @@ function lastAcceptedRound(out: string): number | null {
   return null;
 }
 
-/** Previous real-run trace. `task-copy/trace.jsonl` must match the signed attestation. */
+const TRACE_LEDGER = "trace-ledger.json";
+
+/** HMAC over `{round, traceSha}`. The operator-supplied round-0 sha is not this value. */
+function writeSignedTraceLedger(out: string, round: number, traceSha: string, key: Buffer): void {
+  const body = JSON.stringify({ round, traceSha });
+  writeJson(join(out, `round${round}`, TRACE_LEDGER), {
+    round,
+    traceSha,
+    hmacSha256: createHmac("sha256", key).update(body).digest("hex"),
+  });
+}
+
+/** Signed trace sha recorded in that round's directory. A bad mac is not a sha. */
+function signedTraceLedgerSha(out: string, round: number, key: Buffer): string | null {
+  const file = join(out, `round${round}`, TRACE_LEDGER);
+  if (!isRegularFile(file)) return null;
+  let parsed: { round?: unknown; traceSha?: unknown; hmacSha256?: unknown };
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8")) as { round?: unknown; traceSha?: unknown; hmacSha256?: unknown };
+  } catch {
+    return null;
+  }
+  if (parsed.round !== round || typeof parsed.traceSha !== "string" || typeof parsed.hmacSha256 !== "string") return null;
+  const expected = createHmac("sha256", key).update(JSON.stringify({ round, traceSha: parsed.traceSha })).digest("hex");
+  const left = Buffer.from(parsed.hmacSha256);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length || !timingSafeEqual(left, right)) return null;
+  return parsed.traceSha;
+}
+
+/**
+ * Previous real-run trace.
+ * The file sha has to equal the signed host attestation and the HMAC ledger in that round's directory.
+ * A sha that exists only as an operator flag is not used.
+ */
 function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string, round: number): { readonly path: string; readonly sha256: string } {
   const runDir = candidateRunDir(out, round, taskId);
   const attestDir = join(attestRoot, `round${round}`, taskId, "seed0", "candidate");
@@ -737,6 +779,8 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
     throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
   }
   if (!verified.traceSha) throw new ResumeTraceError();
+  const ledgerSha = signedTraceLedgerSha(out, round, key);
+  if (!ledgerSha || ledgerSha !== verified.traceSha) throw new ResumeTraceError();
   const copy = join(runDir, "task-copy", "trace.jsonl");
   if (isRegularFile(copy)) {
     if (sha256(readFileSync(copy)) !== verified.traceSha) throw new ResumeTraceError();
@@ -852,6 +896,7 @@ function loadResume(options: OptLoopOptions, key: Buffer, relayRoot: string): Re
     baselineEffective: disk && "baselineEffective" in disk
       ? disk.baselineEffective ?? null
       : readRunEdges(gap.path).effective,
+    previousEffective: readRunEdges(gap.path).effective,
   };
 }
 
@@ -943,6 +988,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let baselineEffective: Record<string, unknown> | null = resume
     ? resume.baselineEffective
     : round0Effective ?? (controlTrace ? readRunEdges(controlTrace).effective : null);
+  let previousEffective: Record<string, unknown> | null = resume ? resume.previousEffective : null;
 
   const tried: string[] = [];
   let accepted: AcceptedCandidate | null = resume?.accepted ?? null;
@@ -1467,7 +1513,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         continue;
       }
       // One no-op leaf invalidates the whole candidate. Name those keys; do not strip them.
-      const unchanged = noopKeys(turn.parts, control);
+      // The previous round's effective counts even when that round was not accepted.
+      const unchanged = noopKeys(turn.parts, control, previousEffective);
       if (unchanged.length > 0) {
         invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: "invalid: no_op_change", keys: unchanged });
         continue;
@@ -1774,6 +1821,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const notesPath = join(options.out, `round${round}`, "run-notes.md");
     const seeded = runs[0];
     const edges = readRunEdges(seeded?.verified?.tracePath ?? seeded?.tracePath ?? "");
+    if (edges.effective) previousEffective = edges.effective;
     const changed = changedLeaves(control, candidate);
     const tookEffect = patchTookEffect({
       evidenceActive: activation.patchActive,
@@ -1974,24 +2022,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     if (!hostVerdict) throw new Error("reviewer gates missing");
-    emitClosure({
-      round,
-      closed: false,
-      gapCitedTrace,
-      knobMatched,
-      patchActive: activation.patchActive,
-      reviewFedForward: null,
-      gates: hostVerdict.gates,
-      reviewReason: verdict.reason,
-      ...(hostVerdict.rejectCode ? { rejectCode: hostVerdict.rejectCode } : {}),
-      ...(roundRank ? { rank: roundRank } : {}),
-      ...(codeRank ? { codeRank } : {}),
-    });
     if (hostVerdict.verdict === "anti_forgery") {
       sealReview("anti_forgery", { gates: hostVerdict.gates, reviewReason: verdict.reason });
       break;
     }
     const take = hostVerdict.verdict === "accept";
+    if (take && !activation.patchActive) throw new Error("accepted and patchActive disagree");
     if (!take) reviewerRejectRounds += 1;
     if (take) {
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
@@ -2012,7 +2048,24 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (!run.verified?.traceSha || !run.verified.tracePath) return [];
       return [{ file: run.verified.tracePath, line: 1, sha256: run.verified.traceSha }];
     });
-    if (traceHints.length > 0) latestGapRound = round;
+    if (traceHints.length > 0 && traceHints[0]) {
+      latestGapRound = round;
+      writeSignedTraceLedger(options.out, round, traceHints[0].sha256, attestKey);
+    }
+    emitClosure({
+      round,
+      closed: take,
+      accepted: take,
+      gapCitedTrace,
+      knobMatched,
+      patchActive: activation.patchActive,
+      reviewFedForward: null,
+      gates: hostVerdict.gates,
+      reviewReason: verdict.reason,
+      ...(hostVerdict.rejectCode ? { rejectCode: hostVerdict.rejectCode } : {}),
+      ...(roundRank ? { rank: roundRank } : {}),
+      ...(codeRank ? { codeRank } : {}),
+    });
     pushRound({
       round,
       accepted: take,
@@ -2062,6 +2115,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     accepted,
     gapRound: latestGapRound,
     baselineEffective,
+    previousEffective,
   });
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -2483,7 +2537,7 @@ function innovatorTaskPrompt(input: { readonly round: number; readonly knob: str
     "part 只能是 agent-loop、context、memory、toolchain、skills。",
     "只能改下面这些有效旋钮。碰了名单以外的键，这一条候选无效，原因是 invalid: non_effective_key。",
     "对象的键本身带点，例如 skills 下面写 \"selector.weight\"，harness 不会读。那也是 invalid: non_effective_key。",
-    "空改比的是 harness 实际会用的值，不是写下的原文。0、超出范围、以及类型不对落到默认的值，都按用过之后的值来比。和当前有效值相同就是空改。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
+    "空改比的是 harness 实际会用的值，不是写下的原文。0、超出范围、以及类型不对落到默认的值，都按用过之后的值来比。和签名 control 的当前有效值相同就是空改。上一轮跑出来的有效值也算，上一轮没被接受、control 没改时同样算。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
     "agent-loop.maxSteps 是 agent_end 步数。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这个上限截断。",
     ...knobCatalog(input.control).map(formatKnobLine),
   ].join("\n");
@@ -3864,9 +3918,11 @@ function writeClosure(out: string, round: number, record: ClosureRecord): void {
     const g2 = record.gates?.find((gate) => gate.id === "G2");
     if (g2 && g2.pass !== record.patchActive) throw new Error("G2 and patchActive disagree");
   }
+  const accepted = record.accepted === true;
+  if (accepted && !record.patchActive) throw new Error("accepted and patchActive disagree");
   writeJson(join(out, `round${round}`, "closure.json"), {
     ...record,
-    closed: record.gapCitedTrace && record.knobMatched && record.patchActive && record.reviewFedForward === true,
+    closed: accepted,
   });
 }
 
@@ -4031,15 +4087,23 @@ function hostPreRun(runDir: string, attestDir: string, configPath: string, harne
 
 function relayActive(logPath: string, mountedSha: string): boolean {
   if (!existsSync(logPath)) return true;
-  const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
-  const proc = spawnSync("python3", [script, "patch-active", "--log", logPath, "--sha", mountedSha], { encoding: "utf8" });
-  if (!proc.stdout) return false;
+  let text: string;
   try {
-    const parsed = JSON.parse(proc.stdout) as { active?: unknown };
-    return parsed.active === true;
+    text = readFileSync(logPath, "utf8");
   } catch {
     return false;
   }
+  const events: unknown[] = [];
+  for (const raw of text.split("\n")) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      events.push(JSON.parse(trimmed) as unknown);
+    } catch {
+      return false;
+    }
+  }
+  return relayRequestsActive(events, mountedSha);
 }
 
 const RUN_RECORD_PY = [

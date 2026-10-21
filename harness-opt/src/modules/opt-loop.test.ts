@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../cli";
+import { relayRequestsActive } from "./activation";
 import { writeHostAttestation } from "./attestation";
 import {
   claimNonce,
@@ -871,11 +872,15 @@ describe("optimization loop", () => {
     expect(innovateCalls).toBe(12);
     expect(fake.calls).toHaveLength(1);
     expect(existsSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"))).toBe(true);
-    expect(readFileSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("duplicate summary");
-    const skipped = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as { noWinner?: string };
-    expect(skipped.noWinner).toBe("duplicate summary");
-    expect(result.rounds[1]?.noWinner).toBe("duplicate summary");
-    expect(result.stopReport.noWinner).toEqual([{ round: 2, reason: "duplicate summary" }]);
+    expect(readFileSync(join(fx.out, "round2/sessions/reviewer-gate.jsonl"), "utf8")).toContain("no_winner");
+    const skipped = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+      noWinner?: string;
+      invalidCandidates?: { reason: string; keys?: string[] }[];
+    };
+    expect(skipped.noWinner).toBe("no_winner");
+    expect(skipped.invalidCandidates?.every((item) => item.reason === "invalid: no_op_change" && item.keys?.includes("agent-loop.maxSteps"))).toBe(true);
+    expect(result.rounds[1]?.noWinner).toBe("no_winner");
+    expect(result.stopReport.noWinner).toEqual([{ round: 2, reason: "no_winner" }]);
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
   });
 
@@ -3103,10 +3108,17 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const recorded = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
       reviewReason?: string;
       reason?: string;
+      closed?: boolean;
+      accepted?: boolean;
+      patchActive?: boolean;
       gates?: { id: string; pass: boolean }[];
     };
     expect(recorded.reason).toBeUndefined();
     expect(recorded.reviewReason).toBe("forged");
+    expect(recorded.accepted).toBe(true);
+    expect(recorded.closed).toBe(true);
+    expect(recorded.patchActive).toBe(true);
+    expect(result.rounds[0]?.accepted).toBe(recorded.closed);
     expect(recorded.gates).toEqual([
       { id: "G0", pass: true },
       { id: "G1", pass: true },
@@ -5264,8 +5276,13 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     };
     expect(rejected.parts["agent-loop"].maxSteps).toBe(23);
     const closure = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+      closed?: boolean;
+      accepted?: boolean;
       gates: { id: string; pass: boolean }[];
     };
+    expect(closure.accepted).toBe(false);
+    expect(closure.closed).toBe(false);
+    expect(second.rounds[1]?.accepted).toBe(closure.closed);
     expect(closure.gates).toEqual([
       { id: "G0", pass: true },
       { id: "G1", pass: true },
@@ -5385,6 +5402,113 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(closure.patchActive).toBe(false);
     expect(closure.patchActive).toBe(closure.gates.find((gate) => gate.id === "G2")?.pass);
     expect(closure.rejectCode).toBe("inactive_key");
+  });
+
+  test("relay activation ignores hashless compaction and still rejects a foreign hash", () => {
+    const sha = "ab".repeat(32);
+    const events = [
+      { type: "req", systemConfigHashes: [sha] },
+      { type: "req", systemConfigHashes: [], compaction: true },
+      { type: "req", systemConfigHashes: [], compaction: true },
+      { type: "req", systemConfigHashes: [], compaction: true },
+      { type: "req", systemConfigHashes: [], compaction: true },
+      { type: "done", status: 200 },
+    ];
+    expect(relayRequestsActive(events, sha)).toBe(true);
+    expect(relayRequestsActive([...events, { type: "req", systemConfigHashes: ["cd".repeat(32)] }], sha)).toBe(false);
+    expect(relayRequestsActive([{ type: "req", systemConfigHashes: [], compaction: true }], sha)).toBe(false);
+    expect(relayRequestsActive([], sha)).toBe(false);
+  });
+
+  test("a rejected round's effective maxSteps is a no-op before the next run", async () => {
+    const fx = fixture();
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const fake = fakeExecutor(fx);
+    const first = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: {
+        gap: (input) => cited.gap(input),
+        async innovate(input) {
+          const summary = "agent-loop.maxSteps=20";
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => cited.critic(input),
+        ranker: (input) => cited.ranker(input),
+        review: (input) => cited.review(input),
+      },
+      executor: {
+        name: "lower",
+        async run(request) {
+          fake.calls.push(request);
+          const script = timing(request, 0);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          return observation(request, { reward: 0, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    expect(first.rounds[0]?.accepted).toBe(false);
+    expect(fake.calls).toHaveLength(1);
+    const baseline = JSON.parse(readFileSync(join(fx.out, "baseline", "config.json"), "utf8")) as {
+      parts: { "agent-loop": { maxSteps: number } };
+    };
+    expect(baseline.parts["agent-loop"].maxSteps).toBe(25);
+    const second = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      roles: {
+        gap: (input) => cited.gap(input),
+        async innovate(input) {
+          const summary = "agent-loop.maxSteps=20";
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => cited.critic(input),
+        ranker: (input) => cited.ranker(input),
+        review: (input) => cited.review(input),
+      },
+      executor: fake.executor,
+    });
+    expect(fake.calls).toHaveLength(1);
+    expect(second.rounds[1]?.accepted).toBe(false);
+    expect(existsSync(join(fx.out, "round2/runs"))).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+      noWinner?: string;
+      invalidCandidates?: { reason: string; keys?: string[] }[];
+    };
+    expect(closure.noWinner).toBe("no_winner");
+    expect(closure.invalidCandidates?.every((item) => item.reason === "invalid: no_op_change" && item.keys?.includes("agent-loop.maxSteps"))).toBe(true);
+  });
+
+  test("resume refuses a trace ledger that is not the signed attestation", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const ledgerPath = join(fx.out, "round1", "trace-ledger.json");
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as { hmacSha256: string };
+    ledger.hmacSha256 = "0".repeat(64);
+    writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      round0TracePath: join(fx.root, "operator.jsonl"),
+      round0TraceSha: "ab".repeat(32),
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume trace sha mismatch");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
   });
 });
 

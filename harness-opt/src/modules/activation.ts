@@ -29,7 +29,10 @@ export interface AttestedActivationInput {
   readonly controlSha: string;
   readonly knob: string;
   readonly knobValue: unknown;
-  /** When false, a relay log did not show the mounted config hash on every request. */
+  /**
+   * When false, a relay request that carried a config hash did not carry the mounted one.
+   * Requests with no hash, including compaction, are not this bit.
+   */
   readonly relayPatchActive?: boolean;
 }
 
@@ -156,4 +159,28 @@ function collectText(value: unknown, parts: string[]): void {
 
 export function sha256Bytes(bytes: Buffer | string): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Loop activation measure for one relay log.
+ * A request with no config hash is ignored, and so is one marked compaction.
+ * Every request that does carry a hash must include the mounted config sha.
+ * No such request means the patch was not shown.
+ */
+export function relayRequestsActive(events: readonly unknown[], mountedSha: string): boolean {
+  if (mountedSha === "") return false;
+  let carrying = 0;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const row = event as { type?: unknown; systemConfigHashes?: unknown; compaction?: unknown };
+    if (row.type !== "req") continue;
+    if (row.compaction === true) continue;
+    const hashes = Array.isArray(row.systemConfigHashes)
+      ? row.systemConfigHashes.filter((item): item is string => typeof item === "string" && item !== "")
+      : [];
+    if (hashes.length === 0) continue;
+    carrying += 1;
+    if (!hashes.includes(mountedSha)) return false;
+  }
+  return carrying > 0;
 }

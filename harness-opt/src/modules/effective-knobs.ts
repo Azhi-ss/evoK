@@ -132,15 +132,27 @@ export function formatKnobLine(fact: KnobFact): string {
  * One such leaf invalidates the whole candidate, including a candidate whose every
  * change is a no-op and a partial no-op. The caller names these keys and does not
  * strip them to keep the other edits.
+ * `previousEffective` is the previous round's run_start effective map. It counts
+ * even when that round was not accepted and the signed control was left in place.
  */
-export function noopKeys(parts: Readonly<Record<string, unknown>>, control: unknown): readonly string[] {
+export function noopKeys(
+  parts: Readonly<Record<string, unknown>>,
+  control: unknown,
+  previousEffective?: Readonly<Record<string, unknown>> | null,
+): readonly string[] {
   const current = new Map<string, unknown>(knobCatalog(control).map((fact) => [fact.key, fact.current]));
   const coerce = new Map<string, (value: unknown) => unknown>(SPECS.map((spec) => [spec.key, spec.coerce]));
   const named: string[] = [];
   for (const path of leafKnobPaths(parts)) {
     const apply = coerce.get(path);
     if (!apply || !current.has(path)) continue;
-    if (JSON.stringify(apply(readLeaf(parts, path))) === JSON.stringify(current.get(path))) named.push(path);
+    const effective = apply(readLeaf(parts, path));
+    const matchesControl = JSON.stringify(effective) === JSON.stringify(current.get(path));
+    const matchesPrevious = previousEffective !== null
+      && previousEffective !== undefined
+      && Object.prototype.hasOwnProperty.call(previousEffective, path)
+      && JSON.stringify(effective) === JSON.stringify(previousEffective[path]);
+    if (matchesControl || matchesPrevious) named.push(path);
   }
   return named;
 }

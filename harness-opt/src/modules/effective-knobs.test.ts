@@ -117,6 +117,8 @@ describe("effective knobs", () => {
     expect(noopKeys({ "agent-loop": { maxSteps: "25" } }, control)).toEqual(["agent-loop.maxSteps"]);
     expect(noopKeys({ "agent-loop": { maxSteps: 20 } }, control)).toEqual([]);
     expect(noopKeys({ toolchain: { bashTimeoutSec: 600 } }, control)).toEqual([]);
+    expect(noopKeys({ "agent-loop": { maxSteps: 20 } }, control, { "agent-loop.maxSteps": 20 })).toEqual(["agent-loop.maxSteps"]);
+    expect(noopKeys({ "agent-loop": { maxSteps: 18 } }, control, { "agent-loop.maxSteps": 20 })).toEqual([]);
   });
 
   test("a dotted key inside an object is not a nested harness path", () => {
