@@ -50,6 +50,7 @@ def assert_network_post(test, relay, url):
     def urlopen(req, timeout=None):
         captured["url"] = req.full_url
         captured["auth"] = req.get_header("Authorization")
+        captured["ua"] = req.get_header("User-agent")
         return Resp()
 
     original = urllib.request.urlopen
@@ -62,6 +63,7 @@ def assert_network_post(test, relay, url):
     test.assertEqual(captured["url"], url)
     token = relay.upstream_key.rstrip(b"\r\n").decode()
     test.assertEqual(captured["auth"], f"Bearer {token}")
+    test.assertEqual(captured["ua"], "Mozilla/5.0")
     test.assertGreater(len(json.loads(raw)["choices"]), 0)
     test.assertEqual(usage["prompt_tokens"], 4)
     test.assertEqual(usage["completion_tokens"], 5)
@@ -133,6 +135,7 @@ class RelayCase(unittest.TestCase):
 
         def urlopen(req, timeout=None):
             captured["auth"] = req.get_header("Authorization")
+            captured["ua"] = req.get_header("User-agent")
             captured["data"] = req.data
             return Resp()
 
@@ -150,6 +153,7 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(status, 200)
         token = self.relay.upstream_key.rstrip(b"\r\n").decode()
         self.assertEqual(captured["auth"], f"Bearer {token}")
+        self.assertEqual(captured["ua"], "Mozilla/5.0")
         self.assertNotIn(hooks.PLACEHOLDER_API_KEY, captured["auth"])
         self.assertNotIn(hooks.PLACEHOLDER_API_KEY.encode(), captured["data"])
 
@@ -2176,9 +2180,22 @@ class LiveUpstreamSmoke(unittest.TestCase):
                 "max_tokens": 16,
                 "stream": False,
             }).encode()
-            status, resp = relay.handle(
-                "POST", f"/r/{run}/v1/chat/completions", body, {"host": f"{relay.host}:{relay.port}"},
-            )
+            import urllib.request
+            captured = {}
+            original = urllib.request.urlopen
+
+            def urlopen(req, timeout=None):
+                captured["ua"] = req.get_header("User-agent")
+                return original(req, timeout=timeout)
+
+            urllib.request.urlopen = urlopen
+            try:
+                status, resp = relay.handle(
+                    "POST", f"/r/{run}/v1/chat/completions", body, {"host": f"{relay.host}:{relay.port}"},
+                )
+            finally:
+                urllib.request.urlopen = original
+            self.assertEqual(captured.get("ua"), "Mozilla/5.0")
             self.assertEqual(status, 200, resp)
             parsed = json.loads(resp.decode("utf-8"))
             self.assertIsInstance(parsed.get("choices"), list)

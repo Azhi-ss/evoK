@@ -776,6 +776,7 @@ def _network_upstream(url: str, key: bytes):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0",
         })
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
