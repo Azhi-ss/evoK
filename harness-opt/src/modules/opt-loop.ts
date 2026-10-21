@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -112,10 +112,7 @@ export interface GapCall {
   readonly sessionPath: string;
   /** Spawn limits for this role. Gap has no write, edit, or bash tool. */
   readonly spawn: RoleSpawnConfig;
-  /** Host-private relay log. The relay writes it. The role cwd does not contain it. */
-  readonly relayLog: string;
-  readonly runId: string;
-  readonly seq: number;
+  /** Relay data plane for this call. The record path stays on the host. */
   readonly baseUrl: string;
 }
 
@@ -135,9 +132,6 @@ export interface InnovateCall {
   readonly control: unknown;
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
-  readonly relayLog: string;
-  readonly runId: string;
-  readonly seq: number;
   readonly baseUrl: string;
 }
 
@@ -182,9 +176,6 @@ export interface CriticCall {
   readonly candidates: readonly CandidateView[];
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
-  readonly relayLog: string;
-  readonly runId: string;
-  readonly seq: number;
   readonly baseUrl: string;
 }
 
@@ -199,9 +190,6 @@ export interface RankerCall {
   readonly excluded: readonly string[];
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
-  readonly relayLog: string;
-  readonly runId: string;
-  readonly seq: number;
   readonly baseUrl: string;
 }
 
@@ -219,9 +207,6 @@ export interface ReviewCall {
   readonly ewiSeeds: readonly number[];
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
-  readonly relayLog: string;
-  readonly runId: string;
-  readonly seq: number;
   readonly baseUrl: string;
 }
 
@@ -414,6 +399,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let readOnlyWallS = 0;
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
   const relayRoot = loopRelayRoot(options, env);
+  const relayPort = relayListenPort(env);
+  const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
+  const relayCtl = new RelayControl(relayRoot, relayPort, options.attestKeyFile, upstreamKeyFile);
+  activeRelay = relayCtl;
   let readOnlyTotal = 0;
   const relayTotal = (): { readonly tokens: number; readonly usageMissing: boolean } => ({ tokens: readOnlyTotal, usageMissing: false });
   const loopCap = (startedRounds: number) => {
@@ -429,6 +418,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     });
   };
 
+  try {
   for (let round = 1; round <= rounds; round += 1) {
     if (existsSync(join(options.out, "STOP"))) {
       stopReason = "stop_file";
@@ -467,12 +457,22 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       previousReview,
       previousReviewSession,
       sessionPath: gapSpawn.sessionPath,
-      spawn: gapSpawn,
-      ...gapRelay,
+      spawn: roleFacing(gapSpawn),
+      baseUrl: gapRelay.baseUrl,
     };
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
+    await relayRpc({ op: "open", runId: gapRelay.runId, kind: "role:gap-finder", expectedSha: controlSha });
     const gap = await roles.gap(gapInput);
+    await relayRpc({ op: "close", runId: gapRelay.runId });
+    const gapFault = roleRecordFault(gapRelay.relayLog, attestKey);
+    if (gapFault) {
+      faultRounds += 1;
+      stopReason = gapFault;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
     const gapLog = gapRelay.relayLog;
     const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
@@ -514,7 +514,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const proposals: { id: string; slot: number; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
     const capExcluded: string[] = [];
     let innovatorStop: string | null = null;
-    let innovatorFault = false;
+    let innovatorFault: "usage_missing" | "attest_mismatch" | null = null;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
       const innovatorRelay = roleRelay(relayRoot, env);
@@ -526,16 +526,23 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         triedSummaries: [...tried],
         control,
         sessionPath: innovatorSpawn.sessionPath,
-        spawn: innovatorSpawn,
-        ...innovatorRelay,
+        spawn: roleFacing(innovatorSpawn),
+        baseUrl: innovatorRelay.baseUrl,
       };
       assertNoHeldOutLeak(innovateInput, "innovator input");
       writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
+      await relayRpc({ op: "open", runId: innovatorRelay.runId, kind: "role:innovator", expectedSha: controlSha });
       const turn = await roles.innovate(innovateInput);
+      await relayRpc({ op: "close", runId: innovatorRelay.runId });
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
+      const innovatorGate = roleRecordFault(innovatorRelay.relayLog, attestKey);
+      if (innovatorGate) {
+        innovatorFault = innovatorGate;
+        break;
+      }
       const usage = roleCallUsage(innovatorRelay.relayLog);
       if (usage.usageMissing) {
-        innovatorFault = true;
+        innovatorFault = "usage_missing";
         break;
       }
       readOnlyTotal += usage.tokens;
@@ -553,7 +560,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
     if (innovatorFault) {
       faultRounds += 1;
-      stopReason = "usage_missing";
+      stopReason = innovatorFault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
@@ -577,12 +584,23 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       round,
       candidates: listed,
       sessionPath: criticSpawn.sessionPath,
-      spawn: criticSpawn,
-      ...criticRelay,
+      spawn: roleFacing(criticSpawn),
+      baseUrl: criticRelay.baseUrl,
     };
     assertNoHeldOutLeak(criticInput, "critic input");
+    writeJson(join(options.out, `round${round}`, "critic-input.json"), criticInput);
+    await relayRpc({ op: "open", runId: criticRelay.runId, kind: "role:critic", expectedSha: controlSha });
     const criticTurn = await roles.critic(criticInput);
+    await relayRpc({ op: "close", runId: criticRelay.runId });
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
+    const criticGate = roleRecordFault(criticRelay.relayLog, attestKey);
+    if (criticGate) {
+      faultRounds += 1;
+      stopReason = criticGate;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
     const criticUsage = roleCallUsage(criticRelay.relayLog);
     if (criticUsage.usageMissing) {
       faultRounds += 1;
@@ -608,12 +626,23 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       candidates: listed,
       excluded,
       sessionPath: rankerSpawn.sessionPath,
-      spawn: rankerSpawn,
-      ...rankerRelay,
+      spawn: roleFacing(rankerSpawn),
+      baseUrl: rankerRelay.baseUrl,
     };
     assertNoHeldOutLeak(rankerInput, "ranker input");
+    writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
+    await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
     const rankerTurn = await roles.ranker(rankerInput);
+    await relayRpc({ op: "close", runId: rankerRelay.runId });
     captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
+    const rankerGate = roleRecordFault(rankerRelay.relayLog, attestKey);
+    if (rankerGate) {
+      faultRounds += 1;
+      stopReason = rankerGate;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
     const rankerUsage = roleCallUsage(rankerRelay.relayLog);
     if (rankerUsage.usageMissing) {
       faultRounds += 1;
@@ -759,13 +788,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
       sessionPath: reviewSpawn.sessionPath,
-      spawn: reviewSpawn,
-      ...reviewRelay,
+      spawn: roleFacing(reviewSpawn),
+      baseUrl: reviewRelay.baseUrl,
     };
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
+    await relayRpc({ op: "open", runId: reviewRelay.runId, kind: "role:reviewer", expectedSha: controlSha });
     const verdict = await roles.review(reviewInput);
-    const reviewUsage = roleCallUsage(reviewRelay.relayLog);
+    await relayRpc({ op: "close", runId: reviewRelay.runId });
+    const reviewGate = roleRecordFault(reviewRelay.relayLog, attestKey);
     const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
     writeClosure(options.out, round, {
       round,
@@ -787,6 +818,19 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
+    if (reviewGate) {
+      faultRounds += 1;
+      stopReason = reviewGate;
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash,
+        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      });
+      break;
+    }
+    const reviewUsage = roleCallUsage(reviewRelay.relayLog);
     if (reviewUsage.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
@@ -837,6 +881,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   };
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
+  } finally {
+    activeRelay = null;
+    await relayCtl.shutdown();
+  }
 }
 
 export interface OptOnceOptions {
@@ -980,7 +1028,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
-      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha({ summary }), "innovator", input.round);
+      await relayComplete(input.baseUrl, JSON.stringify({ summary }));
       hostWriteSession(input.spawn, sessionLines("innovator", summary), key);
       return {
         session: { jsonl: "ignored-return\n" },
@@ -991,7 +1039,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async critic(input) {
       const excluded: string[] = [];
       const body = { excluded };
-      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "critic", input.round);
+      await relayComplete(input.baseUrl, JSON.stringify(body));
       hostWriteSession(input.spawn, sessionLines("critic", "critic"), key);
       return { session: { jsonl: "ignored-return\n" }, excluded };
     },
@@ -1000,7 +1048,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
         .filter((item) => !input.excluded.includes(item.id))
         .sort((left, right) => left.changedKeys - right.changedKeys || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0]?.id ?? "";
       const body = { winnerId };
-      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "ranker", input.round);
+      await relayComplete(input.baseUrl, JSON.stringify(body));
       hostWriteSession(input.spawn, sessionLines("ranker", winnerId), key);
       return { session: { jsonl: "ignored-return\n" }, winnerId };
     },
@@ -1008,7 +1056,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
       const body = { accept, reason };
-      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha(body), "reviewer", input.round);
+      await relayComplete(input.baseUrl, JSON.stringify(body));
       hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
@@ -1388,15 +1436,24 @@ function defaultRelayRoot(): string {
   return proc.stdout.trim();
 }
 
+function relayListenPort(env: NodeJS.ProcessEnv): string {
+  return typeof env.HARNESS_RELAY_PORT === "string" && env.HARNESS_RELAY_PORT.trim() !== "" ? env.HARNESS_RELAY_PORT.trim() : "8642";
+}
+
 function roleRelay(root: string, env: NodeJS.ProcessEnv): RoleRelay {
   const runId = hostRunId();
-  const port = typeof env.HARNESS_RELAY_PORT === "string" && env.HARNESS_RELAY_PORT.trim() !== "" ? env.HARNESS_RELAY_PORT.trim() : "8642";
+  const port = relayListenPort(env);
   return {
     relayLog: join(root, runId, "relay.jsonl"),
     runId,
     seq: 1,
     baseUrl: `http://10.204.0.1:${port}/r/${runId}/v1`,
   };
+}
+
+function roleFacing(spawn: RoleSpawnConfig): RoleSpawnConfig {
+  const { relayLog: _hidden, ...rest } = spawn;
+  return rest;
 }
 
 function prepareRole(
@@ -1439,18 +1496,143 @@ function roleOutputSha(body: unknown): string {
   return sha256(JSON.stringify(body));
 }
 
-function plantRoleDone(log: string, runId: string, seq: number, respSha: string, role: string, round: number): void {
-  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
-  const proc = spawnSync("python3", [
-    script, "plant-role",
-    "--log", log,
-    "--run-id", runId,
-    "--seq", String(seq),
-    "--resp-sha", respSha,
-    "--role", role,
-    "--round", String(round),
-  ], { encoding: "utf8" });
-  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "plant-role failed").trim());
+const ROLE_CALL_USAGE = { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } };
+
+let activeRelay: RelayControl | null = null;
+
+async function relayRpc(msg: object): Promise<void> {
+  const ctl = activeRelay;
+  if (!ctl) throw new Error("relay control is not running");
+  const reply = await ctl.request(msg);
+  if (reply.ok !== true) throw new Error(reply.error || "relay control failed");
+}
+
+async function relayComplete(baseUrl: string, response: string): Promise<void> {
+  const runId = baseUrl.split("/r/")[1]?.split("/")[0] ?? "";
+  await relayRpc({ op: "complete", runId, response, usage: ROLE_CALL_USAGE });
+}
+
+function roleRecordFault(log: string, key: Buffer): "usage_missing" | "attest_mismatch" | null {
+  let linked;
+  try {
+    linked = lstatSync(log);
+  } catch {
+    return "usage_missing";
+  }
+  if (linked.isSymbolicLink()) return "attest_mismatch";
+  if (!linked.isFile()) return "usage_missing";
+  if (!relaySealOk(log, key)) return "attest_mismatch";
+  return null;
+}
+
+function relaySealOk(log: string, key: Buffer): boolean {
+  const sigPath = `${log}.sig`;
+  let sigStat;
+  try {
+    sigStat = lstatSync(sigPath);
+  } catch {
+    return false;
+  }
+  if (!sigStat.isFile() || sigStat.isSymbolicLink()) return false;
+  const digest = createHash("sha256").update(readFileSync(log)).digest("hex");
+  let signed: { type?: unknown; relayLogSha?: unknown; hmacSha256?: unknown };
+  try {
+    signed = JSON.parse(readFileSync(sigPath, "utf8")) as { type?: unknown; relayLogSha?: unknown; hmacSha256?: unknown };
+  } catch {
+    return false;
+  }
+  if (signed.type !== "relay_log" || signed.relayLogSha !== digest || typeof signed.hmacSha256 !== "string") return false;
+  const mac = createHmac("sha256", key).update(`{"relayLogSha":"${digest}","type":"relay_log"}`).digest("hex");
+  if (mac.length !== signed.hmacSha256.length) return false;
+  return timingSafeEqual(Buffer.from(mac), Buffer.from(signed.hmacSha256));
+}
+
+function ensureUpstreamKey(attestRoot: string, attestKeyFile: string, env: NodeJS.ProcessEnv): string {
+  const configured = env.RELAY_UPSTREAM_KEY_FILE;
+  if (typeof configured === "string" && configured.trim() !== "" && resolve(configured) !== resolve(attestKeyFile)) return configured.trim();
+  const path = join(attestRoot, "upstream.key");
+  if (!existsSync(path)) {
+    writeFileSync(path, Buffer.from("relay-upstream-key\n"));
+    chmodSync(path, 0o600);
+  }
+  return path;
+}
+
+class RelayControl {
+  private readonly child: ChildProcessWithoutNullStreams;
+  private readonly queue: { resolve: (value: { ok?: boolean; error?: string }) => void; reject: (err: Error) => void }[] = [];
+  private buf = "";
+  private stderr = "";
+  private dead: Error | null = null;
+
+  constructor(root: string, port: string, attestKeyFile: string, upstreamKeyFile: string) {
+    const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+    const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+    this.child = spawn("python3", [script, "control", "--log-root", root, "--port", port], {
+      cwd: relayDir,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        HARNESS_ATTEST_KEY_FILE: attestKeyFile,
+        RELAY_UPSTREAM_KEY_FILE: upstreamKeyFile,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk: string) => {
+      this.buf += chunk;
+      for (;;) {
+        const nl = this.buf.indexOf("\n");
+        if (nl < 0) break;
+        const line = this.buf.slice(0, nl);
+        this.buf = this.buf.slice(nl + 1);
+        const waiter = this.queue.shift();
+        if (!waiter) continue;
+        try {
+          waiter.resolve(JSON.parse(line) as { ok?: boolean; error?: string });
+        } catch (err) {
+          waiter.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+    });
+    this.child.stderr.on("data", (chunk: string) => {
+      this.stderr += chunk;
+    });
+    this.child.stdin.on("error", () => undefined);
+    this.child.on("error", (err) => this.fail(err));
+    this.child.on("exit", (code) => {
+      this.fail(new Error((this.stderr || `relay control exited ${code ?? "null"}`).trim()));
+    });
+  }
+
+  private fail(err: Error): void {
+    if (!this.dead) this.dead = err;
+    while (this.queue.length > 0) this.queue.shift()?.reject(this.dead);
+  }
+
+  request(msg: object): Promise<{ ok?: boolean; error?: string }> {
+    if (this.dead) return Promise.reject(this.dead);
+    return new Promise((resolve, reject) => {
+      this.queue.push({ resolve, reject });
+      try {
+        this.child.stdin.write(`${JSON.stringify(msg)}\n`);
+      } catch (err) {
+        this.queue.pop();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.dead) return;
+    try {
+      await this.request({ op: "shutdown" });
+    } catch {
+      return;
+    }
+    this.child.kill();
+  }
 }
 
 function readJsonl(file: string): unknown[] {

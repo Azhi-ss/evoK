@@ -85,6 +85,48 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(self.calls, [])
 
+    def test_close_seals_the_log_and_a_later_edit_mismatches(self):
+        self.relay.close_run(self.run)
+        sig = self.relay.log_path(self.run).with_name("relay.jsonl.sig")
+        self.assertTrue(sig.is_file())
+        self.assertFalse(sig.is_symlink())
+        self.assertEqual(stat.S_IMODE(sig.stat().st_mode), 0o600)
+        self.assertTrue(self.relay.verify_log(self.run)["ok"])
+        before = sig.read_bytes()
+        with self.relay.log_path(self.run).open("a", encoding="utf-8") as handle:
+            handle.write('{"type":"tamper"}\n')
+        mismatch = self.relay.verify_log(self.run)
+        self.assertFalse(mismatch["ok"])
+        self.assertEqual(mismatch["reason"], "attest_mismatch")
+        self.relay.close_run(self.run)
+        self.assertEqual(sig.read_bytes(), before)
+        self.assertFalse(self.relay.verify_log(self.run)["ok"])
+
+    def test_control_cli_opens_completes_and_seals(self):
+        run = new_run_id()
+        root = self.root / "cli-logs"
+        env = os.environ.copy()
+        env["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
+        env["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        script = str(HERE / "harness_relay.py")
+        base = f"http://10.204.0.1:8642/r/{run}/v1"
+
+        def run_cmd(args):
+            return subprocess.run([sys.executable, script, *args], cwd=HERE, env=env, check=True, text=True, capture_output=True)
+
+        run_cmd(["open-run", "--log-root", str(root), "--run-id", run, "--kind", "role:innovator", "--expected-sha", "abc", "--port", "8642"])
+        run_cmd([
+            "complete", "--log-root", str(root), "--base-url", base,
+            "--response", "{\"summary\":\"x\"}",
+            "--usage", json.dumps({"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}),
+        ])
+        run_cmd(["close-run", "--log-root", str(root), "--run-id", run, "--port", "8642"])
+        verified = json.loads(run_cmd(["verify-log", "--log-root", str(root), "--run-id", run, "--port", "8642"]).stdout)
+        self.assertTrue(verified["ok"])
+        text = (root / run / "relay.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"type":"done"', text)
+        self.assertIn('"type":"open"', text)
+
     def test_03_stream_without_usage_is_usage_missing(self):
         def bare(body, stream):
             self.calls.append(body)

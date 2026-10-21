@@ -87,7 +87,7 @@ describe("role spawn", () => {
     const cwdFile = join(root, "cwd.txt");
     const envFile = join(root, "env.txt");
     const bin = join(root, "pi");
-    writeFileSync(bin, `#!/bin/sh\npwd > ${JSON.stringify(cwdFile)}\nprintf '%s' "$BASE_URL" > ${JSON.stringify(envFile)}\n`);
+    writeFileSync(bin, `#!/bin/sh\npwd > ${JSON.stringify(cwdFile)}\nprintf '%s' "$BASE_URL" > ${JSON.stringify(envFile)}\nif [ -n "$HARNESS_ATTEST_KEY_FILE$HARNESS_RELAY_LOG_ROOT$RELAY_UPSTREAM_KEY_FILE" ]; then printf 'leak' >> ${JSON.stringify(envFile)}; fi\n`);
     chmodSync(bin, 0o755);
     const relayLog = join(root, "private", "ab".repeat(16), "relay.jsonl");
     const baseUrl = `http://10.204.0.1:8642/r/${"ab".repeat(16)}/v1`;
@@ -110,9 +110,26 @@ describe("role spawn", () => {
     })).toThrow(/relay log/);
     expect(roleWrite(config, relayLog, "forged\n")).toBe(false);
     expect(existsSync(relayLog)).toBe(false);
-    const launched = launchRolePi(bin, config);
-    expect(launched.status).toBe(0);
-    expect(readFileSync(cwdFile, "utf8").trim()).toBe(cwd);
-    expect(readFileSync(envFile, "utf8")).toBe(baseUrl);
+    const previous = {
+      attest: process.env.HARNESS_ATTEST_KEY_FILE,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+      upstream: process.env.RELAY_UPSTREAM_KEY_FILE,
+    };
+    process.env.HARNESS_ATTEST_KEY_FILE = join(root, "attest.key");
+    process.env.HARNESS_RELAY_LOG_ROOT = join(root, "private");
+    process.env.RELAY_UPSTREAM_KEY_FILE = join(root, "upstream.key");
+    try {
+      const launched = launchRolePi(bin, config);
+      expect(launched.status).toBe(0);
+      expect(readFileSync(cwdFile, "utf8").trim()).toBe(cwd);
+      expect(readFileSync(envFile, "utf8")).toBe(baseUrl);
+    } finally {
+      if (previous.attest === undefined) delete process.env.HARNESS_ATTEST_KEY_FILE;
+      else process.env.HARNESS_ATTEST_KEY_FILE = previous.attest;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+      if (previous.upstream === undefined) delete process.env.RELAY_UPSTREAM_KEY_FILE;
+      else process.env.RELAY_UPSTREAM_KEY_FILE = previous.upstream;
+    }
   });
 });

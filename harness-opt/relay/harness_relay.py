@@ -4,17 +4,19 @@ Binds only 10.204.0.1. The key scan compares raw request bytes with the raw
 key bytes. It does not decode base64, JSON escapes, or split encodings.
 """
 import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import stat
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from canon import append_jsonl
+from canon import append_jsonl, canonical
 
 BIND_HOST = "10.204.0.1"
 UPSTREAM_URL = "https://newapi.ai-modeling.top/v1/chat/completions"
@@ -127,9 +129,45 @@ class Relay:
     def log_path(self, run_id: str) -> Path:
         return Path(self.log_root) / run_id / "relay.jsonl"
 
+    def _seal_path(self, run_id: str) -> Path:
+        return self.log_path(run_id).with_name("relay.jsonl.sig")
+
+    def _restore_open(self) -> None:
+        """A new process has no open_id. One open line without a close line is the open run."""
+        if self.open_id is not None:
+            return
+        root = Path(self.log_root)
+        if not root.is_dir():
+            return
+        found = []
+        for child in root.iterdir():
+            if not RUN_ID_RE.fullmatch(child.name):
+                continue
+            path = child / "relay.jsonl"
+            if path.is_symlink() or not path.is_file():
+                continue
+            opened = False
+            closed = False
+            for row in self._lines(child.name):
+                if row.get("type") == "open" and row.get("runId") == child.name:
+                    opened = True
+                elif row.get("type") == "close":
+                    closed = True
+            if opened and not closed:
+                found.append(child.name)
+        if len(found) > 1:
+            raise RuntimeError("a run is already open")
+        if len(found) == 1:
+            self.open_id = found[0]
+
+    def _has_close(self, run_id: str) -> bool:
+        return any(row.get("type") == "close" for row in self._lines(run_id))
+
     def open_run(self, run_id: str, kind: str, expected_config_sha: str) -> None:
         if not RUN_ID_RE.fullmatch(run_id or ""):
             raise RuntimeError("run id must be 32 hex")
+        if self.open_id is None:
+            self._restore_open()
         if self.open_id is not None:
             raise RuntimeError("a run is already open")
         path = self.log_path(run_id)
@@ -141,11 +179,91 @@ class Relay:
         self.open_id = run_id
 
     def close_run(self, run_id: str) -> None:
+        """Append close, then HMAC the log bytes. An existing seal is left untouched."""
+        if not RUN_ID_RE.fullmatch(run_id or ""):
+            raise RuntimeError("run id must be 32 hex")
+        path = self.log_path(run_id)
+        sig = self._seal_path(run_id)
+        if path.is_symlink() or sig.is_symlink() or sig.is_file():
+            if self.open_id == run_id:
+                self.open_id = None
+            return
+        if self.open_id is None:
+            self._restore_open()
+        if not path.exists():
+            if self.open_id == run_id:
+                self.open_id = None
+            return
         if self.open_id != run_id:
             raise RuntimeError("run is not open")
-        ts, iso = _stamp()
-        append_jsonl(self.log_path(run_id), {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
+        if not self._has_close(run_id):
+            ts, iso = _stamp()
+            append_jsonl(path, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
         self.open_id = None
+        self._write_seal(run_id)
+
+    def _write_seal(self, run_id: str) -> None:
+        path = self.log_path(run_id)
+        sig = self._seal_path(run_id)
+        if sig.exists() or path.is_symlink() or not path.is_file():
+            return
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        body = {"type": "relay_log", "relayLogSha": digest}
+        mac = hmac.new(self.attest_key, canonical(body), hashlib.sha256).hexdigest()
+        raw = json.dumps({**body, "hmacSha256": mac}, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        try:
+            fd = os.open(sig, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return
+        try:
+            os.write(fd, raw)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def verify_log(self, run_id: str) -> dict:
+        path = self.log_path(run_id)
+        sig = self._seal_path(run_id)
+        if path.is_symlink() or sig.is_symlink() or not path.is_file() or not sig.is_file():
+            return {"ok": False, "reason": "attest_mismatch"}
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        try:
+            signed = json.loads(sig.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {"ok": False, "reason": "attest_mismatch"}
+        if not isinstance(signed, dict):
+            return {"ok": False, "reason": "attest_mismatch"}
+        body = {"type": "relay_log", "relayLogSha": signed.get("relayLogSha")}
+        mac = hmac.new(self.attest_key, canonical(body), hashlib.sha256).hexdigest()
+        offered = str(signed.get("hmacSha256") or "")
+        if not hmac.compare_digest(mac, offered) or signed.get("relayLogSha") != digest:
+            return {"ok": False, "reason": "attest_mismatch"}
+        return {"ok": True}
+
+    def complete(self, run_id: str, response: bytes, usage) -> None:
+        """Data-plane write through handle(). The response bytes are the role conclusion."""
+        if isinstance(response, str):
+            response = response.encode()
+        if self.open_id is None:
+            self._restore_open()
+        request = json.dumps({"messages": [{"role": "user", "content": "complete"}]}, separators=(",", ":")).encode()
+
+        def upstream(_forward, _stream, response=bytes(response), usage=usage):
+            return 200, response, usage
+
+        saved = self.upstream
+        self.upstream = upstream
+        try:
+            status, _resp = self.handle(
+                "POST",
+                f"/r/{run_id}/v1/chat/completions",
+                request,
+                {"host": f"{BIND_HOST}:{self.port}"},
+            )
+        finally:
+            self.upstream = saved
+        if int(status) != 200:
+            raise RuntimeError(f"complete rejected {status}")
 
     def base_url(self, run_id: str) -> str:
         return f"http://{BIND_HOST}:{self.port}/r/{run_id}/v1"
@@ -160,6 +278,8 @@ class Relay:
             self._reject(method, path, "path")
             return 403, b""
         run_id = match.group(1)
+        if self.open_id is None:
+            self._restore_open()
         if run_id != self.open_id:
             reason = "closed" if self._was_opened(run_id) else "run"
             self._reject(method, path, reason)
@@ -335,30 +455,102 @@ def _default_upstream(body, stream):
     return 200, json.dumps({"usage": usage}).encode(), usage
 
 
-def main(argv=None):
-    import sys
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv:
-        raise SystemExit("usage: harness_relay.py patch-active --log PATH --sha HEX")
-    cmd = argv[0]
+def _flags(argv):
     flags = {}
     key = None
-    for arg in argv[1:]:
+    for arg in argv:
         if arg.startswith("--"):
             key = arg[2:]
             flags.setdefault(key, [])
         elif key:
             flags[key].append(arg)
-    def one(name):
-        values = flags.get(name) or []
-        if not values:
-            raise SystemExit(f"missing --{name}")
-        return values[-1]
+    return flags
+
+
+def _one(flags, name):
+    values = flags.get(name) or []
+    if not values:
+        raise SystemExit(f"missing --{name}")
+    return values[-1]
+
+
+def _relay_from(flags) -> Relay:
+    upstream = os.environ.get("RELAY_UPSTREAM_KEY_FILE") or ""
+    attest = os.environ.get("HARNESS_ATTEST_KEY_FILE") or ""
+    if upstream == "" or attest == "":
+        raise SystemExit("RELAY_UPSTREAM_KEY_FILE and HARNESS_ATTEST_KEY_FILE")
+    port = int((flags.get("port") or ["8642"])[-1])
+    return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest)
+
+
+def _base_run(url: str):
+    match = re.fullmatch(r"http://10\.204\.0\.1:(\d+)/r/([0-9a-f]{32})/v1", url or "")
+    if match is None:
+        raise SystemExit("bad base url")
+    return int(match.group(1)), match.group(2)
+
+
+def _serve(relay: Relay) -> None:
+    for raw in sys.stdin:
+        line = raw.strip()
+        if line == "":
+            continue
+        try:
+            msg = json.loads(line)
+            op = msg.get("op")
+            if op == "open":
+                relay.open_run(msg["runId"], msg["kind"], msg["expectedSha"])
+                out = {"ok": True}
+            elif op == "complete":
+                relay.complete(msg["runId"], msg.get("response") or "", msg.get("usage"))
+                out = {"ok": True}
+            elif op == "close":
+                relay.close_run(msg["runId"])
+                out = {"ok": True}
+            elif op == "shutdown":
+                sys.stdout.write(json.dumps({"ok": True}) + "\n")
+                sys.stdout.flush()
+                return
+            else:
+                out = {"ok": False, "error": "unknown"}
+        except Exception as exc:
+            out = {"ok": False, "error": str(exc)}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        raise SystemExit("usage: harness_relay.py patch-active|control|open-run|close-run|complete|verify-log")
+    cmd = argv[0]
+    flags = _flags(argv[1:])
     if cmd == "patch-active":
         from ledger import load, patch_active
-        result = patch_active(load(one("log")), one("sha"))
+        result = patch_active(load(_one(flags, "log")), _one(flags, "sha"))
         print(json.dumps(result))
         raise SystemExit(0 if result["active"] else 2)
+    if cmd == "control":
+        _serve(_relay_from(flags))
+        raise SystemExit(0)
+    if cmd == "open-run":
+        _relay_from(flags).open_run(_one(flags, "run-id"), _one(flags, "kind"), _one(flags, "expected-sha"))
+        print(json.dumps({"ok": True}))
+        raise SystemExit(0)
+    if cmd == "close-run":
+        _relay_from(flags).close_run(_one(flags, "run-id"))
+        print(json.dumps({"ok": True}))
+        raise SystemExit(0)
+    if cmd == "complete":
+        port, run_id = _base_run(_one(flags, "base-url"))
+        flags.setdefault("port", []).append(str(port))
+        usage = json.loads(_one(flags, "usage"))
+        _relay_from(flags).complete(run_id, _one(flags, "response").encode(), usage)
+        print(json.dumps({"ok": True}))
+        raise SystemExit(0)
+    if cmd == "verify-log":
+        print(json.dumps(_relay_from(flags).verify_log(_one(flags, "run-id"))))
+        raise SystemExit(0)
     raise SystemExit(f"unknown {cmd}")
 
 

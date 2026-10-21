@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -169,7 +169,7 @@ function rejectingRoles(fx: Fixture): OptRoles & { readonly reviews: number } {
     review: async (input) => {
       reviews += 1;
       const reason = "still idle";
-      plantRole(input, "reviewer", { accept: false, reason });
+      plantRole(fx, input, "reviewer", { accept: false, reason });
       hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
       return { session: { jsonl: "ignored\n" }, accept: false, reason };
     },
@@ -177,17 +177,28 @@ function rejectingRoles(fx: Fixture): OptRoles & { readonly reviews: number } {
   };
 }
 
+function runIdOf(baseUrl: string): string {
+  const match = /\/r\/([0-9a-f]{32})\/v1$/.exec(baseUrl);
+  if (!match?.[1]) throw new Error("base url has no run id");
+  return match[1];
+}
+
+function roleLog(root: string, baseUrl: string): string {
+  return join(root, runIdOf(baseUrl), "relay.jsonl");
+}
+
 function plantRole(
-  input: { readonly relayLog: string; readonly runId: string; readonly seq: number; readonly round: number },
+  fx: Fixture,
+  input: { readonly baseUrl: string; readonly round: number },
   role: string,
   body: unknown,
 ): void {
   const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
   const proc = spawnSync("python3", [
     script, "plant-role",
-    "--log", input.relayLog,
-    "--run-id", input.runId,
-    "--seq", String(input.seq),
+    "--log", roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl),
+    "--run-id", runIdOf(input.baseUrl),
+    "--seq", "1",
     "--resp-sha", createHash("sha256").update(JSON.stringify(body)).digest("hex"),
     "--role", role,
     "--round", String(input.round),
@@ -202,8 +213,9 @@ function plantRelayRead(log: string, runId: string, files: readonly string[]): v
 }
 
 /** Test-only wrapper. The production stub does not plant relay reads. */
-function citingRoles(key: Buffer): OptRoles {
+function citingRoles(key: Buffer, attestRoot: string): OptRoles {
   const stub = stubOptRoles(key);
+  const root = join(attestRoot, "relay-logs");
   return {
     async gap(input) {
       const turn = await stub.gap(input);
@@ -212,7 +224,7 @@ function citingRoles(key: Buffer): OptRoles {
         ...(input.previousReviewSession ? [input.previousReviewSession] : []),
       ];
       if (files.length > 0) {
-        plantRelayRead(input.relayLog, input.runId, files);
+        plantRelayRead(roleLog(root, input.baseUrl), runIdOf(input.baseUrl), files);
       }
       return turn;
     },
@@ -468,14 +480,14 @@ describe("optimization loop", () => {
         innovateCalls += 1;
         writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "innovator" })}\n`);
         if (input.round > 1) {
-          plantRole(input, "innovator", { summary: "agent-loop.maxSteps=24" });
+          plantRole(fx, input, "innovator", { summary: "agent-loop.maxSteps=24" });
           return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
         }
         return stubOptRoles(fx.key).innovate(input);
       },
       review: async (input) => {
         const reason = "still idle";
-        plantRole(input, "reviewer", { accept: false, reason });
+        plantRole(fx, input, "reviewer", { accept: false, reason });
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
         return { session: { jsonl: "ignored\n" }, accept: false, reason };
       },
@@ -657,7 +669,7 @@ describe("optimization loop", () => {
       ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         const reason = "still idle";
-        plantRole(input, "reviewer", { accept: false, reason });
+        plantRole(fx, input, "reviewer", { accept: false, reason });
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
         return { session: { jsonl: "ignored\n" }, accept: false, reason };
       },
@@ -692,7 +704,7 @@ describe("optimization loop", () => {
       ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         const reason = "accept";
-        plantRole(input, "reviewer", { accept: true, reason });
+        plantRole(fx, input, "reviewer", { accept: true, reason });
         expect(roleWrite(input.spawn, input.sessionPath, "forged\n")).toBe(false);
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "accept" })}\n`, fx.key);
         return { session: { jsonl: "ignored\n" }, accept: true, reason: "accept" };
@@ -951,7 +963,7 @@ describe("optimization loop", () => {
     const body = "alpha\nbeta\ngamma\n";
     writeFileSync(trace, body);
     const fake = fakeExecutor(fx);
-    const citing = citingRoles(fx.key);
+    const citing = citingRoles(fx.key, fx.attestRoot);
     const rejecting = rejectingRoles(fx);
     const result = await runOptLoop({
       ...hostOpts(fx),
@@ -989,7 +1001,7 @@ describe("optimization loop", () => {
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 2,
-      roles: citingRoles(fx.key),
+      roles: citingRoles(fx.key, fx.attestRoot),
       executor: fake.executor,
       round0TracePath: trace,
       round0Tamper: true,
@@ -1311,7 +1323,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           if (!planted) {
             planted = true;
             const usage = { prompt_tokens: 30_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
-            writeFileSync(input.relayLog, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
+            writeFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
           }
           return turn;
         },
@@ -1328,7 +1340,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
   test("a forged reviewer accept is not taken", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
-    const citing = citingRoles(fx.key);
+    const citing = citingRoles(fx.key, fx.attestRoot);
     const result = await runOptLoop({
       ...hostOpts(fx),
       mode: "dry-run",
@@ -1368,14 +1380,15 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         async innovate(input) {
           const name = input.sessionPath.split("/").pop() ?? "";
           if (name === "innovator-0.jsonl") {
-            mkdirSync(join(input.relayLog, ".."), { recursive: true });
+            const log = roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl);
+            mkdirSync(join(log, ".."), { recursive: true });
             const usage = { prompt_tokens: 200_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } };
-            writeFileSync(input.relayLog, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
+            writeFileSync(log, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage })}\n`);
             hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
             return { session: { jsonl: "ignored\n" }, summary: "over-cap", parts: { "agent-loop": { maxSteps: 20 } } };
           }
           if (name === "innovator-1.jsonl") {
-            plantRole(input, "innovator", { summary: "under-cap" });
+            plantRole(fx, input, "innovator", { summary: "under-cap" });
             hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
             return { session: { jsonl: "ignored\n" }, summary: "under-cap", parts: { "agent-loop": { maxSteps: 21 } } };
           }
@@ -1421,7 +1434,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         gap: (input) => stub.gap(input),
         async innovate(input) {
           const turn = await stub.innovate(input);
-          if (input.sessionPath.endsWith("innovator-0.jsonl")) unlinkSync(input.relayLog);
+          if (input.sessionPath.endsWith("innovator-0.jsonl")) unlinkSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl));
           return turn;
         },
         critic: (input) => stub.critic(input),
@@ -1448,7 +1461,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         async innovate(input) {
           const turn = await stub.innovate(input);
           if (input.sessionPath.endsWith("innovator-0.jsonl")) {
-            writeFileSync(input.relayLog, `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage: null })}\n`);
+            writeFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), `${JSON.stringify({ type: "done", role: "innovator", status: 200, round: input.round, usage: null })}\n`);
           }
           return turn;
         },
@@ -1471,7 +1484,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         async innovate(input) {
           const turn = await reqStub.innovate(input);
           if (input.sessionPath.endsWith("innovator-0.jsonl")) {
-            writeFileSync(input.relayLog, `${JSON.stringify({ type: "req", role: "innovator", seq: 1, round: input.round })}\n`);
+            writeFileSync(roleLog(join(reqOnly.attestRoot, "relay-logs"), input.baseUrl), `${JSON.stringify({ type: "req", role: "innovator", seq: 1, round: input.round })}\n`);
           }
           return turn;
         },
@@ -1498,7 +1511,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         innovate: (input) => stub.innovate(input),
         async critic(input) {
           const turn = await stub.critic(input);
-          unlinkSync(input.relayLog);
+          unlinkSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl));
           return turn;
         },
         ranker: (input) => stub.ranker(input),
@@ -1527,17 +1540,17 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         gap: (input) => stub.gap(input),
         async innovate(input) {
           const turn = await stub.innovate(input);
-          if (input.sessionPath.endsWith("innovator-0.jsonl")) writeFileSync(input.relayLog, usageFor("innovator", input.round, 10_000_000));
+          if (input.sessionPath.endsWith("innovator-0.jsonl")) writeFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), usageFor("innovator", input.round, 10_000_000));
           return turn;
         },
         async critic(input) {
           const turn = await stub.critic(input);
-          writeFileSync(input.relayLog, usageFor("critic", input.round, 10_000_000));
+          writeFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), usageFor("critic", input.round, 10_000_000));
           return turn;
         },
         async ranker(input) {
           const turn = await stub.ranker(input);
-          writeFileSync(input.relayLog, usageFor("ranker", input.round, 10_000_000));
+          writeFileSync(roleLog(join(fx.attestRoot, "relay-logs"), input.baseUrl), usageFor("ranker", input.round, 10_000_000));
           return turn;
         },
         review: (input) => stub.review(input),
@@ -1566,34 +1579,248 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const before = readFileSync(spawn.relayLog ?? "");
     expect(roleWrite(spawn, spawn.relayLog ?? "", "forged\n")).toBe(false);
     expect(readFileSync(spawn.relayLog ?? "")).toEqual(before);
+    const innovatorInput = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
+    expect(innovatorInput).not.toContain("relayLog");
+    expect(innovatorInput).not.toContain("relay.jsonl");
+    expect(innovatorInput).toContain("baseUrl");
     expect(fake.calls).toHaveLength(1);
   });
 
   test("execute mode keeps the role relay under the host relay root", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
+    let opened = false;
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "execute",
+        env: { BASE_URL: "https://example.test/v1" },
+        rounds: 1,
+        executor: fake.executor,
+        roles: {
+          ...stubOptRoles(fx.key),
+          async innovate(input) {
+            opened = true;
+            expect(input).not.toHaveProperty("relayLog");
+            expect(input).not.toHaveProperty("runId");
+            expect(input.baseUrl).toMatch(/^http:\/\/10\.204\.0\.1:8642\/r\/[0-9a-f]{32}\/v1$/);
+            const shown = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
+            expect(shown).not.toContain("relayLog");
+            expect(shown).not.toContain("relay.jsonl");
+            const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+            expect(spawn.relayLog?.startsWith("/home/box/.harness-relay/")).toBe(true);
+            expect(resolve(spawn.relayLog ?? "").startsWith(`${resolve(input.spawn.cwd)}/`)).toBe(false);
+            expect(roleWrite(input.spawn, spawn.relayLog ?? "", "forged\n")).toBe(false);
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+            return { session: { jsonl: "ignored\n" }, summary: "missing-relay", parts: { "agent-loop": { maxSteps: 21 } } };
+          },
+        },
+      });
+      expect(opened).toBe(true);
+      expect(result.stopReport.reason).toBe("usage_missing");
+      expect(result.stopReport.faultRounds).toBe(1);
+    } catch (err) {
+      expect(opened).toBe(false);
+      expect(err).toBeInstanceOf(Error);
+    }
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as RoleSpawnConfig;
+    expect(spawn.relayLog?.startsWith("/home/box/.harness-relay/")).toBe(true);
+    expect(spawn.baseUrl?.startsWith("http://10.204.0.1:8642/r/")).toBe(true);
+    const gapInput = readFileSync(join(fx.out, "round1/gap-input.json"), "utf8");
+    expect(gapInput).not.toContain("relayLog");
+    expect(gapInput).not.toContain("relay.jsonl");
+    expect(gapInput).toContain("baseUrl");
+    expect(fake.calls).toEqual([]);
+  });
+
+  test("a role completion through the relay is the production record", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const finish = (baseUrl: string, body: unknown): void => {
+      const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+      const proc = spawnSync("python3", [
+        script, "complete",
+        "--log-root", join(fx.attestRoot, "relay-logs"),
+        "--base-url", baseUrl,
+        "--response", JSON.stringify(body),
+        "--usage", JSON.stringify({ prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } }),
+      ], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HARNESS_ATTEST_KEY_FILE: fx.keyFile,
+          RELAY_UPSTREAM_KEY_FILE: join(fx.attestRoot, "upstream.key"),
+        },
+      });
+      if (proc.status !== 0) throw new Error(proc.stderr || proc.stdout || "complete failed");
+    };
+    const session = (input: { spawn: RoleSpawnConfig }, role: string) => {
+      hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role })}\n`, fx.key);
+    };
     const result = await runOptLoop({
       ...hostOpts(fx),
-      mode: "execute",
-      env: { BASE_URL: "https://example.test/v1" },
+      mode: "dry-run",
       rounds: 1,
       executor: fake.executor,
       roles: {
-        ...stubOptRoles(fx.key),
+        async gap(input) {
+          session(input, "gap-finder");
+          return { session: { jsonl: "ignored\n" }, citations: [], knob: "agent-loop.maxSteps", failureClass: "idle-loop", summary: "early write then idle" };
+        },
         async innovate(input) {
-          expect(input.relayLog.startsWith("/home/box/.harness-relay/")).toBe(true);
-          expect(input.baseUrl).toBe(`http://10.204.0.1:8642/r/${input.runId}/v1`);
-          expect(resolve(input.relayLog).startsWith(`${resolve(input.spawn.cwd)}/`)).toBe(false);
-          expect(roleWrite(input.spawn, input.relayLog, "forged\n")).toBe(false);
-          expect(existsSync(input.relayLog)).toBe(false);
-          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
-          return { session: { jsonl: "ignored\n" }, summary: "missing-relay", parts: { "agent-loop": { maxSteps: 21 } } };
+          const summary = "agent-loop.maxSteps=24";
+          finish(input.baseUrl, { summary });
+          session(input, "innovator");
+          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 24 } } };
+        },
+        async critic(input) {
+          finish(input.baseUrl, { excluded: [] });
+          session(input, "critic");
+          return { session: { jsonl: "ignored\n" }, excluded: [] };
+        },
+        async ranker(input) {
+          const winnerId = input.candidates[0]?.id ?? "";
+          finish(input.baseUrl, { winnerId });
+          session(input, "ranker");
+          return { session: { jsonl: "ignored\n" }, winnerId };
+        },
+        async review(input) {
+          finish(input.baseUrl, { accept: false, reason: "hold" });
+          session(input, "reviewer-gate");
+          return { session: { jsonl: "ignored\n" }, accept: false, reason: "hold" };
         },
       },
     });
+    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+    expect(fake.calls).toHaveLength(1);
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+    const log = readFileSync(spawn.relayLog ?? "", "utf8");
+    expect(log).toContain("\"type\":\"open\"");
+    expect(log).toContain("\"type\":\"done\"");
+    expect(existsSync(`${spawn.relayLog}.sig`)).toBe(true);
+    for (const name of ["gap-input.json", "innovator-0-input.json", "critic-input.json", "ranker-input.json", "review-input.json"]) {
+      const text = readFileSync(join(fx.out, "round1", name), "utf8");
+      expect(text).not.toContain("relayLog");
+      expect(text).not.toContain("relay.jsonl");
+      expect(text).not.toContain(fx.keyFile);
+      expect(text).toContain("baseUrl");
+    }
+  });
+
+  test("a role edit after close_run stops the loop", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stubOptRoles(fx.key).gap(input),
+        async innovate(input) {
+          if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stubOptRoles(fx.key).innovate(input);
+          const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
+          const env = {
+            ...process.env,
+            HARNESS_ATTEST_KEY_FILE: fx.keyFile,
+            RELAY_UPSTREAM_KEY_FILE: join(fx.attestRoot, "upstream.key"),
+          };
+          const logRoot = join(fx.attestRoot, "relay-logs");
+          const done = spawnSync("python3", [
+            script, "complete",
+            "--log-root", logRoot,
+            "--base-url", input.baseUrl,
+            "--response", JSON.stringify({ summary: "tamper" }),
+            "--usage", JSON.stringify({ prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } }),
+          ], { encoding: "utf8", env });
+          if (done.status !== 0) throw new Error(done.stderr || done.stdout || "complete failed");
+          const closed = spawnSync("python3", [
+            script, "close-run",
+            "--log-root", logRoot,
+            "--run-id", runIdOf(input.baseUrl),
+            "--port", "8642",
+          ], { encoding: "utf8", env });
+          if (closed.status !== 0) throw new Error(closed.stderr || closed.stdout || "close-run failed");
+          appendFileSync(roleLog(logRoot, input.baseUrl), "{\"type\":\"tamper\"}\n");
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary: "tamper", parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => stubOptRoles(fx.key).critic(input),
+        ranker: (input) => stubOptRoles(fx.key).ranker(input),
+        review: (input) => stubOptRoles(fx.key).review(input),
+      },
+    });
     expect(fake.calls).toEqual([]);
-    expect(result.stopReport.reason).toBe("usage_missing");
+    expect(result.stopReport.reason).toBe("attest_mismatch");
     expect(result.stopReport.faultRounds).toBe(1);
+    const shown = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
+    expect(shown).not.toContain("relay.jsonl");
+    expect(shown).not.toContain("relayLog");
+  });
+
+  for (const [role, mode] of [
+    ["innovator", "missing"],
+    ["innovator", "null"],
+    ["innovator", "no-done"],
+    ["critic", "missing"],
+    ["critic", "null"],
+    ["critic", "no-done"],
+    ["ranker", "missing"],
+    ["ranker", "null"],
+    ["ranker", "no-done"],
+    ["reviewer", "missing"],
+    ["reviewer", "null"],
+    ["reviewer", "no-done"],
+  ] as const) test(`${role} relay usage ${mode} stops the loop`, async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    const root = join(fx.attestRoot, "relay-logs");
+    const damage = (baseUrl: string): void => {
+      const log = roleLog(root, baseUrl);
+      if (mode === "missing") {
+        unlinkSync(log);
+        return;
+      }
+      if (mode === "null") {
+        writeFileSync(log, `${JSON.stringify({ type: "done", role, status: 200, round: 1, usage: null })}\n`);
+        return;
+      }
+      writeFileSync(log, `${JSON.stringify({ type: "req", role, seq: 1, round: 1 })}\n`);
+    };
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          const turn = await stub.innovate(input);
+          if (role === "innovator" && input.sessionPath.endsWith("innovator-0.jsonl")) damage(input.baseUrl);
+          return turn;
+        },
+        async critic(input) {
+          const turn = await stub.critic(input);
+          if (role === "critic") damage(input.baseUrl);
+          return turn;
+        },
+        async ranker(input) {
+          const turn = await stub.ranker(input);
+          if (role === "ranker") damage(input.baseUrl);
+          return turn;
+        },
+        async review(input) {
+          const turn = await stub.review(input);
+          if (role === "reviewer") damage(input.baseUrl);
+          return turn;
+        },
+      },
+    });
+    expect(result.accepted).toBeNull();
+    expect(result.stopReport.reason).toBe("usage_missing");
+    expect(result.stopReport.faultRounds).toBeGreaterThanOrEqual(1);
+    expect(fake.calls).toHaveLength(role === "reviewer" ? 1 : 0);
   });
 
   test("the run-record child argv does not carry the attest key", () => {

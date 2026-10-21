@@ -33,6 +33,7 @@ def plant_request(log_path, run_id, system_text, *, usage=None, boot_id="plant-b
         "toolResults": [],
     })
     append_jsonl(path, {"type": "done", "seq": seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": usage, "role": "executor"})
+    append_jsonl(path, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
 
 
 def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None) -> None:

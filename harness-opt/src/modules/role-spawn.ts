@@ -129,13 +129,15 @@ export function launchRolePi(piBin: string, config: RoleSpawnConfig): { readonly
   const argv = rolePiArgv(piBin, config);
   const [bin, ...args] = argv;
   if (!bin) throw new Error("pi binary is empty");
+  const env = { ...process.env };
+  delete env.HARNESS_ATTEST_KEY_FILE;
+  delete env.HARNESS_RELAY_LOG_ROOT;
+  delete env.RELAY_UPSTREAM_KEY_FILE;
+  if (config.baseUrl) env.BASE_URL = config.baseUrl;
   const child = spawnSync(bin, args, {
     encoding: "utf8",
     cwd: config.cwd,
-    env: {
-      ...process.env,
-      ...(config.baseUrl ? { BASE_URL: config.baseUrl } : {}),
-    },
+    env,
   });
   return { status: child.status, argv };
 }
