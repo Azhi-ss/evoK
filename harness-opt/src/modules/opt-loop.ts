@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -270,6 +270,8 @@ export interface OptLoopOptions {
   readonly stopBeforeRun?: boolean;
   /** Per-role output cap override. Absent roles use `ROLE_OUTPUT_CAPS`, then the documented model max. */
   readonly roleMaxTokens?: Partial<Record<OptRoleName, number>>;
+  /** Test seam. Absent waits `ROLE_RETRY_DELAYS_MS`. */
+  readonly roleRetrySleep?: (ms: number) => Promise<void>;
 }
 
 export interface AcceptedCandidate {
@@ -290,8 +292,12 @@ export interface OptLoopResult {
     readonly duplicate: boolean;
     readonly patchHash: string | null;
     readonly ewiSeeds: readonly number[];
-    /** Visible stop for this round, such as a citation failure. */
+    /** Visible stop for this round, such as a citation failure or role_failed. */
     readonly reason?: string;
+    /** Set when a role exit stopped this round. */
+    readonly roleFailure?: RoleFailureInfo;
+    /** Innovators that produced no usable candidate. */
+    readonly invalidCandidates?: readonly InvalidCandidate[];
     /** Set when this round closed with no candidate to run. */
     readonly noWinner?: string;
     /** Key-count order. Recorded when the ranker ran. It does not pick the winner. */
@@ -305,9 +311,27 @@ export interface OptLoopResult {
     readonly reason: string | null;
     readonly faultRounds: number;
     readonly reviewerRejectRounds: number;
+    /** Set when `reason` is `role_failed`. */
+    readonly role?: string;
+    readonly exitCode?: number | null;
+    readonly stderrTail?: string;
     /** One entry for every round that closed with no candidate to run. */
     readonly noWinner?: readonly { readonly round: number; readonly reason: string }[];
   };
+}
+
+interface RoleFailureInfo {
+  readonly role: string;
+  readonly exitCode: number | null;
+  readonly stderrTail: string;
+}
+
+interface InvalidCandidate {
+  readonly id: string;
+  readonly role: string;
+  readonly reason: "no_output" | "patch_without_config" | "role_failed";
+  readonly exitCode?: number | null;
+  readonly stderrTail?: string;
 }
 
 interface ConfigFile {
@@ -358,12 +382,58 @@ interface ClosureRecord {
   patchActive: boolean;
   reviewFedForward: boolean | null;
   rank?: "walkover";
-  /** Why this round stopped, when the stop is a citation failure. */
+  /** Why this round stopped, when the stop is a citation failure or a role failure. */
   reason?: string;
+  roleFailure?: RoleFailureInfo;
+  invalidCandidates?: readonly InvalidCandidate[];
   /** Why this round closed with no candidate to run. */
   noWinner?: string;
   /** Key-count order from `rankCandidates`. Recorded, not a veto. */
   codeRank?: CodeRankRecord;
+}
+
+/** Three launches. The waits before the second and third are 5s and 20s. 60s is the next backoff. */
+export const ROLE_ATTEMPTS = 3;
+export const ROLE_RETRY_DELAYS_MS = [5_000, 20_000, 60_000] as const;
+const STDERR_TAIL = 2_000;
+
+export class RoleFailed extends Error {
+  readonly reason = "role_failed";
+  constructor(
+    readonly role: string,
+    readonly exitCode: number | null,
+    readonly stderrTail: string,
+    readonly transient: boolean,
+  ) {
+    super("role_failed");
+    this.name = "RoleFailed";
+  }
+}
+
+export function stderrTail(stderr: string): string {
+  const trimmed = stderr.trim();
+  return trimmed.length <= STDERR_TAIL ? trimmed : trimmed.slice(trimmed.length - STDERR_TAIL);
+}
+
+/** HTTP 5xx, a non-cap 429, or a network error in the relay log or on stderr. A cap refusal is not transient. */
+export function roleFailureIsTransient(logPath: string, stderr: string): { readonly transient: boolean; readonly cap: "readOnlyTokenCap" | "innovatorCap" | null } {
+  let transient = /\b(?:429|500|502|503|504)\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|fetch failed|upstream network/i.test(stderr);
+  let cap: "readOnlyTokenCap" | "innovatorCap" | null = null;
+  if (logPath !== "" && existsSync(logPath)) {
+    for (const event of readJsonl(logPath)) {
+      if (!event || typeof event !== "object") continue;
+      const row = event as { type?: unknown; status?: unknown; errClass?: unknown; error?: unknown };
+      if (row.type !== "done") continue;
+      const err = typeof row.errClass === "string" ? row.errClass : "";
+      if (err === "readOnlyTokenCap" || err === "innovatorCap") cap = err;
+      const status = typeof row.status === "number" ? row.status : null;
+      if (err === "network" || err === "5xx" || row.error === "upstream_network") transient = true;
+      if (status !== null && status >= 500) transient = true;
+      if (status === 429 && err !== "readOnlyTokenCap" && err !== "innovatorCap") transient = true;
+    }
+  }
+  if (cap) return { transient: false, cap };
+  return { transient, cap: null };
 }
 
 function requireLoopTask(task: OptTask | undefined): OptTask {
@@ -450,6 +520,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let previousReviewSha: string | null = null;
   const roundSummaries: OptLoopResult["rounds"][number][] = [];
   let stopReason: string | null = null;
+  let failedRole: RoleFailureInfo | undefined;
   let faultRounds = 0;
   const assignStop = (reason: string): void => {
     if (reason === "usage_missing") faultRounds += 1;
@@ -509,67 +580,165 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const roleMs = started.getTime();
     let roundRank: "walkover" | undefined;
     let codeRank: CodeRankRecord | undefined;
-    const takeRole = async <T>(relay: RoleRelay, run: () => Promise<T>): Promise<T | null> => {
-      try {
-        return await run();
-      } catch (error) {
-        if (!(error instanceof RoleOutputTruncated)) throw error;
-        await closeRelay(relay.runId);
-        faultRounds += 1;
-        stopReason = error.reason;
-        writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-        return null;
+    let gapCitedTrace = false;
+    const invalidCandidates: InvalidCandidate[] = [];
+    const emitClosure = (record: ClosureRecord): void => {
+      writeClosure(options.out, round, invalidCandidates.length === 0 ? record : { ...record, invalidCandidates: [...invalidCandidates] });
+    };
+    const pushRound = (record: OptLoopResult["rounds"][number]): void => {
+      roundSummaries.push(invalidCandidates.length === 0 ? record : { ...record, invalidCandidates: [...invalidCandidates] });
+    };
+    const stopLoop = (reason: string, failure?: RoleFailureInfo, extra?: Partial<ClosureRecord> & { patchHash?: string | null }): void => {
+      if (reason === "usage_missing" || reason === "role_output_truncated" || reason === "attest_mismatch") faultRounds += 1;
+      stopReason = reason;
+      if (reason === "role_failed" && failure) failedRole = failure;
+      emitClosure({
+        round,
+        closed: false,
+        gapCitedTrace: extra?.gapCitedTrace ?? gapCitedTrace,
+        knobMatched: extra?.knobMatched ?? false,
+        patchActive: extra?.patchActive ?? false,
+        reviewFedForward: null,
+        reason,
+        ...(failure ? { roleFailure: failure } : {}),
+        ...(extra?.rank ? { rank: extra.rank } : {}),
+        ...(extra?.codeRank ? { codeRank: extra.codeRank } : {}),
+      });
+      writeNotes(options.out, round, started, now(), threshold, extra?.patchHash ?? null, controlSha, null);
+      pushRound({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash: extra?.patchHash ?? null,
+        ewiSeeds: [],
+        reason,
+        ...(failure ? { roleFailure: failure } : {}),
+        ...(codeRank ? { codeRank } : {}),
+      });
+    };
+    const attemptRole = async <T>(spec: {
+      readonly sessionName: string;
+      readonly kind: string;
+      readonly continuing: boolean;
+      readonly build: (relay: RoleRelay) => { readonly spawn: RoleSpawnConfig; readonly call: () => Promise<T> };
+    }): Promise<
+      | { readonly status: "ok"; readonly value: T; readonly relay: RoleRelay; readonly report: RelayReport; readonly spawn: RoleSpawnConfig }
+      | { readonly status: "stop"; readonly reason: string; readonly failure?: RoleFailureInfo }
+      | { readonly status: "innovator_failed"; readonly failure: RoleFailureInfo; readonly spawn: RoleSpawnConfig }
+    > => {
+      const attempts: { n: number; runId: string; exitCode: number | null; transient: boolean; stderrTail: string }[] = [];
+      const sleep = options.roleRetrySleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+      let lastSpawn: RoleSpawnConfig | null = null;
+      for (let n = 1; n <= ROLE_ATTEMPTS; n += 1) {
+        if (n > 1) {
+          const blocked = loopCap(round - 1);
+          if (blocked) return { status: "stop", reason: blocked };
+          const wait = ROLE_RETRY_DELAYS_MS[n - 2] ?? ROLE_RETRY_DELAYS_MS[ROLE_RETRY_DELAYS_MS.length - 1] ?? 60_000;
+          await sleep(wait);
+        }
+        const relay = roleRelay(relayRoot, env);
+        const built = spec.build(relay);
+        lastSpawn = built.spawn;
+        await relayRpc({ op: "open", runId: relay.runId, kind: spec.kind, expectedSha: controlSha });
+        const note = (exitCode: number | null, transient: boolean, tail: string): void => {
+          attempts.push({ n, runId: relay.runId, exitCode, transient, stderrTail: tail });
+          writeSpawnAttempts(built.spawn.sessionPath, attempts);
+        };
+        try {
+          const value = await built.call();
+          const report = await closeRelay(relay.runId);
+          note(readSpawnExit(built.spawn.sessionPath), false, "");
+          readOnlyTotal = report.loopTokens;
+          return { status: "ok", value, relay, report, spawn: built.spawn };
+        } catch (error) {
+          let report: RelayReport | null = null;
+          try {
+            report = await closeRelay(relay.runId);
+          } catch {
+            report = null;
+          }
+          if (report) readOnlyTotal = report.loopTokens;
+          const failure = failureFrom(error, relay.relayLog);
+          note(failure.exitCode, failure.transient, failure.stderrTail);
+          if (report?.refused === "readOnlyTokenCap" || report?.refused === "innovatorCap") {
+            return { status: "stop", reason: report.refused };
+          }
+          if (failure.cap) return { status: "stop", reason: failure.cap };
+          const blocked = loopCap(round - 1);
+          if (blocked) return { status: "stop", reason: blocked };
+          if (error instanceof RoleOutputTruncated) return { status: "stop", reason: error.reason };
+          if (report?.fault) return { status: "stop", reason: report.fault };
+          const roleExit = error instanceof RoleFailed || failure.transient;
+          if (!roleExit) throw error;
+          if (failure.transient && n < ROLE_ATTEMPTS) continue;
+          const info: RoleFailureInfo = { role: spec.sessionName, exitCode: failure.exitCode, stderrTail: failure.stderrTail };
+          if (spec.continuing && lastSpawn) return { status: "innovator_failed", failure: info, spawn: lastSpawn };
+          return { status: "stop", reason: "role_failed", failure: info };
+        }
       }
+      const info: RoleFailureInfo = { role: spec.sessionName, exitCode: null, stderrTail: "" };
+      if (spec.continuing && lastSpawn) return { status: "innovator_failed", failure: info, spawn: lastSpawn };
+      return { status: "stop", reason: "role_failed", failure: info };
     };
     const gapCwd = join(options.out, `round${round}`, "roles", "gap-finder");
     let gapTraces: TraceHint[];
     try {
       gapTraces = stageGapTraces(gapCwd, gapTraceSources(round, round0, traceHints));
     } catch (error) {
-      if (!(error instanceof GapTraceShaError)) throw error;
+      if (!(error instanceof GapTraceShaError) && !(error instanceof GapTracePathError)) throw error;
       stopReason = "anti_forgery";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     writeJson(join(options.out, `round${round}`, "gap-traces.json"), { traces: gapTraces });
-    const gapRelay = roleRelay(relayRoot, env);
     const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview });
-    const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
-      ...gapTraces.map((hint) => hint.file),
-      ...(previousReviewSession ? [previousReviewSession] : []),
-    ], gapRelay, gapPrompt, "gap-finder", options.roleMaxTokens?.["gap-finder"]);
-    const gapInput: GapCall = {
-      round,
-      traces: gapTraces,
-      previousReview,
-      previousReviewSession,
-      sessionPath: gapSpawn.sessionPath,
-      spawn: roleFacing(gapSpawn),
-      baseUrl: gapRelay.baseUrl,
-    };
-    assertNoHeldOutLeak(gapInput, "gap input");
-    writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
-    await relayRpc({ op: "open", runId: gapRelay.runId, kind: "role:gap-finder", expectedSha: controlSha });
-    const gap = await takeRole(gapRelay, () => roles.gap(gapInput));
-    if (!gap) break;
-    const gapReport = await closeRelay(gapRelay.runId);
+    const gapRun = await attemptRole({
+      sessionName: "gap-finder",
+      kind: "role:gap-finder",
+      continuing: false,
+      build(relay) {
+        const spawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
+          ...gapTraces.map((hint) => hint.file),
+          ...(previousReviewSession ? [previousReviewSession] : []),
+        ], relay, gapPrompt, "gap-finder", options.roleMaxTokens?.["gap-finder"]);
+        const input: GapCall = {
+          round,
+          traces: gapTraces,
+          previousReview,
+          previousReviewSession,
+          sessionPath: spawn.sessionPath,
+          spawn: roleFacing(spawn),
+          baseUrl: relay.baseUrl,
+        };
+        assertNoHeldOutLeak(input, "gap input");
+        writeJson(join(options.out, `round${round}`, "gap-input.json"), input);
+        return { spawn, call: () => roles.gap(input) };
+      },
+    });
+    if (gapRun.status !== "ok") {
+      if (gapRun.status === "stop") stopLoop(gapRun.reason, gapRun.failure);
+      break;
+    }
+    const gap = gapRun.value;
+    const gapRelay = gapRun.relay;
+    const gapSpawn = gapRun.spawn;
+    const gapReport = gapRun.report;
     const gapFault = gapReport.fault;
     if (gapFault) {
       faultRounds += 1;
       stopReason = gapFault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
     const gapLog = gapRelay.relayLog;
-    const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256, gapSpawn.cwd));
+    gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256, gapSpawn.cwd));
     const round0Copy = gapTraces.find((hint) => basename(hint.file) === "round0-trace.jsonl");
     if (round === 1 && round0 && (!round0Copy || !relayCited(gapLog, round0Copy.file, round0.srcSha256, gapSpawn.cwd))) {
       stopReason = "anti_forgery";
-      writeClosure(options.out, round, {
+      emitClosure({
         round,
         closed: false,
         gapCitedTrace,
@@ -579,7 +748,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         reason: "anti_forgery",
       });
       writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [], reason: "anti_forgery" });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [], reason: "anti_forgery" });
       break;
     }
     if (round > 1 && previousReviewSession && previousReviewSha) {
@@ -592,7 +761,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env), "这一轮没有候选，不评测。", "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
-      writeClosure(options.out, round, {
+      emitClosure({
         round,
         closed: false,
         gapCitedTrace,
@@ -604,7 +773,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         ...(codeRank ? { codeRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate,
@@ -627,9 +796,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const capExcluded: string[] = [];
     let innovatorStop: string | null = null;
     let innovatorFault: "usage_missing" | "attest_mismatch" | null = null;
+    let innovatorHalted = false;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
-      const innovatorRelay = roleRelay(relayRoot, env);
       const innovatePrompt = innovatorTaskPrompt({
         round,
         knob: gap.knob,
@@ -637,23 +806,46 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         triedSummaries: [...tried],
         control,
       });
-      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, innovatePrompt, sessionName, options.roleMaxTokens?.innovator);
-      const innovateInput: InnovateCall = {
-        round,
-        knob: gap.knob,
-        gapSummary: gap.summary,
-        triedSummaries: [...tried],
-        control,
-        sessionPath: innovatorSpawn.sessionPath,
-        spawn: roleFacing(innovatorSpawn),
-        baseUrl: innovatorRelay.baseUrl,
-      };
-      assertNoHeldOutLeak(innovateInput, "innovator input");
-      writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
-      await relayRpc({ op: "open", runId: innovatorRelay.runId, kind: "role:innovator", expectedSha: controlSha });
-      const turn = await takeRole(innovatorRelay, () => roles.innovate(innovateInput));
-      if (!turn) break;
-      const innovatorReport = await closeRelay(innovatorRelay.runId);
+      const innovatorRun = await attemptRole({
+        sessionName,
+        kind: "role:innovator",
+        continuing: true,
+        build(relay) {
+          const spawn = prepareRole(options.out, round, "innovator", options.piBin, [], relay, innovatePrompt, sessionName, options.roleMaxTokens?.innovator);
+          const input: InnovateCall = {
+            round,
+            knob: gap.knob,
+            gapSummary: gap.summary,
+            triedSummaries: [...tried],
+            control,
+            sessionPath: spawn.sessionPath,
+            spawn: roleFacing(spawn),
+            baseUrl: relay.baseUrl,
+          };
+          assertNoHeldOutLeak(input, "innovator input");
+          writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), input);
+          return { spawn, call: () => roles.innovate(input) };
+        },
+      });
+      if (innovatorRun.status === "stop") {
+        stopLoop(innovatorRun.reason, innovatorRun.failure);
+        innovatorHalted = true;
+        break;
+      }
+      if (innovatorRun.status === "innovator_failed") {
+        const issue = innovatorArtifactIssue(innovatorRun.spawn.cwd, null);
+        invalidCandidates.push({
+          id: `c${slot}`,
+          role: sessionName,
+          reason: issue ?? "no_output",
+          exitCode: innovatorRun.failure.exitCode,
+          stderrTail: innovatorRun.failure.stderrTail,
+        });
+        continue;
+      }
+      const turn = innovatorRun.value;
+      const innovatorSpawn = innovatorRun.spawn;
+      const innovatorReport = innovatorRun.report;
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
       if (innovatorReport.fault) {
         innovatorFault = innovatorReport.fault;
@@ -674,68 +866,86 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         break;
       }
       if (innovatorReport.refused === "innovatorCap" || innovatorReport.tokens >= innovatorCap) capExcluded.push(`c${slot}`);
+      const artifact = innovatorArtifactIssue(innovatorSpawn.cwd, turn);
+      if (artifact) {
+        invalidCandidates.push({ id: `c${slot}`, role: sessionName, reason: artifact });
+        continue;
+      }
       if (seen.has(turn.summary)) continue;
       seen.add(turn.summary);
       tried.push(turn.summary);
       proposals.push({ id: `c${slot}`, slot, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
     }
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
+    if (innovatorHalted) break;
     if (stopReason === "role_output_truncated") break;
     if (innovatorFault) {
       faultRounds += 1;
       stopReason = innovatorFault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     if (innovatorStop) {
       if (innovatorStop === "usage_missing") faultRounds += 1;
       stopReason = innovatorStop;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     if (proposals.length === 0) {
-      if (closeWithoutRun("duplicate summary", true)) break;
+      const note = invalidCandidates.length > 0 ? "no_winner" : "duplicate summary";
+      if (closeWithoutRun(note, invalidCandidates.length === 0)) break;
       continue;
     }
 
     const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
-    const criticRelay = roleRelay(relayRoot, env);
     const criticPrompt = criticTaskPrompt({ round, candidates: listed });
-    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay, criticPrompt, "critic", options.roleMaxTokens?.critic);
-    const criticInput: CriticCall = {
-      round,
-      candidates: listed,
-      sessionPath: criticSpawn.sessionPath,
-      spawn: roleFacing(criticSpawn),
-      baseUrl: criticRelay.baseUrl,
-    };
-    assertNoHeldOutLeak(criticInput, "critic input");
-    writeJson(join(options.out, `round${round}`, "critic-input.json"), criticInput);
-    await relayRpc({ op: "open", runId: criticRelay.runId, kind: "role:critic", expectedSha: controlSha });
-    const criticTurn = await takeRole(criticRelay, () => roles.critic(criticInput));
-    if (!criticTurn) break;
-    const criticReport = await closeRelay(criticRelay.runId);
+    const criticRun = await attemptRole({
+      sessionName: "critic",
+      kind: "role:critic",
+      continuing: false,
+      build(relay) {
+        const spawn = prepareRole(options.out, round, "critic", options.piBin, [], relay, criticPrompt, "critic", options.roleMaxTokens?.critic);
+        const input: CriticCall = {
+          round,
+          candidates: listed,
+          sessionPath: spawn.sessionPath,
+          spawn: roleFacing(spawn),
+          baseUrl: relay.baseUrl,
+        };
+        assertNoHeldOutLeak(input, "critic input");
+        writeJson(join(options.out, `round${round}`, "critic-input.json"), input);
+        return { spawn, call: () => roles.critic(input) };
+      },
+    });
+    if (criticRun.status !== "ok") {
+      if (criticRun.status === "stop") stopLoop(criticRun.reason, criticRun.failure);
+      break;
+    }
+    const criticTurn = criticRun.value;
+    const criticRelay = criticRun.relay;
+    const criticSpawn = criticRun.spawn;
+    const criticReport = criticRun.report;
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
     if (criticReport.fault) {
       faultRounds += 1;
       stopReason = criticReport.fault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     if (criticReport.refused === "readOnlyTokenCap") {
       stopReason = "readOnlyTokenCap";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     if (criticReport.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
     readOnlyTotal = criticReport.loopTokens;
@@ -743,7 +953,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     if (afterCritic) {
       assignStop(afterCritic);
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
 
@@ -769,42 +979,53 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       roundRank = "walkover";
       recordLedgerRank(join(options.out, `round${round}`, "sessions", "ledger.json"), "walkover");
     } else {
-      const rankerRelay = roleRelay(relayRoot, env);
       const rankerPrompt = rankerTaskPrompt({ round, candidates: listed, excluded });
-      const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt, "ranker", options.roleMaxTokens?.ranker);
-      const rankerInput: RankerCall = {
-        round,
-        candidates: listed,
-        excluded,
-        sessionPath: rankerSpawn.sessionPath,
-        spawn: roleFacing(rankerSpawn),
-        baseUrl: rankerRelay.baseUrl,
-      };
-      assertNoHeldOutLeak(rankerInput, "ranker input");
-      writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
-      await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
-      const rankerTurn = await takeRole(rankerRelay, () => roles.ranker(rankerInput));
-      if (!rankerTurn) break;
-      const rankerReport = await closeRelay(rankerRelay.runId);
+      const rankerRun = await attemptRole({
+        sessionName: "ranker",
+        kind: "role:ranker",
+        continuing: false,
+        build(relay) {
+          const spawn = prepareRole(options.out, round, "ranker", options.piBin, [], relay, rankerPrompt, "ranker", options.roleMaxTokens?.ranker);
+          const input: RankerCall = {
+            round,
+            candidates: listed,
+            excluded,
+            sessionPath: spawn.sessionPath,
+            spawn: roleFacing(spawn),
+            baseUrl: relay.baseUrl,
+          };
+          assertNoHeldOutLeak(input, "ranker input");
+          writeJson(join(options.out, `round${round}`, "ranker-input.json"), input);
+          return { spawn, call: () => roles.ranker(input) };
+        },
+      });
+      if (rankerRun.status !== "ok") {
+        if (rankerRun.status === "stop") stopLoop(rankerRun.reason, rankerRun.failure);
+        break;
+      }
+      const rankerTurn = rankerRun.value;
+      const rankerRelay = rankerRun.relay;
+      const rankerSpawn = rankerRun.spawn;
+      const rankerReport = rankerRun.report;
       captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
       if (rankerReport.fault) {
         faultRounds += 1;
         stopReason = rankerReport.fault;
         writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
         break;
       }
       if (rankerReport.refused === "readOnlyTokenCap") {
         stopReason = "readOnlyTokenCap";
         writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
         break;
       }
       if (rankerReport.usageMissing) {
         faultRounds += 1;
         stopReason = "usage_missing";
         writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
         break;
       }
       readOnlyTotal = rankerReport.loopTokens;
@@ -851,7 +1072,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     if (afterRoles) {
       assignStop(afterRoles);
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      pushRound({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
 
@@ -913,7 +1134,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       faultRounds += 1;
     }
     if (stopBeforeReview) {
-      writeClosure(options.out, round, {
+      emitClosure({
         round,
         closed: false,
         gapCitedTrace,
@@ -927,7 +1148,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
         stopReason = "anti_forgery";
       }
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate: false,
@@ -940,7 +1161,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
     if (runs.some((run) => run.runRecordPath !== undefined && !storedRecordOk(options.attestKeyFile, run))) {
       stopReason = "anti_forgery";
-      writeClosure(options.out, round, {
+      emitClosure({
         round,
         closed: false,
         gapCitedTrace,
@@ -954,7 +1175,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
         stopReason = "anti_forgery";
       }
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate: false,
@@ -964,7 +1185,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
-    const reviewRelay = roleRelay(relayRoot, env);
     const reviewPrompt = reviewerTaskPrompt({
       round,
       patchHash,
@@ -973,27 +1193,41 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
     });
-    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay, reviewPrompt, "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
-    const reviewInput: ReviewCall = {
-      round,
-      patchHash,
-      summary: proposed.summary,
-      knob: gap.knob,
-      runs: metrics.runs,
-      ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
-      sessionPath: reviewSpawn.sessionPath,
-      spawn: roleFacing(reviewSpawn),
-      baseUrl: reviewRelay.baseUrl,
-    };
-    assertNoHeldOutLeak(reviewInput, "reviewer input");
-    writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
-    await relayRpc({ op: "open", runId: reviewRelay.runId, kind: "role:reviewer", expectedSha: controlSha });
-    const verdict = await takeRole(reviewRelay, () => roles.review(reviewInput));
-    if (!verdict) break;
-    const reviewReport = await closeRelay(reviewRelay.runId);
+    const reviewRun = await attemptRole({
+      sessionName: "reviewer-gate",
+      kind: "role:reviewer",
+      continuing: false,
+      build(relay) {
+        const spawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], relay, reviewPrompt, "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
+        const input: ReviewCall = {
+          round,
+          patchHash,
+          summary: proposed.summary,
+          knob: gap.knob,
+          runs: metrics.runs,
+          ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+          sessionPath: spawn.sessionPath,
+          spawn: roleFacing(spawn),
+          baseUrl: relay.baseUrl,
+        };
+        assertNoHeldOutLeak(input, "reviewer input");
+        writeJson(join(options.out, `round${round}`, "review-input.json"), input);
+        return { spawn, call: () => roles.review(input) };
+      },
+    });
+    if (reviewRun.status !== "ok") {
+      if (reviewRun.status === "stop") {
+        stopLoop(reviewRun.reason, reviewRun.failure, { gapCitedTrace, knobMatched, patchActive: activation.patchActive, patchHash });
+      }
+      break;
+    }
+    const verdict = reviewRun.value;
+    const reviewRelay = reviewRun.relay;
+    const reviewSpawn = reviewRun.spawn;
+    const reviewReport = reviewRun.report;
     const reviewGate = reviewReport.fault;
     const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
-    writeClosure(options.out, round, {
+    emitClosure({
       round,
       closed: false,
       gapCitedTrace,
@@ -1006,7 +1240,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
     if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
       stopReason = "anti_forgery";
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate: false,
@@ -1019,7 +1253,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     if (reviewGate) {
       faultRounds += 1;
       stopReason = reviewGate;
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate: false,
@@ -1032,7 +1266,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     if (reviewReport.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
-      roundSummaries.push({
+      pushRound({
         round,
         accepted: false,
         duplicate: false,
@@ -1058,7 +1292,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       if (!run.verified?.traceSha || !run.verified.tracePath) return [];
       return [{ file: run.verified.tracePath, line: 1, sha256: run.verified.traceSha }];
     });
-    roundSummaries.push({
+    pushRound({
       round,
       accepted: take,
       duplicate: false,
@@ -1084,6 +1318,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reason: stopReason,
       faultRounds,
       reviewerRejectRounds,
+      ...(stopReason === "role_failed" && failedRole ? { role: failedRole.role, exitCode: failedRole.exitCode, stderrTail: failedRole.stderrTail } : {}),
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
@@ -1263,6 +1498,69 @@ export function piSubagentRoles(piBin: string): OptRoles {
   };
 }
 
+function spawnRecordPath(sessionPath: string): string | null {
+  if (!sessionPath.endsWith(".jsonl")) return null;
+  return `${sessionPath.slice(0, -".jsonl".length)}.spawn.json`;
+}
+
+function readSpawnExit(sessionPath: string): number | null {
+  const file = spawnRecordPath(sessionPath);
+  if (!file || !existsSync(file)) return null;
+  const current = JSON.parse(readFileSync(file, "utf8")) as { exitCode?: unknown };
+  return typeof current.exitCode === "number" ? current.exitCode : null;
+}
+
+function writeSpawnAttempts(
+  sessionPath: string,
+  attempts: readonly { readonly n: number; readonly runId: string; readonly exitCode: number | null; readonly transient: boolean; readonly stderrTail: string }[],
+): void {
+  const file = spawnRecordPath(sessionPath);
+  if (!file || !existsSync(file)) return;
+  const current = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  writeJson(file, { ...current, attempts });
+}
+
+function failureFrom(error: unknown, logPath: string): { readonly exitCode: number | null; readonly stderrTail: string; readonly transient: boolean; readonly cap: "readOnlyTokenCap" | "innovatorCap" | null } {
+  const raw = error instanceof RoleFailed ? error.stderrTail : error instanceof Error ? error.message : "";
+  const exitCode = error instanceof RoleFailed ? error.exitCode : null;
+  const judged = roleFailureIsTransient(logPath, raw);
+  const transient = judged.cap ? false : judged.transient || (error instanceof RoleFailed && error.transient);
+  return { exitCode, stderrTail: stderrTail(raw), transient, cap: judged.cap };
+}
+
+function regularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function innovatorHasConfig(cwd: string): boolean {
+  if (regularFile(join(cwd, "config.json"))) return true;
+  const dir = join(cwd, "candidates");
+  let names: string[];
+  try {
+    if (!lstatSync(dir).isDirectory()) return false;
+    names = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  return names.some((name) => regularFile(join(dir, name, "config.json")));
+}
+
+/** A patch file without a config, or a turn with nothing written, is not a candidate. */
+function innovatorArtifactIssue(
+  cwd: string,
+  turn: { readonly summary: string; readonly parts: Readonly<Record<string, Readonly<Record<string, unknown>>>> } | null,
+): "no_output" | "patch_without_config" | null {
+  const config = innovatorHasConfig(cwd);
+  if (regularFile(join(cwd, "patch.json")) && !config) return "patch_without_config";
+  const output = turn !== null && (turn.summary.trim() !== "" || leafCount(turn.parts) > 0);
+  if (!output && !config) return "no_output";
+  return null;
+}
+
 function recordRoleExit(sessionPath: string, status: number | null): void {
   if (!sessionPath.endsWith(".jsonl")) return;
   const spawnPath = `${sessionPath.slice(0, -".jsonl".length)}.spawn.json`;
@@ -1276,7 +1574,18 @@ function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, pr
   recordRoleExit(spawn.sessionPath, launched.status);
   const text = lastDoneAssistant(baseUrl);
   if (outputHitLengthLimit(launched.status, launched.stdout, launched.stderr, text)) throw new RoleOutputTruncated(spawn.role);
-  if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
+  if (launched.status !== 0) {
+    let logPath = "";
+    if (activeRelayRoot) {
+      try {
+        logPath = join(activeRelayRoot, runIdFromBase(baseUrl), "relay.jsonl");
+      } catch {
+        logPath = "";
+      }
+    }
+    const judged = roleFailureIsTransient(logPath, launched.stderr);
+    throw new RoleFailed(spawn.role, launched.status, stderrTail(launched.stderr), judged.cap ? false : judged.transient);
+  }
   if (text === null) throw new Error(`role ${spawn.role} returned no conclusion`);
   return text;
 }
@@ -1284,6 +1593,12 @@ function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, pr
 export class GapTraceShaError extends Error {
   constructor() {
     super("gap trace sha mismatch");
+  }
+}
+
+export class GapTracePathError extends Error {
+  constructor() {
+    super("gap trace path");
   }
 }
 
@@ -1301,8 +1616,23 @@ export function stageGapTrace(src: string, dest: string, expectedSha: string): v
   }
   if (sha256(bytes) !== expectedSha) throw new GapTraceShaError();
   mkdirSync(dirname(dest), { recursive: true });
-  writeFileSync(dest, bytes);
-  chmodSync(dest, 0o444);
+  try {
+    if (lstatSync(dest).isSymbolicLink()) throw new GapTracePathError();
+  } catch (error) {
+    if (error instanceof GapTracePathError) throw error;
+  }
+  let fd: number;
+  try {
+    fd = openSync(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  } catch {
+    throw new GapTracePathError();
+  }
+  try {
+    writeSync(fd, bytes);
+    fchmodSync(fd, 0o444);
+  } finally {
+    closeSync(fd);
+  }
   if (sha256File(dest) !== expectedSha) throw new GapTraceShaError();
 }
 

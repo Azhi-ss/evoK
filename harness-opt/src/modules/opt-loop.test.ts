@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import {
   assertLiveRoleCall,
   runLiveRoleSmoke,
   stageGapTrace,
+  RoleFailed,
   runOptLoop,
   runOptOnce,
   runRecordArgv,
@@ -303,6 +304,52 @@ function listenUpstream(usage: typeof UPSTREAM_USAGE = UPSTREAM_USAGE): Promise<
       });
     });
   });
+}
+
+function listenStatusUpstream(failCount: number): Promise<{ readonly url: string; readonly hits: () => number; close(): Promise<void> }> {
+  let hits = 0;
+  const server = createServer((req, res) => {
+    req.on("data", () => undefined);
+    req.on("end", () => {
+      hits += 1;
+      if (hits <= failCount) {
+        const body = "{\"error\":\"bad gateway\"}";
+        res.writeHead(502, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+        res.end(body);
+        return;
+      }
+      const payload = JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "{}" } }],
+        usage: UPSTREAM_USAGE,
+      });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(payload) });
+      res.end(payload);
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        reject(new Error("upstream port"));
+        return;
+      }
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/v1/chat/completions`,
+        hits: () => hits,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
+async function postForStatus(baseUrl: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "role-call" }] }),
+  });
+  if (!response.ok) throw new RoleFailed("role", 1, `HTTP ${response.status}`, false);
+  await response.arrayBuffer();
 }
 
 async function postRole(baseUrl: string): Promise<void> {
@@ -1491,6 +1538,13 @@ describe("optimization loop", () => {
     expect(dest.endsWith(join("traces", "round0-trace.jsonl"))).toBe(true);
     expect(dest.includes("private")).toBe(false);
     expect(() => stageGapTrace(src, join(dir, "roles", "gap-finder", "traces", "private-trace.jsonl"), sha)).toThrow(/gap trace name/);
+    const outside = join(dir, "secret.jsonl");
+    writeFileSync(outside, "secret\n");
+    const planted = join(dir, "roles", "gap-finder", "traces", "planted.jsonl");
+    symlinkSync(outside, planted);
+    expect(() => stageGapTrace(src, planted, sha)).toThrow(/gap trace path/);
+    expect(readFileSync(outside, "utf8")).toBe("secret\n");
+    expect(lstatSync(planted).isSymbolicLink()).toBe(true);
   });
 });
 
@@ -1913,7 +1967,7 @@ describe("optimize command", () => {
     }
   });
 
-  test("a non-zero exit that is not a length limit stays a generic failure", async () => {
+  test("a non-zero exit that is not a length limit stops as role_failed", async () => {
     const fx = fixture();
     const bin = join(fx.root, "pi");
     writeFileSync(bin, "#!/bin/sh\necho boom >&2\nexit 1\n");
@@ -1938,11 +1992,28 @@ describe("optimize command", () => {
         ...taskFlags(),
         ...round0Flags(),
       ]));
-      expect(code).toBe(1);
-      expect(stderr).toContain("role gap-finder pi exited 1");
-      expect(stderr).not.toContain("role_output_truncated");
-      const gapSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { exitCode?: number };
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as {
+        stopReport: { reason: string | null; role?: string; exitCode?: number | null; stderrTail?: string; faultRounds: number };
+        rounds: { reason?: string; roleFailure?: { role: string; exitCode: number | null; stderrTail: string } }[];
+      };
+      expect(loop.stopReport.reason).toBe("role_failed");
+      expect(loop.stopReport.role).toBe("gap-finder");
+      expect(loop.stopReport.exitCode).toBe(1);
+      expect(loop.stopReport.stderrTail).toBe("boom");
+      expect(loop.stopReport.faultRounds).toBe(0);
+      expect(loop.rounds[0]?.reason).toBe("role_failed");
+      expect(loop.rounds[0]?.roleFailure?.stderrTail).toBe("boom");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; roleFailure?: { exitCode?: number | null } };
+      expect(closure.reason).toBe("role_failed");
+      expect(closure.roleFailure?.exitCode).toBe(1);
+      const gapSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { exitCode?: number; baseUrl?: string; attempts?: { n: number; transient: boolean }[] };
       expect(gapSpawn.exitCode).toBe(1);
+      expect(gapSpawn.attempts?.map((item) => item.n)).toEqual([1]);
+      expect(gapSpawn.attempts?.[0]?.transient).toBe(false);
+      const log = readFileSync(roleLog(join(fx.root, "relay-logs"), gapSpawn.baseUrl ?? ""), "utf8");
+      expect(log).toContain("\"type\":\"close\"");
     } finally {
       if (previous.base === undefined) delete process.env.BASE_URL;
       else process.env.BASE_URL = previous.base;
@@ -1951,6 +2022,225 @@ describe("optimize command", () => {
       if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
       else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
     }
+  });
+
+  test("a 502 is retried and the next attempt can succeed", async () => {
+    const fx = fixture();
+    const upstream = await listenStatusUpstream(1);
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        rounds: 1,
+        roleRetrySleep: async (ms) => { delays.push(ms); },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          gap: (input) => stub.gap(input),
+          async innovate(input) {
+            if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+            await postForStatus(input.baseUrl);
+            return stub.innovate(input);
+          },
+          critic: (input) => stub.critic(input),
+          ranker: (input) => stub.ranker(input),
+          review: (input) => stub.review(input),
+        },
+      });
+      expect(delays).toEqual([5_000]);
+      expect(upstream.hits()).toBe(2);
+      expect(result.stopReport.reason).toBeNull();
+      expect(result.rounds[0]?.reason).toBeUndefined();
+      expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"))).toBe(true);
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as { attempts?: { n: number; transient: boolean; exitCode: number | null }[] };
+      expect(spawn.attempts?.map((item) => [item.n, item.transient, item.exitCode])).toEqual([[1, true, 1], [2, false, null]]);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("an innovator that 502s on every attempt is skipped and the round continues", async () => {
+    const fx = fixture();
+    const upstream = await listenStatusUpstream(99);
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        rounds: 1,
+        roleRetrySleep: async (ms) => { delays.push(ms); },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          gap: (input) => stub.gap(input),
+          async innovate(input) {
+            if (input.sessionPath.endsWith("innovator-5.jsonl")) {
+              await postForStatus(input.baseUrl);
+              return stub.innovate(input);
+            }
+            const turn = await stub.innovate(input);
+            const slot = /innovator-(\d+)\.jsonl$/.exec(input.sessionPath)?.[1] ?? "0";
+            return { ...turn, summary: `${turn.summary}#${slot}` };
+          },
+          critic: (input) => stub.critic(input),
+          ranker: (input) => stub.ranker(input),
+          review: (input) => stub.review(input),
+        },
+      });
+      expect(delays).toEqual([5_000, 20_000]);
+      expect(result.stopReport.reason).toBeNull();
+      expect(result.rounds[0]?.reason).toBeUndefined();
+      expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"))).toBe(true);
+      expect(result.rounds[0]?.invalidCandidates).toEqual([
+        { id: "c5", role: "innovator-5", reason: "no_output", exitCode: 1, stderrTail: "HTTP 502" },
+      ]);
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { invalidCandidates?: { id: string; reason: string }[] };
+      expect(closure.invalidCandidates?.map((item) => `${item.id}:${item.reason}`)).toEqual(["c5:no_output"]);
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-5.spawn.json"), "utf8")) as { attempts?: { n: number; runId: string }[] };
+      expect(spawn.attempts?.map((item) => item.n)).toEqual([1, 2, 3]);
+      for (const attempt of spawn.attempts ?? []) {
+        const log = readFileSync(join(fx.attestRoot, "relay-logs", attempt.runId, "relay.jsonl"), "utf8");
+        expect(log).toContain("\"status\":502");
+        expect(log).toContain("\"type\":\"close\"");
+      }
+      expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(true);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("a critic that 502s on every attempt stops as role_failed", async () => {
+    const fx = fixture();
+    const upstream = await listenStatusUpstream(99);
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        rounds: 1,
+        roleRetrySleep: async (ms) => { delays.push(ms); },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          gap: (input) => stub.gap(input),
+          innovate: (input) => stub.innovate(input),
+          async critic(input) {
+            await postForStatus(input.baseUrl);
+            return stub.critic(input);
+          },
+          ranker: (input) => stub.ranker(input),
+          review: (input) => stub.review(input),
+        },
+      });
+      expect(delays).toEqual([5_000, 20_000]);
+      expect(result.stopReport).toEqual({
+        reason: "role_failed",
+        faultRounds: 0,
+        reviewerRejectRounds: 0,
+        role: "critic",
+        exitCode: 1,
+        stderrTail: "HTTP 502",
+      });
+      expect(result.rounds[0]?.reason).toBe("role_failed");
+      expect(result.rounds[0]?.roleFailure).toEqual({ role: "critic", exitCode: 1, stderrTail: "HTTP 502" });
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("role_failed");
+      expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+      expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/critic.spawn.json"), "utf8")) as { attempts?: { runId: string }[] };
+      expect(spawn.attempts).toHaveLength(3);
+      for (const attempt of spawn.attempts ?? []) {
+        const log = readFileSync(join(fx.attestRoot, "relay-logs", attempt.runId, "relay.jsonl"), "utf8");
+        expect(log).toContain("\"type\":\"close\"");
+      }
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("a retry that would cross the read-only cap stops with that cap", async () => {
+    const fx = fixture();
+    const upstream = await listenStatusUpstream(99);
+    const stub = stubOptRoles(fx.key);
+    const delays: number[] = [];
+    let calls = 0;
+    let spent = false;
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        rounds: 1,
+        readOnlyTokens: () => (spent ? 30_000_000 : 0),
+        roleRetrySleep: async (ms) => { delays.push(ms); },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          gap: (input) => stub.gap(input),
+          async innovate(input) {
+            if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stub.innovate(input);
+            calls += 1;
+            spent = true;
+            await postForStatus(input.baseUrl);
+            return stub.innovate(input);
+          },
+          critic: (input) => stub.critic(input),
+          ranker: (input) => stub.ranker(input),
+          review: (input) => stub.review(input),
+        },
+      });
+      expect(calls).toBe(1);
+      expect(delays).toEqual([]);
+      expect(result.stopReport.reason).toBe("readOnlyTokenCap");
+      const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string };
+      expect(closure.reason).toBe("readOnlyTokenCap");
+      expect(existsSync(join(fx.out, "loop-result.json"))).toBe(true);
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as { attempts?: unknown[] };
+      expect(spawn.attempts).toHaveLength(1);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  test("a patch.json without config.json is an invalid candidate and one remaining candidate is a walkover", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          const slot = input.sessionPath.match(/innovator-(\d+)\.jsonl$/)?.[1];
+          if (slot === "0") {
+            writeFileSync(join(input.spawn.cwd, "patch.json"), "{\"summary\":\"only a patch\"}\n");
+            return stub.innovate(input);
+          }
+          if (slot !== "1") throw new RoleFailed("innovator", 1, "boom", false);
+          return stub.innovate(input);
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.rounds[0]?.invalidCandidates?.map((item) => `${item.id}:${item.reason}`)).toEqual([
+      "c0:patch_without_config",
+      "c2:no_output",
+      "c3:no_output",
+      "c4:no_output",
+      "c5:no_output",
+    ]);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { rank?: string; invalidCandidates?: { id: string }[] };
+    expect(closure.rank).toBe("walkover");
+    expect(closure.invalidCandidates?.map((item) => item.id)).toEqual(["c0", "c2", "c3", "c4", "c5"]);
+    expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
   });
 
   test("optimize --execute --stop-before-run writes the closure and does not start docker", async () => {
