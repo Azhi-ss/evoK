@@ -401,8 +401,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const relayRoot = loopRelayRoot(options, env);
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const relayCtl = new RelayControl(relayRoot, relayPort, options.attestKeyFile, upstreamKeyFile);
+  const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile);
   activeRelay = relayCtl;
+  activeRelayRoot = relayRoot;
   let readOnlyTotal = 0;
   const relayTotal = (): { readonly tokens: number; readonly usageMissing: boolean } => ({ tokens: readOnlyTotal, usageMissing: false });
   const loopCap = (startedRounds: number) => {
@@ -883,6 +884,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   return result;
   } finally {
     activeRelay = null;
+    activeRelayRoot = null;
     await relayCtl.shutdown();
   }
 }
@@ -1028,7 +1030,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
-      await relayComplete(input.baseUrl, JSON.stringify({ summary }));
+      plantStubDone(input.baseUrl, "innovator", input.round, { summary });
       hostWriteSession(input.spawn, sessionLines("innovator", summary), key);
       return {
         session: { jsonl: "ignored-return\n" },
@@ -1039,7 +1041,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async critic(input) {
       const excluded: string[] = [];
       const body = { excluded };
-      await relayComplete(input.baseUrl, JSON.stringify(body));
+      plantStubDone(input.baseUrl, "critic", input.round, body);
       hostWriteSession(input.spawn, sessionLines("critic", "critic"), key);
       return { session: { jsonl: "ignored-return\n" }, excluded };
     },
@@ -1048,7 +1050,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
         .filter((item) => !input.excluded.includes(item.id))
         .sort((left, right) => left.changedKeys - right.changedKeys || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0]?.id ?? "";
       const body = { winnerId };
-      await relayComplete(input.baseUrl, JSON.stringify(body));
+      plantStubDone(input.baseUrl, "ranker", input.round, body);
       hostWriteSession(input.spawn, sessionLines("ranker", winnerId), key);
       return { session: { jsonl: "ignored-return\n" }, winnerId };
     },
@@ -1056,7 +1058,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
       const body = { accept, reason };
-      await relayComplete(input.baseUrl, JSON.stringify(body));
+      plantStubDone(input.baseUrl, "reviewer", input.round, body);
       hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
@@ -1440,6 +1442,16 @@ function relayListenPort(env: NodeJS.ProcessEnv): string {
   return typeof env.HARNESS_RELAY_PORT === "string" && env.HARNESS_RELAY_PORT.trim() !== "" ? env.HARNESS_RELAY_PORT.trim() : "8642";
 }
 
+function relayBindHost(env: NodeJS.ProcessEnv): string {
+  const configured = env.HARNESS_RELAY_BIND;
+  return typeof configured === "string" && configured.trim() !== "" ? configured.trim() : "10.204.0.1";
+}
+
+function relayUpstream(env: NodeJS.ProcessEnv): string {
+  const configured = env.HARNESS_RELAY_UPSTREAM;
+  return typeof configured === "string" ? configured.trim() : "";
+}
+
 function roleRelay(root: string, env: NodeJS.ProcessEnv): RoleRelay {
   const runId = hostRunId();
   const port = relayListenPort(env);
@@ -1447,7 +1459,7 @@ function roleRelay(root: string, env: NodeJS.ProcessEnv): RoleRelay {
     relayLog: join(root, runId, "relay.jsonl"),
     runId,
     seq: 1,
-    baseUrl: `http://10.204.0.1:${port}/r/${runId}/v1`,
+    baseUrl: `http://${relayBindHost(env)}:${port}/r/${runId}/v1`,
   };
 }
 
@@ -1496,9 +1508,8 @@ function roleOutputSha(body: unknown): string {
   return sha256(JSON.stringify(body));
 }
 
-const ROLE_CALL_USAGE = { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } };
-
 let activeRelay: RelayControl | null = null;
+let activeRelayRoot: string | null = null;
 
 async function relayRpc(msg: object): Promise<void> {
   const ctl = activeRelay;
@@ -1507,9 +1518,21 @@ async function relayRpc(msg: object): Promise<void> {
   if (reply.ok !== true) throw new Error(reply.error || "relay control failed");
 }
 
-async function relayComplete(baseUrl: string, response: string): Promise<void> {
+function plantStubDone(baseUrl: string, role: string, round: number, body: unknown): void {
+  const root = activeRelayRoot;
+  if (!root) throw new Error("relay control is not running");
   const runId = baseUrl.split("/r/")[1]?.split("/")[0] ?? "";
-  await relayRpc({ op: "complete", runId, response, usage: ROLE_CALL_USAGE });
+  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
+  const proc = spawnSync("python3", [
+    script, "plant-role",
+    "--log", join(root, runId, "relay.jsonl"),
+    "--run-id", runId,
+    "--seq", "1",
+    "--resp-sha", sha256(JSON.stringify(body)),
+    "--role", role,
+    "--round", String(round),
+  ], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "plant-role failed").trim());
 }
 
 function roleRecordFault(log: string, key: Buffer): "usage_missing" | "attest_mismatch" | null {
@@ -1565,10 +1588,12 @@ class RelayControl {
   private stderr = "";
   private dead: Error | null = null;
 
-  constructor(root: string, port: string, attestKeyFile: string, upstreamKeyFile: string) {
+  constructor(root: string, port: string, bindHost: string, upstreamUrl: string, attestKeyFile: string, upstreamKeyFile: string) {
     const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
     const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
-    this.child = spawn("python3", [script, "control", "--log-root", root, "--port", port], {
+    const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost];
+    if (upstreamUrl !== "") args.push("--upstream", upstreamUrl);
+    this.child = spawn("python3", args, {
       cwd: relayDir,
       env: {
         ...process.env,

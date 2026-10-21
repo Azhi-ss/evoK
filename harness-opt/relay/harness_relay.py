@@ -1,7 +1,8 @@
 """Host logging relay.
 
-Binds only 10.204.0.1. The key scan compares raw request bytes with the raw
-key bytes. It does not decode base64, JSON escapes, or split encodings.
+Production binds only 10.204.0.1. An explicit bind_host of 127.0.0.1 is the
+test listener. The key scan compares raw request bytes with the raw key
+bytes. It does not decode base64, JSON escapes, or split encodings.
 """
 import hashlib
 import hmac
@@ -9,8 +10,10 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -98,7 +101,7 @@ def _parse_args(raw):
 
 
 class Relay:
-    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None):
+    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None):
         if os.path.realpath(upstream_key_file) == os.path.realpath(attest_key_file):
             raise RuntimeError("upstream key and attest key are the same path")
         self.upstream_key = _read_secret(upstream_key_file)
@@ -106,7 +109,11 @@ class Relay:
         if self.upstream_key == self.attest_key:
             raise RuntimeError("upstream key and attest key have the same content")
         self.port = int(port)
-        self.host = BIND_HOST
+        host = BIND_HOST if bind_host is None else str(bind_host)
+        if host != BIND_HOST and host != "127.0.0.1":
+            assert_bind_host(host)
+        self.host = host
+        self._lock = threading.RLock()
         self.log_root = str(log_root)
         self.upstream_url = upstream_url or UPSTREAM_URL
         self.mounts = list(mounts)
@@ -164,6 +171,10 @@ class Relay:
         return any(row.get("type") == "close" for row in self._lines(run_id))
 
     def open_run(self, run_id: str, kind: str, expected_config_sha: str) -> None:
+        with self._lock:
+            self._open_run(run_id, kind, expected_config_sha)
+
+    def _open_run(self, run_id: str, kind: str, expected_config_sha: str) -> None:
         if not RUN_ID_RE.fullmatch(run_id or ""):
             raise RuntimeError("run id must be 32 hex")
         if self.open_id is None:
@@ -180,6 +191,10 @@ class Relay:
 
     def close_run(self, run_id: str) -> None:
         """Append close, then HMAC the log bytes. An existing seal is left untouched."""
+        with self._lock:
+            self._close_run(run_id)
+
+    def _close_run(self, run_id: str) -> None:
         if not RUN_ID_RE.fullmatch(run_id or ""):
             raise RuntimeError("run id must be 32 hex")
         path = self.log_path(run_id)
@@ -240,35 +255,14 @@ class Relay:
             return {"ok": False, "reason": "attest_mismatch"}
         return {"ok": True}
 
-    def complete(self, run_id: str, response: bytes, usage) -> None:
-        """Data-plane write through handle(). The response bytes are the role conclusion."""
-        if isinstance(response, str):
-            response = response.encode()
-        if self.open_id is None:
-            self._restore_open()
-        request = json.dumps({"messages": [{"role": "user", "content": "complete"}]}, separators=(",", ":")).encode()
-
-        def upstream(_forward, _stream, response=bytes(response), usage=usage):
-            return 200, response, usage
-
-        saved = self.upstream
-        self.upstream = upstream
-        try:
-            status, _resp = self.handle(
-                "POST",
-                f"/r/{run_id}/v1/chat/completions",
-                request,
-                {"host": f"{BIND_HOST}:{self.port}"},
-            )
-        finally:
-            self.upstream = saved
-        if int(status) != 200:
-            raise RuntimeError(f"complete rejected {status}")
-
     def base_url(self, run_id: str) -> str:
-        return f"http://{BIND_HOST}:{self.port}/r/{run_id}/v1"
+        return f"http://{self.host}:{self.port}/r/{run_id}/v1"
 
     def handle(self, method: str, path: str, body: bytes, headers=None, *, client_disconnect=False):
+        with self._lock:
+            return self._handle(method, path, body, headers, client_disconnect=client_disconnect)
+
+    def _handle(self, method: str, path: str, body: bytes, headers=None, *, client_disconnect=False):
         headers = {str(k).lower(): v for k, v in (headers or {}).items()}
         if self._secret_in_body(body):
             self._reject(method, path, "secret_in_body")
@@ -284,7 +278,7 @@ class Relay:
             reason = "closed" if self._was_opened(run_id) else "run"
             self._reject(method, path, reason)
             return 403, b""
-        expected_host = f"{BIND_HOST}:{self.port}"
+        expected_host = f"{self.host}:{self.port}"
         if headers.get("host") != expected_host:
             self._reject(method, path, "host")
             return 403, b""
@@ -405,10 +399,12 @@ class Relay:
         return any(line.get("type") == "open" for line in self._lines(run_id))
 
     def bind(self):
-        import socket
-        assert_bind_host(self.host)
+        if self.host != "127.0.0.1":
+            assert_bind_host(self.host)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((self.host, self.port))
+        sock.listen(32)
         return sock
 
 
@@ -455,6 +451,116 @@ def _default_upstream(body, stream):
     return 200, json.dumps({"usage": usage}).encode(), usage
 
 
+def _usage_from_json(raw: bytes):
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(parsed, dict):
+        return parsed.get("usage")
+    return None
+
+
+def _network_upstream(url: str, key: bytes):
+    """POST the forwarded body. Usage comes only from the upstream response."""
+    token = key.rstrip(b"\r\n").decode("utf-8")
+
+    def upstream(body, stream):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+                status = int(resp.status)
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            status = int(exc.code)
+        except Exception as exc:
+            raise UpstreamNetworkError("upstream network") from exc
+        usage = _usage_from_stream(raw) if stream else _usage_from_json(raw)
+        return status, raw, usage
+
+    return upstream
+
+
+def _read_http(conn) -> tuple:
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(65536)
+        if chunk == b"":
+            return None
+        data += chunk
+        if len(data) > 2_000_000:
+            return None
+    head, rest = data.split(b"\r\n\r\n", 1)
+    lines = head.decode("iso-8859-1", "replace").split("\r\n")
+    request = lines[0].split(" ")
+    if len(request) < 2:
+        return None
+    path = request[1].split("?", 1)[0]
+    headers = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        headers[name.strip().lower()] = value.strip()
+    try:
+        length = int(headers.get("content-length") or "0")
+    except ValueError:
+        return None
+    if length < 0 or length > 8_000_000:
+        return None
+    while len(rest) < length:
+        chunk = conn.recv(65536)
+        if chunk == b"":
+            break
+        rest += chunk
+    return request[0], path, headers, rest[:length]
+
+
+def _http_exchange(relay: Relay, conn) -> None:
+    conn.settimeout(30)
+    parsed = _read_http(conn)
+    if parsed is None:
+        return
+    method, path, headers, body = parsed
+    status, resp = relay.handle(method, path, body, headers)
+    payload = resp if isinstance(resp, (bytes, bytearray)) else b""
+    reason = "OK" if int(status) == 200 else "Error"
+    header = (
+        f"HTTP/1.1 {int(status)} {reason}\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii")
+    conn.sendall(header + bytes(payload))
+
+
+def _accept_loop(relay: Relay, sock, stop: threading.Event) -> None:
+    sock.settimeout(0.2)
+    while not stop.is_set():
+        try:
+            conn, _addr = sock.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        try:
+            _http_exchange(relay, conn)
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 def _flags(argv):
     flags = {}
     key = None
@@ -480,49 +586,56 @@ def _relay_from(flags) -> Relay:
     if upstream == "" or attest == "":
         raise SystemExit("RELAY_UPSTREAM_KEY_FILE and HARNESS_ATTEST_KEY_FILE")
     port = int((flags.get("port") or ["8642"])[-1])
-    return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest)
-
-
-def _base_run(url: str):
-    match = re.fullmatch(r"http://10\.204\.0\.1:(\d+)/r/([0-9a-f]{32})/v1", url or "")
-    if match is None:
-        raise SystemExit("bad base url")
-    return int(match.group(1)), match.group(2)
+    bind = (flags.get("bind") or [BIND_HOST])[-1]
+    upstream_url = (flags.get("upstream") or [None])[-1]
+    kwargs = {}
+    if upstream_url:
+        kwargs["upstream_url"] = upstream_url
+    return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, **kwargs)
 
 
 def _serve(relay: Relay) -> None:
-    for raw in sys.stdin:
-        line = raw.strip()
-        if line == "":
-            continue
+    sock = relay.bind()
+    stop = threading.Event()
+    thread = threading.Thread(target=_accept_loop, args=(relay, sock, stop), name="relay-http", daemon=True)
+    thread.start()
+    try:
+        for raw in sys.stdin:
+            line = raw.strip()
+            if line == "":
+                continue
+            try:
+                msg = json.loads(line)
+                op = msg.get("op")
+                if op == "open":
+                    relay.open_run(msg["runId"], msg["kind"], msg["expectedSha"])
+                    out = {"ok": True}
+                elif op == "close":
+                    relay.close_run(msg["runId"])
+                    out = {"ok": True}
+                elif op == "shutdown":
+                    sys.stdout.write(json.dumps({"ok": True}) + "\n")
+                    sys.stdout.flush()
+                    return
+                else:
+                    out = {"ok": False, "error": "unknown"}
+            except Exception as exc:
+                out = {"ok": False, "error": str(exc)}
+            sys.stdout.write(json.dumps(out) + "\n")
+            sys.stdout.flush()
+    finally:
+        stop.set()
         try:
-            msg = json.loads(line)
-            op = msg.get("op")
-            if op == "open":
-                relay.open_run(msg["runId"], msg["kind"], msg["expectedSha"])
-                out = {"ok": True}
-            elif op == "complete":
-                relay.complete(msg["runId"], msg.get("response") or "", msg.get("usage"))
-                out = {"ok": True}
-            elif op == "close":
-                relay.close_run(msg["runId"])
-                out = {"ok": True}
-            elif op == "shutdown":
-                sys.stdout.write(json.dumps({"ok": True}) + "\n")
-                sys.stdout.flush()
-                return
-            else:
-                out = {"ok": False, "error": "unknown"}
-        except Exception as exc:
-            out = {"ok": False, "error": str(exc)}
-        sys.stdout.write(json.dumps(out) + "\n")
-        sys.stdout.flush()
+            sock.close()
+        except OSError:
+            pass
+        thread.join(timeout=2)
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        raise SystemExit("usage: harness_relay.py patch-active|control|open-run|close-run|complete|verify-log")
+        raise SystemExit("usage: harness_relay.py patch-active|control|open-run|close-run|verify-log")
     cmd = argv[0]
     flags = _flags(argv[1:])
     if cmd == "patch-active":
@@ -531,7 +644,11 @@ def main(argv=None):
         print(json.dumps(result))
         raise SystemExit(0 if result["active"] else 2)
     if cmd == "control":
-        _serve(_relay_from(flags))
+        relay = _relay_from(flags)
+        url = (flags.get("upstream") or [UPSTREAM_URL])[-1]
+        relay.upstream_url = url
+        relay.upstream = _network_upstream(url, relay.upstream_key)
+        _serve(relay)
         raise SystemExit(0)
     if cmd == "open-run":
         _relay_from(flags).open_run(_one(flags, "run-id"), _one(flags, "kind"), _one(flags, "expected-sha"))
@@ -539,13 +656,6 @@ def main(argv=None):
         raise SystemExit(0)
     if cmd == "close-run":
         _relay_from(flags).close_run(_one(flags, "run-id"))
-        print(json.dumps({"ok": True}))
-        raise SystemExit(0)
-    if cmd == "complete":
-        port, run_id = _base_run(_one(flags, "base-url"))
-        flags.setdefault("port", []).append(str(port))
-        usage = json.loads(_one(flags, "usage"))
-        _relay_from(flags).complete(run_id, _one(flags, "response").encode(), usage)
         print(json.dumps({"ok": True}))
         raise SystemExit(0)
     if cmd == "verify-log":

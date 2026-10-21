@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,7 +63,7 @@ function fixture(): Fixture {
   };
 }
 
-function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath"> {
+function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath" | "env"> {
   return {
     out: fx.out,
     attestRoot: fx.attestRoot,
@@ -70,6 +71,7 @@ function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "att
     harnessPath: fx.harnessPath,
     controlAttests: [fx.controlAttest],
     controlConfigPath: fx.controlConfig,
+    env: { HARNESS_RELAY_BIND: "127.0.0.1" },
   };
 }
 
@@ -204,6 +206,46 @@ function plantRole(
     "--round", String(input.round),
   ], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error(proc.stderr || proc.stdout || "plant-role failed");
+}
+
+const UPSTREAM_USAGE = { prompt_tokens: 11, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 1 } };
+
+function listenUpstream(): Promise<{ readonly url: string; readonly hits: Buffer[]; close(): Promise<void> }> {
+  const hits: Buffer[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      hits.push(Buffer.concat(chunks));
+      const body = JSON.stringify({ usage: UPSTREAM_USAGE });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+      res.end(body);
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        reject(new Error("upstream port"));
+        return;
+      }
+      resolve({
+        url: `http://127.0.0.1:${addr.port}/v1/chat/completions`,
+        hits,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
+async function postRole(baseUrl: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "role-call" }] }),
+  });
+  if (!response.ok) throw new Error(`relay ${response.status}`);
+  await response.arrayBuffer();
 }
 
 function plantRelayRead(log: string, runId: string, files: readonly string[]): void {
@@ -1036,22 +1078,29 @@ describe("optimization loop", () => {
 describe("optimize command", () => {
   test("dry-run finishes a round without a model process", async () => {
     const fx = fixture();
-    const code = await main([
-      "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
-      "--attest-root", fx.attestRoot,
-      "--attest-key-file", fx.keyFile,
-      "--harness", fx.harnessPath,
-      "--control-config", fx.controlConfig,
-      "--control-attest", fx.controlAttest,
-    ]);
-    expect(code).toBe(0);
-    expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
-    expect(existsSync(join(fx.out, "round1/patch.diff"))).toBe(true);
-    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
-    expect(activation.patchActive).toBe(true);
-    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
-    const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { skippedFinal: boolean };
-    expect(loop.skippedFinal).toBe(true);
+    const previousBind = process.env.HARNESS_RELAY_BIND;
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    try {
+      const code = await main([
+        "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+      ]);
+      expect(code).toBe(0);
+      expect(existsSync(join(fx.out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
+      expect(existsSync(join(fx.out, "round1/patch.diff"))).toBe(true);
+      const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
+      expect(activation.patchActive).toBe(true);
+      expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
+      const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { skippedFinal: boolean };
+      expect(loop.skippedFinal).toBe(true);
+    } finally {
+      if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previousBind;
+    }
   });
 
   test("dry-run without a control attestation does not write a stub baseline", async () => {
@@ -1411,7 +1460,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const result = await runOptLoop({
       ...hostOpts(fx),
       mode: "execute",
-      env: { BASE_URL: "https://example.test/v1", HARNESS_RELAY_LOG_ROOT: join(fx.attestRoot, "relay-logs") },
+      env: { BASE_URL: "https://example.test/v1", HARNESS_RELAY_LOG_ROOT: join(fx.attestRoot, "relay-logs"), HARNESS_RELAY_BIND: "127.0.0.1" },
       rounds: 1,
       roles: rejectingRoles(fx),
       executor: fake.executor,
@@ -1572,7 +1621,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: stubOptRoles(fx.key),
     });
     const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
-    expect(spawn.baseUrl?.startsWith("http://10.204.0.1:8642/r/")).toBe(true);
+    expect(spawn.baseUrl?.startsWith("http://127.0.0.1:8642/r/")).toBe(true);
     expect(spawn.baseUrl?.endsWith("/v1")).toBe(true);
     expect(spawn.relayLog?.startsWith(`${join(fx.attestRoot, "relay-logs")}/`)).toBe(true);
     expect(resolve(spawn.relayLog ?? "").startsWith(`${resolve(spawn.cwd)}/`)).toBe(false);
@@ -1589,43 +1638,38 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
   test("execute mode keeps the role relay under the host relay root", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
-    let opened = false;
-    try {
-      const result = await runOptLoop({
-        ...hostOpts(fx),
-        mode: "execute",
-        env: { BASE_URL: "https://example.test/v1" },
-        rounds: 1,
-        executor: fake.executor,
-        roles: {
-          ...stubOptRoles(fx.key),
-          async innovate(input) {
-            opened = true;
-            expect(input).not.toHaveProperty("relayLog");
-            expect(input).not.toHaveProperty("runId");
-            expect(input.baseUrl).toMatch(/^http:\/\/10\.204\.0\.1:8642\/r\/[0-9a-f]{32}\/v1$/);
-            const shown = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
-            expect(shown).not.toContain("relayLog");
-            expect(shown).not.toContain("relay.jsonl");
-            const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
-            expect(spawn.relayLog?.startsWith("/home/box/.harness-relay/")).toBe(true);
-            expect(resolve(spawn.relayLog ?? "").startsWith(`${resolve(input.spawn.cwd)}/`)).toBe(false);
-            expect(roleWrite(input.spawn, spawn.relayLog ?? "", "forged\n")).toBe(false);
-            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
-            return { session: { jsonl: "ignored\n" }, summary: "missing-relay", parts: { "agent-loop": { maxSteps: 21 } } };
-          },
+    const relayRoot = join(fx.attestRoot, "relay-logs");
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "execute",
+      env: { BASE_URL: "https://example.test/v1", HARNESS_RELAY_LOG_ROOT: relayRoot, HARNESS_RELAY_BIND: "127.0.0.1" },
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        ...stubOptRoles(fx.key),
+        async innovate(input) {
+          expect(input).not.toHaveProperty("relayLog");
+          expect(input).not.toHaveProperty("runId");
+          expect(input.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:8642\/r\/[0-9a-f]{32}\/v1$/);
+          const shown = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
+          expect(shown).not.toContain("relayLog");
+          expect(shown).not.toContain("relay.jsonl");
+          const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+          expect(spawn.relayLog?.startsWith(`${relayRoot}/`)).toBe(true);
+          expect(spawn.relayLog ?? "").not.toContain("/home/box");
+          expect(resolve(spawn.relayLog ?? "").startsWith(`${resolve(input.spawn.cwd)}/`)).toBe(false);
+          expect(roleWrite(input.spawn, spawn.relayLog ?? "", "forged\n")).toBe(false);
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary: "missing-relay", parts: { "agent-loop": { maxSteps: 21 } } };
         },
-      });
-      expect(opened).toBe(true);
-      expect(result.stopReport.reason).toBe("usage_missing");
-      expect(result.stopReport.faultRounds).toBe(1);
-    } catch (err) {
-      expect(opened).toBe(false);
-      expect(err).toBeInstanceOf(Error);
-    }
+      },
+    });
+    expect(result.stopReport.reason).toBe("usage_missing");
+    expect(result.stopReport.faultRounds).toBe(1);
     const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as RoleSpawnConfig;
-    expect(spawn.relayLog?.startsWith("/home/box/.harness-relay/")).toBe(true);
-    expect(spawn.baseUrl?.startsWith("http://10.204.0.1:8642/r/")).toBe(true);
+    expect(spawn.relayLog?.startsWith(`${relayRoot}/`)).toBe(true);
+    expect(spawn.relayLog ?? "").not.toContain("/home/box");
+    expect(spawn.baseUrl?.startsWith("http://127.0.0.1:8642/r/")).toBe(true);
     const gapInput = readFileSync(join(fx.out, "round1/gap-input.json"), "utf8");
     expect(gapInput).not.toContain("relayLog");
     expect(gapInput).not.toContain("relay.jsonl");
@@ -1633,77 +1677,70 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(fake.calls).toEqual([]);
   });
 
-  test("a role completion through the relay is the production record", async () => {
+  test("a role HTTP call through the relay is the production record", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
-    const finish = (baseUrl: string, body: unknown): void => {
-      const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
-      const proc = spawnSync("python3", [
-        script, "complete",
-        "--log-root", join(fx.attestRoot, "relay-logs"),
-        "--base-url", baseUrl,
-        "--response", JSON.stringify(body),
-        "--usage", JSON.stringify({ prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } }),
-      ], {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          HARNESS_ATTEST_KEY_FILE: fx.keyFile,
-          RELAY_UPSTREAM_KEY_FILE: join(fx.attestRoot, "upstream.key"),
-        },
-      });
-      if (proc.status !== 0) throw new Error(proc.stderr || proc.stdout || "complete failed");
-    };
+    const upstream = await listenUpstream();
     const session = (input: { spawn: RoleSpawnConfig }, role: string) => {
       hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role })}\n`, fx.key);
     };
-    const result = await runOptLoop({
-      ...hostOpts(fx),
-      mode: "dry-run",
-      rounds: 1,
-      executor: fake.executor,
-      roles: {
-        async gap(input) {
-          session(input, "gap-finder");
-          return { session: { jsonl: "ignored\n" }, citations: [], knob: "agent-loop.maxSteps", failureClass: "idle-loop", summary: "early write then idle" };
+    const call = async (baseUrl: string) => {
+      await postRole(baseUrl);
+    };
+    try {
+      const result = await runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        rounds: 1,
+        executor: fake.executor,
+        roles: {
+          async gap(input) {
+            session(input, "gap-finder");
+            return { session: { jsonl: "ignored\n" }, citations: [], knob: "agent-loop.maxSteps", failureClass: "idle-loop", summary: "early write then idle" };
+          },
+          async innovate(input) {
+            await call(input.baseUrl);
+            session(input, "innovator");
+            return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
+          },
+          async critic(input) {
+            await call(input.baseUrl);
+            session(input, "critic");
+            return { session: { jsonl: "ignored\n" }, excluded: [] };
+          },
+          async ranker(input) {
+            await call(input.baseUrl);
+            session(input, "ranker");
+            return { session: { jsonl: "ignored\n" }, winnerId: input.candidates[0]?.id ?? "" };
+          },
+          async review(input) {
+            await call(input.baseUrl);
+            session(input, "reviewer-gate");
+            return { session: { jsonl: "ignored\n" }, accept: false, reason: "hold" };
+          },
         },
-        async innovate(input) {
-          const summary = "agent-loop.maxSteps=24";
-          finish(input.baseUrl, { summary });
-          session(input, "innovator");
-          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 24 } } };
-        },
-        async critic(input) {
-          finish(input.baseUrl, { excluded: [] });
-          session(input, "critic");
-          return { session: { jsonl: "ignored\n" }, excluded: [] };
-        },
-        async ranker(input) {
-          const winnerId = input.candidates[0]?.id ?? "";
-          finish(input.baseUrl, { winnerId });
-          session(input, "ranker");
-          return { session: { jsonl: "ignored\n" }, winnerId };
-        },
-        async review(input) {
-          finish(input.baseUrl, { accept: false, reason: "hold" });
-          session(input, "reviewer-gate");
-          return { session: { jsonl: "ignored\n" }, accept: false, reason: "hold" };
-        },
-      },
-    });
-    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
-    expect(fake.calls).toHaveLength(1);
-    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
-    const log = readFileSync(spawn.relayLog ?? "", "utf8");
-    expect(log).toContain("\"type\":\"open\"");
-    expect(log).toContain("\"type\":\"done\"");
-    expect(existsSync(`${spawn.relayLog}.sig`)).toBe(true);
-    for (const name of ["gap-input.json", "innovator-0-input.json", "critic-input.json", "ranker-input.json", "review-input.json"]) {
-      const text = readFileSync(join(fx.out, "round1", name), "utf8");
-      expect(text).not.toContain("relayLog");
-      expect(text).not.toContain("relay.jsonl");
-      expect(text).not.toContain(fx.keyFile);
-      expect(text).toContain("baseUrl");
+      });
+      expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 0 });
+      expect(fake.calls).toEqual([]);
+      expect(upstream.hits.length).toBeGreaterThan(0);
+      const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+      const log = readFileSync(spawn.relayLog ?? "", "utf8");
+      expect(log).toContain("\"type\":\"req\"");
+      expect(log).toContain("\"type\":\"done\"");
+      expect(log).not.toContain("plant-boot");
+      const done = log.split("\n").map((line) => line.trim()).filter((line) => line !== "").map((line) => JSON.parse(line) as { type?: string; usage?: unknown }).find((row) => row.type === "done");
+      expect(done?.usage).toEqual(UPSTREAM_USAGE);
+      expect(existsSync(`${spawn.relayLog}.sig`)).toBe(true);
+      for (const name of ["gap-input.json", "innovator-0-input.json", "critic-input.json", "ranker-input.json"]) {
+        const text = readFileSync(join(fx.out, "round1", name), "utf8");
+        expect(text).not.toContain("relayLog");
+        expect(text).not.toContain("relay.jsonl");
+        expect(text).not.toContain(fx.keyFile);
+        expect(text).toContain("baseUrl");
+      }
+    } finally {
+      await upstream.close();
     }
   });
 
@@ -1719,6 +1756,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         gap: (input) => stubOptRoles(fx.key).gap(input),
         async innovate(input) {
           if (!input.sessionPath.endsWith("innovator-0.jsonl")) return stubOptRoles(fx.key).innovate(input);
+          plantRole(fx, input, "innovator", { summary: "tamper" });
           const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
           const env = {
             ...process.env,
@@ -1726,14 +1764,6 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
             RELAY_UPSTREAM_KEY_FILE: join(fx.attestRoot, "upstream.key"),
           };
           const logRoot = join(fx.attestRoot, "relay-logs");
-          const done = spawnSync("python3", [
-            script, "complete",
-            "--log-root", logRoot,
-            "--base-url", input.baseUrl,
-            "--response", JSON.stringify({ summary: "tamper" }),
-            "--usage", JSON.stringify({ prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } }),
-          ], { encoding: "utf8", env });
-          if (done.status !== 0) throw new Error(done.stderr || done.stdout || "complete failed");
           const closed = spawnSync("python3", [
             script, "close-run",
             "--log-root", logRoot,

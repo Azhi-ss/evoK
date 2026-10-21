@@ -102,30 +102,101 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(sig.read_bytes(), before)
         self.assertFalse(self.relay.verify_log(self.run)["ok"])
 
-    def test_control_cli_opens_completes_and_seals(self):
+    def test_control_listens_forwards_and_seals(self):
+        import threading
+        import urllib.request
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        usage = {"prompt_tokens": 11, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 1}}
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                seen.append(self.rfile.read(length))
+                raw = json.dumps({"usage": usage}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, fmt, *args):
+                return
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        upstream_port = upstream.server_address[1]
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        relay_sock = __import__("socket").socket()
+        relay_sock.bind(("127.0.0.1", 0))
+        relay_port = relay_sock.getsockname()[1]
+        relay_sock.close()
         run = new_run_id()
         root = self.root / "cli-logs"
         env = os.environ.copy()
         env["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
         env["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
         script = str(HERE / "harness_relay.py")
-        base = f"http://10.204.0.1:8642/r/{run}/v1"
+        proc = subprocess.Popen(
+            [sys.executable, script, "control", "--log-root", str(root), "--port", str(relay_port), "--bind", "127.0.0.1", "--upstream", f"http://127.0.0.1:{upstream_port}/v1/chat/completions"],
+            cwd=HERE, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def rpc(msg):
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            self.assertNotEqual(line, "")
+            return json.loads(line)
+
+        try:
+            self.assertTrue(rpc({"op": "open", "runId": run, "kind": "role:innovator", "expectedSha": "abc"})["ok"])
+            refused = rpc({"op": "complete", "runId": run, "response": "{}", "usage": usage})
+            self.assertFalse(refused["ok"])
+            body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{relay_port}/r/{run}/v1/chat/completions",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(json.loads(resp.read().decode())["usage"], usage)
+            self.assertEqual(len(seen), 1)
+            self.assertNotIn(self.up.read_bytes(), seen[0])
+            self.assertTrue(rpc({"op": "close", "runId": run})["ok"])
+            self.assertTrue(rpc({"op": "shutdown"})["ok"])
+            proc.wait(timeout=5)
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            err = ""
+            if proc.stderr is not None and not proc.stderr.closed:
+                err = proc.stderr.read()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+
+        self.assertEqual(proc.returncode, 0, err)
+        text = (root / run / "relay.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"type":"req"', text)
+        self.assertIn('"type":"done"', text)
+        self.assertIn('"type":"open"', text)
+        self.assertIn('"prompt_tokens":11', text)
+        self.assertNotIn("plant-boot", text)
+        self.assertNotIn(self.up.read_bytes().decode(), text)
 
         def run_cmd(args):
             return subprocess.run([sys.executable, script, *args], cwd=HERE, env=env, check=True, text=True, capture_output=True)
 
-        run_cmd(["open-run", "--log-root", str(root), "--run-id", run, "--kind", "role:innovator", "--expected-sha", "abc", "--port", "8642"])
-        run_cmd([
-            "complete", "--log-root", str(root), "--base-url", base,
-            "--response", "{\"summary\":\"x\"}",
-            "--usage", json.dumps({"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}),
-        ])
-        run_cmd(["close-run", "--log-root", str(root), "--run-id", run, "--port", "8642"])
-        verified = json.loads(run_cmd(["verify-log", "--log-root", str(root), "--run-id", run, "--port", "8642"]).stdout)
+        verified = json.loads(run_cmd(["verify-log", "--log-root", str(root), "--run-id", run, "--port", str(relay_port), "--bind", "127.0.0.1"]).stdout)
         self.assertTrue(verified["ok"])
-        text = (root / run / "relay.jsonl").read_text(encoding="utf-8")
-        self.assertIn('"type":"done"', text)
-        self.assertIn('"type":"open"', text)
+        gone = subprocess.run([sys.executable, script, "complete"], cwd=HERE, env=env, text=True, capture_output=True)
+        self.assertNotEqual(gone.returncode, 0)
 
     def test_03_stream_without_usage_is_usage_missing(self):
         def bare(body, stream):
@@ -240,6 +311,17 @@ class RelayCase(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 assert_bind_host(host)
         assert_bind_host("10.204.0.1")
+        self.assertEqual(self.relay.host, "10.204.0.1")
+        with self.assertRaises(RuntimeError):
+            Relay(port=9, log_root=self.root / "bad-bind", upstream_key_file=self.up, attest_key_file=self.att, bind_host="0.0.0.0")
+        loopback = Relay(port=9, log_root=self.root / "loopback", upstream_key_file=self.up, attest_key_file=self.att, bind_host="127.0.0.1")
+        self.assertEqual(loopback.host, "127.0.0.1")
+        loop_run = new_run_id()
+        loopback.open_run(loop_run, "executor", "abc")
+        denied, _ = loopback.handle("POST", f"/r/{loop_run}/v1/chat/completions", b'{"messages":[]}', {"host": "10.204.0.1:9"})
+        self.assertEqual(denied, 403)
+        allowed, _ = loopback.handle("POST", f"/r/{loop_run}/v1/chat/completions", b'{"messages":[]}', {"host": "127.0.0.1:9"})
+        self.assertEqual(allowed, 200)
         with self.assertRaises(RuntimeError):
             Relay(port=9, log_root=self.root / "a", upstream_key_file=self.att, attest_key_file=self.att)
         same = self.root / "same.key"
