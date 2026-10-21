@@ -92,9 +92,8 @@ const PATCH_SCHEMA = {
 const REVIEW_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["accept", "reason"],
+  required: ["reason"],
   properties: {
-    accept: { type: "boolean" },
     reason: { type: "string" },
   },
 };
@@ -260,7 +259,7 @@ function sampleValue(agent: string): unknown {
     };
   }
   if (agent === "reviewer-gate") {
-    return { accept: true, reason: "keep-better" };
+    return { reason: "keep-better" };
   }
   return {};
 }

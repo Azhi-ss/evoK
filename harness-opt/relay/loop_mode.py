@@ -84,9 +84,25 @@ def declared_round0(path, sha) -> dict:
 
 
 def gate_rule_sha() -> str:
-    """sha256 of the host reviewer-gate rule. It is part of the pre-round signature."""
-    path = Path(__file__).resolve().parents[1] / "docs" / "reviewer-gate-rules.md"
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """sha256 of a canonical manifest of the rule text and the gate implementation.
+
+    The manifest is UTF-8. Two lines, in this order, each ending in ``\\n``::
+
+        docs/reviewer-gate-rules.md <sha256 of that file>
+        src/modules/reviewer-gates.ts <sha256 of that file>
+
+    Paths are relative to the harness-opt directory. This digest is gateRuleSha.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = (
+        "docs/reviewer-gate-rules.md",
+        "src/modules/reviewer-gates.ts",
+    )
+    lines = []
+    for rel in files:
+        digest = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        lines.append(f"{rel} {digest}\n")
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
 def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
@@ -313,8 +329,8 @@ def _conclusion_shape(role: str, obj):
         return {"excluded": list(obj["excluded"])}
     if role == "ranker" and isinstance(obj.get("winnerId"), str):
         return {"winnerId": obj["winnerId"]}
-    if role == "reviewer" and isinstance(obj.get("accept"), bool) and isinstance(obj.get("reason"), str):
-        return {"accept": obj["accept"], "reason": obj["reason"]}
+    if role == "reviewer" and set(obj) == {"reason"} and isinstance(obj.get("reason"), str):
+        return {"reason": obj["reason"]}
     return None
 
 

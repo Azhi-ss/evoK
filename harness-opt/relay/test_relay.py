@@ -1606,6 +1606,17 @@ class LoopModeCase(unittest.TestCase):
             {"type": "done", "seq": 1, "assistant": "{\"accept\":true,\"reason\":\"x\"}"},
         ])
         self.assertEqual(wrong["reason"], "wrong_runId")
+        reason_only = {"reason": "x"}
+        bound = loop_mode.bind_role_call("reviewer", {"seq": 1, "runId": run_id, "conclusion": reason_only}, [
+            {"type": "req", "seq": 1, "runId": run_id},
+            {"type": "done", "seq": 1, "assistant": json.dumps(reason_only)},
+        ])
+        self.assertTrue(bound["ok"])
+        verdict_field = loop_mode.bind_role_call("reviewer", {"seq": 1, "runId": run_id, "conclusion": reason_only}, [
+            {"type": "req", "seq": 1, "runId": run_id},
+            {"type": "done", "seq": 1, "assistant": json.dumps({"accept": True, "reason": "x"})},
+        ])
+        self.assertEqual(verdict_field["reason"], "conclusion_mismatch")
         mismatch = loop_mode.bind_role_call("critic", call, [
             {"type": "req", "seq": 1, "runId": run_id},
             {"type": "done", "seq": 1, "assistant": "{\"excluded\":[\"c0\"]}"},

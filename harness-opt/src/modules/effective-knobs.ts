@@ -38,6 +38,11 @@ export function isEffectiveKnob(path: string): boolean {
   return EFFECTIVE_KNOB_SET.has(path);
 }
 
+/** Keys the harness reads as `effective["..."]`. Order follows the file. */
+export function harnessEffectiveKeys(source: string): string[] {
+  return [...source.matchAll(/effective\["([^"]+)"\]/g)].map((match) => match[1] ?? "");
+}
+
 /** Leaf paths in an innovator `parts` object. Arrays and scalars are leaves. */
 export function leafKnobPaths(parts: Readonly<Record<string, unknown>>): string[] {
   const out: string[] = [];

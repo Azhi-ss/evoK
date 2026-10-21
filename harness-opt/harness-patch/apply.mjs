@@ -4,6 +4,14 @@
  * apply harness.mjs.patch, then syntax-check both copies.
  *
  *   node harness-opt/harness-patch/apply.mjs <source harness.mjs> <dest harness.mjs>
+ *
+ * The deployable box file is that dest. From the repo root:
+ *
+ *   node harness-opt/harness-patch/apply.mjs \
+ *     harness-opt/harness-patch/upstream/harness.mjs \
+ *     /workspace/harness-opt-runs/config/harness.pr202.mjs
+ *
+ * stdout ends with `sha256 <hex>` of the bytes just written.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -53,5 +61,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.exit(2);
   }
   applyPatch(source, dest);
+  const digest = createHash("sha256").update(readFileSync(dest)).digest("hex");
   console.log(`patched ${dest}`);
+  console.log(`sha256 ${digest}`);
 }

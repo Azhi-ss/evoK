@@ -17,7 +17,7 @@ The relay replaces Authorization with the key from RELAY_UPSTREAM_KEY_FILE. The 
 Agent argv comes from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL.
 The checker uses the same builder with expose_relay=False, so it has no model access.
 Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1.
-`once` mounts harness sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c and refuses any other file."""
+`once` mounts harness sha 77b4c1ea84aeab449e480835d049feaf859aaa9d5014ddf659998480a70ba2a8 and refuses any other file."""
 import fcntl, json, os, secrets, shutil, socket, subprocess, sys, time, hashlib, tomllib
 from pathlib import Path
 import hooks
@@ -26,7 +26,7 @@ DATA=Path("/workspace/contest-data/devii"); LAKE=DATA/"shared/data_lake"
 HOME=Path("/workspace/harness-opt-runs"); CFG=HOME/"config"
 PATCHED=CFG/"harness.patched.mjs"; PATCHED_SHA="3f4a45ea484a8d645edb8f10e6b57aefeff5a4a7d2938fc95d1870bfa125efd1"
 # Box prereq harness. Once refuses any other bytes. There is no allow-override.
-HARNESS_SHA="4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c"
+HARNESS_SHA="77b4c1ea84aeab449e480835d049feaf859aaa9d5014ddf659998480a70ba2a8"
 MODEL="deepseek-v4-1-flash-261017"
 TASKS=["tasks1/003-tsa-seq-robust-domain-discovery","tasks2/i006","tasks3/hb008","tasks1/004-dims-pqn-batch-qc","tasks2/i028"]  # prereg tasks.selected order
 BATCH={"1":["tasks1/003-tsa-seq-robust-domain-discovery","tasks3/hb008","tasks1/004-dims-pqn-batch-qc"],"2":["tasks2/i006","tasks2/i028"]}

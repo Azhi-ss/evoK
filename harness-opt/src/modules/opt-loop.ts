@@ -36,9 +36,9 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
-import { EFFECTIVE_KNOBS, isEffectiveKnob, leafKnobPaths } from "./effective-knobs";
+import { EFFECTIVE_KNOBS, harnessEffectiveKeys, isEffectiveKnob, leafKnobPaths } from "./effective-knobs";
 import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
-import { evaluateReviewerGates } from "./reviewer-gates";
+import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec } from "./reviewer-gates";
 import {
   buildRoleSpawn,
   hostWriteSession,
@@ -213,7 +213,6 @@ export interface ReviewCall {
 
 export interface ReviewerTurn {
   readonly session: RoleSession;
-  readonly accept: boolean;
   readonly reason: string;
 }
 
@@ -395,6 +394,10 @@ interface ClosureRecord {
   codeRank?: CodeRankRecord;
   /** Host reviewer gates, in order. The LLM reason cannot change this verdict. */
   gates?: readonly { readonly id: "G0" | "G1" | "G2" | "G3"; readonly pass: boolean; readonly code?: string }[];
+  /** True when `gates` were decided before the real run. */
+  preflight?: boolean;
+  /** False on a preflight closure. A real host verdict omits this field. */
+  final?: boolean;
   rejectCode?: string;
   reviewReason?: string;
 }
@@ -452,6 +455,34 @@ export function roleFailureIsTransient(logPath: string, stderr: string): { reado
   return { transient, cap: null };
 }
 
+/** Refuse to start when a whitelisted knob has no `effective["..."]` read in the harness file. */
+function assertHarnessCoversKnobs(harnessPath: string): void {
+  let text = "";
+  try {
+    text = readFileSync(harnessPath, "utf8");
+  } catch {
+    text = "";
+  }
+  const present = new Set(harnessEffectiveKeys(text));
+  const missing = EFFECTIVE_KNOBS.filter((key) => !present.has(key));
+  if (missing.length > 0) throw new Error(`harness is missing effective-config for ${missing.join(", ")}`);
+}
+
+/** `[agent].timeout_sec` from `{task}/task.toml` or `{task}/task/task.toml`. No default. */
+function officialAgentTimeoutSec(taskPath: string): number | null {
+  for (const file of [join(taskPath, "task.toml"), join(taskPath, "task", "task.toml")]) {
+    if (!existsSync(file)) continue;
+    try {
+      if (!lstatSync(file).isFile()) continue;
+    } catch {
+      continue;
+    }
+    const parsed = parseAgentTimeoutSec(readFileSync(file, "utf8"));
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
 function requireLoopTask(task: OptTask | undefined): OptTask {
   if (!task || task.id.trim() === "" || task.path.trim() === "" || !Number.isFinite(task.tokenW) || task.tokenW <= 0) {
     throw new Error("loop target task is required");
@@ -482,6 +513,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
   const model = options.model ?? OPT_MODEL;
   if (!Number.isInteger(rounds) || rounds < 1) throw new Error("rounds must be a positive integer");
+  assertHarnessCoversKnobs(options.harnessPath);
   const task = requireLoopTask(options.task);
   const round0Pin = requireRound0(options.round0TracePath, options.round0TraceSha);
   const env = options.env ?? process.env;
@@ -489,6 +521,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const firstRun = join(options.out, "round1", "runs", task.id, "seed0", "candidate");
   if (existsSync(join(firstRun, "result.json"))) throw new Error("run dir already exists");
   const attestKey = loadAttestKey(options.attestKeyFile);
+  const officialTimeoutSec = officialAgentTimeoutSec(task.path);
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : options.piBin ? piSubagentRoles(options.piBin) : undefined);
   if (!roles) throw new Error("execute mode needs roles");
   assertAttestRoot(options.attestRoot, options.out);
@@ -1362,9 +1395,38 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     if (options.stopBeforeRun) {
+      const changed = changedLeaves(control, candidate);
+      let harnessText = "";
+      try {
+        harnessText = readFileSync(options.harnessPath, "utf8");
+      } catch {
+        harnessText = "";
+      }
+      const preflight = evaluatePreflightGates({
+        gapCitedPrevious: gapCitedTrace,
+        knobPaths: gap.knob.trim() === "" ? [] : [gap.knob],
+        patchPaths: changed.map((leaf) => leaf.path),
+        changed,
+        whitelist: EFFECTIVE_KNOBS,
+        harnessKeys: harnessEffectiveKeys(harnessText),
+      });
       previousReview = { accept: false, reason: verdict.reason };
       previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
       previousReviewSha = reviewCaptured?.sha256 ?? null;
+      emitClosure({
+        round,
+        closed: false,
+        gapCitedTrace,
+        knobMatched,
+        patchActive: activation.patchActive,
+        reviewFedForward: null,
+        gates: preflight.gates,
+        preflight: true,
+        final: false,
+        reviewReason: verdict.reason,
+        ...(roundRank ? { rank: roundRank } : {}),
+        ...(codeRank ? { codeRank } : {}),
+      });
       pushRound({
         round,
         accepted: false,
@@ -1389,6 +1451,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runEnd: edges.runEnd,
       scored: seeded?.scoreStatus === "scored",
       timedOut: seeded?.timedOut === true,
+      wallS: seeded?.wallS ?? null,
+      officialTimeoutSec,
       reward: seeded?.reward ?? null,
       baselineReward,
     });
@@ -1633,7 +1697,7 @@ export function piSubagentRoles(piBin: string): OptRoles {
       const text = await piConclusion(piBin, input.spawn, input.baseUrl, reviewerTaskPrompt(input));
       const verdict = reviewerFromAssistant(text);
       if (!verdict) throw new Error("role reviewer-gate returned no conclusion");
-      return { session: IGNORED_SESSION, ...verdict };
+      return { session: IGNORED_SESSION, reason: verdict.reason };
     },
   };
 }
@@ -1882,7 +1946,7 @@ function reviewerTaskPrompt(input: { readonly round: number; readonly patchHash:
     `补丁 ${input.patchHash}。旋钮 ${input.knob}。摘要 ${input.summary}。`,
     runs.join("\n") || "没有运行。",
     `ewiSeeds：${input.ewiSeeds.join(" ") || "无"}`,
-    "最后一条 assistant 消息只放一个 JSON 对象：accept 是布尔值，reason 是字符串。",
+    "最后一条 assistant 消息只放一个 JSON 对象，字段只有 reason，reason 是字符串。",
   ].join("\n");
 }
 
@@ -1947,10 +2011,11 @@ function rankerFromAssistant(text: string): string | null {
   return found;
 }
 
-function reviewerFromAssistant(text: string): { accept: boolean; reason: string } | null {
-  let found: { accept: boolean; reason: string } | null = null;
+function reviewerFromAssistant(text: string): { reason: string } | null {
+  let found: { reason: string } | null = null;
   for (const obj of jsonObjects(text)) {
-    if (typeof obj.accept === "boolean" && typeof obj.reason === "string") found = { accept: obj.accept, reason: obj.reason };
+    const keys = Object.keys(obj);
+    if (keys.length === 1 && keys[0] === "reason" && typeof obj.reason === "string") found = { reason: obj.reason };
   }
   return found;
 }
@@ -2065,12 +2130,11 @@ export function stubOptRoles(key: Buffer): OptRoles {
       return { session: { jsonl: "ignored-return\n" }, winnerId };
     },
     async review(input) {
-      const accept = input.round === 1;
-      const reason = accept ? "accept the idle cap" : "reject this candidate";
-      const body = { accept, reason };
+      const reason = input.round === 1 ? "accept the idle cap" : "reject this candidate";
+      const body = { reason };
       await plantStubDone(input.baseUrl, "reviewer", input.round, body);
       hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
-      return { session: { jsonl: "ignored-return\n" }, accept, reason };
+      return { session: { jsonl: "ignored-return\n" }, reason };
     },
   };
 }

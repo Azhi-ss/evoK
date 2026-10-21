@@ -31,6 +31,7 @@ import {
   type OptRoles,
 } from "./opt-loop";
 import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
+import { EFFECTIVE_KNOBS } from "./effective-knobs";
 import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type OptTask, type RunArtifactTiming } from "./opt-executor";
 
 /** Caller-supplied loop target. The loop itself has no built-in task. */
@@ -44,6 +45,17 @@ const LOOP_TASK: OptTask = {
 /** Chief's current box identity. The `...` segment is supplied by the operator; this string is the input, not a default in the loop. */
 const ROUND0_TRACE = "heldout/hb003/seed0/.../trace.jsonl";
 const ROUND0_SHA = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76";
+
+/** sha256 of the two-line gate manifest. Same composition as loop_mode.gate_rule_sha. */
+function gateRuleManifestSha(): string {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const files = ["docs/reviewer-gate-rules.md", "src/modules/reviewer-gates.ts"];
+  const manifest = files.map((rel) => {
+    const digest = createHash("sha256").update(readFileSync(join(root, rel))).digest("hex");
+    return `${rel} ${digest}\n`;
+  }).join("");
+  return createHash("sha256").update(manifest).digest("hex");
+}
 
 function taskFlags(): string[] {
   return ["--task", LOOP_TASK.id, "--task-path", LOOP_TASK.path, "--network", LOOP_TASK.network, "--token-w", String(LOOP_TASK.tokenW)];
@@ -72,7 +84,10 @@ function fixture(): Fixture {
   writeFileSync(keyFile, key);
   chmodSync(keyFile, 0o600);
   const harnessPath = join(root, "harness.mjs");
-  writeFileSync(harnessPath, "/* host harness */\n");
+  writeFileSync(harnessPath, `${EFFECTIVE_KNOBS.map((key) => `effective["${key}"]`).join("\n")}\n`);
+  const taskDir = join(root, "task");
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(join(taskDir, "task.toml"), "[agent]\ntimeout_sec = 3600\n\n[verifier]\ntimeout_sec = 60\n");
   const out = join(root, "out");
   const attestRoot = join(root, "attest");
   mkdirSync(attestRoot, { recursive: true });
@@ -101,7 +116,7 @@ function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "att
     controlAttests: [fx.controlAttest],
     controlConfigPath: fx.controlConfig,
     env: { HARNESS_RELAY_BIND: "127.0.0.1" },
-    task: LOOP_TASK,
+    task: { ...LOOP_TASK, path: join(fx.root, "task") },
     round0TracePath: ROUND0_TRACE,
     round0TraceSha: ROUND0_SHA,
   };
@@ -203,9 +218,9 @@ function rejectingRoles(fx: Fixture): OptRoles & { readonly reviews: number } {
     review: async (input) => {
       reviews += 1;
       const reason = "still idle";
-      await plantRole(fx, input, "reviewer", { accept: false, reason });
+      await plantRole(fx, input, "reviewer", { reason });
       hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
-      return { session: { jsonl: "ignored\n" }, accept: false, reason };
+      return { session: { jsonl: "ignored\n" }, reason };
     },
     get reviews() { return reviews; },
   };
@@ -253,9 +268,9 @@ function equalKeyRoles(fx: Fixture, winnerId: string, options?: { readonly exclu
     },
     async review(input) {
       const reason = "hold";
-      if (options?.reviewPlant !== false) await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: false, reason });
+      if (options?.reviewPlant !== false) await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason });
       session(input.spawn, "reviewer-gate");
-      return { session: { jsonl: "ignored\n" }, accept: false, reason };
+      return { session: { jsonl: "ignored\n" }, reason };
     },
   };
 }
@@ -494,7 +509,7 @@ async function postConclusion(baseUrl: string, conclusion: unknown): Promise<voi
 
 function chatRoles(
   fx: Fixture,
-  review: { readonly reported: { readonly accept: boolean; readonly reason: string }; readonly recorded: { readonly accept: boolean; readonly reason: string } },
+  review: { readonly reported: { readonly reason: string }; readonly recorded: { readonly reason: string } },
 ): OptRoles {
   const session = (input: { spawn: RoleSpawnConfig }, role: string) => {
     hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role })}\n`, fx.key);
@@ -529,7 +544,7 @@ function chatRoles(
     async review(input) {
       await postConclusion(input.baseUrl, review.recorded);
       session(input, "reviewer-gate");
-      return { session: { jsonl: "ignored\n" }, accept: review.reported.accept, reason: review.reported.reason };
+      return { session: { jsonl: "ignored\n" }, reason: review.reported.reason };
     },
   };
 }
@@ -617,7 +632,7 @@ describe("optimization loop", () => {
     expect(pre.realRunWallCapS).toBe(103 * 3600);
     expect(pre.seed).toBe(0);
     expect(pre.innovatorCap).toBe(200_000);
-    expect(pre.gateRuleSha).toBe(createHash("sha256").update(readFileSync(fileURLToPath(new URL("../../docs/reviewer-gate-rules.md", import.meta.url)))).digest("hex"));
+    expect(pre.gateRuleSha).toBe(gateRuleManifestSha());
     expect(pre.seedSha).toMatch(/^[0-9a-f]{64}$/);
     expect(pre.round0Record).toEqual({
       srcPath: ROUND0_TRACE,
@@ -825,9 +840,9 @@ describe("optimization loop", () => {
       },
       review: async (input) => {
         const reason = "still idle";
-        await plantRole(fx, input, "reviewer", { accept: false, reason });
+        await plantRole(fx, input, "reviewer", { reason });
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
-        return { session: { jsonl: "ignored\n" }, accept: false, reason };
+        return { session: { jsonl: "ignored\n" }, reason };
       },
     };
     const result = await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fake.executor });
@@ -1071,7 +1086,7 @@ describe("optimization loop", () => {
         },
         async review(input) {
           writeFileSync(input.sessionPath, "{\"type\":\"message\",\"text\":\"accept\"}\n");
-          return { session: { jsonl: perfectRead(input.sessionPath, "nope") }, accept: true, reason: "accept" };
+          return { session: { jsonl: perfectRead(input.sessionPath, "nope") }, reason: "accept" };
         },
       },
     });
@@ -1106,9 +1121,9 @@ describe("optimization loop", () => {
       ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         const reason = "still idle";
-        await plantRole(fx, input, "reviewer", { accept: false, reason });
+        await plantRole(fx, input, "reviewer", { reason });
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: reason })}\n`, fx.key);
-        return { session: { jsonl: "ignored\n" }, accept: false, reason };
+        return { session: { jsonl: "ignored\n" }, reason };
       },
     };
     await runOptLoop({ ...hostOpts(fx), mode: "dry-run", rounds: 2, roles, executor: fakeExecutor(fx).executor });
@@ -1141,10 +1156,10 @@ describe("optimization loop", () => {
       ranker: (input) => stubOptRoles(fx.key).ranker(input),
       async review(input) {
         const reason = "accept";
-        await plantRole(fx, input, "reviewer", { accept: true, reason });
+        await plantRole(fx, input, "reviewer", { reason });
         expect(roleWrite(input.spawn, input.sessionPath, "forged\n")).toBe(false);
         hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "accept" })}\n`, fx.key);
-        return { session: { jsonl: "ignored\n" }, accept: true, reason: "accept" };
+        return { session: { jsonl: "ignored\n" }, reason: "accept" };
       },
     };
     const result = await runOptLoop({
@@ -2465,7 +2480,7 @@ describe("optimize command", () => {
       "  innovator: { summary: 'agent-loop.maxSteps=' + maxSteps, parts: { 'agent-loop': { maxSteps } } },",
       "  critic: { excluded: [] },",
       "  ranker: { winnerId: 'c1' },",
-      "  'reviewer-gate': { accept: false, reason: 'hold' },",
+      "  'reviewer-gate': { reason: 'hold' },",
       "};",
       "const body = bodies[role];",
       "if (!body) { process.stderr.write('unknown role ' + role + '\\n'); process.exit(2); }",
@@ -3054,9 +3069,9 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         critic: (input) => citing.critic(input),
         ranker: (input) => citing.ranker(input),
         async review(input) {
-          await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: false, reason: "recorded" });
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "recorded" });
           hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "forged" })}\n`, fx.key);
-          return { session: { jsonl: "ignored\n" }, accept: true, reason: "forged" };
+          return { session: { jsonl: "ignored\n" }, reason: "forged" };
         },
       },
     });
@@ -3216,9 +3231,23 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const ranking = JSON.parse(readFileSync(join(fx.out, "round1/ranking.json"), "utf8")) as { codeWinner: string | null; rankerWinnerId: string };
     expect(ranking.codeWinner).toBe("c0");
     expect(ranking.rankerWinnerId).toBe("c1");
-    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { codeRank?: { winner?: string }; noWinner?: string };
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      codeRank?: { winner?: string };
+      noWinner?: string;
+      preflight?: boolean;
+      final?: boolean;
+      gates?: { id: string; pass: boolean; code?: string }[];
+      reason?: string;
+    };
     expect(closure.codeRank?.winner).toBe("c0");
     expect(closure.noWinner).toBeUndefined();
+    expect(closure.reason).toBeUndefined();
+    expect(closure.preflight).toBe(true);
+    expect(closure.final).toBe(false);
+    expect(closure.gates).toEqual([
+      { id: "G1", pass: false },
+      { id: "G2", pass: true },
+    ]);
     expect(result.rounds[0]?.codeRank?.winner).toBe("c0");
     expect(result.rounds[0]?.noWinner).toBeUndefined();
     expect(result.stopReport.reason).toBeNull();
@@ -3345,9 +3374,9 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
             return { session: { jsonl: "ignored\n" }, winnerId };
           },
           async review(input) {
-            await postConclusion(input.baseUrl, { accept: false, reason: "still idle" });
+            await postConclusion(input.baseUrl, { reason: "still idle" });
             session(input, "reviewer-gate");
-            return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
+            return { session: { jsonl: "ignored\n" }, reason: "still idle" };
           },
         },
       });
@@ -3680,7 +3709,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           async review(input) {
             await call(input.baseUrl);
             session(input, "reviewer-gate");
-            return { session: { jsonl: "ignored\n" }, accept: false, reason: "hold" };
+            return { session: { jsonl: "ignored\n" }, reason: "hold" };
           },
         },
       });
@@ -3719,7 +3748,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const fake = fakeExecutor(fx);
     const upstream = await listenEchoUpstream();
     const relayRoot = join(fx.attestRoot, "relay-logs");
-    const verdict = { accept: true, reason: "accept the idle cap" };
+    const verdict = { reason: "accept the idle cap" };
     try {
       const result = await runOptLoop({
         ...hostOpts(fx),
@@ -3773,8 +3802,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         rounds: 1,
         executor: fake.executor,
         roles: chatRoles(fx, {
-          recorded: { accept: false, reason: "hold" },
-          reported: { accept: true, reason: "forged" },
+          recorded: { reason: "hold" },
+          reported: { reason: "forged" },
         }),
       });
       expect(upstream.hits).toBe(10);
@@ -3788,7 +3817,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       const review = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as RoleSpawnConfig;
       expect(review.relayLog).toBeUndefined();
       expect(JSON.stringify(review)).not.toContain(relayRoot);
-      expect(lastDone(roleLog(relayRoot, review.baseUrl ?? ""))?.assistant).toBe(JSON.stringify({ accept: false, reason: "hold" }));
+      expect(lastDone(roleLog(relayRoot, review.baseUrl ?? ""))?.assistant).toBe(JSON.stringify({ reason: "hold" }));
     } finally {
       await upstream.close();
     }
@@ -4059,7 +4088,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         async review(input) {
           if (role === "reviewer" && mode === "no-done") {
             await bare(input.baseUrl, input.spawn);
-            return { session: { jsonl: "ignored\n" }, accept: false, reason: "no-done" };
+            return { session: { jsonl: "ignored\n" }, reason: "no-done" };
           }
           const turn = await stub.review(input);
           if (role === "reviewer") await damage(input.baseUrl);
@@ -4085,6 +4114,57 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
 
+  test("a harness missing a whitelisted effective key refuses to start", async () => {
+    const fx = fixture();
+    writeFileSync(fx.harnessPath, `${EFFECTIVE_KNOBS.filter((key) => key !== "goal.maxContinuationTurns").map((key) => `effective["${key}"]`).join("\n")}\n`);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow(/harness is missing effective-config for goal.maxContinuationTurns/);
+    expect(existsSync(join(fx.out, "pre-round1.json"))).toBe(false);
+  });
+
+  test("G3 rejects a scored run whose wall time meets the official agent timeout", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.root, "task", "task.toml"), "[agent]\ntimeout_sec = 30\n\n[verifier]\ntimeout_sec = 60\n");
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: {
+        name: "slow",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, { ...script, wallS: 30, timedOut: false }, { key: fx.key, harnessPath: fx.harnessPath });
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: 30, timedOut: false });
+        },
+      },
+      roles: {
+        gap: (input) => citing.gap(input),
+        innovate: (input) => citing.innovate(input),
+        critic: (input) => citing.critic(input),
+        ranker: (input) => citing.ranker(input),
+        review: (input) => citing.review(input),
+      },
+    });
+    expect(result.accepted).toBeNull();
+    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      preflight?: boolean;
+      gates?: { id: string; pass: boolean }[];
+    };
+    expect(closure.preflight).toBeUndefined();
+    expect(closure.gates).toEqual([
+      { id: "G0", pass: true },
+      { id: "G1", pass: true },
+      { id: "G2", pass: true },
+      { id: "G3", pass: false },
+    ]);
+  });
+
   test("an LLM accept cannot override a reward below the signed baseline", async () => {
     const fx = fixture();
     const citing = citingRoles(fx.key, fx.attestRoot);
@@ -4106,9 +4186,9 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         critic: (input) => citing.critic(input),
         ranker: (input) => citing.ranker(input),
         async review(input) {
-          await relayPlantRole(input.baseUrl, "reviewer", input.round, { accept: true, reason: "forged accept" });
+          await relayPlantRole(input.baseUrl, "reviewer", input.round, { reason: "forged accept" });
           hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n`, fx.key);
-          return { session: { jsonl: "ignored\n" }, accept: true, reason: "forged accept" };
+          return { session: { jsonl: "ignored\n" }, reason: "forged accept" };
         },
       },
     });
@@ -4372,7 +4452,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       "  innovator: { summary: 'agent-loop.maxSteps=24', parts: { 'agent-loop': { maxSteps: 24 } } },",
       "  critic: { excluded: [] },",
       "  ranker: { winnerId: 'c1' },",
-      "  'reviewer-gate': { accept: true, reason: 'hold' },",
+      "  'reviewer-gate': { reason: 'hold' },",
       "};",
       "const body = bodies[role];",
       "if (!body) { process.stderr.write('unknown role ' + role + '\\n'); process.exit(2); }",
