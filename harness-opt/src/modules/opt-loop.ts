@@ -41,6 +41,7 @@ import {
   buildRoleSpawn,
   hostWriteSession,
   launchRolePi,
+  recordLedgerRank,
   recordedSessionSha,
   rolePiArgv,
   type RoleSpawnConfig,
@@ -49,7 +50,7 @@ import {
 /** Pinned test id. Calls go out through BASE_URL; this package does not pick a host. */
 export const OPT_MODEL = "deepseek-v4-1-flash-261017";
 
-/** Innovators per round. The real run is seed 0 of the bound ranker winner. */
+/** Innovators per round. The real run is seed 0 of the one candidate left, or of the ranker winner. */
 const INNOVATORS_PER_ROUND = 6;
 
 export const HELD_OUT_TASKS: readonly OptTask[] = [
@@ -331,6 +332,7 @@ interface ClosureRecord {
   knobMatched: boolean;
   patchActive: boolean;
   reviewFedForward: boolean | null;
+  rank?: "walkover";
 }
 
 function requireLoopTask(task: OptTask | undefined): OptTask {
@@ -473,6 +475,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const started = now();
     const roleMs = started.getTime();
+    let roundRank: "walkover" | undefined;
     const gapTraces = round === 1 && round0
       ? [{ file: round0.hostCopyPath, line: 1, sha256: round0.srcSha256 }, ...traceHints]
       : traceHints;
@@ -663,61 +666,84 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
 
-    const rankerRelay = roleRelay(relayRoot, env);
     const excluded = [...new Set([...criticTurn.excluded, ...capExcluded])];
-    const rankerPrompt = rankerTaskPrompt({ round, candidates: listed, excluded });
-    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt);
-    const rankerInput: RankerCall = {
-      round,
-      candidates: listed,
-      excluded,
-      sessionPath: rankerSpawn.sessionPath,
-      spawn: roleFacing(rankerSpawn),
-      baseUrl: rankerRelay.baseUrl,
-    };
-    assertNoHeldOutLeak(rankerInput, "ranker input");
-    writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
-    await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
-    const rankerTurn = await roles.ranker(rankerInput);
-    const rankerReport = await closeRelay(rankerRelay.runId);
-    captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
-    if (rankerReport.fault) {
-      faultRounds += 1;
-      stopReason = rankerReport.fault;
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-      break;
-    }
-    if (rankerReport.refused === "readOnlyTokenCap") {
-      stopReason = "readOnlyTokenCap";
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-      break;
-    }
-    if (rankerReport.usageMissing) {
-      faultRounds += 1;
-      stopReason = "usage_missing";
-      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
-      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
-      break;
-    }
-    readOnlyTotal = rankerReport.loopTokens;
-    const budget = rankingBudget([
-      ...hostedEvents(criticRelay.relayLog, "critic", round),
-      ...hostedEvents(rankerRelay.relayLog, "ranker", round),
-    ]);
-    if (budget.capHit) {
-      if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
-      continue;
-    }
-    const criticBound = bindConclusion("critic", criticRelay, { excluded: criticTurn.excluded });
-    const rankerBound = bindConclusion("ranker", rankerRelay, { winnerId: rankerTurn.winnerId });
-    const ranked = rankCandidates(listed.map((item) => ({ id: item.id, changedKeys: item.changedKeys })), excluded);
-    const winner = ranked.status === "winner" ? proposals.find((item) => item.id === ranked.winner) : undefined;
-    if (!criticBound || !rankerBound || !winner || ranked.winner !== rankerTurn.winnerId) {
+    const remaining = proposals.filter((item) => !excluded.includes(item.id));
+    let winner: (typeof proposals)[number] | undefined;
+    if (remaining.length === 0) {
       if (closeWithoutRun("no_winner", false)) break;
       continue;
     }
+    if (remaining.length === 1) {
+      const budget = rankingBudget(hostedEvents(criticRelay.relayLog, "critic", round));
+      if (budget.capHit) {
+        if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
+        continue;
+      }
+      const criticBound = bindConclusion("critic", criticRelay, { excluded: criticTurn.excluded });
+      if (!criticBound) {
+        if (closeWithoutRun("no_winner", false)) break;
+        continue;
+      }
+      winner = remaining[0];
+      roundRank = "walkover";
+      recordLedgerRank(join(options.out, `round${round}`, "sessions", "ledger.json"), "walkover");
+    } else {
+      const rankerRelay = roleRelay(relayRoot, env);
+      const rankerPrompt = rankerTaskPrompt({ round, candidates: listed, excluded });
+      const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt);
+      const rankerInput: RankerCall = {
+        round,
+        candidates: listed,
+        excluded,
+        sessionPath: rankerSpawn.sessionPath,
+        spawn: roleFacing(rankerSpawn),
+        baseUrl: rankerRelay.baseUrl,
+      };
+      assertNoHeldOutLeak(rankerInput, "ranker input");
+      writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
+      await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
+      const rankerTurn = await roles.ranker(rankerInput);
+      const rankerReport = await closeRelay(rankerRelay.runId);
+      captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
+      if (rankerReport.fault) {
+        faultRounds += 1;
+        stopReason = rankerReport.fault;
+        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        break;
+      }
+      if (rankerReport.refused === "readOnlyTokenCap") {
+        stopReason = "readOnlyTokenCap";
+        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        break;
+      }
+      if (rankerReport.usageMissing) {
+        faultRounds += 1;
+        stopReason = "usage_missing";
+        writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        break;
+      }
+      readOnlyTotal = rankerReport.loopTokens;
+      const budget = rankingBudget([
+        ...hostedEvents(criticRelay.relayLog, "critic", round),
+        ...hostedEvents(rankerRelay.relayLog, "ranker", round),
+      ]);
+      if (budget.capHit) {
+        if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
+        continue;
+      }
+      const criticBound = bindConclusion("critic", criticRelay, { excluded: criticTurn.excluded });
+      const rankerBound = bindConclusion("ranker", rankerRelay, { winnerId: rankerTurn.winnerId });
+      const ranked = rankCandidates(listed.map((item) => ({ id: item.id, changedKeys: item.changedKeys })), excluded);
+      winner = ranked.status === "winner" ? proposals.find((item) => item.id === ranked.winner) : undefined;
+      if (!criticBound || !rankerBound || !winner || ranked.winner !== rankerTurn.winnerId) {
+        if (closeWithoutRun("no_winner", false)) break;
+        continue;
+      }
+    }
+    if (!winner) continue;
     const proposed = { summary: winner.summary, parts: winner.parts };
     const afterRoles = loopCap(round - 1);
     if (afterRoles) {
@@ -790,6 +816,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         knobMatched,
         patchActive: activation.patchActive,
         reviewFedForward: null,
+        ...(roundRank ? { rank: roundRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
@@ -814,6 +841,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         knobMatched,
         patchActive: activation.patchActive,
         reviewFedForward: null,
+        ...(roundRank ? { rank: roundRank } : {}),
       });
       writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
       if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
@@ -863,6 +891,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       knobMatched,
       patchActive: activation.patchActive,
       reviewFedForward: null,
+      ...(roundRank ? { rank: roundRank } : {}),
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
     if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {

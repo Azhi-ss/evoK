@@ -110,7 +110,14 @@ export function hostWriteSession(config: RoleSpawnConfig, text: string, key: Buf
   const ledger = readLedger(config.ledgerPath);
   ledger.sessions[config.role] = { sha256: sha256(text) };
   const mac = ledgerMac(key, ledger.sessions);
-  writeFileSync(config.ledgerPath, `${JSON.stringify({ sessions: ledger.sessions, hmacSha256: mac }, null, 2)}\n`);
+  writeFileSync(config.ledgerPath, `${JSON.stringify(ledgerBody(ledger.sessions, mac, ledger.rank), null, 2)}\n`);
+}
+
+/** Record how this round was ranked. The session HMAC stays over the session map. */
+export function recordLedgerRank(ledgerPath: string, rank: "walkover"): void {
+  mkdirSync(resolve(ledgerPath, ".."), { recursive: true });
+  const ledger = readLedger(ledgerPath);
+  writeFileSync(ledgerPath, `${JSON.stringify(ledgerBody(ledger.sessions, ledger.hmacSha256, rank), null, 2)}\n`);
 }
 
 export function recordedSessionSha(ledgerPath: string, role: string, key: Buffer): string | null {
@@ -227,10 +234,22 @@ function overlaps(left: string, right: string): boolean {
   return left === right || inside(left, right) || inside(right, left);
 }
 
-function readLedger(file: string): { sessions: Record<string, { sha256?: string }>; hmacSha256: string } {
+function readLedger(file: string): { sessions: Record<string, { sha256?: string }>; hmacSha256: string; rank?: "walkover" } {
   if (!existsSync(file)) return { sessions: {}, hmacSha256: "" };
-  const parsed = JSON.parse(readFileSync(file, "utf8")) as { sessions?: Record<string, { sha256?: string }>; hmacSha256?: string };
-  return { sessions: parsed.sessions ?? {}, hmacSha256: parsed.hmacSha256 ?? "" };
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as { sessions?: Record<string, { sha256?: string }>; hmacSha256?: string; rank?: string };
+  return {
+    sessions: parsed.sessions ?? {},
+    hmacSha256: parsed.hmacSha256 ?? "",
+    ...(parsed.rank === "walkover" ? { rank: "walkover" as const } : {}),
+  };
+}
+
+function ledgerBody(
+  sessions: Record<string, { sha256?: string }>,
+  hmacSha256: string,
+  rank?: "walkover",
+): { sessions: Record<string, { sha256?: string }>; hmacSha256: string; rank?: "walkover" } {
+  return { sessions, hmacSha256, ...(rank ? { rank } : {}) };
 }
 
 function ledgerMac(key: Buffer, sessions: Record<string, { sha256?: string }>): string {

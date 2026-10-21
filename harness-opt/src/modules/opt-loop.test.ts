@@ -218,6 +218,14 @@ function roleLog(root: string, baseUrl: string): string {
   return join(root, runIdOf(baseUrl), "relay.jsonl");
 }
 
+function secondProposal(key: Buffer, input: { readonly baseUrl: string; readonly round: number; readonly spawn: RoleSpawnConfig }): Promise<{ session: { jsonl: string }; summary: string; parts: { context: { compression: boolean } } }> {
+  const summary = "context.compression=on";
+  return relayPlantRole(input.baseUrl, "innovator", input.round, { summary }).then(() => {
+    hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, key);
+    return { session: { jsonl: "ignored\n" }, summary, parts: { context: { compression: true } } };
+  });
+}
+
 function plantRole(
   _fx: Fixture,
   input: { readonly baseUrl: string; readonly round: number },
@@ -350,9 +358,12 @@ function chatRoles(
       return turn;
     },
     async innovate(input) {
-      await postConclusion(input.baseUrl, { summary: "agent-loop.maxSteps=24" });
+      const slot = input.sessionPath.match(/innovator-(\d+)\.jsonl$/)?.[1] ?? "0";
+      const maxSteps = slot === "1" ? 20 : 24;
+      const summary = `agent-loop.maxSteps=${maxSteps}`;
+      await postConclusion(input.baseUrl, { summary });
       session(input, "innovator");
-      return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
+      return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps } } };
     },
     async critic(input) {
       const body = { excluded: [] as string[] };
@@ -476,7 +487,6 @@ describe("optimization loop", () => {
       "innovator",
       "innovator",
       "critic",
-      "ranker",
       "reviewer-gate",
     ]);
     for (const item of manifest.sessions) {
@@ -2118,6 +2128,80 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.stopReport.reason).toBeNull();
   });
 
+  test("one candidate left after the critic is a walkover and the ranker is not called", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    let rankerCalls = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        async ranker(input) {
+          rankerCalls += 1;
+          return stub.ranker(input);
+        },
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(rankerCalls).toBe(0);
+    expect(existsSync(join(fx.out, "round1/ranker-input.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+    const ledger = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ledger.json"), "utf8")) as { rank?: string };
+    expect(ledger.rank).toBe("walkover");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { rank?: string };
+    expect(closure.rank).toBe("walkover");
+    expect(fake.calls.map((call) => `${call.task.id}:${call.seed}`)).toEqual(["hb003:0"]);
+    const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as { parts: { "agent-loop": { maxSteps: number } } };
+    expect(config.parts["agent-loop"].maxSteps).toBe(24);
+    expect(result.stopReport.reason).toBeNull();
+  });
+
+  test("zero candidates left records no_winner and the next round generates candidates", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const stub = stubOptRoles(fx.key);
+    let rankerCalls = 0;
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        innovate: (input) => stub.innovate(input),
+        async critic(input) {
+          if (input.round !== 1) return stub.critic(input);
+          const excluded = input.candidates.map((item) => item.id);
+          await relayPlantRole(input.baseUrl, "critic", input.round, { excluded });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "critic" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, excluded };
+        },
+        async ranker(input) {
+          rankerCalls += 1;
+          return stub.ranker(input);
+        },
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(rankerCalls).toBe(0);
+    expect(existsSync(join(fx.out, "round1/candidate/config.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round1/ranker-input.json"))).toBe(false);
+    const review = readFileSync(join(fx.out, "round1/sessions/reviewer-gate.jsonl"), "utf8");
+    expect(review).toContain("no_winner");
+    const gap = JSON.parse(readFileSync(join(fx.out, "round2/gap-input.json"), "utf8")) as { previousReview?: { reason?: string } };
+    expect(gap.previousReview?.reason).toBe("no_winner");
+    expect(existsSync(join(fx.out, "round2/innovator-0-input.json"))).toBe(true);
+    expect(fake.calls.map((call) => call.runDir.includes("/round2/"))).toEqual([true]);
+    expect(result.rounds[0]?.accepted).toBe(false);
+    expect(result.stopReport.reason).toBeNull();
+  });
+
   test("execute mode ignores a read-only token override", async () => {
     const fx = fixture();
     const fake = fakeExecutor(fx);
@@ -2285,6 +2369,13 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: {
         gap: (input) => stub.gap(input),
         async innovate(input) {
+          if (input.sessionPath.endsWith("innovator-1.jsonl")) return secondProposal(fx.key, input);
+          if (input.sessionPath.endsWith("innovator-2.jsonl")) {
+            const summary = "memory.recall=recent";
+            await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+            hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+            return { session: { jsonl: "ignored\n" }, summary, parts: { memory: { recall: "recent" } } };
+          }
           const turn = await stub.innovate(input);
           if (input.sessionPath.endsWith("innovator-0.jsonl")) {
             await relayRecord(input.baseUrl, { type: "done", role: "innovator", status: 200, round: input.round, usage: { prompt_tokens: 10_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } });
@@ -2433,7 +2524,9 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           async innovate(input) {
             await call(input.baseUrl);
             session(input, "innovator");
-            return { session: { jsonl: "ignored\n" }, summary: "agent-loop.maxSteps=24", parts: { "agent-loop": { maxSteps: 24 } } };
+            const slot = input.sessionPath.match(/innovator-(\d+)\.jsonl$/)?.[1] ?? "0";
+            const maxSteps = slot === "1" ? 20 : 24;
+            return { session: { jsonl: "ignored\n" }, summary: `agent-loop.maxSteps=${maxSteps}`, parts: { "agent-loop": { maxSteps } } };
           },
           async critic(input) {
             await call(input.baseUrl);
@@ -2780,6 +2873,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: {
         gap: (input) => stub.gap(input),
         async innovate(input) {
+          if (role === "ranker" && input.sessionPath.endsWith("innovator-1.jsonl")) return secondProposal(fx.key, input);
           const mine = role === "innovator" && input.sessionPath.endsWith("innovator-0.jsonl");
           if (mine && mode === "no-done") {
             await bare(input.baseUrl, input.spawn);
