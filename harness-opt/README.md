@@ -139,7 +139,7 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 `optimize` 把 gap-finder、innovator、reviewer-gate 接到一次 Dev-II 执行上。默认协议：只做 i014，3 轮，每轮 1 个候选，dev 种子 0/1/2。三轮里最后一个被接受的候选，再和 control 按 `C0,X0,C1,X1,C2,X2` 交替重跑 i014，然后 held-out 跑 002、i030、hb003 各 3 个种子。002 的网络是 gateway-only。三轮都没有接受的候选时，不跑终比，也不跑 held-out。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
 
-执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{attestDir}` `{harness}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}`、`{patchHash}` 或 `{attestKey}`：环不会把补丁标记或证明密钥交给执行器，命令里写了这些占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。`{attestDir}` 由环在拉起执行器之前分配，位于 `--attest-root` 下，并且不和 `{runDir}` 嵌套。i014 的 `task.toml` 允许联网，box 上把这个模式叫 `open`；环传给执行器的仍是 `--network shared`（适配器自己把 `shared` 映射成 `open`）。002 仍是 `gateway-only`。
+执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{runId}` `{attestDir}` `{harness}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}`、`{patchHash}` 或 `{attestKey}`：环不会把补丁标记或证明密钥交给执行器，命令里写了这些占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。`{runId}` 和 `{runDir}` 都由环在拉起执行器之前分配。`{attestDir}` 位于 `--attest-root` 下，并且不和 `{runDir}` 嵌套。i014 的 `task.toml` 允许联网，box 上把这个模式叫 `open`；环传给执行器的仍是 `--network shared`（适配器自己把 `shared` 映射成 `open`）。002 仍是 `gateway-only`。
 
 驱动在容器退出之后，把 `{attestDir}/attestation.json` 写到任何挂载之外。环只读这个它自己分配的路径，不读执行器 stdout，也不读 `result.json` 里的路径。schema 是 `devii-opt-attest/v1`，字段与包装器的 `ATTEST_FIELDS` 一一对应，没有第二套名字：
 
@@ -159,13 +159,15 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 `hmacSha256` 是 HMAC-SHA256，覆盖除它自己以外的对象。待签字节等于 Python `json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`。密钥是 `HARNESS_ATTEST_KEY_FILE` 指向的文件的原始字节，模式 `0600`，至少 32 字节。这个环境变量可以由包装进程继承，但不得出现在 argv 里，也不得传进容器。`piSessionShas` 和 `outputShas` 只含普通文件的相对路径，不含 symlink。环会重算 trace、sessions、outputs、`verifier/reward.txt` 和 `result.json` 的 sha256，并核对 `mountedConfigSha` 等于宿主交给执行器的那份 config 文件。缺文件、哈希不符或 MAC 不符都失败关闭。`result.json` 的 `session_file` 不是证据。
 
+`run` 里还有宿主分配的 `runId` 和 `runPath`。`runPath` 必须等于环交给这次执行的目录，也必须等于已签名的 `runDir`。对不上就失败关闭，哪怕 MAC 和文件哈希都对。`runId` 由环生成并经 `{runId}` 交给包装器；环核对时要求证明里的 `runId` 等于它分配的那个值。
+
 `patchActive` 为真需要三件事同时成立：已验证证明里的 `mountedConfigSha` 等于宿主候选 config 的 sha256，已证明的 trace 里 `run_start.candidateConfigHash` 等于这个 sha，并且已证明的某个 `.pi-sessions` 文件的 system message（`content` 或 `sections`）含有 harness 追加的 `candidateConfigHash: <同一哈希>`。候选 sha 还必须和 control 不同，`effective` 里的旋钮值要等于候选 config。做不到就不能接受，终比和 held-out 不跑。
 
 第一轮的 control trace 用 `--control-attest <目录>` 传入，目录里要有上述证明，而且 `run.arm` 是 `control`。环核对 `mountedConfigSha` 等于宿主 control 文件的 sha256，再核对 trace 里的 `run_start.candidateConfigHash` 等于这个 sha。预注册那份紧凑 control（`{"parts":{"agent-loop":{"maxSteps":25}}}\n`）的 sha256 是 `3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c`。环不把这个常数当成唯一合法值；换一份字节不同的 control 文件，证明对不上就拒绝。环不写 `baseline/` 桩。
 
-`gapCitedTrace` 和 `reviewFedForward` 只读环在调用角色之前分配的会话文件。角色函数的返回文本、它自己报的路径，都不算。会话里要有一次成功的 `read`：assistant 的 `toolCall`（`name` 为 `read`，`arguments.path` 指向目标文件）以及之后 `role` 为 `toolResult`、`toolName` 为 `read`、`isError` 为 false 的结果，结果文本的 sha256 必须等于宿主已经记下的那个文件哈希。目标是 control / 上一轮已证明的 trace，或上一轮 reviewer 会话。
+`gapCitedTrace` 和 `reviewFedForward` 只认宿主写下的会话，不认角色返回的文本。gap-finder 和 reviewer-gate 的 spawn 配置只有 `read`，没有 `write`、`edit`、`bash`。会话文件和宿主账本都在角色 cwd 和允许读取的路径之外，由宿主写入；退出时宿主记下的 sha 必须和文件字节一致。对不上就不算引用。会话里还要有一次成功的 `read`：assistant 的 `toolCall`（`name` 为 `read`，`arguments.path` 指向目标文件）以及之后 `role` 为 `toolResult`、`toolName` 为 `read`、`isError` 为 false 的结果，结果文本的 sha256 必须等于宿主已经记下的那个文件哈希。目标是 control / 上一轮已证明的 trace，或上一轮 reviewer 会话。角色往自己的会话里追加一条伪造 read，不能让这两个标志变成真。
 
-每一轮落下三个角色的 Pi session jsonl 和宿主算出的 sha、`patch.diff`、以及 `activation.json`。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。实现和 `scripts/ewi_idle.py` 对齐：空行在文件中间会失败，文件末尾换行不会多出一行；`ts` 为 `NaN` 时按 Python 接受并从 idle 窗口去掉；截断行和缺少 `ts` 的 `assistant_message` 失败关闭。`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。单次 tokens 超过该题 `6×W` 记 unscored。
+每一轮落下三个角色的 Pi session jsonl 和宿主算出的 sha、`patch.diff`、以及 `activation.json`。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。计分走进程内实现，不调用脚本。若要单独跑 `scripts/ewi_idle.py`，路径来自 `EWI_IDLE_SCRIPT`，否则用包内这份。两边对齐：空行在文件中间会失败，文件末尾换行不会多出一行；`assistant_message` 的 `ts` 只要不是有限数字（`true`、`false`、`Infinity`、`-Infinity`、`NaN`、字符串）就和缺少 `ts` 一样失败关闭；截断行也失败关闭。`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。单次 tokens 超过该题 `6×W` 记 unscored。
 
 ```bash
 bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
@@ -184,7 +186,7 @@ bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once \
   --harness "$HARNESS_FILE" --config /tmp/harness-opt-candidate.json \
   --control-config /tmp/harness-opt-control.json --knob agent-loop.maxSteps \
   --seed 0 --task i014 --task-path "$TASK_DIR" \
-  --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--model","{model}","--network","{network}","--token-cap","{tokenCap}","--harness","{harness}","--attest-dir","{attestDir}"]' \
+  --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--run-id","{runId}","--model","{model}","--network","{network}","--token-cap","{tokenCap}","--harness","{harness}","--attest-dir","{attestDir}"]' \
   --driver "$HARNESS_OPT_DRIVER"
 ```
 

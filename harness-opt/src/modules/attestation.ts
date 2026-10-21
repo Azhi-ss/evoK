@@ -37,6 +37,10 @@ export interface AttestRunMeta {
   readonly tokens: number;
   readonly exit: number | string;
   readonly runDir: string;
+  /** Host-allocated id. The wrapper copies this; it does not invent one. */
+  readonly runId: string;
+  /** Host-assigned run directory. Must equal the path the loop passed in. */
+  readonly runPath: string;
   readonly at: string;
 }
 
@@ -54,6 +58,8 @@ export interface VerifiedAttestation {
   readonly ok: true;
   readonly attestDir: string;
   readonly runDir: string;
+  readonly runPath: string;
+  readonly runId: string;
   readonly mountedHarnessSha: string;
   readonly mountedConfigSha: string;
   readonly traceSha: string | null;
@@ -177,8 +183,10 @@ export function verifyHostAttestation(input: {
   readonly key: Buffer;
   readonly configPath: string;
   readonly harnessPath?: string;
-  /** When set, the signed runDir must be this host path. */
+  /** When set, the signed runDir and runPath must be this host path. */
   readonly runDir?: string;
+  /** When set, the signed runId must be this host-allocated id. */
+  readonly runId?: string;
 }): VerifiedAttestation | AttestationRejection {
   const file = join(input.attestDir, ATTEST_FILENAME);
   if (!existsSync(file)) return { ok: false, reasons: ["missing"] };
@@ -213,10 +221,17 @@ export function verifyHostAttestation(input: {
 
   const runNode = field(unsigned, ATTEST_FIELDS.meta);
   const signedRunDir = runNode && runNode.t === "obj" ? stringField(runNode, "runDir") : null;
+  const signedRunPath = runNode && runNode.t === "obj" ? stringField(runNode, "runPath") : null;
+  const signedRunId = runNode && runNode.t === "obj" ? stringField(runNode, "runId") : null;
   const arm = runNode && runNode.t === "obj" ? stringField(runNode, "arm") : null;
   if (!signedRunDir || !arm) reasons.push("runDir");
+  if (!signedRunPath) reasons.push("runPath");
+  if (!signedRunId) reasons.push("runId");
   const runDir = signedRunDir ?? "";
   if (input.runDir && runDir && resolve(input.runDir) !== resolve(runDir)) reasons.push("runDir");
+  if (signedRunPath && runDir && resolve(signedRunPath) !== resolve(runDir)) reasons.push("runPath");
+  if (input.runDir && signedRunPath && resolve(input.runDir) !== resolve(signedRunPath)) reasons.push("runPath");
+  if (input.runId && signedRunId !== input.runId) reasons.push("runId");
 
   const traceSha = shaOrNull(unsigned, ATTEST_FIELDS.trace, reasons, "trace");
   const rewardFileSha = shaOrNull(unsigned, ATTEST_FIELDS.rewardFile, reasons, "rewardFile");
@@ -245,6 +260,8 @@ export function verifyHostAttestation(input: {
     ok: true,
     attestDir: input.attestDir,
     runDir,
+    runPath: signedRunPath ?? "",
+    runId: signedRunId ?? "",
     mountedHarnessSha,
     mountedConfigSha,
     traceSha,
@@ -260,7 +277,10 @@ export function verifyHostAttestation(input: {
 }
 
 function attestBody(input: HostAttestationWrite): JsonNode {
+  if (input.meta.runId.trim() === "") throw new Error("attestation runId is empty");
+  if (input.meta.runPath.trim() === "") throw new Error("attestation runPath is empty");
   const run = resolve(input.runDir);
+  const runPath = resolve(input.meta.runPath);
   const pairs: (readonly [string, JsonNode])[] = [
     [ATTEST_FIELDS.schema, { t: "str", v: ATTEST_SCHEMA }],
     [ATTEST_FIELDS.harness, { t: "str", v: sha256File(input.harnessPath) }],
@@ -278,6 +298,8 @@ function attestBody(input: HostAttestationWrite): JsonNode {
         ["at", { t: "str", v: input.meta.at }],
         ["exit", exitNode(input.meta.exit)],
         ["runDir", { t: "str", v: run }],
+        ["runId", { t: "str", v: input.meta.runId }],
+        ["runPath", { t: "str", v: runPath }],
         ["score_status", { t: "str", v: input.meta.score_status }],
         ["seed", { t: "num", lex: integerLexeme(input.meta.seed) }],
         ["task", { t: "str", v: input.meta.task }],

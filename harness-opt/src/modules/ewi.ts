@@ -1,8 +1,19 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Frozen externally. The loop reads this unless a run passes another threshold. */
 export const DEFAULT_EWI_THRESHOLD_SEC = 600;
+
+/**
+ * Path of `ewi_idle.py` when a caller shells out to it.
+ * `EWI_IDLE_SCRIPT` wins. Otherwise the package copy. The scoring path does not shell out.
+ */
+export function resolveEwiIdleScript(configured?: string): string {
+  const chosen = (configured ?? process.env.EWI_IDLE_SCRIPT ?? "").trim();
+  if (chosen !== "") return chosen;
+  return fileURLToPath(new URL("../../scripts/ewi_idle.py", import.meta.url));
+}
 
 export interface EwiObservation {
   readonly task: string;
@@ -173,7 +184,8 @@ function assistantTimestamps(tracePath: string): number[] {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const record = parsed as { type?: unknown; ts?: unknown };
     if (record.type !== "assistant_message") continue;
-    if (typeof record.ts !== "number") {
+    // true/false, strings, NaN, and ±Infinity are the same failure as a missing key.
+    if (typeof record.ts !== "number" || !Number.isFinite(record.ts)) {
       throw new Error(`assistant_message on line ${index + 1} is missing ts`);
     }
     stamps.push(record.ts / 1000);
@@ -181,7 +193,7 @@ function assistantTimestamps(tracePath: string): number[] {
   return stamps;
 }
 
-/** Python `json.loads` accepts NaN, Infinity, and -Infinity. NaN is not missing. */
+/** Python `json.loads` accepts NaN, Infinity, and -Infinity. Those values are still missing `ts`. */
 function parsePythonJsonLine(line: string, index: number): unknown {
   try {
     return JSON.parse(rewritePythonNonFinite(line), (_key, value) => {

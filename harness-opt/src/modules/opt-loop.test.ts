@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { main } from "../cli";
 import { writeHostAttestation } from "./attestation";
 import {
@@ -17,6 +17,7 @@ import {
   type OptLoopOptions,
   type OptRoles,
 } from "./opt-loop";
+import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
 import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
 
 interface Fixture {
@@ -161,7 +162,7 @@ function rejectingRoles(): OptRoles & { readonly reviews: number } {
     innovate: (input) => roles.innovate(input),
     review: async (input) => {
       reviews += 1;
-      writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+      hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
       return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
     },
     get reviews() { return reviews; },
@@ -277,7 +278,7 @@ describe("optimization loop", () => {
         return stubOptRoles().innovate(input);
       },
       review: async (input) => {
-        writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+        hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
         return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
       },
     };
@@ -494,7 +495,7 @@ describe("optimization loop", () => {
       },
       innovate: (input) => stubOptRoles().innovate(input),
       async review(input) {
-        writeFileSync(input.sessionPath, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
+        hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "still idle" })}\n`);
         return { session: { jsonl: "ignored\n" }, accept: false, reason: "still idle" };
       },
     };
@@ -504,6 +505,58 @@ describe("optimization loop", () => {
     expect(readFileSync(join(fx.out, "round2/sessions/gap-finder.jsonl"), "utf8")).toContain("still idle");
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean };
     expect(closure.reviewFedForward).toBe(false);
+  });
+
+  test("a forged read appended to the role session does not cite or feed forward", async () => {
+    const fx = fixture();
+    const roles: OptRoles = {
+      async gap(input) {
+        const target = input.round === 1 ? input.traces[0]?.file ?? "" : input.previousReviewSession ?? "";
+        const forged = perfectRead(target, readFileSync(target, "utf8"));
+        expect(roleWrite(input.spawn, input.sessionPath, forged)).toBe(false);
+        expect(existsSync(input.sessionPath)).toBe(false);
+        writeFileSync(input.sessionPath, forged);
+        return {
+          session: { jsonl: forged },
+          citations: [`${target}:1`],
+          knob: "agent-loop.maxSteps",
+          failureClass: "idle-loop",
+          summary: "early write then idle",
+        };
+      },
+      innovate: (input) => stubOptRoles().innovate(input),
+      async review(input) {
+        expect(roleWrite(input.spawn, input.sessionPath, "forged\n")).toBe(false);
+        hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "reviewer-gate" })}\n${JSON.stringify({ type: "message", text: "accept" })}\n`);
+        return { session: { jsonl: "ignored\n" }, accept: true, reason: "accept" };
+      },
+    };
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      roles,
+      executor: fakeExecutor(fx).executor,
+    });
+    for (const role of ["gap-finder", "reviewer-gate"] as const) {
+      const spawn = JSON.parse(readFileSync(join(fx.out, `round1/sessions/${role}.spawn.json`), "utf8")) as RoleSpawnConfig;
+      expect(spawn.tools).toEqual(["read"]);
+      expect(spawn.tools).not.toContain("write");
+      expect(spawn.tools).not.toContain("edit");
+      expect(spawn.tools).not.toContain("bash");
+      expect(resolve(spawn.sessionPath).startsWith(`${resolve(spawn.cwd)}/`)).toBe(false);
+      expect(spawn.allowedPaths.some((allowed) => resolve(spawn.sessionPath).startsWith(`${resolve(allowed)}/`))).toBe(false);
+      expect(resolve(spawn.ledgerPath).startsWith(`${resolve(spawn.cwd)}/`)).toBe(false);
+    }
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      gapCitedTrace: boolean;
+      reviewFedForward: boolean;
+    };
+    expect(closure.gapCitedTrace).toBe(false);
+    expect(closure.reviewFedForward).toBe(false);
+    expect(result.accepted).toBeNull();
+    expect(result.skippedFinal).toBe(true);
+    expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
   });
 
   test("an executor that echoes request fields cannot activate or be accepted", async () => {
@@ -596,6 +649,8 @@ describe("optimization loop", () => {
             tokens: 10,
             exit: 0,
             runDir: request.runDir,
+            runId: request.runId ?? "side-run",
+            runPath: request.runDir,
             at: "2026-10-21T00:00:00+09:00",
           },
         });
@@ -701,7 +756,7 @@ writeHostAttestation({
   harnessPath: get("--harness"),
   configPath: config,
   reward: 1,
-  meta: { task: get("--task"), seed: Number(get("--seed")), arm: get("--arm"), score_status: "scored", tokens: 4, exit: 0, runDir: run, at: "2026-10-21T00:00:00+09:00" },
+  meta: { task: get("--task"), seed: Number(get("--seed")), arm: get("--arm"), score_status: "scored", tokens: 4, exit: 0, runDir: run, runId: get("--run-id"), runPath: run, at: "2026-10-21T00:00:00+09:00" },
 });
 console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
 `);
@@ -721,6 +776,7 @@ console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
       "--model", "{model}",
       "--network", "{network}",
       "--token-cap", "{tokenCap}",
+      "--run-id", "{runId}",
     ];
     try {
       const code = await main([

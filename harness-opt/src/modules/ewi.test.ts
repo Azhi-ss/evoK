@@ -3,10 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { DEFAULT_EWI_THRESHOLD_SEC, measureEwi, measureRunEwi, roundTenth } from "./ewi";
+import { DEFAULT_EWI_THRESHOLD_SEC, measureEwi, measureRunEwi, resolveEwiIdleScript, roundTenth } from "./ewi";
 
-const EWI_SCRIPT = fileURLToPath(new URL("../../scripts/ewi_idle.py", import.meta.url));
+const EWI_SCRIPT = resolveEwiIdleScript();
 
 describe("EWI metric", () => {
   test("rounds the first decimal the way Python 3 round does", () => {
@@ -191,24 +190,30 @@ describe("EWI metric", () => {
     expect(measureCase(trailing).idleS).toBe(699);
   });
 
-  test("an assistant NaN timestamp is kept out of the idle window", () => {
+  test("a non-finite assistant timestamp is a missing ts", () => {
     const dir = edgeDir("nan", "{\"type\":\"assistant_message\",\"ts\":NaN}\n");
-    expect(measureCase(dir).idleS).toBe(700);
-    expect(measureCase(dir).postWriteS).toBe(700);
+    expect(() => measureCase(dir)).toThrow(/missing ts/);
+    expect(() => measureCase(edgeDir("inf", "{\"type\":\"assistant_message\",\"ts\":Infinity}\n"))).toThrow(/missing ts/);
+    expect(() => measureCase(edgeDir("true", "{\"type\":\"assistant_message\",\"ts\":true}\n"))).toThrow(/missing ts/);
   });
 
   test("the shared edge table matches ewi_idle.py", () => {
-    const rows: { readonly name: string; readonly trace: string; readonly link: boolean; readonly idle?: number }[] = [
-      { name: "blank-middle", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\n\n{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false },
-      { name: "ts-nan", trace: "{\"type\":\"assistant_message\",\"ts\":NaN}\n", link: false, idle: 700 },
-      { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false },
-      { name: "missing-ts", trace: "{\"type\":\"assistant_message\"}\n", link: false },
+    const rows: { readonly name: string; readonly trace: string; readonly link: boolean; readonly idle?: number; readonly error?: RegExp }[] = [
+      { name: "blank-middle", trace: "{\"type\":\"assistant_message\",\"ts\":1000}\n\n{\"type\":\"assistant_message\",\"ts\":2000}\n", link: false, error: /not JSON/ },
+      { name: "ts-nan", trace: "{\"type\":\"assistant_message\",\"ts\":NaN}\n", link: false, error: /missing ts/ },
+      { name: "ts-true", trace: "{\"type\":\"assistant_message\",\"ts\":true}\n", link: false, error: /missing ts/ },
+      { name: "ts-false", trace: "{\"type\":\"assistant_message\",\"ts\":false}\n", link: false, error: /missing ts/ },
+      { name: "ts-infinity", trace: "{\"type\":\"assistant_message\",\"ts\":Infinity}\n", link: false, error: /missing ts/ },
+      { name: "ts-neginfinity", trace: "{\"type\":\"assistant_message\",\"ts\":-Infinity}\n", link: false, error: /missing ts/ },
+      { name: "ts-string", trace: "{\"type\":\"assistant_message\",\"ts\":\"1\"}\n", link: false, error: /missing ts/ },
+      { name: "truncated", trace: "{\"type\":\"assistant_message\",\"ts\":\n", link: false, error: /not JSON/ },
+      { name: "missing-ts", trace: "{\"type\":\"assistant_message\"}\n", link: false, error: /missing ts/ },
       { name: "symlink-output", trace: "", link: true, idle: 700 },
     ];
     for (const row of rows) {
       const dir = edgeDir(row.name, row.trace, row.link);
       if (row.idle === undefined) {
-        expect(() => measureCase(dir)).toThrow();
+        expect(() => measureCase(dir)).toThrow(row.error ?? /missing ts|not JSON/);
         const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
         expect(proc.status).not.toBe(0);
         continue;

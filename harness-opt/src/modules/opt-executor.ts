@@ -27,8 +27,15 @@ export interface OptRunRequest {
   readonly attestDir: string;
   /** Host harness file mounted over the image harness. Optional unless `{harness}` is used. */
   readonly harnessPath?: string;
+  /** Host-allocated id. The wrapper copies it into `run.runId`. */
+  readonly runId?: string;
   readonly model: string;
   readonly tokenCap: number;
+}
+
+/** Stable id for the host-assigned run directory. The sandbox does not choose it. */
+export function hostRunId(runDir: string): string {
+  return createHash("sha256").update(resolve(runDir)).digest("hex");
 }
 
 export interface OptRunObservation {
@@ -74,6 +81,7 @@ const PLACEHOLDERS = [
   "arm",
   "config",
   "runDir",
+  "runId",
   "attestDir",
   "harness",
   "model",
@@ -230,6 +238,7 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     score_status: "scored",
   })}\n`);
   if (!attest) return;
+  const runPath = resolve(request.runDir);
   const meta: AttestRunMeta = {
     task: request.task.path,
     seed: request.seed,
@@ -237,7 +246,9 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     score_status: "scored",
     tokens: timing.tokens,
     exit: 0,
-    runDir: resolve(request.runDir),
+    runDir: runPath,
+    runId: request.runId && request.runId.trim() !== "" ? request.runId : hostRunId(runPath),
+    runPath,
     at: attest.at ?? "2026-10-21T00:00:00+09:00",
   };
   writeHostAttestation({
@@ -307,7 +318,11 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!request.harnessPath) throw new Error("executor command needs --harness for {harness}");
     return request.harnessPath;
   }
-  const values: Record<Exclude<Placeholder, "driver" | "harness">, string> = {
+  if (name === "runId") {
+    if (!request.runId || request.runId.trim() === "") throw new Error("executor command needs a host run id for {runId}");
+    return request.runId;
+  }
+  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId">, string> = {
     task: request.task.id,
     taskPath: request.task.path,
     seed: String(request.seed),

@@ -91,6 +91,8 @@ describe("devii-opt-attest/v1", () => {
         tokens: 10,
         exit: 0,
         runDir: host.runDir,
+        runId: "host-run",
+        runPath: host.runDir,
         at: "2026-10-21T00:00:00+09:00",
       },
     });
@@ -122,6 +124,8 @@ describe("devii-opt-attest/v1", () => {
         tokens: 4,
         exit: 0,
         runDir: host.runDir,
+        runId: "host-run",
+        runPath: host.runDir,
         at: "2026-10-21T00:00:00+09:00",
       },
     });
@@ -151,6 +155,53 @@ describe("devii-opt-attest/v1", () => {
     expect(treeShas(join(host.runDir, "outputs"))).not.toHaveProperty("linked.txt");
     expect(() => loadAttestKey(join(host.runDir, "missing-key"))).toThrow(/missing/);
   });
+
+  test("a signed runPath that is not the host-assigned path fails closed", () => {
+    const host = layout("runpath");
+    const planted = join(host.root, "planted");
+    mkdirSync(planted, { recursive: true });
+    writeHostAttestation({
+      attestDir: host.attestDir,
+      runDir: host.runDir,
+      key: host.key,
+      harnessPath: host.harness,
+      configPath: host.config,
+      reward: 1,
+      meta: {
+        task: "tasks2/i014",
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: 4,
+        exit: 0,
+        runDir: host.runDir,
+        runId: "host-run",
+        runPath: planted,
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const hijacked = verifyHostAttestation({
+      attestDir: host.attestDir,
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      runDir: host.runDir,
+      runId: "host-run",
+    });
+    expect(hijacked.ok).toBe(false);
+    if (!hijacked.ok) expect(hijacked.reasons).toContain("runPath");
+    const missing = spawnSync("python3", ["-c", PYTHON_WRITE_NO_RUNPATH, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    expect(missing.status).toBe(0);
+    const bare = verifyHostAttestation({
+      attestDir: host.attestDir,
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      runDir: host.runDir,
+    });
+    expect(bare.ok).toBe(false);
+    if (!bare.ok) expect(bare.reasons).toContain("runPath");
+  });
 });
 
 const PYTHON_WRITE = `
@@ -174,7 +225,7 @@ body = {
   "reward": float(1),
   "rewardFileSha": sha(run / "verifier" / "reward.txt"),
   "resultSha": sha(run / "result.json"),
-  "run": {"task": "tasks2/i014", "seed": 0, "arm": "candidate", "score_status": "scored", "tokens": 4, "exit": 0, "runDir": str(run.resolve()), "at": "2026-10-21T00:00:00+09:00"},
+  "run": {"task": "tasks2/i014", "seed": 0, "arm": "candidate", "score_status": "scored", "tokens": 4, "exit": 0, "runDir": str(run.resolve()), "runPath": str(run.resolve()), "runId": "host-run", "at": "2026-10-21T00:00:00+09:00"},
 }
 key = keyfile.read_bytes()
 body["hmacSha256"] = hmac.new(key, json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
@@ -189,4 +240,31 @@ mac = body.pop("hmacSha256")
 key = open(sys.argv[2], "rb").read()
 got = hmac.new(key, json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
 print("ok" if hmac.compare_digest(mac, got) else "bad")
+`;
+
+const PYTHON_WRITE_NO_RUNPATH = `
+import hashlib, hmac, json, sys
+from pathlib import Path
+run, attest, harness, config, keyfile = map(Path, sys.argv[1:])
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def tree(root):
+    root = Path(root)
+    return {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()}
+body = {
+  "schema": "devii-opt-attest/v1",
+  "mountedHarnessSha": sha(harness),
+  "mountedConfigSha": sha(config),
+  "traceSha": sha(run / "trace.jsonl"),
+  "piSessionShas": tree(run / ".pi-sessions"),
+  "outputShas": tree(run / "outputs"),
+  "reward": float(1),
+  "rewardFileSha": sha(run / "verifier" / "reward.txt"),
+  "resultSha": sha(run / "result.json"),
+  "run": {"task": "tasks2/i014", "seed": 0, "arm": "candidate", "score_status": "scored", "tokens": 4, "exit": 0, "runDir": str(run.resolve()), "runId": "host-run", "at": "2026-10-21T00:00:00+09:00"},
+}
+key = keyfile.read_bytes()
+body["hmacSha256"] = hmac.new(key, json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+attest.mkdir(parents=True, exist_ok=True)
+(attest / "attestation.json").write_text(json.dumps(body, indent=1, sort_keys=True) + "\\n")
 `;

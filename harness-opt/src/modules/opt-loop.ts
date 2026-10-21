@@ -15,11 +15,19 @@ import { DEFAULT_EWI_THRESHOLD_SEC, measureRunEwi, type EwiMetrics } from "./ewi
 import {
   CommandOptExecutor,
   createDryRunExecutor,
+  hostRunId,
   tokenCap,
   type OptExecutor,
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
+import {
+  buildRoleSpawn,
+  hostRecordRead,
+  hostWriteSession,
+  recordedSessionSha,
+  type RoleSpawnConfig,
+} from "./role-spawn";
 
 /** Pinned test id. Calls go out through BASE_URL; this package does not pick a host. */
 export const OPT_MODEL = "deepseek-v4-1-flash-261017";
@@ -81,8 +89,10 @@ export interface GapCall {
   readonly previousReview: ReviewNote | null;
   /** Previous reviewer Pi session captured by the host. The next gap has to read this file. */
   readonly previousReviewSession: string | null;
-  /** Host-assigned session file. The role writes here. The return text is ignored. */
+  /** Host-assigned session file. The host writes it. The return text is ignored. */
   readonly sessionPath: string;
+  /** Spawn limits for this role. Gap has no write, edit, or bash tool. */
+  readonly spawn: RoleSpawnConfig;
 }
 
 export interface GapTurn {
@@ -100,6 +110,7 @@ export interface InnovateCall {
   readonly triedSummaries: readonly string[];
   readonly control: unknown;
   readonly sessionPath: string;
+  readonly spawn: RoleSpawnConfig;
 }
 
 export interface InnovatorTurn {
@@ -130,6 +141,7 @@ export interface ReviewCall {
   readonly runs: readonly RunView[];
   readonly ewiSeeds: readonly number[];
   readonly sessionPath: string;
+  readonly spawn: RoleSpawnConfig;
 }
 
 export interface ReviewerTurn {
@@ -259,18 +271,22 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
   for (let round = 1; round <= rounds; round += 1) {
     const started = now();
-    const gapSessionPath = sessionPath(options.out, round, "gap-finder");
+    const gapSpawn = prepareRole(options.out, round, "gap-finder", [
+      ...traceHints.map((hint) => hint.file),
+      ...(previousReviewSession ? [previousReviewSession] : []),
+    ]);
     const gapInput: GapCall = {
       round,
       traces: traceHints,
       previousReview,
       previousReviewSession,
-      sessionPath: gapSessionPath,
+      sessionPath: gapSpawn.sessionPath,
+      spawn: gapSpawn,
     };
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     const gap = await roles.gap(gapInput);
-    const gapCaptured = captureSession(options.out, round, "gap-finder", gapSessionPath);
+    const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath);
     const gapCitedTrace = gapCaptured
       ? citedByCapturedRead(gapCaptured.text, traceHints, options.out)
       : false;
@@ -281,25 +297,26 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
       writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
     }
-    const innovatorPath = sessionPath(options.out, round, "innovator");
+    const innovatorSpawn = prepareRole(options.out, round, "innovator", []);
     const innovateInput: InnovateCall = {
       round,
       knob: gap.knob,
       gapSummary: gap.summary,
       triedSummaries: [...tried],
       control,
-      sessionPath: innovatorPath,
+      sessionPath: innovatorSpawn.sessionPath,
+      spawn: innovatorSpawn,
     };
     assertNoHeldOutLeak(innovateInput, "innovator input");
     writeJson(join(options.out, `round${round}`, "innovator-input.json"), innovateInput);
     const proposed = await roles.innovate(innovateInput);
-    captureSession(options.out, round, "innovator", innovatorPath);
+    captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath);
 
     if (tried.includes(proposed.summary)) {
       const note = "duplicate summary";
-      const reviewPath = sessionPath(options.out, round, "reviewer-gate");
-      writeText(reviewPath, sessionLines("reviewer-gate", note));
-      const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewPath)?.sha256 ?? null;
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", []);
+      hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note));
+      const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath)?.sha256 ?? null;
       writeClosure(options.out, round, {
         round,
         closed: false,
@@ -311,7 +328,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: true, patchHash: null, ewiSeeds: [] });
       previousReview = { accept: false, reason: note };
-      previousReviewSession = reviewPath;
+      previousReviewSession = reviewSpawn.sessionPath;
       previousReviewSha = reviewSha;
       continue;
     }
@@ -351,7 +368,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const metrics = summarize(runs, threshold);
     writeJson(join(options.out, `round${round}`, "metrics.json"), metrics);
 
-    const reviewPath = sessionPath(options.out, round, "reviewer-gate");
+    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", [diffPath]);
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -359,12 +376,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       knob: gap.knob,
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
-      sessionPath: reviewPath,
+      sessionPath: reviewSpawn.sessionPath,
+      spawn: reviewSpawn,
     };
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     const verdict = await roles.review(reviewInput);
-    const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewPath);
+    const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath);
     writeClosure(options.out, round, {
       round,
       closed: false,
@@ -379,7 +397,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
     }
     previousReview = { accept: verdict.accept, reason: verdict.reason };
-    previousReviewSession = reviewCaptured ? reviewPath : null;
+    previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
     previousReviewSha = reviewCaptured?.sha256 ?? null;
     traceHints = runs.flatMap((run) => {
       if (!run.verified?.traceSha || !run.verified.tracePath) return [];
@@ -518,6 +536,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   const attestDir = join(options.attestRoot, "once", task.id, `seed${seed}`, "candidate");
   assertAttestIsolated(attestDir, runDir);
   mkdirSync(runDir, { recursive: true });
+  const runId = hostRunId(runDir);
   const request: OptRunRequest = {
     task,
     seed,
@@ -526,6 +545,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     runDir,
     attestDir,
     harnessPath: options.harnessPath,
+    runId,
     model,
     tokenCap: tokenCap(task),
   };
@@ -539,6 +559,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
     configPath: options.configPath,
     harnessPath: options.harnessPath,
     runDir,
+    runId,
   });
   const activation = {
     seed,
@@ -567,10 +588,9 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
 export function stubOptRoles(): OptRoles {
   return {
     async gap(input) {
-      const files = input.traces.map((hint) => hint.file);
-      if (input.previousReviewSession) files.push(input.previousReviewSession);
-      const reads = files.map((file, index) => toolExchange(file, index)).join("");
-      writeText(input.sessionPath, `${sessionLines("gap-finder", "gap")}${reads}`);
+      hostWriteSession(input.spawn, sessionLines("gap-finder", "gap"));
+      for (const hint of input.traces) hostRecordRead(input.spawn, hint.file);
+      if (input.previousReviewSession) hostRecordRead(input.spawn, input.previousReviewSession);
       return {
         session: { jsonl: "ignored-return\n" },
         citations: [],
@@ -582,7 +602,7 @@ export function stubOptRoles(): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
-      writeText(input.sessionPath, sessionLines("innovator", summary));
+      hostWriteSession(input.spawn, sessionLines("innovator", summary));
       return {
         session: { jsonl: "ignored-return\n" },
         summary,
@@ -592,7 +612,7 @@ export function stubOptRoles(): OptRoles {
     async review(input) {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
-      writeText(input.sessionPath, sessionLines("reviewer-gate", reason));
+      hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason));
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
   };
@@ -634,7 +654,12 @@ async function executeScored(
     throw new Error("i014 network must be shared");
   }
   assertAttestIsolated(host.attestDir, request.runDir);
-  const full: OptRunRequest = { ...request, attestDir: host.attestDir, harnessPath: host.harnessPath };
+  const full: OptRunRequest = {
+    ...request,
+    attestDir: host.attestDir,
+    harnessPath: host.harnessPath,
+    runId: request.runId && request.runId.trim() !== "" ? request.runId : hostRunId(request.runDir),
+  };
   mkdirSync(request.runDir, { recursive: true });
   const observation = await executor.run(full);
   const verified = verifyHostAttestation({
@@ -643,6 +668,7 @@ async function executeScored(
     configPath: request.configPath,
     harnessPath: host.harnessPath,
     runDir: request.runDir,
+    runId: full.runId,
   });
   const rewardFile = readReward(request.runDir);
   let scoreStatus = observation.scoreStatus;
@@ -818,6 +844,25 @@ function sessionPath(out: string, round: number, role: string): string {
   return file;
 }
 
+function prepareRole(
+  out: string,
+  round: number,
+  role: RoleSpawnConfig["role"],
+  allowedPaths: readonly string[],
+): RoleSpawnConfig {
+  const cwd = join(out, `round${round}`, "roles", role);
+  mkdirSync(cwd, { recursive: true });
+  const config = buildRoleSpawn({
+    role,
+    cwd,
+    allowedPaths,
+    sessionPath: sessionPath(out, round, role),
+    ledgerPath: join(out, `round${round}`, "sessions", "ledger.json"),
+  });
+  writeJson(join(out, `round${round}`, "sessions", `${role}.spawn.json`), config);
+  return config;
+}
+
 function captureSession(
   out: string,
   round: number,
@@ -834,6 +879,8 @@ function captureSession(
   if (!linked.isFile()) return null;
   const bytes = readFileSync(file);
   const sha = sha256(bytes);
+  const recorded = recordedSessionSha(join(out, `round${round}`, "sessions", "ledger.json"), role);
+  if (recorded !== sha) return null;
   const manifestPath = join(out, `round${round}`, "sessions", "manifest.json");
   const current = existsSync(manifestPath)
     ? JSON.parse(readFileSync(manifestPath, "utf8")) as { sessions: { role: string; file: string; sha256: string }[] }
@@ -957,37 +1004,6 @@ function sameFile(root: string, left: string, right: string): boolean {
   } catch {
     return false;
   }
-}
-
-function toolExchange(file: string, index: number): string {
-  const text = readFileSync(file, "utf8");
-  const callId = `c${index}`;
-  const call = {
-    type: "message",
-    id: `r${index}`,
-    parentId: null,
-    timestamp: "2026-10-21T00:00:00.000Z",
-    message: {
-      role: "assistant",
-      content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: file } }],
-      timestamp: 0,
-    },
-  };
-  const result = {
-    type: "message",
-    id: `t${index}`,
-    parentId: `r${index}`,
-    timestamp: "2026-10-21T00:00:00.000Z",
-    message: {
-      role: "toolResult",
-      toolCallId: callId,
-      toolName: "read",
-      isError: false,
-      content: [{ type: "text", text }],
-      timestamp: 0,
-    },
-  };
-  return `${JSON.stringify(call)}\n${JSON.stringify(result)}\n`;
 }
 
 function assertKeyOutside(keyFile: string, dirs: readonly string[]): void {

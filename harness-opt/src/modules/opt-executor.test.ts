@@ -112,7 +112,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
 
 describe("executor command source", () => {
   test("does not bake box paths into the loop", () => {
-    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts", "activation.ts", "attestation.ts", "../cli.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
+    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts", "activation.ts", "attestation.ts", "role-spawn.ts", "../cli.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
     expect(sources).not.toContain("/workspace/harness-opt-runs");
     expect(sources).not.toContain("/workspace/contest-data");
     expect(sources).not.toContain("pi-bio-harness@sha256");
