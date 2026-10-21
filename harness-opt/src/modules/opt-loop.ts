@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -35,7 +35,7 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
-import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayReadOnlyTokens, signPreRound1 } from "./loop-driver";
+import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
 import {
   buildRoleSpawn,
   hostWriteSession,
@@ -112,6 +112,11 @@ export interface GapCall {
   readonly sessionPath: string;
   /** Spawn limits for this role. Gap has no write, edit, or bash tool. */
   readonly spawn: RoleSpawnConfig;
+  /** Host-private relay log. The relay writes it. The role cwd does not contain it. */
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
+  readonly baseUrl: string;
 }
 
 export interface GapTurn {
@@ -130,6 +135,10 @@ export interface InnovateCall {
   readonly control: unknown;
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
+  readonly baseUrl: string;
 }
 
 export interface InnovatorTurn {
@@ -176,6 +185,7 @@ export interface CriticCall {
   readonly relayLog: string;
   readonly runId: string;
   readonly seq: number;
+  readonly baseUrl: string;
 }
 
 export interface CriticTurn {
@@ -192,6 +202,7 @@ export interface RankerCall {
   readonly relayLog: string;
   readonly runId: string;
   readonly seq: number;
+  readonly baseUrl: string;
 }
 
 export interface RankerTurn {
@@ -211,6 +222,7 @@ export interface ReviewCall {
   readonly relayLog: string;
   readonly runId: string;
   readonly seq: number;
+  readonly baseUrl: string;
 }
 
 export interface ReviewerTurn {
@@ -392,18 +404,30 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const roundSummaries: OptLoopResult["rounds"][number][] = [];
   let stopReason: string | null = null;
   let faultRounds = 0;
+  const assignStop = (reason: string): void => {
+    if (reason === "usage_missing") faultRounds += 1;
+    stopReason = reason;
+  };
   let reviewerRejectRounds = 0;
   let consecutiveNoAccept = 0;
   let realRunWallS = 0;
   let readOnlyWallS = 0;
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
-  const relayTokens = () => relayReadOnlyTokens(relayEvents(options.out));
-  const loopCap = (startedRounds: number) => capHit({
-    startedRounds,
-    readOnlyTokens: options.mode === "dry-run" && options.readOnlyTokens ? options.readOnlyTokens() : relayTokens(),
-    readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
-    realRunWallS,
-  });
+  const relayRoot = loopRelayRoot(options, env);
+  let readOnlyTotal = 0;
+  const relayTotal = (): { readonly tokens: number; readonly usageMissing: boolean } => ({ tokens: readOnlyTotal, usageMissing: false });
+  const loopCap = (startedRounds: number) => {
+    const summed = options.mode === "dry-run" && options.readOnlyTokens
+      ? { tokens: options.readOnlyTokens(), usageMissing: false }
+      : relayTotal();
+    if (summed.usageMissing) return "usage_missing" as const;
+    return capHit({
+      startedRounds,
+      readOnlyTokens: summed.tokens,
+      readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
+      realRunWallS,
+    });
+  };
 
   for (let round = 1; round <= rounds; round += 1) {
     if (existsSync(join(options.out, "STOP"))) {
@@ -420,7 +444,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const opened = loopCap(round - 1);
     if (opened) {
-      stopReason = opened;
+      assignStop(opened);
       break;
     }
     if (round0 && sha256(readFileSync(round0.hostCopyPath)) !== round0.srcSha256) {
@@ -432,10 +456,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gapTraces = round === 1 && round0
       ? [{ file: round0.hostCopyPath, line: 1, sha256: round0.srcSha256 }, ...traceHints]
       : traceHints;
+    const gapRelay = roleRelay(relayRoot, env);
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
       ...gapTraces.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
-    ]);
+    ], gapRelay);
     const gapInput: GapCall = {
       round,
       traces: gapTraces,
@@ -443,12 +468,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       previousReviewSession,
       sessionPath: gapSpawn.sessionPath,
       spawn: gapSpawn,
+      ...gapRelay,
     };
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     const gap = await roles.gap(gapInput);
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
-    const gapLog = join(options.out, `round${round}`, "relay", "gap-finder.jsonl");
+    const gapLog = gapRelay.relayLog;
     const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
     if (round === 1 && round0 && !relayCited(gapLog, round0.hostCopyPath, round0.srcSha256)) {
       stopReason = "anti_forgery";
@@ -463,7 +489,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const closeWithoutRun = (note: string, duplicate: boolean): boolean => {
       consecutiveNoAccept += 1;
-      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, []);
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env));
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
       writeClosure(options.out, round, {
@@ -480,16 +506,19 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       previousReviewSession = reviewSpawn.sessionPath;
       previousReviewSha = reviewSha;
       const afterSkip = loopCap(round - 1);
-      if (afterSkip) stopReason = afterSkip;
+      if (afterSkip) assignStop(afterSkip);
       return afterSkip !== null;
     };
 
     const seen = new Set(tried);
     const proposals: { id: string; slot: number; summary: string; changedKeys: number; parts: InnovatorTurn["parts"] }[] = [];
+    const capExcluded: string[] = [];
     let innovatorStop: string | null = null;
+    let innovatorFault = false;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
-      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], sessionName);
+      const innovatorRelay = roleRelay(relayRoot, env);
+      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, sessionName);
       const innovateInput: InnovateCall = {
         round,
         knob: gap.knob,
@@ -498,23 +527,39 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         control,
         sessionPath: innovatorSpawn.sessionPath,
         spawn: innovatorSpawn,
+        ...innovatorRelay,
       };
       assertNoHeldOutLeak(innovateInput, "innovator input");
       writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
       const turn = await roles.innovate(innovateInput);
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
+      const usage = roleCallUsage(innovatorRelay.relayLog);
+      if (usage.usageMissing) {
+        innovatorFault = true;
+        break;
+      }
+      readOnlyTotal += usage.tokens;
       const opened = loopCap(round - 1);
       if (opened) {
         innovatorStop = opened;
         break;
       }
+      if (usage.tokens >= innovatorCap) capExcluded.push(`c${slot}`);
       if (seen.has(turn.summary)) continue;
       seen.add(turn.summary);
       tried.push(turn.summary);
       proposals.push({ id: `c${slot}`, slot, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
     }
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
+    if (innovatorFault) {
+      faultRounds += 1;
+      stopReason = "usage_missing";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
     if (innovatorStop) {
+      if (innovatorStop === "usage_missing") faultRounds += 1;
       stopReason = innovatorStop;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
@@ -526,11 +571,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
 
     const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
-    const capExcluded = proposals
-      .filter((item) => innovatorCallTokens(options.out, round, item.slot) >= innovatorCap)
-      .map((item) => item.id);
-    const criticRelay = roleRelay(options.out, round, "critic");
-    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, []);
+    const criticRelay = roleRelay(relayRoot, env);
+    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay);
     const criticInput: CriticCall = {
       round,
       candidates: listed,
@@ -541,16 +583,25 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(criticInput, "critic input");
     const criticTurn = await roles.critic(criticInput);
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
+    const criticUsage = roleCallUsage(criticRelay.relayLog);
+    if (criticUsage.usageMissing) {
+      faultRounds += 1;
+      stopReason = "usage_missing";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    readOnlyTotal += criticUsage.tokens;
     const afterCritic = loopCap(round - 1);
     if (afterCritic) {
-      stopReason = afterCritic;
+      assignStop(afterCritic);
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
 
-    const rankerRelay = roleRelay(options.out, round, "ranker");
-    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, []);
+    const rankerRelay = roleRelay(relayRoot, env);
+    const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay);
     const excluded = [...new Set([...criticTurn.excluded, ...capExcluded])];
     const rankerInput: RankerCall = {
       round,
@@ -563,7 +614,19 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(rankerInput, "ranker input");
     const rankerTurn = await roles.ranker(rankerInput);
     captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
-    const budget = rankingBudget(roundRelayEvents(options.out, round));
+    const rankerUsage = roleCallUsage(rankerRelay.relayLog);
+    if (rankerUsage.usageMissing) {
+      faultRounds += 1;
+      stopReason = "usage_missing";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    readOnlyTotal += rankerUsage.tokens;
+    const budget = rankingBudget([
+      ...hostedEvents(criticRelay.relayLog, "critic", round),
+      ...hostedEvents(rankerRelay.relayLog, "ranker", round),
+    ]);
     if (budget.capHit) {
       if (closeWithoutRun(budget.reason ?? "no_winner:cap_hit", false)) break;
       continue;
@@ -579,7 +642,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const proposed = { summary: winner.summary, parts: winner.parts };
     const afterRoles = loopCap(round - 1);
     if (afterRoles) {
-      stopReason = afterRoles;
+      assignStop(afterRoles);
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
@@ -600,7 +663,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const seed = 0;
     const beforeSeed = loopCap(round - 1);
     if (beforeSeed) {
-      stopReason = beforeSeed;
+      assignStop(beforeSeed);
       stopBeforeReview = true;
     } else {
       const seedMs = now().getTime();
@@ -620,7 +683,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       } else {
         const afterSeed = loopCap(round);
         if (afterSeed) {
-          stopReason = afterSeed;
+          assignStop(afterSeed);
           stopBeforeReview = true;
         }
       }
@@ -686,8 +749,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
-    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath]);
-    const reviewRelay = roleRelay(options.out, round, "reviewer");
+    const reviewRelay = roleRelay(relayRoot, env);
+    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay);
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -702,6 +765,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     const verdict = await roles.review(reviewInput);
+    const reviewUsage = roleCallUsage(reviewRelay.relayLog);
     const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
     writeClosure(options.out, round, {
       round,
@@ -714,6 +778,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
     if (!displayedRewardOk(options.attestKeyFile, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
       stopReason = "anti_forgery";
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash,
+        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      });
+      break;
+    }
+    if (reviewUsage.usageMissing) {
+      faultRounds += 1;
+      stopReason = "usage_missing";
       roundSummaries.push({
         round,
         accepted: false,
@@ -904,6 +980,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
+      plantRoleDone(input.relayLog, input.runId, input.seq, roleOutputSha({ summary }), "innovator", input.round);
       hostWriteSession(input.spawn, sessionLines("innovator", summary), key);
       return {
         session: { jsonl: "ignored-return\n" },
@@ -1287,12 +1364,48 @@ function sessionPath(out: string, round: number, role: string): string {
   return file;
 }
 
+interface RoleRelay {
+  readonly relayLog: string;
+  readonly runId: string;
+  readonly seq: number;
+  readonly baseUrl: string;
+}
+
+function loopRelayRoot(options: OptLoopOptions, env: NodeJS.ProcessEnv): string {
+  const configured = env.HARNESS_RELAY_LOG_ROOT;
+  if (typeof configured === "string" && configured.trim() !== "") return configured;
+  if (options.mode === "dry-run") return join(options.attestRoot, "relay-logs");
+  return defaultRelayRoot();
+}
+
+function defaultRelayRoot(): string {
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const proc = spawnSync("python3", ["-c", "import hooks; print(hooks.DEFAULT_RELAY_ROOT, end='')"], {
+    cwd: relayDir,
+    encoding: "utf8",
+  });
+  if (proc.status !== 0 || proc.stdout.trim() === "") throw new Error((proc.stderr || proc.stdout || "relay root").trim());
+  return proc.stdout.trim();
+}
+
+function roleRelay(root: string, env: NodeJS.ProcessEnv): RoleRelay {
+  const runId = hostRunId();
+  const port = typeof env.HARNESS_RELAY_PORT === "string" && env.HARNESS_RELAY_PORT.trim() !== "" ? env.HARNESS_RELAY_PORT.trim() : "8642";
+  return {
+    relayLog: join(root, runId, "relay.jsonl"),
+    runId,
+    seq: 1,
+    baseUrl: `http://10.204.0.1:${port}/r/${runId}/v1`,
+  };
+}
+
 function prepareRole(
   out: string,
   round: number,
   role: RoleSpawnConfig["role"],
   piBin: string | undefined,
   allowedPaths: readonly string[],
+  relay: RoleRelay,
   sessionName: string = role,
 ): RoleSpawnConfig {
   const cwd = join(out, `round${round}`, "roles", sessionName);
@@ -1303,16 +1416,14 @@ function prepareRole(
     allowedPaths,
     sessionPath: sessionPath(out, round, sessionName),
     ledgerPath: join(out, `round${round}`, "sessions", "ledger.json"),
+    relayLog: relay.relayLog,
+    baseUrl: relay.baseUrl,
   });
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), config);
   const argv = rolePiArgv(piBin ?? "pi", config);
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
   if (piBin) launchRolePi(piBin, config);
   return config;
-}
-
-function roleRelay(out: string, round: number, role: string): { readonly relayLog: string; readonly runId: string; readonly seq: number } {
-  return { relayLog: join(out, `round${round}`, "relay", `${role}.jsonl`), runId: hostRunId(), seq: 1 };
 }
 
 function bindConclusion(
@@ -1357,29 +1468,21 @@ function readJsonl(file: string): unknown[] {
   return events;
 }
 
-function relayEvents(out: string): unknown[] {
-  const events: unknown[] = [];
-  if (!existsSync(out)) return events;
-  for (const entry of readdirSync(out)) {
-    if (!/^round\d+$/.test(entry)) continue;
-    const dir = join(out, entry, "relay");
-    if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith(".jsonl")) continue;
-      events.push(...readJsonl(join(dir, name)));
-    }
+function roleCallUsage(log: string): { readonly tokens: number; readonly usageMissing: boolean } {
+  let linked;
+  try {
+    linked = lstatSync(log);
+  } catch {
+    return { tokens: 0, usageMissing: true };
   }
-  return events;
+  if (!linked.isFile()) return { tokens: 0, usageMissing: true };
+  return relayCallUsage(readJsonl(log));
 }
 
-function innovatorCallTokens(out: string, round: number, slot: number): number {
-  return relayReadOnlyTokens(readJsonl(join(out, `round${round}`, "relay", `innovator-${slot}.jsonl`)));
-}
-
-function roundRelayEvents(out: string, round: number): unknown[] {
-  return relayEvents(out).filter((event) => {
-    if (!event || typeof event !== "object") return false;
-    return (event as { round?: unknown }).round === round;
+function hostedEvents(log: string, role: string, round: number): unknown[] {
+  return readJsonl(log).map((event) => {
+    if (!event || typeof event !== "object") return event;
+    return { ...(event as Record<string, unknown>), role, round };
   });
 }
 

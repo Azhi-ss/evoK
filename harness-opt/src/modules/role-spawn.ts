@@ -23,6 +23,10 @@ export interface RoleSpawnConfig {
   readonly sessionPath: string;
   /** Host ledger of the session sha. The role cannot write this file. */
   readonly ledgerPath: string;
+  /** Host relay log for this call. Outside `cwd`. The relay writes it. */
+  readonly relayLog?: string;
+  /** Relay data-plane URL for this call. Spawned as BASE_URL. */
+  readonly baseUrl?: string;
 }
 
 export function evidenceRoleTools(): readonly string[] {
@@ -35,6 +39,8 @@ export function buildRoleSpawn(input: {
   readonly allowedPaths: readonly string[];
   readonly sessionPath: string;
   readonly ledgerPath: string;
+  readonly relayLog?: string;
+  readonly baseUrl?: string;
 }): RoleSpawnConfig {
   const tools = input.role === "innovator" ? ["read", "write"] : evidenceRoleTools();
   const config: RoleSpawnConfig = { ...input, tools };
@@ -57,6 +63,10 @@ export function assertRoleSpawn(config: RoleSpawnConfig): void {
   if (inside(session, cwd)) throw new Error("role session must be outside the role cwd");
   const ledger = resolve(config.ledgerPath);
   if (inside(ledger, cwd) || ledger === session) throw new Error("role session ledger must be outside the role cwd");
+  if (config.relayLog) {
+    const log = resolve(config.relayLog);
+    if (log === cwd || inside(log, cwd)) throw new Error("role relay log must stay outside the role cwd");
+  }
   for (const allowed of config.allowedPaths) {
     const root = resolve(allowed);
     if (overlaps(session, root) || overlaps(ledger, root) || overlaps(resolve(config.sessionPath, ".."), root)) {
@@ -119,7 +129,14 @@ export function launchRolePi(piBin: string, config: RoleSpawnConfig): { readonly
   const argv = rolePiArgv(piBin, config);
   const [bin, ...args] = argv;
   if (!bin) throw new Error("pi binary is empty");
-  const child = spawnSync(bin, args, { encoding: "utf8" });
+  const child = spawnSync(bin, args, {
+    encoding: "utf8",
+    cwd: config.cwd,
+    env: {
+      ...process.env,
+      ...(config.baseUrl ? { BASE_URL: config.baseUrl } : {}),
+    },
+  });
   return { status: child.status, argv };
 }
 

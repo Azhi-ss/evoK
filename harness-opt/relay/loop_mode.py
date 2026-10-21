@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from canon import canonical
-from ledger import weight
+from ledger import Ledger, tokens
 
 INNOVATOR_CAP = 200_000
 MAX_ROUNDS = 10
@@ -111,53 +111,78 @@ def verify_pre_round1(signed, key: bytes) -> bool:
     return hmac.compare_digest(str(mac), _mac(body, key))
 
 
-def read_only_tokens(events, trace=None) -> int:
-    """i+o+cacheRead from innovator, critic, and ranker relay usage. A trace is ignored."""
-    del trace
-    total = 0
+def call_usage(events) -> dict:
+    """One relay record through ledger.tokens. No done line is usage_missing, not zero."""
+    ledger = Ledger()
     for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        ledger.events.append(event)
+        if event.get("type") == "req":
+            ledger.reqs.append(event)
+        if event.get("type") == "done":
+            ledger.dones.append(event)
+    if not ledger.dones:
+        return {"tokens": None, "usage_missing": True, "observed": 0}
+    return tokens(ledger)
+
+
+def read_only_tokens(events, trace=None) -> dict:
+    """Innovator+critic+ranker usage via ledger.tokens. A trace is ignored.
+
+    An empty role set is zero. A 2xx done with null usage, or a req with no done, is usage_missing.
+    """
+    del trace
+    rows = []
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
         if (event.get("role") or event.get("kind")) not in READ_ONLY_ROLES:
             continue
-        if event.get("type") != "done":
-            continue
-        status = event.get("status", 200)
-        if isinstance(status, bool) or status is None or not 200 <= int(status) <= 299:
-            continue
-        usage = event.get("usage")
-        if usage is None:
-            continue
-        total += weight(usage)
-    return total
+        rows.append(event)
+    if not rows:
+        return {"tokens": 0, "usage_missing": False, "observed": 0}
+    return call_usage(rows)
 
 
 def ranking_budget(events) -> dict:
     """Per-round critic+ranker sub-cap. Innovator tokens are not part of this sub-cap."""
-    per_round = {}
+    grouped = {}
     for event in events or []:
+        if not isinstance(event, dict):
+            continue
         if (event.get("role") or event.get("kind")) not in RANKING_ROLES:
             continue
-        if event.get("type") != "done":
-            continue
-        status = event.get("status", 200)
-        if isinstance(status, bool) or status is None or not 200 <= int(status) <= 299:
-            continue
-        usage = event.get("usage")
-        if usage is None:
-            continue
         rnd = event.get("round", 1)
-        per_round[rnd] = per_round.get(rnd, 0) + weight(usage)
+        grouped.setdefault(rnd, []).append(event)
+    per_round = {}
+    missing = False
+    for rnd, rows in grouped.items():
+        info = call_usage(rows)
+        if info["usage_missing"]:
+            missing = True
+            continue
+        per_round[rnd] = info["tokens"] or 0
     hit = any(total >= RANKING_ROUND_CAP for total in per_round.values())
-    return {"perRound": per_round, "cap": RANKING_ROUND_CAP, "capHit": hit, "reason": "no_winner:cap_hit" if hit else None}
+    return {
+        "perRound": per_round,
+        "cap": RANKING_ROUND_CAP,
+        "capHit": hit,
+        "reason": "no_winner:cap_hit" if hit else None,
+        "usageMissing": missing,
+    }
 
 
 def budget_status(events) -> dict:
     """The 3M sub-cap and the 30M cumulative cap are decided independently."""
     ranking = ranking_budget(events)
-    cumulative = read_only_tokens(events)
+    info = read_only_tokens(events)
+    total = 0 if info["tokens"] is None else info["tokens"]
     return {
         "ranking": ranking,
-        "readOnlyTokens": cumulative,
-        "readOnlyCapHit": cumulative >= READ_ONLY_TOKEN_CAP,
+        "readOnlyTokens": total,
+        "usageMissing": info["usage_missing"],
+        "readOnlyCapHit": (not info["usage_missing"]) and total >= READ_ONLY_TOKEN_CAP,
     }
 
 
@@ -262,8 +287,10 @@ def main(argv=None) -> None:
     payload = json.load(sys.stdin)
     cmd = argv[0] if argv else ""
     if cmd == "pre-round1":
-        key_path = os.environ.get("HARNESS_ATTEST_KEY_FILE") or payload.get("keyFile") or ""
-        key_bytes = Path(key_path).read_bytes() if key_path else bytes.fromhex(payload["key"])
+        key_path = os.environ.get("HARNESS_ATTEST_KEY_FILE") or ""
+        if key_path == "":
+            raise SystemExit("HARNESS_ATTEST_KEY_FILE")
+        key_bytes = Path(key_path).read_bytes()
         signed = pre_round1_sign(
             key_bytes,
             seed=bytes.fromhex(payload["seed"]),
@@ -285,7 +312,10 @@ def main(argv=None) -> None:
         )}, sys.stdout)
         return
     if cmd == "read-only-tokens":
-        json.dump({"tokens": read_only_tokens(payload.get("events") or [], payload.get("trace"))}, sys.stdout)
+        json.dump(read_only_tokens(payload.get("events") or [], payload.get("trace")), sys.stdout)
+        return
+    if cmd == "call-usage":
+        json.dump(call_usage(payload.get("events") or []), sys.stdout)
         return
     if cmd == "ranking-budget":
         json.dump(ranking_budget(payload.get("events") or []), sys.stdout)

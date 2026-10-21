@@ -77,4 +77,42 @@ describe("role spawn", () => {
     expect(text).not.toContain("bash");
     expect(text).not.toContain(roleRunId);
   });
+
+  test("an innovator launch uses its cwd and the relay BASE_URL, and cannot write the relay log", () => {
+    const root = mkdtempSync(join(tmpdir(), "role-relay-"));
+    const cwd = join(root, "cwd");
+    const sessions = join(root, "sessions");
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(sessions, { recursive: true });
+    const cwdFile = join(root, "cwd.txt");
+    const envFile = join(root, "env.txt");
+    const bin = join(root, "pi");
+    writeFileSync(bin, `#!/bin/sh\npwd > ${JSON.stringify(cwdFile)}\nprintf '%s' "$BASE_URL" > ${JSON.stringify(envFile)}\n`);
+    chmodSync(bin, 0o755);
+    const relayLog = join(root, "private", "ab".repeat(16), "relay.jsonl");
+    const baseUrl = `http://10.204.0.1:8642/r/${"ab".repeat(16)}/v1`;
+    const config = buildRoleSpawn({
+      role: "innovator",
+      cwd,
+      allowedPaths: [],
+      sessionPath: join(sessions, "innovator.jsonl"),
+      ledgerPath: join(sessions, "ledger.json"),
+      relayLog,
+      baseUrl,
+    });
+    expect(() => buildRoleSpawn({
+      role: "innovator",
+      cwd,
+      allowedPaths: [],
+      sessionPath: join(sessions, "innovator.jsonl"),
+      ledgerPath: join(sessions, "ledger.json"),
+      relayLog: join(cwd, "relay.jsonl"),
+    })).toThrow(/relay log/);
+    expect(roleWrite(config, relayLog, "forged\n")).toBe(false);
+    expect(existsSync(relayLog)).toBe(false);
+    const launched = launchRolePi(bin, config);
+    expect(launched.status).toBe(0);
+    expect(readFileSync(cwdFile, "utf8").trim()).toBe(cwd);
+    expect(readFileSync(envFile, "utf8")).toBe(baseUrl);
+  });
 });

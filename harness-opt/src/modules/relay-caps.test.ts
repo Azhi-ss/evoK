@@ -80,7 +80,7 @@ events = [
     {"type": "done", "role": "critic", "status": 200, "usage": usage},
     {"type": "done", "role": "executor", "status": 200, "usage": huge},
 ]
-print(loop_mode.read_only_tokens(events, {"tokens": 10 ** 9}))
+print(loop_mode.read_only_tokens(events, {"tokens": 10 ** 9})["tokens"])
 `);
     expect(text).toBe("5");
   });

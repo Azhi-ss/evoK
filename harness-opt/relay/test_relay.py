@@ -629,7 +629,9 @@ class LoopModeCase(unittest.TestCase):
             {"type": "done", "role": "critic", "status": 200, "usage": usage},
             {"type": "done", "role": "executor", "status": 200, "usage": huge},
         ]
-        self.assertEqual(loop_mode.read_only_tokens(events, {"tokens": 10 ** 9}), 5)
+        counted = loop_mode.read_only_tokens(events, {"tokens": 10 ** 9})
+        self.assertEqual(counted["tokens"], 5)
+        self.assertFalse(counted["usage_missing"])
 
         mixed = loop_mode.drive([
             {"host_fault": True},
@@ -845,6 +847,43 @@ class LoopModeCase(unittest.TestCase):
         blank_tokens, blank_flag = launcher.relay_usage_tokens(root, "  ")
         self.assertEqual(blank_tokens, 0)
         self.assertTrue(blank_flag)
+
+    def test_read_only_usage_follows_the_ledger(self):
+        usage = {"prompt_tokens": 10_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}
+        events = [
+            {"type": "done", "role": "innovator", "status": 200, "usage": usage},
+            {"type": "done", "role": "critic", "status": 200, "usage": usage},
+            {"type": "done", "role": "ranker", "status": 200, "usage": usage},
+            {"type": "done", "role": "executor", "status": 200, "usage": {"prompt_tokens": 10 ** 9, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}},
+        ]
+        counted = loop_mode.read_only_tokens(events)
+        self.assertEqual(counted["tokens"], 30_000_000)
+        self.assertFalse(counted["usage_missing"])
+        missing_done = loop_mode.read_only_tokens([{"type": "req", "role": "innovator", "seq": 1}])
+        self.assertTrue(missing_done["usage_missing"])
+        self.assertIsNone(missing_done["tokens"])
+        null_usage = loop_mode.call_usage([{"type": "done", "role": "innovator", "status": 200, "usage": None}])
+        self.assertTrue(null_usage["usage_missing"])
+        self.assertIsNone(null_usage["tokens"])
+        self.assertTrue(loop_mode.call_usage([])["usage_missing"])
+
+    def test_pre_round1_rejects_stdin_key(self):
+        env = {key: value for key, value in os.environ.items() if key != "HARNESS_ATTEST_KEY_FILE"}
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("loop_mode.py")), "pre-round1"],
+            input=json.dumps({
+                "key": "ab" * 32,
+                "seed": "cd" * 32,
+                "ranker": {"tools": ["read"]},
+                "critic": {"tools": ["read"]},
+            }),
+            text=True,
+            capture_output=True,
+            env=env,
+            cwd=str(Path(__file__).parent),
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("hmacSha256", proc.stdout)
 
     def test_bind_role_and_exclusion(self):
         run_id = "ab" * 16

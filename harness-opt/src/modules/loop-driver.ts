@@ -118,10 +118,27 @@ function loopMode(command: string, payload: unknown): Record<string, unknown> {
   return JSON.parse(proc.stdout) as Record<string, unknown>;
 }
 
-/** Innovator+critic+ranker i+o+cacheRead. A trace argument is ignored by loop_mode. */
-export function relayReadOnlyTokens(events: readonly unknown[]): number {
-  const parsed = loopMode("read-only-tokens", { events });
-  return typeof parsed.tokens === "number" ? parsed.tokens : 0;
+export interface RelayUsage {
+  readonly tokens: number;
+  readonly usageMissing: boolean;
+}
+
+function usageOf(command: "read-only-tokens" | "call-usage", events: readonly unknown[]): RelayUsage {
+  const parsed = loopMode(command, { events });
+  return {
+    tokens: typeof parsed.tokens === "number" ? parsed.tokens : 0,
+    usageMissing: parsed.usage_missing === true,
+  };
+}
+
+/** Innovator+critic+ranker i+o+cacheRead via ledger.tokens. A trace is ignored. */
+export function relayReadOnlyTokens(events: readonly unknown[]): RelayUsage {
+  return usageOf("read-only-tokens", events);
+}
+
+/** One relay record. Missing done line or null 2xx usage is usage_missing. */
+export function relayCallUsage(events: readonly unknown[]): RelayUsage {
+  return usageOf("call-usage", events);
 }
 
 export function bindRoleCall(
