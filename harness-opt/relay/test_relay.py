@@ -30,6 +30,45 @@ def write_key(path: Path, body: bytes) -> None:
     os.chmod(path, 0o600)
 
 
+def assert_network_post(test, relay, url):
+    """The callable is the real client: it POSTs to `url` with the upstream key and returns that response."""
+    import urllib.request
+    captured = {}
+
+    class Resp:
+        status = 200
+
+        def read(self):
+            return b'{"choices":[{"message":{"role":"assistant","content":"pong"}}],"usage":{"prompt_tokens":4,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0}}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        return Resp()
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = urlopen
+    try:
+        status, raw, usage = relay.upstream(b"{}", False)
+    finally:
+        urllib.request.urlopen = original
+    test.assertEqual(status, 200)
+    test.assertEqual(captured["url"], url)
+    token = relay.upstream_key.rstrip(b"\r\n").decode()
+    test.assertEqual(captured["auth"], f"Bearer {token}")
+    test.assertGreater(len(json.loads(raw)["choices"]), 0)
+    test.assertEqual(usage["prompt_tokens"], 4)
+    test.assertEqual(usage["completion_tokens"], 5)
+    test.assertIsNot(relay.upstream, harness_relay._default_upstream)
+    test.assertTrue(getattr(relay.upstream, "production_upstream", False))
+
+
 class RelayCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,7 +84,7 @@ class RelayCase(unittest.TestCase):
             return 200, b'{"usage":true}', dict(USAGE)
 
         self.upstream = upstream
-        self.relay = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=upstream)
+        self.relay = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=upstream, allow_fake_upstream=True)
         self.run = new_run_id()
         self.relay.open_run(self.run, "executor", "abc")
 
@@ -243,7 +282,7 @@ class RelayCase(unittest.TestCase):
         nxt = new_run_id()
         self.relay.open_run(nxt, "role:innovator", "abc")
         self.assertIsNone(self.relay.close_run(nxt)["fault"])
-        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream, allow_fake_upstream=True)
         again = new_run_id()
         restarted.open_run(again, "executor", "abc")
         self.assertIsNone(restarted.close_run(again)["fault"])
@@ -275,7 +314,7 @@ class RelayCase(unittest.TestCase):
         raw = killed.read_bytes()
         chopped = raw + partial
         killed.write_bytes(chopped)
-        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream, allow_fake_upstream=True)
         fresh = new_run_id()
         restarted.open_run(fresh, "executor", "abc")
         self.assertTrue(killed.is_file())
@@ -314,7 +353,7 @@ class RelayCase(unittest.TestCase):
         path.write_bytes(path.read_bytes() + b'{"type":"tamper"}\n')
         self.assertEqual(self.relay.close_run(critic)["fault"], "attest_mismatch")
 
-        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream)
+        restarted = Relay(port=9, log_root=self.root / "logs", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream, allow_fake_upstream=True)
         self.assertEqual(restarted.loop_tokens, 1500)
         nxt = new_run_id()
         restarted.open_run(nxt, "role:innovator", "abc")
@@ -584,7 +623,10 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(self.relay.host, "10.204.0.1")
         with self.assertRaises(RuntimeError):
             Relay(port=9, log_root=self.root / "bad-bind", upstream_key_file=self.up, attest_key_file=self.att, bind_host="0.0.0.0")
-        loopback = Relay(port=9, log_root=self.root / "loopback", upstream_key_file=self.up, attest_key_file=self.att, bind_host="127.0.0.1")
+        loopback = Relay(
+            port=9, log_root=self.root / "loopback", upstream_key_file=self.up, attest_key_file=self.att,
+            bind_host="127.0.0.1", upstream=harness_relay._default_upstream, allow_fake_upstream=True,
+        )
         self.assertEqual(loopback.host, "127.0.0.1")
         loop_run = new_run_id()
         loopback.open_run(loop_run, "executor", "abc")
@@ -602,6 +644,97 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(len(new_run_id()), 32)
         with self.assertRaises(RuntimeError):
             self.relay.open_run(new_run_id(), "executor", "x")
+
+    def test_production_relay_rejects_a_fake_upstream(self):
+        root = self.root / "fake-upstream"
+        with self.assertRaises(RuntimeError) as caught:
+            Relay(port=9, log_root=root, upstream_key_file=self.up, attest_key_file=self.att, upstream=harness_relay._default_upstream)
+        self.assertIn("fake upstream", str(caught.exception))
+        fault = json.loads((root / "reject.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(fault["type"], "fault")
+        self.assertEqual(fault["fault"], "fake_upstream")
+        with self.assertRaises(RuntimeError) as other:
+            Relay(
+                port=9, log_root=self.root / "lambda-upstream", upstream_key_file=self.up, attest_key_file=self.att,
+                upstream=lambda body, stream: (200, b"{}", {}),
+            )
+        self.assertIn("fake upstream", str(other.exception))
+        production = Relay(port=9, log_root=self.root / "real-upstream", upstream_key_file=self.up, attest_key_file=self.att, bind_host="127.0.0.1")
+        self.assertTrue(harness_relay._is_production_upstream(production.upstream))
+        production.upstream = harness_relay._default_upstream
+        with self.assertRaises(RuntimeError) as swapped:
+            production.open_run(new_run_id(), "executor", "abc")
+        self.assertIn("fake upstream", str(swapped.exception))
+        self.assertIsNone(production.open_id)
+        again = json.loads((self.root / "real-upstream" / "reject.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(again["fault"], "fake_upstream")
+
+    def test_loop_control_uses_the_network_upstream(self):
+        saved_att = os.environ.get("HARNESS_ATTEST_KEY_FILE")
+        saved_up = os.environ.get("RELAY_UPSTREAM_KEY_FILE")
+        os.environ["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
+        os.environ["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        try:
+            flags = harness_relay._flags(["--log-root", str(self.root / "loop-wire"), "--port", "8642", "--bind", "127.0.0.1", "--mode", "execute"])
+            relay = harness_relay.prepare_control(flags)
+            self.assertEqual(relay.upstream_url, harness_relay.UPSTREAM_URL)
+            assert_network_post(self, relay, harness_relay.UPSTREAM_URL)
+            local = "http://127.0.0.1:9/v1/chat/completions"
+            overridden = harness_relay.prepare_control(harness_relay._flags([
+                "--log-root", str(self.root / "loop-override"), "--port", "8642", "--bind", "127.0.0.1",
+                "--mode", "dry-run", "--upstream", local,
+            ]))
+            self.assertEqual(overridden.upstream_url, local)
+            assert_network_post(self, overridden, local)
+            self.assertIsNot(overridden.upstream, harness_relay._default_upstream)
+        finally:
+            if saved_att is None:
+                os.environ.pop("HARNESS_ATTEST_KEY_FILE", None)
+            else:
+                os.environ["HARNESS_ATTEST_KEY_FILE"] = saved_att
+            if saved_up is None:
+                os.environ.pop("RELAY_UPSTREAM_KEY_FILE", None)
+            else:
+                os.environ["RELAY_UPSTREAM_KEY_FILE"] = saved_up
+
+        import socket
+        relay_sock = socket.socket()
+        relay_sock.bind(("127.0.0.1", 0))
+        relay_port = relay_sock.getsockname()[1]
+        relay_sock.close()
+        root = self.root / "loop-cli"
+        env = os.environ.copy()
+        env["HARNESS_ATTEST_KEY_FILE"] = str(self.att)
+        env["RELAY_UPSTREAM_KEY_FILE"] = str(self.up)
+        proc = subprocess.Popen(
+            [sys.executable, str(HERE / "harness_relay.py"), "control", "--mode", "execute", "--log-root", str(root), "--port", str(relay_port), "--bind", "127.0.0.1"],
+            cwd=HERE, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+        def rpc(msg):
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            self.assertNotEqual(line, "")
+            return json.loads(line)
+
+        err = ""
+        try:
+            opened = rpc({"op": "open", "runId": new_run_id(), "kind": "executor", "expectedSha": "abc"})
+            self.assertTrue(opened["ok"], opened)
+            self.assertTrue(rpc({"op": "shutdown"})["ok"])
+            proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stderr is not None and not proc.stderr.closed:
+                err = proc.stderr.read()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertFalse((root / "reject.jsonl").exists())
 
     def test_tokens_usage_missing_is_only_2xx(self):
         ledger = Ledger()
@@ -1969,6 +2102,93 @@ class OnceCase(unittest.TestCase):
         self.assertNotIn("purpose", recorded)
         self.assertFalse((self.root / "relay" / ("ab" * 16) / "run-record.json").exists())
         self.assertEqual(recorded["tokens"], 0)
+
+    def test_once_relay_upstream_is_the_network_upstream(self):
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+        seen = {}
+        real = self.box._standalone_relay
+
+        def wrap(root, port):
+            relay = real(root, port)
+            seen["relay"] = relay
+            return relay
+
+        self.box._standalone_relay = wrap
+        run = self.root / "net-once"
+        run_id = "cd" * 16
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        try:
+            recorded = self.box.run_once(
+                "hb003", 9, "control", self.config, run, self.harness,
+                run_id=run_id, relay_root=self.root / "net-relay", listen=False,
+                popen=lambda argv, **kwargs: Proc(), call=lambda *args, **kwargs: Proc(),
+                preflight=lambda **_kwargs: None,
+                stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
+                limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
+                lock_path=self.root / "net-once.lock",
+            )
+        finally:
+            self.box._standalone_relay = real
+        relay = seen["relay"]
+        self.assertEqual(relay.upstream_url, harness_relay.UPSTREAM_URL)
+        self.assertIsNot(relay.upstream, harness_relay._default_upstream)
+        self.assertTrue(harness_relay._is_production_upstream(relay.upstream))
+        assert_network_post(self, relay, harness_relay.UPSTREAM_URL)
+        self.assertEqual(recorded["unscored_reason"], "no_requests")
+        self.assertFalse((self.root / "net-relay" / "reject.jsonl").exists())
+
+
+@unittest.skipUnless(
+    os.environ.get("RELAY_LIVE_SMOKE") == "1" and bool(os.environ.get("RELAY_UPSTREAM_KEY_FILE")),
+    "set RELAY_LIVE_SMOKE=1 and RELAY_UPSTREAM_KEY_FILE to POST one chat through the relay",
+)
+class LiveUpstreamSmoke(unittest.TestCase):
+    def test_one_chat_reaches_the_real_upstream(self):
+        import devii_docker_v2 as box
+        key_file = os.environ["RELAY_UPSTREAM_KEY_FILE"]
+        self.assertTrue(Path(key_file).is_file(), key_file)
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        attest = root / "attest.key"
+        attest.write_bytes(b"live-smoke-attest-key-not-the-upstream\n")
+        os.chmod(attest, 0o600)
+        self.assertNotEqual(os.path.realpath(key_file), os.path.realpath(attest))
+        self.assertNotEqual(Path(key_file).read_bytes(), attest.read_bytes())
+        try:
+            relay = Relay(
+                port=8642, log_root=root / "logs", upstream_key_file=key_file, attest_key_file=str(attest),
+                bind_host="127.0.0.1", plant_enabled=False,
+            )
+            self.assertIsNot(relay.upstream, harness_relay._default_upstream)
+            self.assertEqual(relay.upstream_url, harness_relay.UPSTREAM_URL)
+            run = new_run_id()
+            relay.open_run(run, "executor", "abc")
+            body = json.dumps({
+                "model": box.MODEL,
+                "messages": [{"role": "user", "content": "Reply with the single word pong."}],
+                "max_tokens": 16,
+                "stream": False,
+            }).encode()
+            status, resp = relay.handle(
+                "POST", f"/r/{run}/v1/chat/completions", body, {"host": f"{relay.host}:{relay.port}"},
+            )
+            self.assertEqual(status, 200, resp)
+            parsed = json.loads(resp.decode("utf-8"))
+            self.assertIsInstance(parsed.get("choices"), list)
+            self.assertGreater(len(parsed["choices"]), 0)
+            usage = parsed.get("usage") or {}
+            self.assertIsInstance(usage.get("prompt_tokens"), int)
+            self.assertIsInstance(usage.get("completion_tokens"), int)
+            self.assertGreater(usage["prompt_tokens"] + usage["completion_tokens"], 0)
+        finally:
+            tmp.cleanup()
 
 
 def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):

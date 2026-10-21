@@ -104,7 +104,7 @@ def _parse_args(raw):
 
 
 class Relay:
-    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None, plant_enabled=True):
+    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None, plant_enabled=True, allow_fake_upstream=False):
         if os.path.realpath(upstream_key_file) == os.path.realpath(attest_key_file):
             raise RuntimeError("upstream key and attest key are the same path")
         self.upstream_key = _read_secret(upstream_key_file)
@@ -124,7 +124,6 @@ class Relay:
             source = mount["source"] if isinstance(mount, dict) else mount[0]
             if _overlaps(self.log_root, source):
                 raise RuntimeError("relay log is inside a mount")
-        self.upstream = upstream or _default_upstream
         self.boot_id = str(uuid.uuid4())
         self.pid = os.getpid()
         self.relay_sha = relay_code_sha()
@@ -135,8 +134,17 @@ class Relay:
         self._chain = {}
         self.loop_tokens = 0
         self.plant_enabled = bool(plant_enabled)
+        # Tests opt in. Production never falls through to _default_upstream.
+        self.allow_fake_upstream = bool(allow_fake_upstream)
         Path(self.log_root).mkdir(parents=True, exist_ok=True)
         os.chmod(self.log_root, 0o700)
+        if upstream is None:
+            use_network_upstream(self)
+        elif self.allow_fake_upstream or _is_production_upstream(upstream):
+            self.upstream = upstream
+        else:
+            self._record_fake_upstream()
+            raise RuntimeError("fake upstream")
         self._recount_loop_tokens()
 
     def status(self) -> dict:
@@ -169,6 +177,7 @@ class Relay:
             self._open_run(run_id, kind, expected_config_sha)
 
     def _open_run(self, run_id: str, kind: str, expected_config_sha: str) -> None:
+        self._ensure_production_upstream()
         if not RUN_ID_RE.fullmatch(run_id or ""):
             raise RuntimeError("run id must be 32 hex")
         if self.open_id is None:
@@ -462,6 +471,7 @@ class Relay:
             return self._handle(method, path, body, headers, client_disconnect=client_disconnect)
 
     def _handle(self, method: str, path: str, body: bytes, headers=None, *, client_disconnect=False):
+        self._ensure_production_upstream()
         headers = {str(k).lower(): v for k, v in (headers or {}).items()}
         if self._secret_in_body(body):
             self._reject(method, path, "secret_in_body")
@@ -639,7 +649,20 @@ class Relay:
             return False
         return any(line.get("type") == "open" for line in self._lines(run_id))
 
+    def _record_fake_upstream(self) -> None:
+        ts, iso = _stamp()
+        append_jsonl(Path(self.log_root) / "reject.jsonl", {"type": "fault", "fault": "fake_upstream", "ts": ts, "ts_iso": iso})
+
+    def _ensure_production_upstream(self) -> None:
+        if self.allow_fake_upstream:
+            return
+        if _is_production_upstream(self.upstream):
+            return
+        self._record_fake_upstream()
+        raise RuntimeError("fake upstream")
+
     def bind(self):
+        self._ensure_production_upstream()
         if self.host != "127.0.0.1":
             assert_bind_host(self.host)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -766,7 +789,19 @@ def _network_upstream(url: str, key: bytes):
         usage = _usage_from_stream(raw) if stream else _usage_from_json(raw)
         return status, raw, usage
 
+    upstream.production_upstream = True
     return upstream
+
+
+def _is_production_upstream(fn) -> bool:
+    return fn is not _default_upstream and getattr(fn, "production_upstream", False) is True
+
+
+def use_network_upstream(relay, url=None) -> None:
+    """The production forwarder: UPSTREAM_URL unless the caller passes a URL, plus the upstream key."""
+    chosen = url or relay.upstream_url or UPSTREAM_URL
+    relay.upstream_url = chosen
+    relay.upstream = _network_upstream(chosen, relay.upstream_key)
 
 
 def _read_http(conn) -> tuple:
@@ -879,6 +914,17 @@ def _relay_from(flags) -> Relay:
     return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, **kwargs)
 
 
+def prepare_control(flags) -> Relay:
+    """Relay the loop starts: `harness_relay.py control` with the network upstream."""
+    mode = (flags.get("mode") or [""])[-1]
+    if mode not in ("dry-run", "execute"):
+        raise SystemExit("control requires --mode dry-run|execute")
+    relay = _relay_from(flags)
+    url = (flags.get("upstream") or [UPSTREAM_URL])[-1]
+    use_network_upstream(relay, url)
+    return relay
+
+
 def _serve(relay: Relay) -> None:
     sock = relay.bind()
     stop = threading.Event()
@@ -940,14 +986,7 @@ def main(argv=None):
         print(json.dumps(result))
         raise SystemExit(0 if result["active"] else 2)
     if cmd == "control":
-        mode = (flags.get("mode") or [""])[-1]
-        if mode not in ("dry-run", "execute"):
-            raise SystemExit("control requires --mode dry-run|execute")
-        relay = _relay_from(flags)
-        url = (flags.get("upstream") or [UPSTREAM_URL])[-1]
-        relay.upstream_url = url
-        relay.upstream = _network_upstream(url, relay.upstream_key)
-        _serve(relay)
+        _serve(prepare_control(flags))
         raise SystemExit(0)
     if cmd == "open-run":
         _relay_from(flags).open_run(_one(flags, "run-id"), _one(flags, "kind"), _one(flags, "expected-sha"))

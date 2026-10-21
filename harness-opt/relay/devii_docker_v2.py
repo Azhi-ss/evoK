@@ -365,10 +365,12 @@ def _standalone_relay(relay_root, port):
     upstream=os.environ.get("RELAY_UPSTREAM_KEY_FILE") or ""
     if attest.strip()=="" or upstream.strip()=="":
         raise OnceError("HARNESS_ATTEST_KEY_FILE and RELAY_UPSTREAM_KEY_FILE")
-    return harness_relay.Relay(
+    relay = harness_relay.Relay(
         port=port, log_root=str(relay_root), upstream_key_file=upstream, attest_key_file=attest,
         bind_host=harness_relay.BIND_HOST, plant_enabled=False,
     )
+    harness_relay.use_network_upstream(relay)
+    return relay
 
 def _kill_container(name, call):
     call(["sudo","docker","kill",name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
