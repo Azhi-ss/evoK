@@ -38,6 +38,8 @@ export const bus = {
 export class DefaultResourceLoader {
   constructor(options) {
     this.eventBus = bus;
+    const text = typeof options.systemPromptOverride === "function" ? options.systemPromptOverride("") : "";
+    if (process.env.HARNESS_STUB_PROMPT) writeFileSync(process.env.HARNESS_STUB_PROMPT, text);
     if (process.env.HARNESS_STUB_LOADER) {
       writeFileSync(process.env.HARNESS_STUB_LOADER, JSON.stringify({ extensions: options.additionalExtensionPaths || [] }));
     }
@@ -103,6 +105,7 @@ function runHarness(home: string, harnessFile: string, runDir: string, extra: Re
     HARNESS_AGENT_DIR: join(runDir, "agent"),
     HARNESS_STUB_SETTINGS: join(runDir, "settings.json"),
     HARNESS_STUB_LOADER: join(runDir, "loader.json"),
+    HARNESS_STUB_PROMPT: join(runDir, "prompt.txt"),
   };
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -117,6 +120,7 @@ function runHarness(home: string, harnessFile: string, runDir: string, extra: Re
     HARNESS_SESSION_DIR: join(runDir, "sessions"),
     HARNESS_STUB_SETTINGS: paths.HARNESS_STUB_SETTINGS,
     HARNESS_STUB_LOADER: paths.HARNESS_STUB_LOADER,
+    HARNESS_STUB_PROMPT: paths.HARNESS_STUB_PROMPT,
     ...extra,
   };
   delete env.HARNESS_CANDIDATE_CONFIG;
@@ -202,6 +206,13 @@ describe("patched harness smoke", () => {
     };
     expect(controlStart.candidateConfigHash).toBe(createHash("sha256").update(readFileSync(controlPath)).digest("hex"));
     expect(treatmentStart.candidateConfigHash).toBe(createHash("sha256").update(readFileSync(treatmentPath)).digest("hex"));
+    expect(controlStart).not.toHaveProperty("systemPrompt");
+    const controlPrompt = readFileSync(join(controlRun.env.RUN_DIR, "prompt.txt"), "utf8");
+    const treatmentPrompt = readFileSync(join(treatmentRun.env.RUN_DIR, "prompt.txt"), "utf8");
+    expect(controlPrompt).toContain(`candidateConfigHash: ${controlStart.candidateConfigHash}`);
+    expect(treatmentPrompt).toContain(`candidateConfigHash: ${treatmentStart.candidateConfigHash}`);
+    expect(controlPrompt).not.toContain(treatmentStart.candidateConfigHash);
+    expect(readFileSync(join(plainPatched.env.RUN_DIR, "prompt.txt"), "utf8")).not.toContain("candidateConfigHash:");
     expect(controlStart.candidateConfigHash).not.toBe(treatmentStart.candidateConfigHash);
     expect(controlStart.effective["agent-loop.maxSteps"]).toBe(25);
     expect(treatmentStart.effective["agent-loop.maxSteps"]).toBe(3);

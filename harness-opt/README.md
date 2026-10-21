@@ -139,15 +139,25 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 
 `optimize` 把 gap-finder、innovator、reviewer-gate 接到一次 Dev-II 执行上。默认协议：只做 i014，3 轮，每轮 1 个候选，dev 种子 0/1/2。三轮里最后一个被接受的候选，再和 control 按 `C0,X0,C1,X1,C2,X2` 交替重跑 i014，然后 held-out 跑 002、i030、hb003 各 3 个种子。002 的网络是 gateway-only。三轮都没有接受的候选时，不跑终比，也不跑 held-out。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
 
-执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{model}` `{patchHash}` `{marker}` `{network}` `{tokenCap}` `{driver}`。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。驱动要在 `{runDir}` 留下 `trace.jsonl`（第 1 行 `run_start` 带 `candidateConfigHash`、`effective`，并把 `{marker}` 写进 `systemPrompt`）、`outputs/`、`batch.log`（`<时间> run 1 done`）、`verifier/reward.txt`、`result.json`。单次 tokens 超过该题 `6×W` 记 unscored。
+执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{model}` `{network}` `{tokenCap}` `{driver}`。没有 `{marker}` 或 `{patchHash}`：环不会把补丁标记交给执行器，命令里写了这两个占位符会直接拒绝。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。驱动要在 `{runDir}` 留下 harness 自己写的 `trace.jsonl`（`run_start` 带它读完候选 config 后算出的 `candidateConfigHash` 和 `effective`）、`{runDir}/.pi-sessions/*.jsonl`（Pi 会话里的 system message，`sections.preamble` 或 `content` 含 harness 追加的 `candidateConfigHash: <同一哈希>`）、`outputs/`、`batch.log`（`<时间> run 1 done`）、`verifier/reward.txt`、`result.json`。`result.json` 的 `session_file` 如果指向会话文件，也会被核对。trace 里自称的 `systemPrompt` 不作为证据。单次 tokens 超过该题 `6×W` 记 unscored。
 
-每一轮落下三个角色的 Pi session jsonl 和 sha、`patch.diff`、以及 `activation.json`：补丁哈希必须出现在本轮 dev run 的 system prompt 里，并且和候选 config 的 sha 一致。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。
+第一轮的上一轮 trace 必须用 `--control-trace <文件>` 传入，而且文件要已经存在。环不写 `baseline/` 桩。`gapCitedTrace` 只认 gap 会话里对那些 trace 文件的 `read` 工具调用。`reviewFedForward` 只认下一轮 gap 会话里对上一轮 `reviewer-gate.jsonl` 的 `read` 工具调用，不读环自己写的 `gap-input.json`。`patchActive` 为 false，或会话里没有这条哈希，本轮不能被接受，终比和 held-out 不跑。
+
+每一轮落下三个角色的 Pi session jsonl 和 sha、`patch.diff`、以及 `activation.json`。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。坏掉的 trace 行和缺少 `ts` 的 `assistant_message` 跟 `ewi_idle.py` 一样失败关闭；`outputs` 里指向文件的 symlink 跟随目标 mtime，指向目录的 symlink 不进入。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。
 
 ```bash
-bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run
+bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run --control-trace /tmp/i014-control-seed0.jsonl
 ```
 
 `--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。
+
+下面这条只跑一个候选种子，用来在真镜像和真模型上证明激活可以为真。它不是预注册的终比，也不会跑 `C0,X0,...` 或 held-out。镜像里的 harness 必须是这份补丁：它自己读候选 config，把 sha256 写进 `run_start`，并追加到 lead system prompt，Pi 再把这段写进 `.pi-sessions/*.jsonl`。驱动要把该会话留在 `{runDir}/.pi-sessions/`。
+
+```bash
+BASE_URL="$BASE_URL" bun harness-opt/src/cli.ts optimize-one --out /tmp/harness-opt-once --config /tmp/harness-opt-candidate.json --control-config /tmp/harness-opt-control.json --knob agent-loop.maxSteps --seed 0 --task i014 --task-path "$TASK_DIR" --executor-cmd '["python3","{driver}","--task","{taskPath}","--seed","{seed}","--arm","{arm}","--config","{config}","--run-dir","{runDir}","--model","{model}","--network","{network}","--token-cap","{tokenCap}"]' --driver "$HARNESS_OPT_DRIVER"
+```
+
+`patchActive` 为真时退出码是 0，否则是 1。`$BASE_URL`、`$TASK_DIR`、`$HARNESS_OPT_DRIVER` 由运行那台机器提供。候选 config 必须和 control 不是同一份字节。
 
 ## 本地闭环
 

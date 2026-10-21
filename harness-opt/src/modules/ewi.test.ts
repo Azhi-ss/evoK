@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_EWI_THRESHOLD_SEC, measureEwi, measureRunEwi, roundTenth } from "./ewi";
@@ -112,5 +112,71 @@ describe("EWI metric", () => {
     expect(metrics.postWriteS).toBe(roundTenth(tEnd - tWrite));
     expect(metrics.idleS).toBe(roundTenth(tEnd - tLast));
     expect(metrics.ewi).toBe(true);
+  });
+
+  test("a truncated trace line fails closed instead of scoring the prefix", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ewi-truncated-"));
+    const outputs = join(dir, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    const written = join(outputs, "answer.txt");
+    writeFileSync(written, "x\n");
+    utimesSync(written, 0, 0);
+    writeFileSync(join(dir, "trace.jsonl"), `${JSON.stringify({ type: "assistant_message", ts: 10_000 })}\n{"type":"assistant_message","ts":\n`);
+    writeFileSync(join(dir, "batch.log"), "1970-01-01T00:11:40.000Z run 1 done\n");
+    expect(() => measureRunEwi({
+      task: "i014",
+      seed: "0",
+      timedOut: false,
+      tracePath: join(dir, "trace.jsonl"),
+      outputsDir: outputs,
+      batchLogPath: join(dir, "batch.log"),
+    }, 600)).toThrow(/not JSON/);
+  });
+
+  test("an assistant_message without ts fails closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ewi-missing-ts-"));
+    const outputs = join(dir, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    const written = join(outputs, "answer.txt");
+    writeFileSync(written, "x\n");
+    utimesSync(written, 0, 0);
+    writeFileSync(join(dir, "trace.jsonl"), `${JSON.stringify({ type: "assistant_message", text: "hi" })}\n`);
+    writeFileSync(join(dir, "batch.log"), "1970-01-01T00:11:40.000Z run 1 done\n");
+    expect(() => measureRunEwi({
+      task: "i014",
+      seed: "0",
+      timedOut: false,
+      tracePath: join(dir, "trace.jsonl"),
+      outputsDir: outputs,
+      batchLogPath: join(dir, "batch.log"),
+    }, 600)).toThrow(/missing ts/);
+  });
+
+  test("a symlinked output file is followed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ewi-symlink-"));
+    const outputs = join(dir, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    const real = join(dir, "answer.txt");
+    writeFileSync(real, "x\n");
+    utimesSync(real, 0, 0);
+    symlinkSync(real, join(outputs, "answer.txt"));
+    const nested = join(dir, "nested");
+    mkdirSync(nested, { recursive: true });
+    const decoy = join(nested, "later.txt");
+    writeFileSync(decoy, "later\n");
+    utimesSync(decoy, 5_000, 5_000);
+    symlinkSync(nested, join(outputs, "linked-dir"));
+    writeFileSync(join(dir, "trace.jsonl"), "");
+    writeFileSync(join(dir, "batch.log"), "1970-01-01T00:11:40.000Z run 1 done\n");
+    const metrics = measureRunEwi({
+      task: "i014",
+      seed: "0",
+      timedOut: false,
+      tracePath: join(dir, "trace.jsonl"),
+      outputsDir: outputs,
+      batchLogPath: join(dir, "batch.log"),
+    }, 600);
+    expect(metrics.idleS).toBe(700);
+    expect(metrics.postWriteS).toBe(700);
   });
 });

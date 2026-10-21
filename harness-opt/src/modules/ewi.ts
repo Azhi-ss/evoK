@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Frozen externally. The loop reads this unless a run passes another threshold. */
@@ -129,15 +129,24 @@ function latestOutputMtime(outputsDir: string): number {
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current) continue;
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
+    for (const name of readdirSync(current)) {
+      const full = join(current, name);
+      const linked = lstatSync(full);
+      if (linked.isSymbolicLink()) {
+        const target = statSync(full);
+        if (target.isDirectory()) continue;
+        if (!target.isFile()) continue;
+        files += 1;
+        latest = Math.max(latest, target.mtimeMs / 1000);
+        continue;
+      }
+      if (linked.isDirectory()) {
         stack.push(full);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!linked.isFile()) continue;
       files += 1;
-      latest = Math.max(latest, statSync(full).mtimeMs / 1000);
+      latest = Math.max(latest, linked.mtimeMs / 1000);
     }
   }
   if (files === 0) throw new Error(`outputs has no files: ${outputsDir}`);
@@ -146,17 +155,21 @@ function latestOutputMtime(outputsDir: string): number {
 
 function assistantTimestamps(tracePath: string): number[] {
   const stamps: number[] = [];
-  for (const raw of readFileSync(tracePath, "utf8").split("\n")) {
-    const trimmed = raw.trim();
+  const lines = readFileSync(tracePath, "utf8").split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index]?.trim() ?? "";
     if (!trimmed) continue;
+    let parsed: { type?: unknown; ts?: unknown };
     try {
-      const parsed = JSON.parse(trimmed) as { type?: unknown; ts?: unknown };
-      if (parsed.type === "assistant_message" && typeof parsed.ts === "number" && Number.isFinite(parsed.ts)) {
-        stamps.push(parsed.ts / 1000);
-      }
+      parsed = JSON.parse(trimmed) as { type?: unknown; ts?: unknown };
     } catch {
-      /* a truncated trace line is not an assistant timestamp */
+      throw new Error(`trace.jsonl line ${index + 1} is not JSON`);
     }
+    if (parsed.type !== "assistant_message") continue;
+    if (typeof parsed.ts !== "number" || !Number.isFinite(parsed.ts)) {
+      throw new Error(`assistant_message on line ${index + 1} is missing ts`);
+    }
+    stamps.push(parsed.ts / 1000);
   }
   return stamps;
 }

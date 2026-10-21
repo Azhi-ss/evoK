@@ -20,8 +20,6 @@ function request(dir: string): OptRunRequest {
     configPath: join(dir, "config.json"),
     runDir: join(dir, "run"),
     model: "deepseek-v4-1-flash-261017",
-    patchHash: "abc",
-    marker: "harness-opt-patch:abc",
     tokenCap: tokenCap(TASK),
   };
 }
@@ -49,7 +47,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
         "--seed", "{seed}",
         "--run-dir", "{runDir}",
         "--model", "{model}",
-        "--marker", "{marker}",
+        "--config", "{config}",
         "--network", "{network}",
         "--token-cap", "{tokenCap}",
       ],
@@ -60,11 +58,20 @@ writeFileSync(run + "/result.json", JSON.stringify({
     expect(argv).toContain("tasks1/002-bigwig-h3k27ac-igg-peak-audit");
     expect(argv).toContain("gateway-only");
     expect(argv).toContain("deepseek-v4-1-flash-261017");
+    expect(argv).toContain(join(dir, "config.json"));
     expect(argv).toContain(String(tokenCap(TASK)));
     expect(argv.join(" ")).not.toContain("sk-secret");
     expect(readFileSync(join(dir, "run", "base-url.txt"), "utf8")).toBe("https://example.test/v1");
     expect(observation.reward).toBe(1);
     expect(observation.tokens).toBe(4);
+  });
+
+  test("a marker placeholder is refused before spawn", () => {
+    expect(() => renderExecutorCommand(
+      ["python3", "--task", "{task}", "--run-dir", "{runDir}", "--marker", "{marker}"],
+      request("/tmp"),
+      "driver.py",
+    )).toThrow(/marker/);
   });
 
   test("a missing driver placeholder fails before spawn", async () => {
@@ -85,7 +92,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
 
 describe("executor command source", () => {
   test("does not bake box paths into the loop", () => {
-    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
+    const sources = ["opt-executor.ts", "opt-loop.ts", "ewi.ts", "activation.ts", "../cli.ts"].map((name) => readFileSync(new URL(name, import.meta.url), "utf8")).join("\n");
     expect(sources).not.toContain("/workspace/harness-opt-runs");
     expect(sources).not.toContain("/workspace/contest-data");
     expect(sources).not.toContain("pi-bio-harness@sha256");

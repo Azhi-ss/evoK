@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { candidateHashFragment } from "./activation";
 
 export interface OptTask {
   readonly id: string;
@@ -22,8 +23,6 @@ export interface OptRunRequest {
   readonly configPath: string;
   readonly runDir: string;
   readonly model: string;
-  readonly patchHash: string;
-  readonly marker: string;
   readonly tokenCap: number;
 }
 
@@ -71,8 +70,6 @@ const PLACEHOLDERS = [
   "config",
   "runDir",
   "model",
-  "patchHash",
-  "marker",
   "network",
   "tokenCap",
   "driver",
@@ -90,6 +87,9 @@ export function renderExecutorCommand(
   driver?: string,
 ): string[] {
   const text = template.join("\n");
+  if (text.includes("{marker}") || text.includes("{patchHash}")) {
+    throw new Error("executor command must not receive {marker} or {patchHash}");
+  }
   const namesTask = text.includes("{task}") || text.includes("{taskPath}");
   if (!namesTask || !text.includes("{runDir}")) {
     throw new Error("executor command must include {task} or {taskPath}, and {runDir}");
@@ -163,11 +163,11 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   utimesSync(answer, timing.tWrite, timing.tWrite);
   const configBytes = readFileSync(request.configPath);
   const config = JSON.parse(configBytes.toString()) as { parts?: Record<string, unknown> };
+  const hash = createHash("sha256").update(configBytes).digest("hex");
   const start = {
     type: "run_start",
-    candidateConfigHash: createHash("sha256").update(configBytes).digest("hex"),
+    candidateConfigHash: hash,
     effective: flatten(config.parts ?? {}),
-    systemPrompt: request.marker ? `system\n${request.marker}\n` : "system\n",
   };
   const messages = timing.assistantTs.map((stamp) => ({ type: "assistant_message", ts: stamp * 1000 }));
   writeFileSync(
@@ -177,12 +177,34 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   writeFileSync(join(request.runDir, "batch.log"), `${new Date(timing.tEnd * 1000).toISOString()} run 1 done\n`);
   mkdirSync(join(request.runDir, "verifier"), { recursive: true });
   writeFileSync(join(request.runDir, "verifier", "reward.txt"), `${timing.reward}\n`);
+  const sessionDir = join(request.runDir, ".pi-sessions");
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionFile = join(sessionDir, "session.jsonl");
+  writeFileSync(sessionFile, `${JSON.stringify({
+    type: "session",
+    version: 3,
+    id: "dry-run",
+    timestamp: new Date(0).toISOString(),
+    cwd: request.runDir,
+  })}\n${JSON.stringify({
+    type: "message",
+    id: "system",
+    parentId: null,
+    timestamp: new Date(0).toISOString(),
+    message: {
+      role: "system",
+      content: "",
+      sections: { preamble: `lead${candidateHashFragment(hash)}` },
+      timestamp: 0,
+    },
+  })}\n`);
   writeFileSync(join(request.runDir, "result.json"), `${JSON.stringify({
     reward: timing.reward,
     tokens: timing.tokens,
     wall_s: timing.wallS,
     timed_out: timing.timedOut,
     score_status: "scored",
+    session_file: sessionFile,
   })}\n`);
 }
 
@@ -246,8 +268,6 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     config: request.configPath,
     runDir: request.runDir,
     model: request.model,
-    patchHash: request.patchHash,
-    marker: request.marker,
     network: request.task.network,
     tokenCap: String(request.tokenCap),
   };

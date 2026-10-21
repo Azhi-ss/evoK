@@ -1,14 +1,33 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../cli";
-import { DEV_TASK, HELD_OUT_TASKS, OPT_MODEL, runOptLoop, stubOptRoles, type OptRoles } from "./opt-loop";
+import { DEV_TASK, HELD_OUT_TASKS, OPT_MODEL, runOptLoop, runOptOnce, stubOptRoles, type OptRoles } from "./opt-loop";
 import { tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type RunArtifactTiming } from "./opt-executor";
 
 function outDir(): string {
   return mkdtempSync(join(tmpdir(), "opt-loop-"));
+}
+
+function givenControl(dir: string): string[] {
+  const file = join(dir, "control-trace.jsonl");
+  writeFileSync(file, `${JSON.stringify({ type: "run_start", source: "control" })}\n`);
+  return [file];
+}
+
+function flattenParts(value: Record<string, unknown>, prefix = ""): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
+      Object.assign(out, flattenParts(child as Record<string, unknown>, path));
+    } else {
+      out[path] = child;
+    }
+  }
+  return out;
 }
 
 function timing(request: OptRunRequest, reward: number, tokens = 100): RunArtifactTiming {
@@ -66,14 +85,16 @@ function rejectingRoles(): OptRoles & { readonly reviews: number } {
 }
 
 describe("optimization loop", () => {
-  test("one round persists sessions, the patch, and a marker the next run actually loaded", async () => {
+  test("one round persists sessions, the patch, and the Pi session that loaded the candidate", async () => {
     const out = outDir();
     const fake = fakeExecutor();
     const roles = rejectingRoles();
+    const traces = givenControl(out);
     const result = await runOptLoop({
       out,
       mode: "dry-run",
       rounds: 1,
+      controlTraces: traces,
       roles,
       executor: fake.executor,
     });
@@ -95,7 +116,10 @@ describe("optimization loop", () => {
       const bytes = readFileSync(join(out, item.file));
       expect(createHash("sha256").update(bytes).digest("hex")).toBe(item.sha256);
     }
-    expect(readFileSync(join(out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain("baseline/i014/seed0/trace.jsonl:1");
+    const gapSession = readFileSync(join(out, "round1/sessions/gap-finder.jsonl"), "utf8");
+    expect(gapSession).toContain('"name":"read"');
+    expect(gapSession).toContain(traces[0]);
+    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
 
     const diff = readFileSync(join(out, "round1/patch.diff"), "utf8");
     expect(diff).toContain('"maxSteps": 25');
@@ -103,19 +127,23 @@ describe("optimization loop", () => {
     const patchHash = createHash("sha256").update(readFileSync(join(out, "round1/patch.diff"))).digest("hex");
     const activation = JSON.parse(readFileSync(join(out, "round1/activation.json"), "utf8")) as {
       patchHash: string;
-      marker: string;
       differsFromControl: boolean;
       patchActive: boolean;
-      runs: { seed: number; tracePath: string; active: boolean }[];
+      candidateConfigSha: string;
+      runs: { seed: number; tracePath: string; hashInSystemMessage: boolean; active: boolean }[];
     };
     expect(activation.patchHash).toBe(patchHash);
-    expect(activation.marker).toBe(`harness-opt-patch:${patchHash}`);
+    expect(activation).not.toHaveProperty("marker");
     expect(activation.differsFromControl).toBe(true);
     expect(activation.patchActive).toBe(true);
     for (const run of activation.runs) {
       const line = readFileSync(run.tracePath, "utf8").split("\n")[0] ?? "";
       const start = JSON.parse(line) as { systemPrompt?: string; candidateConfigHash?: string };
-      expect(start.systemPrompt).toContain(activation.marker);
+      expect(start.systemPrompt).toBeUndefined();
+      expect(start.candidateConfigHash).toBe(activation.candidateConfigSha);
+      const session = readFileSync(join(run.tracePath, "../.pi-sessions/session.jsonl"), "utf8");
+      expect(session).toContain(`candidateConfigHash: ${activation.candidateConfigSha}`);
+      expect(run.hashInSystemMessage).toBe(true);
       expect(run.active).toBe(true);
     }
 
@@ -162,11 +190,14 @@ describe("optimization loop", () => {
         reason: "still idle",
       }),
     };
-    await runOptLoop({ out, mode: "dry-run", rounds: 2, roles, executor: fake.executor });
+    await runOptLoop({ out, mode: "dry-run", rounds: 2, controlTraces: givenControl(out), roles, executor: fake.executor });
     const gapInput = JSON.parse(readFileSync(join(out, "round2/gap-input.json"), "utf8")) as {
       previousReview: { reason: string };
     };
     expect(gapInput.previousReview.reason).toBe("still idle");
+    const gapSession = readFileSync(join(out, "round2/sessions/gap-finder.jsonl"), "utf8");
+    expect(gapSession).toContain(join(out, "round1/sessions/reviewer-gate.jsonl"));
+    expect(gapSession).toContain('"name":"read"');
     const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean; closed: boolean };
     expect(closure.reviewFedForward).toBe(true);
     expect(closure.closed).toBe(true);
@@ -184,6 +215,7 @@ describe("optimization loop", () => {
       out,
       mode: "dry-run",
       rounds: 3,
+      controlTraces: givenControl(out),
       roles: rejectingRoles(),
       executor: fake.executor,
     });
@@ -201,6 +233,7 @@ describe("optimization loop", () => {
       out,
       mode: "dry-run",
       rounds: 3,
+      controlTraces: givenControl(out),
       roles: stubOptRoles(),
       executor: fake.executor,
     });
@@ -211,9 +244,7 @@ describe("optimization loop", () => {
     expect(dev.every((call) => call.arm === "candidate" && call.task.id === DEV_TASK.id)).toBe(true);
     const finalCalls = fake.calls.slice(9, 15);
     expect(finalCalls.map((call) => `${call.arm === "control" ? "C" : "X"}${call.seed}`)).toEqual(["C0", "X0", "C1", "X1", "C2", "X2"]);
-    const marker = result.accepted?.marker ?? "";
-    expect(finalCalls.filter((call) => call.arm === "candidate").every((call) => call.marker === marker)).toBe(true);
-    expect(finalCalls.filter((call) => call.arm === "control").every((call) => call.marker === "")).toBe(true);
+    expect(finalCalls.every((call) => !("marker" in call) && !("patchHash" in call))).toBe(true);
     const held = fake.calls.slice(15);
     expect(held.map((call) => `${call.task.id}:${call.seed}:${call.task.network}`)).toEqual(
       HELD_OUT_TASKS.flatMap((task) => [0, 1, 2].map((seed) => `${task.id}:${seed}:${task.network}`)),
@@ -222,10 +253,16 @@ describe("optimization loop", () => {
     expect(result.heldOut).toEqual({ calls: 9, gatewayOnly: ["002"] });
     const heldOutFile = JSON.parse(readFileSync(join(out, "heldout/metrics.json"), "utf8")) as { comparison: string };
     expect(heldOutFile.comparison).toBe("control-not-run");
-    const controlTrace = readFileSync(finalCalls[0]?.runDir + "/trace.jsonl", "utf8");
-    const candidateTrace = readFileSync(finalCalls[1]?.runDir + "/trace.jsonl", "utf8");
-    expect(candidateTrace).toContain(marker);
-    expect(controlTrace).not.toContain(marker);
+    const candidateConfig = finalCalls[1]?.configPath ?? "";
+    const controlConfig = finalCalls[0]?.configPath ?? "";
+    const candidateHash = createHash("sha256").update(readFileSync(candidateConfig)).digest("hex");
+    const controlHash = createHash("sha256").update(readFileSync(controlConfig)).digest("hex");
+    const candidateSession = readFileSync(join(finalCalls[1]?.runDir ?? "", ".pi-sessions/session.jsonl"), "utf8");
+    const controlSession = readFileSync(join(finalCalls[0]?.runDir ?? "", ".pi-sessions/session.jsonl"), "utf8");
+    expect(candidateSession).toContain(`candidateConfigHash: ${candidateHash}`);
+    expect(controlSession).toContain(`candidateConfigHash: ${controlHash}`);
+    expect(candidateSession).not.toContain(`candidateConfigHash: ${controlHash}`);
+    expect(readFileSync(join(finalCalls[1]?.runDir ?? "", "trace.jsonl"), "utf8")).not.toContain("systemPrompt");
   });
 
   test("a run past 6×W is unscored and stays out of the reward mean", async () => {
@@ -255,6 +292,7 @@ describe("optimization loop", () => {
       mode: "dry-run",
       rounds: 1,
       seeds: [0, 1],
+      controlTraces: givenControl(out),
       roles: rejectingRoles(),
       executor,
     });
@@ -269,10 +307,12 @@ describe("optimization loop", () => {
 
   test("execute mode refuses to start without BASE_URL or a command", async () => {
     const out = outDir();
+    const trace = givenControl(out);
     await expect(runOptLoop({
       out,
       mode: "execute",
       rounds: 1,
+      controlTraces: trace,
       env: {},
       roles: stubOptRoles(),
       executorCommand: ["python3", "{driver}", "--task", "{task}", "--run-dir", "{runDir}"],
@@ -282,16 +322,181 @@ describe("optimization loop", () => {
       out: outDir(),
       mode: "execute",
       rounds: 1,
+      controlTraces: trace,
       env: { BASE_URL: "https://example.test/v1" },
       roles: stubOptRoles(),
     })).rejects.toThrow(/executor command/);
+  });
+
+  test("round 1 refuses to invent a prior trace", async () => {
+    const out = outDir();
+    await expect(runOptLoop({
+      out,
+      mode: "dry-run",
+      rounds: 1,
+      controlTraces: [],
+      roles: stubOptRoles(),
+      executor: fakeExecutor().executor,
+    })).rejects.toThrow(/control trace/);
+    await expect(runOptLoop({
+      out,
+      mode: "dry-run",
+      rounds: 1,
+      controlTraces: [join(out, "missing-control.jsonl")],
+      roles: stubOptRoles(),
+      executor: fakeExecutor().executor,
+    })).rejects.toThrow(/control trace is missing/);
+    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+  });
+
+  test("a path mentioned in the gap text is not a read of the trace", async () => {
+    const out = outDir();
+    const traces = givenControl(out);
+    const file = traces[0] ?? "";
+    await runOptLoop({
+      out,
+      mode: "dry-run",
+      rounds: 1,
+      controlTraces: traces,
+      executor: fakeExecutor().executor,
+      roles: {
+        ...stubOptRoles(),
+        async gap() {
+          return {
+            session: { jsonl: `${JSON.stringify({ type: "message", role: "assistant", text: `cited ${file}:1` })}\n` },
+            citations: [`${file}:1`],
+            knob: "agent-loop.maxSteps",
+            failureClass: "idle-loop",
+            summary: "early write then idle",
+          };
+        },
+        async review() {
+          return { session: { jsonl: "{\"type\":\"message\",\"text\":\"no\"}\n" }, accept: false, reason: "no" };
+        },
+      },
+    });
+    const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
+    expect(readFileSync(join(out, "round1/sessions/gap-finder.jsonl"), "utf8")).toContain(`${file}:1`);
+    expect(closure.gapCitedTrace).toBe(false);
+  });
+
+  test("feed-forward reads the reviewer session and ignores the loop's gap input", async () => {
+    const out = outDir();
+    const roles: OptRoles = {
+      async gap(input) {
+        if (input.round === 1) return stubOptRoles().gap(input);
+        const reason = input.previousReview?.reason ?? "";
+        return {
+          session: { jsonl: `${JSON.stringify({ type: "message", role: "assistant", text: `echo ${reason}` })}\n` },
+          citations: [],
+          knob: "agent-loop.maxSteps",
+          failureClass: "idle-loop",
+          summary: "early write then idle",
+        };
+      },
+      innovate: (input) => stubOptRoles().innovate(input),
+      async review() {
+        return { session: { jsonl: "{\"type\":\"message\",\"text\":\"still idle\"}\n" }, accept: false, reason: "still idle" };
+      },
+    };
+    await runOptLoop({
+      out,
+      mode: "dry-run",
+      rounds: 2,
+      controlTraces: givenControl(out),
+      roles,
+      executor: fakeExecutor().executor,
+    });
+    const gapInput = JSON.parse(readFileSync(join(out, "round2/gap-input.json"), "utf8")) as { previousReview: { reason: string } };
+    expect(gapInput.previousReview.reason).toBe("still idle");
+    expect(readFileSync(join(out, "round2/sessions/gap-finder.jsonl"), "utf8")).toContain("still idle");
+    const closure = JSON.parse(readFileSync(join(out, "round1/closure.json"), "utf8")) as { reviewFedForward: boolean };
+    expect(closure.reviewFedForward).toBe(false);
+  });
+
+  test("an executor that echoes request fields cannot activate or be accepted", async () => {
+    const out = outDir();
+    const calls: OptRunRequest[] = [];
+    const executor: OptExecutor = {
+      name: "echo",
+      async run(request) {
+        calls.push(request);
+        const bytes = readFileSync(request.configPath);
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        const config = JSON.parse(bytes.toString()) as { parts?: Record<string, unknown> };
+        const echoed = {
+          config: request.configPath,
+          model: request.model,
+          arm: request.arm,
+          seed: request.seed,
+          task: request.task.id,
+          tokenCap: request.tokenCap,
+        };
+        mkdirSync(join(request.runDir, "outputs"), { recursive: true });
+        const answer = join(request.runDir, "outputs", "answer.txt");
+        writeFileSync(answer, "echo\n");
+        const base = 1_700_000_000;
+        utimesSync(answer, base, base);
+        writeFileSync(join(request.runDir, "trace.jsonl"), `${JSON.stringify({
+          type: "run_start",
+          systemPrompt: JSON.stringify(echoed),
+          candidateConfigHash: hash,
+          effective: flattenParts(config.parts ?? {}),
+        })}\n`);
+        writeFileSync(join(request.runDir, "batch.log"), `${new Date((base + 1) * 1000).toISOString()} run 1 done\n`);
+        mkdirSync(join(request.runDir, "verifier"), { recursive: true });
+        writeFileSync(join(request.runDir, "verifier", "reward.txt"), "1\n");
+        mkdirSync(join(request.runDir, ".pi-sessions"), { recursive: true });
+        writeFileSync(join(request.runDir, ".pi-sessions/session.jsonl"), `${JSON.stringify({
+          type: "message",
+          message: { role: "system", content: JSON.stringify(echoed), timestamp: 0 },
+        })}\n`);
+        writeFileSync(join(request.runDir, "result.json"), `${JSON.stringify({
+          reward: 1, tokens: 10, wall_s: 1, timed_out: false, score_status: "scored",
+        })}\n`);
+        return {
+          reward: 1,
+          scoreStatus: "scored" as const,
+          tokens: 10,
+          wallS: 1,
+          timedOut: false,
+          tracePath: join(request.runDir, "trace.jsonl"),
+          outputsDir: join(request.runDir, "outputs"),
+          batchLogPath: join(request.runDir, "batch.log"),
+        };
+      },
+    };
+    const result = await runOptLoop({
+      out,
+      mode: "dry-run",
+      rounds: 1,
+      controlTraces: givenControl(out),
+      roles: stubOptRoles(),
+      executor,
+    });
+    expect(calls[0]).not.toHaveProperty("marker");
+    expect(calls[0]).not.toHaveProperty("patchHash");
+    const activation = JSON.parse(readFileSync(join(out, "round1/activation.json"), "utf8")) as {
+      patchActive: boolean;
+      runs: { hashInSystemMessage: boolean; candidateConfigHash: string | null }[];
+    };
+    expect(activation.runs.every((run) => run.candidateConfigHash !== null && run.hashInSystemMessage === false)).toBe(true);
+    expect(activation.patchActive).toBe(false);
+    expect(result.accepted).toBeNull();
+    expect(result.rounds[0]?.accepted).toBe(false);
+    expect(result.skippedFinal).toBe(true);
+    expect(result.finalBlock).toBeNull();
+    expect(result.heldOut).toBeNull();
+    expect(existsSync(join(out, "final/order.json"))).toBe(false);
+    expect(calls).toHaveLength(3);
   });
 });
 
 describe("optimize command", () => {
   test("dry-run finishes a round without a model process", async () => {
     const out = outDir();
-    const code = await main(["optimize", "--out", out, "--dry-run", "--rounds", "1"]);
+    const trace = givenControl(out)[0] ?? "";
+    const code = await main(["optimize", "--out", out, "--dry-run", "--rounds", "1", "--control-trace", trace]);
     expect(code).toBe(0);
     expect(existsSync(join(out, "round1/sessions/gap-finder.jsonl"))).toBe(true);
     expect(existsSync(join(out, "round1/patch.diff"))).toBe(true);
@@ -300,5 +505,159 @@ describe("optimize command", () => {
     expect(JSON.parse(readFileSync(join(out, "final/order.json"), "utf8"))).toEqual({
       order: ["C0", "X0", "C1", "X1", "C2", "X2"],
     });
+  });
+
+  test("dry-run without a control trace does not write a stub baseline", async () => {
+    const out = outDir();
+    const code = await main(["optimize", "--out", out, "--dry-run", "--rounds", "1"]);
+    expect(code).toBe(1);
+    expect(existsSync(join(out, "baseline/i014/seed0/trace.jsonl"))).toBe(false);
+  });
+});
+
+describe("optimize-one command", () => {
+  test("one honest candidate run can be active, and an echoing command cannot", async () => {
+    const out = outDir();
+    const control = join(out, "control.json");
+    const candidate = join(out, "candidate.json");
+    writeFileSync(control, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 25 } } })}\n`);
+    writeFileSync(candidate, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 24 } } })}\n`);
+    const honest = join(out, "honest.mjs");
+    writeFileSync(honest, `
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const run = get("--run-dir");
+const bytes = readFileSync(get("--config"));
+const hash = createHash("sha256").update(bytes).digest("hex");
+const parts = JSON.parse(bytes.toString()).parts ?? {};
+const effective = {};
+for (const [part, value] of Object.entries(parts)) {
+  for (const [leaf, item] of Object.entries(value)) effective[part + "." + leaf] = item;
+}
+mkdirSync(join(run, "outputs"), { recursive: true });
+const answer = join(run, "outputs", "answer.txt");
+writeFileSync(answer, "ok\\n");
+utimesSync(answer, 1700000000, 1700000000);
+writeFileSync(join(run, "trace.jsonl"), JSON.stringify({ type: "run_start", candidateConfigHash: hash, effective }) + "\\n");
+writeFileSync(join(run, "batch.log"), "2026-10-21T00:00:01.000Z run 1 done\\n");
+mkdirSync(join(run, "verifier"), { recursive: true });
+writeFileSync(join(run, "verifier", "reward.txt"), "1\\n");
+mkdirSync(join(run, ".pi-sessions"), { recursive: true });
+const preamble = "\\n\\n### Loaded candidate config\\ncandidateConfigHash: " + hash + "\\n";
+writeFileSync(join(run, ".pi-sessions", "session.jsonl"), JSON.stringify({
+  type: "message",
+  message: { role: "system", content: "", sections: { preamble }, timestamp: 0 },
+}) + "\\n");
+writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored" }) + "\\n");
+`);
+    const previous = process.env.BASE_URL;
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    try {
+      const code = await main([
+        "optimize-one",
+        "--out", out,
+        "--config", candidate,
+        "--control-config", control,
+        "--knob", "agent-loop.maxSteps",
+        "--seed", "0",
+        "--executor-cmd", JSON.stringify([process.execPath, honest, "--task", "{taskPath}", "--seed", "{seed}", "--arm", "{arm}", "--config", "{config}", "--run-dir", "{runDir}", "--model", "{model}"]),
+      ]);
+      expect(code).toBe(0);
+      const saved = JSON.parse(readFileSync(join(out, "once/activation.json"), "utf8")) as { patchActive: boolean };
+      expect(saved.patchActive).toBe(true);
+      expect(existsSync(join(out, "final/order.json"))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous;
+    }
+
+    const echoOut = outDir();
+    const echoScript = join(echoOut, "echo.mjs");
+    writeFileSync(echoScript, `
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const run = get("--run-dir");
+const echoed = args.join(" ");
+mkdirSync(join(run, "outputs"), { recursive: true });
+const answer = join(run, "outputs", "answer.txt");
+writeFileSync(answer, "echo\\n");
+utimesSync(answer, 1700000000, 1700000000);
+writeFileSync(join(run, "trace.jsonl"), JSON.stringify({ type: "run_start", systemPrompt: echoed, candidateConfigHash: echoed, effective: {} }) + "\\n");
+writeFileSync(join(run, "batch.log"), "2026-10-21T00:00:01.000Z run 1 done\\n");
+mkdirSync(join(run, "verifier"), { recursive: true });
+writeFileSync(join(run, "verifier", "reward.txt"), "1\\n");
+mkdirSync(join(run, ".pi-sessions"), { recursive: true });
+writeFileSync(join(run, ".pi-sessions", "session.jsonl"), JSON.stringify({
+  type: "message",
+  message: { role: "system", content: echoed, timestamp: 0 },
+}) + "\\n");
+writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored" }) + "\\n");
+`);
+    writeFileSync(join(echoOut, "control.json"), readFileSync(control));
+    writeFileSync(join(echoOut, "candidate.json"), readFileSync(candidate));
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    try {
+      const code = await main([
+        "optimize-one",
+        "--out", echoOut,
+        "--config", join(echoOut, "candidate.json"),
+        "--control-config", join(echoOut, "control.json"),
+        "--knob", "agent-loop.maxSteps",
+        "--executor-cmd", JSON.stringify([process.execPath, echoScript, "--task", "{taskPath}", "--config", "{config}", "--run-dir", "{runDir}", "--model", "{model}"]),
+      ]);
+      expect(code).toBe(1);
+      const saved = JSON.parse(readFileSync(join(echoOut, "once/activation.json"), "utf8")) as { patchActive: boolean };
+      expect(saved.patchActive).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous;
+    }
+  });
+
+  test("the direct once helper does not run the final block", async () => {
+    const out = outDir();
+    const control = join(out, "control.json");
+    const candidate = join(out, "candidate.json");
+    writeFileSync(control, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 25 } } })}\n`);
+    writeFileSync(candidate, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 24 } } })}\n`);
+    const result = await runOptOnce({
+      out,
+      configPath: candidate,
+      controlConfigPath: control,
+      knob: "agent-loop.maxSteps",
+      seed: 0,
+      executor: {
+        name: "honest",
+        async run(request) {
+          writeRunArtifacts(request, {
+            reward: 1,
+            tokens: 10,
+            wallS: 1,
+            timedOut: false,
+            tWrite: 1_700_000_000,
+            tEnd: 1_700_000_001,
+            assistantTs: [],
+          });
+          return {
+            reward: 1,
+            scoreStatus: "scored",
+            tokens: 10,
+            wallS: 1,
+            timedOut: false,
+            tracePath: join(request.runDir, "trace.jsonl"),
+            outputsDir: join(request.runDir, "outputs"),
+            batchLogPath: join(request.runDir, "batch.log"),
+          };
+        },
+      },
+    });
+    expect(result.patchActive).toBe(true);
+    expect(existsSync(join(out, "final/order.json"))).toBe(false);
+    expect(existsSync(join(out, "round1"))).toBe(false);
   });
 });

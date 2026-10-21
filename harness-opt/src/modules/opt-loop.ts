@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { inspectRunActivation, sha256File, type ActivationInspection } from "./activation";
 import { assertNoHeldOutLeak } from "./proposer";
 import { DEFAULT_EWI_THRESHOLD_SEC, measureRunEwi, type EwiMetrics } from "./ewi";
 import {
@@ -60,6 +61,8 @@ export interface GapCall {
   readonly round: number;
   readonly traces: readonly TraceHint[];
   readonly previousReview: ReviewNote | null;
+  /** Previous reviewer Pi session. The next gap has to read this file. */
+  readonly previousReviewSession: string | null;
 }
 
 export interface GapTurn {
@@ -126,6 +129,8 @@ export interface OptLoopOptions {
   readonly ewiThresholdSec?: number;
   readonly model?: string;
   readonly mode: "dry-run" | "execute";
+  /** Real control-arm trace files for round 1. The loop does not invent one. */
+  readonly controlTraces: readonly string[];
   readonly roles?: OptRoles;
   readonly executor?: OptExecutor;
   readonly executorCommand?: readonly string[];
@@ -137,7 +142,6 @@ export interface OptLoopOptions {
 export interface AcceptedCandidate {
   readonly round: number;
   readonly patchHash: string;
-  readonly marker: string;
   readonly configPath: string;
   readonly knob: string;
   readonly knobValue: unknown;
@@ -174,6 +178,7 @@ interface ScoredRun {
   readonly wallS: number;
   readonly timedOut: boolean;
   readonly ewi: EwiMetrics;
+  readonly runDir: string;
   readonly tracePath: string;
 }
 
@@ -199,33 +204,36 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles() : undefined);
   if (!roles) throw new Error("execute mode needs roles");
   const executor = options.executor ?? executorFor(options, env);
+  const controlTraces = requireControlTraces(options.controlTraces);
   const now = options.now ?? (() => new Date());
   mkdirSync(options.out, { recursive: true });
 
   const control = controlConfig();
   const controlPath = join(options.out, "control", "config.json");
   writeJson(controlPath, control);
-  const controlSha = sha256(readFileSync(controlPath));
-  const baseline = "baseline/i014/seed0/trace.jsonl";
-  writeText(join(options.out, baseline), `${JSON.stringify({ type: "run_start", source: "protocol-baseline" })}\n`);
+  const controlSha = sha256File(controlPath);
 
   const tried: string[] = [];
   let accepted: AcceptedCandidate | null = null;
-  let traces: TraceHint[] = [{ file: baseline, line: 1 }];
+  let traces: TraceHint[] = controlTraces.map((file) => ({ file, line: 1 }));
   let previousReview: ReviewNote | null = null;
+  let previousReviewSession: string | null = null;
   const roundSummaries: OptLoopResult["rounds"][number][] = [];
 
   for (let round = 1; round <= rounds; round += 1) {
     const started = now();
-    const gapInput: GapCall = { round, traces, previousReview };
+    const gapInput: GapCall = { round, traces, previousReview, previousReviewSession };
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
-    if (previousReview && round > 1) {
-      updateFedForward(options.out, round - 1, previousReview.reason);
-    }
     const gap = await roles.gap(gapInput);
     writeSession(options.out, round, "gap-finder", gap.session.jsonl);
-    const gapCitedTrace = traces.some((hint) => gap.session.jsonl.includes(`${hint.file}:${hint.line}`));
+    const gapSession = readFileSync(join(options.out, `round${round}`, "sessions", "gap-finder.jsonl"), "utf8");
+    const gapCitedTrace = citedByRead(gapSession, traces.map((hint) => hint.file), options.out);
+    if (round > 1 && previousReviewSession) {
+      const fed = citedByRead(gapSession, [previousReviewSession], options.out);
+      const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
+      writeClosure(options.out, round - 1, { ...prior, reviewFedForward: fed });
+    }
 
     const innovateInput: InnovateCall = {
       round,
@@ -253,6 +261,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: true, patchHash: null, ewiSeeds: [] });
       previousReview = { accept: false, reason: note };
+      previousReviewSession = join(options.out, `round${round}`, "sessions", "reviewer-gate.jsonl");
       continue;
     }
 
@@ -263,7 +272,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const diffPath = join(options.out, `round${round}`, "patch.diff");
     writeText(diffPath, diff);
     const patchHash = sha256(readFileSync(diffPath));
-    const marker = `harness-opt-patch:${patchHash}`;
     const knobValue = valueAt(candidate, gap.knob);
     const knobMatched = knobValue !== undefined && knobValue !== valueAt(control, gap.knob);
     tried.push(proposed.summary);
@@ -277,17 +285,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         configPath,
         runDir: join(options.out, `round${round}`, "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
         model,
-        patchHash,
-        marker,
         tokenCap: tokenCap(DEV_TASK),
       }, threshold));
     }
     const activation = activationRecord({
       runs,
-      marker,
       patchHash,
       controlSha,
-      candidateSha: sha256(readFileSync(configPath)),
+      candidateSha: sha256File(configPath),
       knob: gap.knob,
       knobValue,
     });
@@ -316,14 +321,16 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       reviewFedForward: null,
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
-    if (verdict.accept) {
-      accepted = { round, patchHash, marker, configPath, knob: gap.knob, knobValue };
+    const take = verdict.accept && activation.patchActive;
+    if (take) {
+      accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
     }
     previousReview = { accept: verdict.accept, reason: verdict.reason };
+    previousReviewSession = join(options.out, `round${round}`, "sessions", "reviewer-gate.jsonl");
     traces = runs.map((run) => ({ file: relativeTo(options.out, run.tracePath), line: 1 }));
     roundSummaries.push({
       round,
-      accepted: verdict.accept,
+      accepted: take,
       duplicate: false,
       patchHash,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
@@ -355,8 +362,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       configPath: controlPath,
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "control"),
       model,
-      patchHash: "",
-      marker: "",
       tokenCap: tokenCap(DEV_TASK),
     }, threshold));
     order.push(`X${seed}`);
@@ -367,8 +372,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       configPath: accepted.configPath,
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
       model,
-      patchHash: accepted.patchHash,
-      marker: accepted.marker,
       tokenCap: tokenCap(DEV_TASK),
     }, threshold));
   }
@@ -386,8 +389,6 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         configPath: accepted.configPath,
         runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
         model,
-        patchHash: accepted.patchHash,
-        marker: accepted.marker,
         tokenCap: tokenCap(task),
       }, threshold));
     }
@@ -416,15 +417,88 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   return result;
 }
 
+export interface OptOnceOptions {
+  readonly out: string;
+  readonly configPath: string;
+  readonly controlConfigPath: string;
+  readonly knob: string;
+  readonly seed?: number;
+  readonly task?: OptTask;
+  readonly model?: string;
+  readonly executor: OptExecutor;
+}
+
+export interface OptOnceResult {
+  readonly model: string;
+  readonly seed: number;
+  readonly runDir: string;
+  readonly patchActive: boolean;
+  readonly candidateConfigSha: string;
+  readonly controlConfigSha: string;
+  readonly activation: ActivationInspection & { readonly seed: number };
+}
+
+/** One candidate seed through the pluggable executor. Not the prereg final comparison. */
+export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult> {
+  const seed = options.seed ?? 0;
+  if (!Number.isInteger(seed) || seed < 0) throw new Error("seed must be a non-negative integer");
+  if (!existsSync(options.configPath) || !statSync(options.configPath).isFile()) {
+    throw new Error(`candidate config is missing: ${options.configPath}`);
+  }
+  if (!existsSync(options.controlConfigPath) || !statSync(options.controlConfigPath).isFile()) {
+    throw new Error(`control config is missing: ${options.controlConfigPath}`);
+  }
+  const task = options.task ?? DEV_TASK;
+  const model = options.model ?? OPT_MODEL;
+  const runDir = join(options.out, "once", task.id, `seed${seed}`, "candidate");
+  mkdirSync(runDir, { recursive: true });
+  const request: OptRunRequest = {
+    task,
+    seed,
+    arm: "candidate",
+    configPath: options.configPath,
+    runDir,
+    model,
+    tokenCap: tokenCap(task),
+  };
+  await options.executor.run(request);
+  const candidateSha = sha256File(options.configPath);
+  const controlSha = sha256File(options.controlConfigPath);
+  const knobValue = valueAt(JSON.parse(readFileSync(options.configPath, "utf8")) as ConfigFile, options.knob);
+  const activation = {
+    seed,
+    ...inspectRunActivation({
+      runDir,
+      tracePath: join(runDir, "trace.jsonl"),
+      candidateSha,
+      controlSha,
+      knob: options.knob,
+      knobValue,
+    }),
+  };
+  const result: OptOnceResult = {
+    model,
+    seed,
+    runDir,
+    patchActive: activation.active,
+    candidateConfigSha: candidateSha,
+    controlConfigSha: controlSha,
+    activation,
+  };
+  writeJson(join(options.out, "once", "activation.json"), result);
+  return result;
+}
+
 export function stubOptRoles(): OptRoles {
   return {
     async gap(input) {
-      const hint = input.traces[0];
-      const cite = hint ? `${hint.file}:${hint.line}` : "baseline/i014/seed0/trace.jsonl:1";
+      const files = input.traces.map((hint) => hint.file);
+      if (input.previousReviewSession) files.push(input.previousReviewSession);
+      const reads = files.map((file, index) => toolRead(file, index)).join("");
       const prior = input.previousReview ? ` previous ${input.previousReview.reason}` : "";
       return {
-        session: { jsonl: sessionLines("gap-finder", `cited ${cite} knob agent-loop.maxSteps${prior}`) },
-        citations: [cite],
+        session: { jsonl: `${sessionLines("gap-finder", `knob agent-loop.maxSteps${prior}`)}${reads}` },
+        citations: files,
         knob: "agent-loop.maxSteps",
         failureClass: "idle-loop",
         summary: "early write then idle",
@@ -493,6 +567,7 @@ async function executeScored(executor: OptExecutor, request: OptRunRequest, thre
     wallS: observation.wallS,
     timedOut: observation.timedOut,
     ewi,
+    runDir: request.runDir,
     tracePath: observation.tracePath,
   };
 }
@@ -510,7 +585,6 @@ function readReward(runDir: string): { readonly reward: number | null; readonly 
 
 function activationRecord(input: {
   readonly runs: readonly ScoredRun[];
-  readonly marker: string;
   readonly patchHash: string;
   readonly controlSha: string;
   readonly candidateSha: string;
@@ -518,58 +592,31 @@ function activationRecord(input: {
   readonly knobValue: unknown;
 }): {
   readonly patchHash: string;
-  readonly marker: string;
   readonly controlConfigSha: string;
   readonly candidateConfigSha: string;
   readonly differsFromControl: boolean;
   readonly patchActive: boolean;
-  readonly runs: readonly {
-    readonly seed: number;
-    readonly tracePath: string;
-    readonly candidateConfigHash: string | null;
-    readonly markerInSystemPrompt: boolean;
-    readonly effectiveKnob: unknown;
-    readonly active: boolean;
-  }[];
+  readonly runs: readonly (ActivationInspection & { readonly seed: number })[];
 } {
-  const runs = input.runs.map((run) => {
-    const start = readRunStart(run.tracePath);
-    const prompt = typeof start?.systemPrompt === "string" ? start.systemPrompt : "";
-    const hash = typeof start?.candidateConfigHash === "string" ? start.candidateConfigHash : null;
-    const effective = start?.effective;
-    const effectiveKnob = effective && typeof effective === "object" ? (effective as Record<string, unknown>)[input.knob] : undefined;
-    const markerInSystemPrompt = input.marker !== "" && prompt.includes(input.marker);
-    const active = markerInSystemPrompt
-      && hash === input.candidateSha
-      && input.candidateSha !== input.controlSha
-      && sameValue(effectiveKnob, input.knobValue);
-    return {
-      seed: run.seed,
+  const runs = input.runs.map((run) => ({
+    seed: run.seed,
+    ...inspectRunActivation({
+      runDir: run.runDir,
       tracePath: run.tracePath,
-      candidateConfigHash: hash,
-      markerInSystemPrompt,
-      effectiveKnob,
-      active,
-    };
-  });
+      candidateSha: input.candidateSha,
+      controlSha: input.controlSha,
+      knob: input.knob,
+      knobValue: input.knobValue,
+    }),
+  }));
   return {
     patchHash: input.patchHash,
-    marker: input.marker,
     controlConfigSha: input.controlSha,
     candidateConfigSha: input.candidateSha,
     differsFromControl: input.candidateSha !== input.controlSha,
-    patchActive: runs.every((run) => run.active),
+    patchActive: runs.length > 0 && runs.every((run) => run.active),
     runs,
   };
-}
-
-function readRunStart(tracePath: string): { readonly candidateConfigHash?: unknown; readonly systemPrompt?: unknown; readonly effective?: unknown } | null {
-  if (!existsSync(tracePath)) throw new Error(`patch activation is unreadable: ${tracePath}`);
-  const line = readFileSync(tracePath, "utf8").split("\n").find((item) => item.trim() !== "");
-  if (!line) throw new Error(`patch activation is unreadable: ${tracePath}`);
-  const parsed = JSON.parse(line) as { type?: unknown; candidateConfigHash?: unknown; systemPrompt?: unknown; effective?: unknown };
-  if (parsed.type !== "run_start") throw new Error(`patch activation is unreadable: ${tracePath}`);
-  return parsed;
 }
 
 function summarize(runs: readonly ScoredRun[], threshold: number): {
@@ -639,10 +686,6 @@ function valueAt(config: ConfigFile, knob: string): unknown {
   return current;
 }
 
-function sameValue(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 export function unifiedDiff(fromName: string, fromText: string, toName: string, toText: string): string {
   const from = linesOf(fromText);
   const to = linesOf(toText);
@@ -685,15 +728,69 @@ function writeClosure(out: string, round: number, record: ClosureRecord): void {
   });
 }
 
-function updateFedForward(out: string, round: number, reason: string): void {
-  const file = join(out, `round${round}`, "closure.json");
-  if (!existsSync(file)) return;
-  const prior = JSON.parse(readFileSync(file, "utf8")) as ClosureRecord;
-  const gapInput = JSON.parse(readFileSync(join(out, `round${round + 1}`, "gap-input.json"), "utf8")) as {
-    previousReview?: { reason?: string };
-  };
-  const fed = gapInput.previousReview?.reason === reason;
-  writeClosure(out, round, { ...prior, reviewFedForward: fed });
+function requireControlTraces(traces: readonly string[] | undefined): string[] {
+  if (!traces || traces.length === 0) throw new Error("round 1 needs control trace paths");
+  for (const file of traces) {
+    if (!existsSync(file) || !statSync(file).isFile()) throw new Error(`control trace is missing: ${file}`);
+  }
+  return [...traces];
+}
+
+function citedByRead(jsonl: string, files: readonly string[], root: string): boolean {
+  if (files.length === 0) return false;
+  const reads = readToolPaths(jsonl);
+  return files.every((file) => reads.some((item) => sameFile(root, item, file)));
+}
+
+function readToolPaths(jsonl: string): string[] {
+  const paths: string[] = [];
+  for (const raw of jsonl.split("\n")) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const message = entry && typeof entry === "object" ? (entry as { message?: unknown }).message : undefined;
+    if (!message || typeof message !== "object") continue;
+    const record = message as { role?: unknown; content?: unknown };
+    if (record.role !== "assistant" || !Array.isArray(record.content)) continue;
+    for (const block of record.content) {
+      if (!block || typeof block !== "object") continue;
+      const tool = block as { type?: unknown; name?: unknown; arguments?: unknown };
+      if (tool.type !== "toolCall" || tool.name !== "read" || !tool.arguments || typeof tool.arguments !== "object") continue;
+      const path = (tool.arguments as { path?: unknown }).path;
+      if (typeof path === "string" && path !== "") paths.push(path);
+    }
+  }
+  return paths;
+}
+
+function sameFile(root: string, left: string, right: string): boolean {
+  const a = resolve(root, left);
+  const b = resolve(root, right);
+  if (a === b) return true;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+function toolRead(file: string, index: number): string {
+  return `${JSON.stringify({
+    type: "message",
+    id: `r${index}`,
+    parentId: null,
+    timestamp: "2026-10-21T00:00:00.000Z",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: `c${index}`, name: "read", arguments: { path: file } }],
+      timestamp: 0,
+    },
+  })}\n`;
 }
 
 function writeNotes(
