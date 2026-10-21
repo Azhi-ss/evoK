@@ -9,6 +9,13 @@ import re
 from pathlib import Path
 
 PREFIX = re.compile(r"^(\d+)\|(.*)$")
+# pi-coding-agent dist/core/tools/read.js: one trailing truncation notice.
+_READ_NOTICE_BODY = (
+    r"\n\n\[(Showing lines \d+-\d+ of \d+(?: \([^)]*\))?|\d+ more lines in file)"
+    r"\. Use offset=\d+ to continue\.\]"
+)
+_READ_NOTICE_END = re.compile(_READ_NOTICE_BODY + r"\s*$")
+_READ_NOTICE_ANY = re.compile(_READ_NOTICE_BODY)
 READ_TOOLS = frozenset({"read"})
 INFRA_CODES = (
     "usage_missing",
@@ -249,6 +256,17 @@ def patch_active(ledger: Ledger, mounted_sha: str) -> dict:
     return {"active": active, "requests": len(reqs)}
 
 
+def _strip_read_notice(text: str) -> str:
+    """Drop Pi's read-tool truncation notice when it is exactly one, at the end."""
+    hits = list(_READ_NOTICE_ANY.finditer(text))
+    if len(hits) != 1:
+        return text
+    end = _READ_NOTICE_END.search(text)
+    if end is None or end.start() != hits[0].start():
+        return text
+    return text[:end.start()]
+
+
 def strip_line_prefixes(text: str) -> str:
     """If every line is N|rest, strip that prefix. Mixed lines stay as they are."""
     lines = text.splitlines()
@@ -357,7 +375,10 @@ def read_evidence(role_ledger, host_file_path, expected_file_sha, cited_lines=No
             raw = ledger.tool_text(tool.get("sha256"))
             if raw is None:
                 continue
-            segment = strip_line_prefixes(raw)
+            stripped = _strip_read_notice(raw)
+            if stripped != raw and stripped == "":
+                continue
+            segment = strip_line_prefixes(stripped)
             span = _segment_span(segment, host_text)
             if span is None:
                 continue

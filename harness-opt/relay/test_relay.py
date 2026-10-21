@@ -866,6 +866,63 @@ def _file(path: Path, text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+_PI_TRUNCATE = (
+    Path(__file__).resolve().parents[2]
+    / "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/truncate.js"
+)
+# Same assembly as pi-coding-agent dist/core/tools/read.js (truncation notice).
+_PI_READ_CHUNK_JS = r"""
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { truncateHead, formatSize, DEFAULT_MAX_BYTES } = await import(pathToFileURL(process.env.PI_TRUNCATE).href);
+const textContent = readFileSync(0, "utf8");
+const offset = process.env.OFFSET ? Number(process.env.OFFSET) : undefined;
+const allLines = textContent.split("\n");
+const totalFileLines = allLines.length;
+const startLine = offset ? Math.max(0, offset - 1) : 0;
+const startLineDisplay = startLine + 1;
+const selectedContent = allLines.slice(startLine).join("\n");
+const truncation = truncateHead(selectedContent);
+if (!truncation.truncated || truncation.firstLineExceedsLimit) {
+  throw new Error("expected a truncated read");
+}
+const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
+const nextOffset = endLineDisplay + 1;
+let outputText = truncation.content;
+if (truncation.truncatedBy === "lines") {
+  outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
+} else {
+  outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+}
+process.stdout.write(JSON.stringify({
+  outputText,
+  startLine: startLineDisplay,
+  endLine: endLineDisplay,
+  truncatedBy: truncation.truncatedBy,
+}));
+"""
+
+
+def _pi_read_chunk(text: str, offset: int | None = None) -> dict:
+    if not _PI_TRUNCATE.is_file():
+        raise AssertionError(f"pi truncate.js missing: {_PI_TRUNCATE}")
+    env = os.environ.copy()
+    env["PI_TRUNCATE"] = str(_PI_TRUNCATE)
+    if offset is None:
+        env.pop("OFFSET", None)
+    else:
+        env["OFFSET"] = str(offset)
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", _PI_READ_CHUNK_JS],
+        input=text.encode(),
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return json.loads(proc.stdout)
+
+
 def _read_ledger(path: Path, body: str, *, tool="read", seq=1, conclusion=None, run="ee" * 16):
     ledger = Ledger()
     ledger.run_id = run
@@ -944,6 +1001,55 @@ class EvidenceCase(unittest.TestCase):
         self.assertLess(len(short_text.encode()), 200)
         self.assertFalse(read_evidence(_read_ledger(short, "only a short file\n"), short, short_sha)["ok"])
         self.assertTrue(read_evidence(_read_ledger(short, short_text), short, short_sha)["ok"])
+
+    def test_pi_chunk_notice_strips_for_first_and_middle(self):
+        lines = [f"{i:05d}-" + ("x" * 80) for i in range(1, 1401)]
+        text = "\n".join(lines) + "\n"
+        self.assertGreater(len(text.encode()), 50 * 1024)
+        host = self.root / "wide.txt"
+        digest = _file(host, text)
+        file_lines = text.splitlines()
+        for offset in (None, 400):
+            chunk = _pi_read_chunk(text, offset)
+            self.assertEqual(chunk["truncatedBy"], "bytes")
+            body = chunk["outputText"]
+            self.assertIn("(50.0KB limit)", body)
+            self.assertNotIn("[Showing lines", text)
+            got = read_evidence(_read_ledger(host, body), host, digest)
+            self.assertTrue(got["ok"], got)
+            self.assertEqual((got["startLine"], got["endLine"]), (chunk["startLine"], chunk["endLine"]))
+            span = "\n".join(file_lines[got["startLine"] - 1:got["endLine"]])
+            self.assertNotIn("Showing lines", span)
+            self.assertNotIn("more lines in file", span)
+            self.assertTrue(body.startswith(span))
+            self.assertGreater(len(body), len(span))
+
+    def test_altered_or_misplaced_read_notice_is_rejected(self):
+        lines = [f"{i:05d}-" + ("y" * 80) for i in range(1, 1401)]
+        text = "\n".join(lines) + "\n"
+        host = self.root / "wide.txt"
+        digest = _file(host, text)
+        body = _pi_read_chunk(text)["outputText"]
+        at = body.rfind("\n\n[")
+        content, notice = body[:at], body[at:]
+        self.assertRegex(
+            notice,
+            r"\n\n\[Showing lines \d+-\d+ of \d+ \(50\.0KB limit\)\. Use offset=\d+ to continue\.\]\Z",
+        )
+        self.assertTrue(read_evidence(_read_ledger(host, content + notice), host, digest)["ok"])
+
+        def rejected(tool_text: str) -> None:
+            got = read_evidence(_read_ledger(host, tool_text), host, digest)
+            self.assertFalse(got["ok"])
+            self.assertEqual(got["reason"], "no_segment")
+
+        rejected(content + notice.replace("Showing lines", "Showing rows", 1))
+        rejected(content + notice.replace("to continue", "to  continue", 1))
+        rejected(content + notice.replace(" of ", " of x", 1))
+        parts = content.split("\n")
+        rejected("\n".join(parts[:20]) + notice + "\n" + "\n".join(parts[20:]))
+        rejected(content + notice + notice)
+        rejected(notice)
 
     def test_08_citation_is_per_run_and_innovator_checks_the_patch(self):
         host = self.root / "gap.txt"
