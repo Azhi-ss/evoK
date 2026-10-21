@@ -36,7 +36,7 @@ def plant_request(log_path, run_id, system_text, *, usage=None, boot_id="plant-b
     append_jsonl(path, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
 
 
-def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None) -> None:
+def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None, writer=None) -> None:
     path = Path(log_path)
     text = Path(host_file).read_text(encoding="utf-8")
     sha = hashlib.sha256(text.encode()).hexdigest()
@@ -44,18 +44,25 @@ def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None) -> No
     tool.parent.mkdir(parents=True, exist_ok=True)
     tool.write_text(text, encoding="utf-8")
     ts, iso = _stamp()
-    if not path.is_file():
-        append_jsonl(path, {"type": "relay_start", "bootId": "plant-boot", "pid": 1, "relaySha": relay_code_sha(), "ts": ts, "ts_iso": iso})
-        append_jsonl(path, {"type": "open", "runId": run_id, "kind": "role:gap-finder", "expectedConfigSha": "", "ts": ts, "ts_iso": iso})
+
+    def emit(obj):
+        if writer is not None:
+            writer(obj)
+        else:
+            append_jsonl(path, obj)
+
+    if not path.is_file() and writer is None:
+        emit({"type": "relay_start", "bootId": "plant-boot", "pid": 1, "relaySha": relay_code_sha(), "ts": ts, "ts_iso": iso})
+        emit({"type": "open", "runId": run_id, "kind": "role:gap-finder", "expectedConfigSha": "", "ts": ts, "ts_iso": iso})
     existing = []
     if path.is_file():
         existing = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     reqs = [row for row in existing if row.get("type") == "req"]
-    if reqs and reqs[-1].get("seq") == seq and not reqs[-1].get("conclusion"):
+    if writer is None and reqs and reqs[-1].get("seq") == seq and not reqs[-1].get("conclusion"):
         reqs[-1]["toolResults"].append({"sha256": sha, "tool_call_id": f"c{len(reqs[-1]['toolResults'])}", "toolName": "read", "args": {"path": str(Path(host_file).resolve())}})
         _rewrite(path, existing)
         return
-    append_jsonl(path, {
+    emit({
         "type": "req",
         "seq": seq,
         "runId": run_id,
@@ -70,24 +77,31 @@ def plant_read(log_path, run_id, host_file, *, seq=1, conclusion_seq=None) -> No
         "toolResults": [{"sha256": sha, "tool_call_id": "c0", "toolName": "read", "args": {"path": str(Path(host_file).resolve())}}],
         **({"conclusion": True} if conclusion_seq == seq else {}),
     })
-    append_jsonl(path, {"type": "done", "seq": seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}, "role": "gap"})
+    emit({"type": "done", "seq": seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}, "role": "gap"})
     if conclusion_seq is not None and conclusion_seq != seq:
-        append_jsonl(path, {
+        emit({
             "type": "req", "seq": conclusion_seq, "runId": run_id, "ts_recv": ts, "ts_iso": iso, "bootId": "plant-boot",
             "reqSha": "0" * 64, "systemSha": "0" * 64, "systemConfigHashes": [], "stream": False, "streamPatched": False,
             "toolResults": [], "conclusion": True,
         })
-        append_jsonl(path, {"type": "done", "seq": conclusion_seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}, "role": "gap"})
+        emit({"type": "done", "seq": conclusion_seq, "ts_resp_end": ts, "ts_iso": iso, "respSha": "0" * 64, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}, "role": "gap"})
 
 
-def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1, assistant="") -> None:
+def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1, assistant="", writer=None) -> None:
     """One req/done pair. assistant is the conclusion JSON. Tests and dry-run only."""
     path = Path(log_path)
     ts, iso = _stamp()
-    if not path.is_file():
-        append_jsonl(path, {"type": "relay_start", "bootId": "plant-boot", "pid": 1, "relaySha": relay_code_sha(), "ts": ts, "ts_iso": iso})
-        append_jsonl(path, {"type": "open", "runId": run_id, "kind": f"role:{role}", "expectedConfigSha": "", "ts": ts, "ts_iso": iso})
-    append_jsonl(path, {
+
+    def emit(obj):
+        if writer is not None:
+            writer(obj)
+        else:
+            append_jsonl(path, obj)
+
+    if not path.is_file() and writer is None:
+        emit({"type": "relay_start", "bootId": "plant-boot", "pid": 1, "relaySha": relay_code_sha(), "ts": ts, "ts_iso": iso})
+        emit({"type": "open", "runId": run_id, "kind": f"role:{role}", "expectedConfigSha": "", "ts": ts, "ts_iso": iso})
+    emit({
         "type": "req", "seq": seq, "runId": run_id, "ts_recv": ts, "ts_iso": iso, "bootId": "plant-boot",
         "reqSha": resp_sha, "systemSha": "0" * 64, "systemConfigHashes": [], "stream": False,
         "streamPatched": False, "toolResults": [], "role": role, "round": round,
@@ -100,7 +114,7 @@ def plant_role_done(log_path, run_id, seq, resp_sha, role, round=1, assistant=""
     if assistant:
         done["assistant"] = assistant
         done["assistantSha"] = hashlib.sha256(assistant.encode()).hexdigest()
-    append_jsonl(path, done)
+    emit(done)
 
 
 def _rewrite(path: Path, rows) -> None:

@@ -465,8 +465,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     await relayRpc({ op: "open", runId: gapRelay.runId, kind: "role:gap-finder", expectedSha: controlSha });
     const gap = await roles.gap(gapInput);
-    await relayRpc({ op: "close", runId: gapRelay.runId });
-    const gapFault = roleRecordFault(gapRelay.relayLog, attestKey);
+    const gapReport = await closeRelay(gapRelay.runId);
+    const gapFault = gapReport.fault;
     if (gapFault) {
       faultRounds += 1;
       stopReason = gapFault;
@@ -534,25 +534,27 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
       await relayRpc({ op: "open", runId: innovatorRelay.runId, kind: "role:innovator", expectedSha: controlSha });
       const turn = await roles.innovate(innovateInput);
-      await relayRpc({ op: "close", runId: innovatorRelay.runId });
+      const innovatorReport = await closeRelay(innovatorRelay.runId);
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
-      const innovatorGate = roleRecordFault(innovatorRelay.relayLog, attestKey);
-      if (innovatorGate) {
-        innovatorFault = innovatorGate;
+      if (innovatorReport.fault) {
+        innovatorFault = innovatorReport.fault;
         break;
       }
-      const usage = roleCallUsage(innovatorRelay.relayLog);
-      if (usage.usageMissing) {
+      if (innovatorReport.refused === "readOnlyTokenCap") {
+        innovatorStop = "readOnlyTokenCap";
+        break;
+      }
+      if (innovatorReport.usageMissing) {
         innovatorFault = "usage_missing";
         break;
       }
-      readOnlyTotal += usage.tokens;
+      readOnlyTotal = innovatorReport.loopTokens;
       const opened = loopCap(round - 1);
       if (opened) {
         innovatorStop = opened;
         break;
       }
-      if (usage.tokens >= innovatorCap) capExcluded.push(`c${slot}`);
+      if (innovatorReport.refused === "innovatorCap" || innovatorReport.tokens >= innovatorCap) capExcluded.push(`c${slot}`);
       if (seen.has(turn.summary)) continue;
       seen.add(turn.summary);
       tried.push(turn.summary);
@@ -592,25 +594,29 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeJson(join(options.out, `round${round}`, "critic-input.json"), criticInput);
     await relayRpc({ op: "open", runId: criticRelay.runId, kind: "role:critic", expectedSha: controlSha });
     const criticTurn = await roles.critic(criticInput);
-    await relayRpc({ op: "close", runId: criticRelay.runId });
+    const criticReport = await closeRelay(criticRelay.runId);
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
-    const criticGate = roleRecordFault(criticRelay.relayLog, attestKey);
-    if (criticGate) {
+    if (criticReport.fault) {
       faultRounds += 1;
-      stopReason = criticGate;
+      stopReason = criticReport.fault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
-    const criticUsage = roleCallUsage(criticRelay.relayLog);
-    if (criticUsage.usageMissing) {
+    if (criticReport.refused === "readOnlyTokenCap") {
+      stopReason = "readOnlyTokenCap";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    if (criticReport.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
-    readOnlyTotal += criticUsage.tokens;
+    readOnlyTotal = criticReport.loopTokens;
     const afterCritic = loopCap(round - 1);
     if (afterCritic) {
       assignStop(afterCritic);
@@ -634,25 +640,29 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
     await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
     const rankerTurn = await roles.ranker(rankerInput);
-    await relayRpc({ op: "close", runId: rankerRelay.runId });
+    const rankerReport = await closeRelay(rankerRelay.runId);
     captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
-    const rankerGate = roleRecordFault(rankerRelay.relayLog, attestKey);
-    if (rankerGate) {
+    if (rankerReport.fault) {
       faultRounds += 1;
-      stopReason = rankerGate;
+      stopReason = rankerReport.fault;
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
-    const rankerUsage = roleCallUsage(rankerRelay.relayLog);
-    if (rankerUsage.usageMissing) {
+    if (rankerReport.refused === "readOnlyTokenCap") {
+      stopReason = "readOnlyTokenCap";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
+    if (rankerReport.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
       writeNotes(options.out, round, started, now(), threshold, null, controlSha);
       roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
       break;
     }
-    readOnlyTotal += rankerUsage.tokens;
+    readOnlyTotal = rankerReport.loopTokens;
     const budget = rankingBudget([
       ...hostedEvents(criticRelay.relayLog, "critic", round),
       ...hostedEvents(rankerRelay.relayLog, "ranker", round),
@@ -796,8 +806,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     await relayRpc({ op: "open", runId: reviewRelay.runId, kind: "role:reviewer", expectedSha: controlSha });
     const verdict = await roles.review(reviewInput);
-    await relayRpc({ op: "close", runId: reviewRelay.runId });
-    const reviewGate = roleRecordFault(reviewRelay.relayLog, attestKey);
+    const reviewReport = await closeRelay(reviewRelay.runId);
+    const reviewGate = reviewReport.fault;
     const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
     writeClosure(options.out, round, {
       round,
@@ -831,8 +841,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       });
       break;
     }
-    const reviewUsage = roleCallUsage(reviewRelay.relayLog);
-    if (reviewUsage.usageMissing) {
+    if (reviewReport.usageMissing) {
       faultRounds += 1;
       stopReason = "usage_missing";
       roundSummaries.push({
@@ -1030,7 +1039,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async innovate(input) {
       const maxSteps = 25 - input.round;
       const summary = `agent-loop.maxSteps=${maxSteps}`;
-      plantStubDone(input.baseUrl, "innovator", input.round, { summary });
+      await plantStubDone(input.baseUrl, "innovator", input.round, { summary });
       hostWriteSession(input.spawn, sessionLines("innovator", summary), key);
       return {
         session: { jsonl: "ignored-return\n" },
@@ -1041,7 +1050,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
     async critic(input) {
       const excluded: string[] = [];
       const body = { excluded };
-      plantStubDone(input.baseUrl, "critic", input.round, body);
+      await plantStubDone(input.baseUrl, "critic", input.round, body);
       hostWriteSession(input.spawn, sessionLines("critic", "critic"), key);
       return { session: { jsonl: "ignored-return\n" }, excluded };
     },
@@ -1050,7 +1059,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
         .filter((item) => !input.excluded.includes(item.id))
         .sort((left, right) => left.changedKeys - right.changedKeys || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))[0]?.id ?? "";
       const body = { winnerId };
-      plantStubDone(input.baseUrl, "ranker", input.round, body);
+      await plantStubDone(input.baseUrl, "ranker", input.round, body);
       hostWriteSession(input.spawn, sessionLines("ranker", winnerId), key);
       return { session: { jsonl: "ignored-return\n" }, winnerId };
     },
@@ -1058,7 +1067,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
       const accept = input.round === 1;
       const reason = accept ? "accept the idle cap" : "reject this candidate";
       const body = { accept, reason };
-      plantStubDone(input.baseUrl, "reviewer", input.round, body);
+      await plantStubDone(input.baseUrl, "reviewer", input.round, body);
       hostWriteSession(input.spawn, sessionLines("reviewer-gate", reason), key);
       return { session: { jsonl: "ignored-return\n" }, accept, reason };
     },
@@ -1507,29 +1516,65 @@ function bindConclusion(
 let activeRelay: RelayControl | null = null;
 let activeRelayRoot: string | null = null;
 
-async function relayRpc(msg: object): Promise<void> {
+interface RelayReport {
+  readonly fault: "usage_missing" | "attest_mismatch" | null;
+  readonly tokens: number;
+  readonly usageMissing: boolean;
+  readonly refused: "readOnlyTokenCap" | "innovatorCap" | null;
+  readonly loopTokens: number;
+}
+
+async function closeRelay(runId: string): Promise<RelayReport> {
+  const reply = await relayRpc({ op: "close", runId });
+  const fault = reply.fault === "usage_missing" || reply.fault === "attest_mismatch" ? reply.fault : null;
+  const refused = reply.refused === "readOnlyTokenCap" || reply.refused === "innovatorCap" ? reply.refused : null;
+  return {
+    fault,
+    tokens: typeof reply.tokens === "number" ? reply.tokens : 0,
+    usageMissing: reply.usageMissing === true,
+    refused,
+    loopTokens: typeof reply.loopTokens === "number" ? reply.loopTokens : 0,
+  };
+}
+
+async function relayRpc(msg: object): Promise<{ ok?: boolean; error?: string; fault?: unknown; tokens?: unknown; usageMissing?: unknown; refused?: unknown; loopTokens?: unknown }> {
   const ctl = activeRelay;
   if (!ctl) throw new Error("relay control is not running");
   const reply = await ctl.request(msg);
   if (reply.ok !== true) throw new Error(reply.error || "relay control failed");
+  return reply;
 }
 
-function plantStubDone(baseUrl: string, role: string, round: number, body: unknown): void {
-  const root = activeRelayRoot;
-  if (!root) throw new Error("relay control is not running");
+function plantStubDone(baseUrl: string, role: string, round: number, body: unknown): Promise<void> {
+  return relayPlantRole(baseUrl, role, round, body);
+}
+
+/** Dry-run / test record through the live relay, so the line is on the memory chain. */
+export async function relayPlantRole(baseUrl: string, role: string, round: number, body: unknown): Promise<void> {
+  await relayRpc({
+    op: "plant-role",
+    runId: runIdFromBase(baseUrl),
+    role,
+    round,
+    seq: 1,
+    assistant: JSON.stringify(body),
+  });
+}
+
+/** Host-side read evidence. The relay appends it; a role edit of the file still mismatches. */
+export async function relayPlantRead(baseUrl: string, files: readonly string[]): Promise<void> {
+  await relayRpc({ op: "plant-read", runId: runIdFromBase(baseUrl), files });
+}
+
+/** Append one JSON row through the relay process. */
+export async function relayRecord(baseUrl: string, row: unknown): Promise<void> {
+  await relayRpc({ op: "record", runId: runIdFromBase(baseUrl), row });
+}
+
+function runIdFromBase(baseUrl: string): string {
   const runId = baseUrl.split("/r/")[1]?.split("/")[0] ?? "";
-  const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
-  const proc = spawnSync("python3", [
-    script, "plant-role",
-    "--log", join(root, runId, "relay.jsonl"),
-    "--run-id", runId,
-    "--seq", "1",
-    "--resp-sha", sha256(JSON.stringify(body)),
-    "--assistant", JSON.stringify(body),
-    "--role", role,
-    "--round", String(round),
-  ], { encoding: "utf8" });
-  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "plant-role failed").trim());
+  if (!/^[0-9a-f]{32}$/.test(runId)) throw new Error("base url has no run id");
+  return runId;
 }
 
 function roleRecordFault(log: string, key: Buffer): "usage_missing" | "attest_mismatch" | null {
@@ -1580,7 +1625,7 @@ function ensureUpstreamKey(attestRoot: string, attestKeyFile: string, env: NodeJ
 
 class RelayControl {
   private readonly child: ChildProcessWithoutNullStreams;
-  private readonly queue: { resolve: (value: { ok?: boolean; error?: string }) => void; reject: (err: Error) => void }[] = [];
+  private readonly queue: { resolve: (value: { ok?: boolean; error?: string; fault?: unknown; tokens?: unknown; usageMissing?: unknown; refused?: unknown; loopTokens?: unknown }) => void; reject: (err: Error) => void }[] = [];
   private buf = "";
   private stderr = "";
   private dead: Error | null = null;
@@ -1612,7 +1657,7 @@ class RelayControl {
         const waiter = this.queue.shift();
         if (!waiter) continue;
         try {
-          waiter.resolve(JSON.parse(line) as { ok?: boolean; error?: string });
+          waiter.resolve(JSON.parse(line) as { ok?: boolean; error?: string; fault?: unknown; tokens?: unknown; usageMissing?: unknown; refused?: unknown; loopTokens?: unknown });
         } catch (err) {
           waiter.reject(err instanceof Error ? err : new Error(String(err)));
         }
@@ -1633,7 +1678,7 @@ class RelayControl {
     while (this.queue.length > 0) this.queue.shift()?.reject(this.dead);
   }
 
-  request(msg: object): Promise<{ ok?: boolean; error?: string }> {
+  request(msg: object): Promise<{ ok?: boolean; error?: string; fault?: unknown; tokens?: unknown; usageMissing?: unknown; refused?: unknown; loopTokens?: unknown }> {
     if (this.dead) return Promise.reject(this.dead);
     return new Promise((resolve, reject) => {
       this.queue.push({ resolve, reject });

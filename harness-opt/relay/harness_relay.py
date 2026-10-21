@@ -19,7 +19,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from canon import append_jsonl, canonical
+from canon import append_jsonl
+from ledger import _is_2xx, weight
+from loop_mode import INNOVATOR_CAP, READ_ONLY_TOKEN_CAP
 
 BIND_HOST = "10.204.0.1"
 UPSTREAM_URL = "https://newapi.ai-modeling.top/v1/chat/completions"
@@ -27,6 +29,7 @@ DEFAULT_LOG_ROOT = "/home/box/.harness-relay"
 RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
 COMPLETIONS = re.compile(r"^/r/([0-9a-f]{32})/v1/chat/completions$")
+READ_ONLY_KINDS = frozenset({"role:innovator", "role:critic", "role:ranker"})
 HERE = Path(__file__).resolve()
 TZ = timezone(timedelta(hours=9))
 
@@ -127,6 +130,10 @@ class Relay:
         self.relay_sha = relay_code_sha()
         self.open_id = None
         self.forwarded = []
+        # Rolling HMAC key. It lives only in this process and is never written.
+        self.mac_key = secrets.token_bytes(32)
+        self._chain = {}
+        self.loop_tokens = 0
         Path(self.log_root).mkdir(parents=True, exist_ok=True)
         os.chmod(self.log_root, 0o700)
 
@@ -184,48 +191,169 @@ class Relay:
         path = self.log_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
+        state = self._state(run_id)
+        state["kind"] = kind
         ts, iso = _stamp()
-        append_jsonl(path, {"type": "relay_start", "bootId": self.boot_id, "pid": self.pid, "relaySha": self.relay_sha, "ts": ts, "ts_iso": iso})
-        append_jsonl(path, {"type": "open", "runId": run_id, "kind": kind, "expectedConfigSha": expected_config_sha, "ts": ts, "ts_iso": iso})
+        self._append_obj(run_id, {"type": "relay_start", "bootId": self.boot_id, "pid": self.pid, "relaySha": self.relay_sha, "ts": ts, "ts_iso": iso})
+        self._append_obj(run_id, {"type": "open", "runId": run_id, "kind": kind, "expectedConfigSha": expected_config_sha, "ts": ts, "ts_iso": iso})
         self.open_id = run_id
 
-    def close_run(self, run_id: str) -> None:
-        """Append close, then HMAC the log bytes. An existing seal is left untouched."""
+    def close_run(self, run_id: str) -> dict:
+        """Seal the in-memory chain. A disk edit is a fault, not a new signature."""
         with self._lock:
-            self._close_run(run_id)
+            return self._close_run(run_id)
 
-    def _close_run(self, run_id: str) -> None:
+    def _close_run(self, run_id: str) -> dict:
         if not RUN_ID_RE.fullmatch(run_id or ""):
             raise RuntimeError("run id must be 32 hex")
         path = self.log_path(run_id)
         sig = self._seal_path(run_id)
-        if path.is_symlink() or sig.is_symlink() or sig.is_file():
+        if path.is_symlink() or sig.is_symlink():
             if self.open_id == run_id:
                 self.open_id = None
-            return
+            return self._fault_report("attest_mismatch")
+        if sig.is_file():
+            if self.open_id == run_id:
+                self.open_id = None
+            return self.report(run_id)
         if self.open_id is None:
             self._restore_open()
-        if not path.exists():
+        if not path.is_file():
             if self.open_id == run_id:
                 self.open_id = None
-            return
+            return self._fault_report("usage_missing")
         if self.open_id != run_id:
             raise RuntimeError("run is not open")
-        if not self._has_close(run_id):
+        state = self._chain.get(run_id)
+        if state is None or path.read_bytes() != state["body"]:
+            self.open_id = None
+            return self._fault_report("attest_mismatch")
+        if not any(row.get("type") == "close" for row in self._mem_rows(run_id)):
             ts, iso = _stamp()
-            append_jsonl(path, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
+            self._append_obj(run_id, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
         self.open_id = None
         self._write_seal(run_id)
+        return self.report(run_id)
+
+    def _state(self, run_id: str) -> dict:
+        state = self._chain.get(run_id)
+        if state is None:
+            state = {
+                "mac": b"",
+                "body": b"",
+                "tokens": 0,
+                "usage_missing": False,
+                "refused": None,
+                "kind": "",
+                "saw_done": False,
+            }
+            self._chain[run_id] = state
+        return state
+
+    def _append_obj(self, run_id: str, obj: dict) -> None:
+        """Write one line and extend the in-memory HMAC chain over those exact bytes."""
+        raw = append_jsonl(self.log_path(run_id), obj)
+        state = self._state(run_id)
+        state["mac"] = hmac.new(self.mac_key, state["mac"] + raw, hashlib.sha256).digest()
+        state["body"] += raw
+        self._account(state, obj)
+
+    def _account(self, state: dict, obj: dict) -> None:
+        if obj.get("type") != "done":
+            return
+        state["saw_done"] = True
+        err = obj.get("errClass")
+        if err in ("readOnlyTokenCap", "innovatorCap"):
+            state["refused"] = err
+            return
+        if not _is_2xx(obj):
+            return
+        usage = obj.get("usage")
+        if usage is None:
+            state["usage_missing"] = True
+            return
+        weighed = weight(usage)
+        if weighed is None:
+            state["usage_missing"] = True
+            return
+        state["tokens"] += weighed
+        if state.get("kind") in READ_ONLY_KINDS:
+            self.loop_tokens += weighed
+
+    def _mem_rows(self, run_id: str) -> list:
+        state = self._chain.get(run_id)
+        if not state or not state["body"]:
+            return []
+        return [json.loads(line) for line in state["body"].splitlines() if line.strip()]
+
+    def _fault_report(self, fault: str) -> dict:
+        return {
+            "ok": True,
+            "fault": fault,
+            "tokens": 0,
+            "usageMissing": fault == "usage_missing",
+            "refused": None,
+            "loopTokens": self.loop_tokens,
+        }
+
+    def report(self, run_id: str) -> dict:
+        """Token totals from memory. Disk that is not the chain is attest_mismatch."""
+        path = self.log_path(run_id)
+        state = self._chain.get(run_id)
+        if path.is_symlink():
+            return self._fault_report("attest_mismatch")
+        if not path.is_file():
+            return self._fault_report("usage_missing")
+        if state is None or path.read_bytes() != state["body"]:
+            return self._fault_report("attest_mismatch")
+        return {
+            "ok": True,
+            "fault": None,
+            "tokens": state["tokens"],
+            "usageMissing": state["usage_missing"] or not state["saw_done"],
+            "refused": state["refused"],
+            "loopTokens": self.loop_tokens,
+        }
+
+    def record(self, run_id: str, row: dict) -> None:
+        """Host control-plane append. The role HTTP path cannot call this."""
+        with self._lock:
+            if run_id != self.open_id:
+                raise RuntimeError("run is not open")
+            if not isinstance(row, dict):
+                raise RuntimeError("row")
+            self._append_obj(run_id, row)
+
+    def plant_role(self, run_id: str, role: str, round_n, assistant: str, seq=1) -> None:
+        with self._lock:
+            if run_id != self.open_id:
+                raise RuntimeError("run is not open")
+            from plant import plant_role_done
+            resp = hashlib.sha256((assistant or "").encode()).hexdigest()
+            plant_role_done(
+                self.log_path(run_id), run_id, int(seq), resp, role, int(round_n), assistant or "",
+                writer=lambda obj: self._append_obj(run_id, obj),
+            )
+
+    def plant_reads(self, run_id: str, files) -> None:
+        with self._lock:
+            if run_id != self.open_id:
+                raise RuntimeError("run is not open")
+            from plant import plant_read
+            for index, file in enumerate(files or [], start=1):
+                plant_read(self.log_path(run_id), run_id, file, seq=index, writer=lambda obj: self._append_obj(run_id, obj))
 
     def _write_seal(self, run_id: str) -> None:
+        """Commit the in-memory chain. The HMAC key is not in the file."""
         path = self.log_path(run_id)
         sig = self._seal_path(run_id)
-        if sig.exists() or path.is_symlink() or not path.is_file():
+        state = self._chain.get(run_id)
+        if state is None or sig.exists() or path.is_symlink() or not path.is_file():
             return
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        body = {"type": "relay_log", "relayLogSha": digest}
-        mac = hmac.new(self.attest_key, canonical(body), hashlib.sha256).hexdigest()
-        raw = json.dumps({**body, "hmacSha256": mac}, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        if path.read_bytes() != state["body"]:
+            return
+        body = {"type": "relay_log", "relayLogSha": hashlib.sha256(state["body"]).hexdigest(), "chain": state["mac"].hex()}
+        raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         try:
             fd = os.open(sig, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -241,17 +369,17 @@ class Relay:
         sig = self._seal_path(run_id)
         if path.is_symlink() or sig.is_symlink() or not path.is_file() or not sig.is_file():
             return {"ok": False, "reason": "attest_mismatch"}
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        disk = path.read_bytes()
         try:
             signed = json.loads(sig.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {"ok": False, "reason": "attest_mismatch"}
-        if not isinstance(signed, dict):
+        if not isinstance(signed, dict) or signed.get("type") != "relay_log":
             return {"ok": False, "reason": "attest_mismatch"}
-        body = {"type": "relay_log", "relayLogSha": signed.get("relayLogSha")}
-        mac = hmac.new(self.attest_key, canonical(body), hashlib.sha256).hexdigest()
-        offered = str(signed.get("hmacSha256") or "")
-        if not hmac.compare_digest(mac, offered) or signed.get("relayLogSha") != digest:
+        if signed.get("relayLogSha") != hashlib.sha256(disk).hexdigest():
+            return {"ok": False, "reason": "attest_mismatch"}
+        state = self._chain.get(run_id)
+        if state is not None and (state["body"] != disk or signed.get("chain") != state["mac"].hex()):
             return {"ok": False, "reason": "attest_mismatch"}
         return {"ok": True}
 
@@ -292,7 +420,7 @@ class Relay:
             return 403, b""
         forward, stream, patched = _prepare(incoming)
         messages = incoming.get("messages") or []
-        seq = 1 + sum(1 for line in self._lines(run_id) if line.get("type") == "req")
+        seq = 1 + sum(1 for line in self._mem_rows(run_id) if line.get("type") == "req")
         ts, iso = _stamp()
         tool_results = self._store_tools(run_id, messages)
         req = {
@@ -311,7 +439,11 @@ class Relay:
         }
         if incoming.get("conclusion") is True:
             req["conclusion"] = True
-        append_jsonl(self.log_path(run_id), req)
+        self._append_obj(run_id, req)
+        kind = self._state(run_id).get("kind") or ""
+        if kind in READ_ONLY_KINDS and self.loop_tokens >= READ_ONLY_TOKEN_CAP:
+            self._done(run_id, seq, status=429, usage=None, error="cap_refused", err_class="readOnlyTokenCap", resp=b"")
+            return 429, b'{"error":"readOnlyTokenCap"}'
         if client_disconnect:
             self._done(run_id, seq, status=None, usage=None, error="client_disconnect", resp=b"")
             return 499, b""
@@ -327,8 +459,25 @@ class Relay:
             return int(status or 502), resp or b""
         if stream and usage is None:
             usage = _usage_from_stream(resp)
+        refused = self._cap_refusal(kind, usage)
+        if refused:
+            self._done(run_id, seq, status=429, usage=usage, error="cap_refused", err_class=refused, resp=resp or b"")
+            return 429, json.dumps({"error": refused}).encode()
         self._done(run_id, seq, status=int(status), usage=usage, resp=resp or b"")
         return int(status), resp or b""
+
+    def _cap_refusal(self, kind: str, usage):
+        """Refuse a counted role call whose usage would cross 200k or 30M."""
+        if kind not in READ_ONLY_KINDS or not isinstance(usage, dict):
+            return None
+        weighed = weight(usage)
+        if weighed is None:
+            return None
+        if self.loop_tokens + weighed >= READ_ONLY_TOKEN_CAP:
+            return "readOnlyTokenCap"
+        if kind == "role:innovator" and weighed >= INNOVATOR_CAP:
+            return "innovatorCap"
+        return None
 
     def _secret_in_body(self, body: bytes) -> bool:
         # Raw bytes only. Encoded or escaped copies of the key are not matches.
@@ -338,8 +487,11 @@ class Relay:
 
     def _reject(self, method, path, reason) -> None:
         ts, iso = _stamp()
-        target = self.log_path(self.open_id) if self.open_id else Path(self.log_root) / "reject.jsonl"
-        append_jsonl(target, {"type": "reject", "ts": ts, "ts_iso": iso, "method": method, "path": path, "reason": reason})
+        row = {"type": "reject", "ts": ts, "ts_iso": iso, "method": method, "path": path, "reason": reason}
+        if self.open_id:
+            self._append_obj(self.open_id, row)
+            return
+        append_jsonl(Path(self.log_root) / "reject.jsonl", row)
 
     def _done(self, run_id, seq, *, status, usage, resp, error=None, err_class=None) -> None:
         ts, iso = _stamp()
@@ -360,7 +512,7 @@ class Relay:
             row["error"] = error
         if err_class:
             row["errClass"] = err_class
-        append_jsonl(self.log_path(run_id), row)
+        self._append_obj(run_id, row)
 
     def _store_tools(self, run_id, messages) -> list:
         calls = {}
@@ -656,7 +808,18 @@ def _serve(relay: Relay) -> None:
                     relay.open_run(msg["runId"], msg["kind"], msg["expectedSha"])
                     out = {"ok": True}
                 elif op == "close":
-                    relay.close_run(msg["runId"])
+                    out = relay.close_run(msg["runId"])
+                    out["ok"] = True
+                elif op == "report":
+                    out = relay.report(msg["runId"])
+                elif op == "record":
+                    relay.record(msg["runId"], msg.get("row"))
+                    out = {"ok": True}
+                elif op == "plant-role":
+                    relay.plant_role(msg["runId"], msg.get("role") or "", msg.get("round") or 1, msg.get("assistant") or "", msg.get("seq") or 1)
+                    out = {"ok": True}
+                elif op == "plant-read":
+                    relay.plant_reads(msg["runId"], msg.get("files") or [])
                     out = {"ok": True}
                 elif op == "shutdown":
                     sys.stdout.write(json.dumps({"ok": True}) + "\n")

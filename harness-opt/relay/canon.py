@@ -10,17 +10,18 @@ def canonical(obj) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def append_jsonl(path, obj) -> None:
-    """Append one JSON line and fsync it. Never truncates."""
+def append_jsonl(path, obj) -> bytes:
+    """Append one JSON line and fsync it. Never truncates. Returns the bytes written."""
     global fsync_count
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(dest.parent, 0o700)
-    line = json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+    raw = (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
     fd = os.open(dest, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
     try:
-        os.write(fd, line.encode())
+        os.write(fd, raw)
         os.fsync(fd)
         fsync_count += 1
     finally:
         os.close(fd)
+    return raw

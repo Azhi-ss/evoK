@@ -102,6 +102,82 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(sig.read_bytes(), before)
         self.assertFalse(self.relay.verify_log(self.run)["ok"])
 
+    def test_editing_jsonl_is_detected(self):
+        def fault_after(mutate):
+            path = self.relay.log_path(self.run)
+            mutate(path)
+            report = self.relay.close_run(self.run)
+            self.assertEqual(report["fault"], "attest_mismatch")
+            self.assertFalse(path.with_name("relay.jsonl.sig").exists())
+            path.unlink()
+
+        fault_after(lambda path: path.write_text(path.read_text(encoding="utf-8").replace('"pid":', '"pid":0,'), encoding="utf-8"))
+        self.run = new_run_id()
+        self.relay.open_run(self.run, "role:innovator", "abc")
+        fault_after(lambda path: path.write_text(path.read_text(encoding="utf-8") + '{"type":"done"}\n', encoding="utf-8"))
+        self.run = new_run_id()
+        self.relay.open_run(self.run, "role:innovator", "abc")
+        fault_after(lambda path: path.write_bytes(path.read_bytes()[:8]))
+
+    def test_over_limit_is_refused_by_relay(self):
+        self.relay.close_run(self.run)
+        run = new_run_id()
+        self.relay.open_run(run, "role:innovator", "abc")
+
+        def at_innovator_cap(body, stream):
+            usage = {"prompt_tokens": 200_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}
+            return 200, b"{}", usage
+
+        self.relay.upstream = at_innovator_cap
+        status, body = self.post(b'{"messages":[]}', run=run)
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body.decode())["error"], "innovatorCap")
+        self.assertEqual(self.relay.loop_tokens, 0)
+        report = self.relay.close_run(run)
+        self.assertIsNone(report["fault"])
+        self.assertEqual(report["refused"], "innovatorCap")
+        self.assertEqual(report["tokens"], 0)
+        self.assertFalse(report["usageMissing"])
+        self.assertEqual(report["loopTokens"], 0)
+
+        run = new_run_id()
+        self.relay.open_run(run, "role:critic", "abc")
+
+        def at_loop_cap(body, stream):
+            usage = {"prompt_tokens": 30_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}
+            return 200, b"{}", usage
+
+        self.relay.upstream = at_loop_cap
+        status, body = self.post(b'{"messages":[]}', run=run)
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body.decode())["error"], "readOnlyTokenCap")
+        self.assertEqual(self.relay.loop_tokens, 0)
+        report = self.relay.close_run(run)
+        self.assertEqual(report["refused"], "readOnlyTokenCap")
+        self.assertEqual(report["loopTokens"], 0)
+
+    def test_missing_cached_field_is_usage_missing(self):
+        ledger = Ledger()
+        ledger.reqs = [{"seq": 1, "toolResults": []}]
+        ledger.dones = [{"seq": 1, "status": 200, "usage": {"prompt_tokens": 3, "completion_tokens": 1}}]
+        counted = tokens(ledger)
+        self.assertTrue(counted["usage_missing"])
+        self.assertIsNone(counted["tokens"])
+        decision = classify(ledger)
+        self.assertIn("usage_missing", decision["codes"])
+
+        def bare(body, stream):
+            return 200, b"{}", {"prompt_tokens": 3, "completion_tokens": 1}
+
+        self.relay.upstream = bare
+        status, _ = self.post(b'{"messages":[]}')
+        self.assertEqual(status, 200)
+        report = self.relay.report(self.run)
+        self.assertIsNone(report["fault"])
+        self.assertTrue(report["usageMissing"])
+        self.assertEqual(report["tokens"], 0)
+        self.assertEqual(self.relay.loop_tokens, 0)
+
     def test_control_listens_forwards_and_seals(self):
         import threading
         import urllib.request
@@ -348,8 +424,10 @@ class RelayCase(unittest.TestCase):
         self.assertTrue(tokens(ledger)["usage_missing"])
         bad = Ledger()
         bad.dones = [{"seq": 1, "status": 200, "usage": {"prompt_tokens": 1, "completion_tokens": 1}}]
-        with self.assertRaises(ValueError):
-            tokens(bad)
+        missing = tokens(bad)
+        self.assertTrue(missing["usage_missing"])
+        self.assertIsNone(missing["tokens"])
+        self.assertIn("usage_missing", classify(bad)["codes"])
 
 
 def _req(seq, boot="boot", usage=USAGE, status=200, error=None, err=None, run="r" * 32):

@@ -118,21 +118,30 @@ def _is_2xx(done) -> bool:
     return 200 <= int(status) <= 299
 
 
-def weight(usage) -> int:
-    """W = i + o + cacheRead. A present usage with no cached field is an error, not zero."""
+def weight(usage):
+    """W = i + o + cacheRead. Missing cached field is usage_missing, not an exception."""
     if not isinstance(usage, dict):
-        raise ValueError("usage_missing")
+        return None
     if "prompt_tokens_details" in usage and isinstance(usage["prompt_tokens_details"], dict) and "cached_tokens" in usage["prompt_tokens_details"]:
         cache = usage["prompt_tokens_details"]["cached_tokens"]
     elif "prompt_cache_hit_tokens" in usage:
         cache = usage["prompt_cache_hit_tokens"]
     else:
-        raise ValueError("cached field absent")
-    return (usage["prompt_tokens"] - cache) + usage["completion_tokens"] + cache
+        return None
+    try:
+        prompt = usage["prompt_tokens"]
+        completion = usage["completion_tokens"]
+    except (KeyError, TypeError):
+        return None
+    if isinstance(cache, bool) or isinstance(prompt, bool) or isinstance(completion, bool):
+        return None
+    if not all(isinstance(item, (int, float)) for item in (prompt, completion, cache)):
+        return None
+    return (prompt - cache) + completion + cache
 
 
 def tokens(ledger: Ledger) -> dict:
-    """Sum relay usage. usage_missing is only a 2xx done row with missing usage."""
+    """Sum relay usage. usage_missing is a 2xx done with null usage or no cached field."""
     total = 0
     missing = False
     for done in ledger.dones:
@@ -141,7 +150,11 @@ def tokens(ledger: Ledger) -> dict:
         if done.get("usage") is None:
             missing = True
             continue
-        total += weight(done["usage"])
+        weighed = weight(done["usage"])
+        if weighed is None:
+            missing = True
+            continue
+        total += weighed
     return {"tokens": None if missing else total, "usage_missing": missing, "observed": total}
 
 
@@ -198,7 +211,7 @@ def classify(ledger: Ledger, host=None) -> dict:
         if tokens(ledger)["usage_missing"]:
             add("usage_missing")
     except ValueError:
-        raise
+        add("usage_missing")
     done_by_seq = {done.get("seq"): done for done in ledger.dones}
     for req in ledger.reqs:
         done = done_by_seq.get(req.get("seq"))
