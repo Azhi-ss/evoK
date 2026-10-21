@@ -25,6 +25,8 @@ INFRA_CODES = frozenset({
 })
 POLL_INTERVAL_S = 15
 DEFAULT_RELAY_ROOT = "/home/box/.harness-relay"
+# The image's run.sh refuses to start without API_KEY. This value is not a credential.
+PLACEHOLDER_API_KEY = "relay-placeholder-not-a-key"
 
 
 def _under_home_box(path) -> bool:
@@ -39,13 +41,15 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
     """One serial container. Every run drops NET_RAW. Nothing under /home/box is mounted.
 
     expose_relay is for the agent. The checker passes False so it gets no relay
-    BASE_URL and no HARNESS_RUN_ID.
+    BASE_URL and no HARNESS_RUN_ID. API_KEY may only equal the placeholder; any
+    other value is rejected before docker. The agent container receives that
+    placeholder and nothing else.
     """
     if network != DOCKER_NETWORK:
         raise ValueError(f"reject network {network}")
     if not isinstance(env, dict):
         raise ValueError("env")
-    if any(key == "API_KEY" for key in env):
+    if "API_KEY" in env and env.get("API_KEY") != PLACEHOLDER_API_KEY:
         raise ValueError("API_KEY")
     argv = [
         "docker", "run", "--rm",
@@ -56,8 +60,11 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
         argv.extend([
             "-e", f"BASE_URL=http://10.204.0.1:{port}/r/{run_id}/v1",
             "-e", f"HARNESS_RUN_ID={run_id}",
+            "-e", f"API_KEY={PLACEHOLDER_API_KEY}",
         ])
     for key, value in env.items():
+        if key == "API_KEY":
+            continue
         if key in ("BASE_URL", "HARNESS_RUN_ID") or not isinstance(key, str) or not key.isidentifier():
             raise ValueError("env")
         if not isinstance(value, str) or "\n" in value or "\x00" in value:
@@ -73,7 +80,8 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
     argv.append(image)
     argv.extend(list(command))
     blob = "\n".join(argv)
-    if "--add-host" in argv or "API_KEY" in blob:
+    allowed_key = f"API_KEY={PLACEHOLDER_API_KEY}"
+    if "--add-host" in argv or any("API_KEY" in item and item != allowed_key for item in argv):
         raise ValueError("forbidden docker argument")
     for role_id in role_run_ids:
         if role_id and role_id in blob:

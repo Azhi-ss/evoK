@@ -10,8 +10,9 @@ Usage:
   devii_docker_v2.py groups                    # print probe/heldout/minloop task lists
   devii_docker_v2.py plan <probe|heldout|minloop|all> [k]
   devii_docker_v2.py once --task <id> --seed <n> --arm control|candidate --config <file> --run-dir <dir> --harness <file>
-The batch execute path requires API_KEY in the host environment and does not pass it into the container.
-`once` does not read API_KEY and does not put it in the container. The container BASE_URL is the relay.
+The batch execute path requires API_KEY in the host environment and does not pass that value into the container.
+`once` does not read the host API_KEY. The agent container receives only hooks.PLACEHOLDER_API_KEY.
+The relay replaces Authorization with the key from RELAY_UPSTREAM_KEY_FILE. The container BASE_URL is the relay.
 Agent argv comes from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL.
 The checker uses the same builder with expose_relay=False, so it has no model access.
 Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1.
@@ -57,6 +58,30 @@ def check_token_cap(task, tokens_used):
   """Return (ok, cap, tokens). ok False => terminate & record unscored (budget guard, not score 0)."""
   cap=token_cap(task)
   return (tokens_used <= cap, cap, tokens_used)
+def relay_request_count(relay_root, run_id):
+  """How many relay req lines this run wrote. open and done do not count."""
+  path=Path(relay_root)/run_id/"relay.jsonl"
+  if not isinstance(run_id, str) or run_id.strip()=="" or not path.is_file():
+    return 0
+  count=0
+  for line in path.read_text().splitlines():
+    if not line.strip():
+      continue
+    try:
+      row=json.loads(line)
+    except json.JSONDecodeError:
+      continue
+    if isinstance(row, dict) and row.get("type")=="req":
+      count+=1
+  return count
+def _memory_tokens(report):
+  """Close-report tokens are the in-memory total. Anything else is null."""
+  if not isinstance(report, dict) or "tokens" not in report:
+    return None
+  value=report.get("tokens")
+  if isinstance(value, bool) or not isinstance(value, int):
+    return None
+  return value
 def relay_usage_tokens(relay_root, run_id):
   """i+o+cacheRead from the relay log only. An agent trace is not a token source.
 
@@ -360,6 +385,8 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
         raise OnceError("arm")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed<0:
         raise OnceError("seed")
+    if reconcile and hooks._task_name(expected_task)=="":
+        raise OnceError("expected task")
     if model is not None and model!=MODEL:
         raise OnceError("model")
     chosen=model or MODEL
@@ -482,19 +509,37 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             res["checker_exit"]="skipped"
         recorded=finalize_launch(run, run_id, root, res)
         fault=None
+        report={}
         if not external:
             report=relay.close_run(run_id) or {}
             closed=True
             fault=report.get("fault") if isinstance(report, dict) else None
-            if fault in ("attest_mismatch", "usage_missing"):
-                recorded["score_status"]="unscored"
-                recorded["reward"]=None
-                recorded["unscored_reason"]=fault
-                recorded["relayFault"]=fault
-        if fault not in ("attest_mismatch", "usage_missing"):
+        exit_code=recorded.get("exit")
+        bad_exit=isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code!=0
+        kept_reason=recorded.get("unscored_reason") in ("usage_missing", "token_cap") and recorded.get("checker_exit")=="skipped_token_cap"
+        run_fault=None
+        if fault in ("attest_mismatch", "usage_missing"):
+            run_fault=fault
+        elif not kept_reason and relay_request_count(root, run_id)==0:
+            run_fault="no_requests"
+        elif not kept_reason and bad_exit:
+            run_fault="agent_failed"
+        elif not kept_reason and not staged:
+            run_fault="agent_failed"
+        if run_fault:
+            recorded["score_status"]="unscored"
+            recorded["reward"]=None
+            recorded["unscored_reason"]=run_fault
+            recorded["relayFault"]=run_fault
+            if not external:
+                remembered=_memory_tokens(report)
+                recorded["tokens"]=remembered
+                recorded["tokens_used"]=remembered
+        can_reconcile=run_fault is None and recorded.get("score_status")=="scored" and recorded.get("reward") is not None
+        if can_reconcile:
             decision=hooks.reconcile_first_run(
                 task=resolved,
-                expected_task=task if expected_task is None else expected_task,
+                expected_task=expected_task if hooks._task_name(expected_task) else task,
                 config_sha=config_sha,
                 seed=seed,
                 arm=arm,
@@ -508,7 +553,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             recorded["purpose"]="reconcile"
             (Path(root)/"reconcile.json").write_text(json.dumps({"task": hooks._task_name(resolved), "seed": seed})+"\n")
         (Path(run)/"result.json").write_text(json.dumps(recorded, indent=1))
-        if recorded.get("score_status")=="scored" and recorded.get("reward") is not None and recorded.get("checker_exit")!="skipped_token_cap" and fault not in ("attest_mismatch", "usage_missing"):
+        if recorded.get("score_status")=="scored" and recorded.get("reward") is not None and recorded.get("checker_exit")!="skipped_token_cap" and run_fault is None:
             binding=hooks.relay_binding(log_path)
             signed=hooks.sign_run_record(
                 _attest_key(), checker_dir,
@@ -591,12 +636,14 @@ def once_from_flags(argv, **deps):
         if run_id is not None and log.parent.name!=run_id:
             raise OnceError("relay log")
         run_id=run_id or log.parent.name
+    if flags.get("reconcile") and hooks._task_name(flags.get("expected-task"))=="":
+        raise OnceError("expected task")
     return run_once(
         flags["task"], seed, flags["arm"], flags["config"], flags["run-dir"], flags["harness"],
         run_id=run_id, relay_root=relay_root, external=bool(flags.get("relay-external")),
         model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
         attest_dir=flags.get("attest-dir"), nonce=flags.get("nonce"),
-        reconcile=bool(flags.get("reconcile")), expected_task=flags["task"], **deps,
+        reconcile=bool(flags.get("reconcile")), expected_task=flags.get("expected-task"), **deps,
     )
 
 def main():

@@ -76,6 +76,44 @@ class RelayCase(unittest.TestCase):
         self.assertGreater(second, first)
         self.assertEqual(len(load(self.relay.log_path(self.run)).reqs), 2)
 
+    def test_forward_uses_the_upstream_key_not_the_placeholder(self):
+        import urllib.request
+        captured = {}
+
+        class Resp:
+            status = 200
+
+            def read(self):
+                return b'{"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(req, timeout=None):
+            captured["auth"] = req.get_header("Authorization")
+            captured["data"] = req.data
+            return Resp()
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        try:
+            self.relay.upstream = harness_relay._network_upstream("http://127.0.0.1:9/v1/chat/completions", self.relay.upstream_key)
+            body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+            status, _resp = self.post(body, headers={
+                "host": "10.204.0.1:9",
+                "authorization": f"Bearer {hooks.PLACEHOLDER_API_KEY}",
+            })
+        finally:
+            urllib.request.urlopen = original
+        self.assertEqual(status, 200)
+        token = self.relay.upstream_key.rstrip(b"\r\n").decode()
+        self.assertEqual(captured["auth"], f"Bearer {token}")
+        self.assertNotIn(hooks.PLACEHOLDER_API_KEY, captured["auth"])
+        self.assertNotIn(hooks.PLACEHOLDER_API_KEY.encode(), captured["data"])
+
     def test_02_other_run_and_closed_run_are_forbidden(self):
         other = new_run_id()
         status, _ = self.post(b"{}", run=other)
@@ -814,7 +852,7 @@ class HookCase(unittest.TestCase):
             self.assertEqual(argv_i[argv_i.index("--cap-drop") + 1], "NET_RAW")
             self.assertNotIn("/home/box", "\n".join(argv_i))
         self.assertNotIn("open", argv)
-        self.assertNotIn("API_KEY", blob)
+        self.assertEqual([item for item in argv if "API_KEY" in item], [f"API_KEY={hooks.PLACEHOLDER_API_KEY}"])
         self.assertNotIn(role, blob)
         self.assertIn(f"HARNESS_RUN_ID={executor}", blob)
         self.assertNotIn(executor, "/src/config")
@@ -824,6 +862,13 @@ class HookCase(unittest.TestCase):
             hooks.container_argv(image="img", run_id=executor, port=1, network="open", env={}, mounts=[], command=["run"])
         with self.assertRaises(ValueError):
             hooks.container_argv(image="img", run_id=executor, port=1, network="devii-004-int", env={"API_KEY": "x"}, mounts=[], command=["run"])
+        with self.assertRaises(ValueError):
+            hooks.container_argv(image="img", run_id=executor, port=1, network="devii-004-int", env={"API_KEY": "sk-live-key"}, mounts=[], command=["run"])
+        allowed = hooks.container_argv(
+            image="img", run_id=executor, port=1, network="devii-004-int",
+            env={"API_KEY": hooks.PLACEHOLDER_API_KEY}, mounts=[], command=["run"],
+        )
+        self.assertEqual([item for item in allowed if "API_KEY" in item], [f"API_KEY={hooks.PLACEHOLDER_API_KEY}"])
         rejects = [{"type": "reject"}, {"type": "req"}, {"type": "reject"}]
         self.assertEqual(sum(1 for row in rejects if row["type"] == "reject"), 2)
 
@@ -1368,7 +1413,8 @@ class LaunchCase(unittest.TestCase):
         self.assertIn("OMP_NUM_THREADS=4", argv)
         self.assertIn("OPENBLAS_NUM_THREADS=4", argv)
         self.assertIn(f"BASE_URL=http://10.204.0.1:9/r/{run_id}/v1", argv)
-        self.assertNotIn("API_KEY", blob)
+        self.assertEqual([item for item in argv if "API_KEY" in item], [f"API_KEY={hooks.PLACEHOLDER_API_KEY}"])
+        self.assertNotIn("API_KEY", checker_blob)
         self.assertNotIn("newapi.ai-modeling.top", blob)
         self.assertNotIn("--add-host", argv)
         self.assertNotIn("/home/box", blob)
@@ -1659,6 +1705,7 @@ class OnceCase(unittest.TestCase):
         def popen(argv, **kwargs):
             seen.append(list(argv))
             (run / "workspace" / "runs" / "task-stub").mkdir(parents=True, exist_ok=True)
+            relay.record(run_id, {"type": "req", "seq": 1, "runId": run_id})
             relay.record(run_id, {"type": "done", "status": 200, "usage": dict(USAGE)})
             return Proc()
 
@@ -1681,7 +1728,7 @@ class OnceCase(unittest.TestCase):
         self.assertEqual(argv[argv.index("--network") + 1], "devii-004-int")
         self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
         self.assertIn(f"BASE_URL=http://10.204.0.1:8642/r/{run_id}/v1", argv)
-        self.assertNotIn("API_KEY", blob)
+        self.assertEqual([item for item in argv if "API_KEY" in item], [f"API_KEY={hooks.PLACEHOLDER_API_KEY}"])
         self.assertIn(f"{self.harness}:/opt/harness/src/harness.mjs:ro", argv)
         self.assertIn(f"{self.config}:/cfg/candidate.json:ro", argv)
 
@@ -1786,7 +1833,7 @@ class OnceCase(unittest.TestCase):
             (run / "verifier" / "reward.txt").write_text("1\n")
             return Done()
 
-        recorded, _seen, _run_id, _attest = self._run(relay, run, checker, extra=("--reconcile",))
+        recorded, _seen, _run_id, _attest = self._run(relay, run, checker, extra=("--reconcile", "--expected-task", "hb003"))
         self.assertEqual(recorded["purpose"], "reconcile")
         self.assertTrue(recorded["reconcile"]["exclude"])
         self.assertEqual(recorded["score_status"], "scored")
@@ -1798,9 +1845,28 @@ class OnceCase(unittest.TestCase):
             (run2 / "verifier" / "reward.txt").write_text("1\n")
             return Done()
 
-        again, _seen2, _id2, _attest2 = self._run(relay, run2, checker2, extra=("--reconcile",), run_id="cd" * 16)
+        again, _seen2, _id2, _attest2 = self._run(relay, run2, checker2, extra=("--reconcile", "--expected-task", "hb003"), run_id="cd" * 16)
         self.assertFalse(again["reconcile"]["accepted"])
         self.assertNotIn("purpose", again)
+        mismatch = self.root / "recon-other"
+
+        def checker3(argv, **kwargs):
+            (mismatch / "verifier").mkdir(parents=True, exist_ok=True)
+            (mismatch / "verifier" / "reward.txt").write_text("1\n")
+            return Done()
+
+        other, _seen3, _id3, _attest3 = self._run(
+            relay, mismatch, checker3, extra=("--reconcile", "--expected-task", "i014"), run_id="ef" * 16,
+        )
+        self.assertFalse(other["reconcile"]["accepted"])
+        self.assertEqual(other["score_status"], "scored")
+        with self.assertRaises(self.box.OnceError) as missing_expected:
+            self.box.once_from_flags([
+                "--task", "hb003", "--seed", "9", "--arm", "control", "--reconcile",
+                "--config", str(self.config), "--run-dir", str(self.root / "no-expected"),
+                "--harness", str(self.harness),
+            ], popen=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("docker")), preflight=lambda **_kwargs: None)
+        self.assertIn("expected task", str(missing_expected.exception))
 
     def test_standalone_close_fault_is_unscored_and_unsigned(self):
         class Done:
@@ -1821,6 +1887,7 @@ class OnceCase(unittest.TestCase):
         self.assertEqual(recorded["unscored_reason"], "attest_mismatch")
         self.assertEqual(recorded["score_status"], "unscored")
         self.assertIsNone(recorded["reward"])
+        self.assertEqual(recorded["tokens"], 12)
         self.assertFalse((self.root / "relay" / run_id / "run-record.json").exists())
         self.assertNotIn("purpose", recorded)
 
@@ -1866,8 +1933,42 @@ class OnceCase(unittest.TestCase):
         self.assertEqual(dropped["unscored_reason"], "usage_missing")
         self.assertEqual(dropped["score_status"], "unscored")
         self.assertIsNone(dropped["reward"])
+        self.assertEqual(dropped["tokens"], 12)
         self.assertFalse((missing_root / missing_id / "run-record.json").exists())
         self.assertEqual(len(seen), 1)
+
+    def test_empty_run_is_unscored_and_not_reconciled(self):
+        relay = self._relay()
+        run = self.root / "empty"
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 2
+
+            def kill(self):
+                return None
+
+        def popen(argv, **kwargs):
+            return Proc()
+
+        recorded = self.box.once_from_flags([
+            "--task", "hb003", "--seed", "9", "--arm", "control", "--reconcile",
+            "--expected-task", "hb003",
+            "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
+            "--run-id", "ab" * 16,
+        ], popen=popen, preflight=lambda **_kwargs: None,
+           stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
+           limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
+           relay=relay, listen=False, lock_path=self.root / "empty.lock")
+        self.assertEqual(recorded["exit"], 2)
+        self.assertEqual(recorded["unscored_reason"], "no_requests")
+        self.assertEqual(recorded["score_status"], "unscored")
+        self.assertIsNone(recorded["reward"])
+        self.assertFalse(recorded["reconcile"]["accepted"])
+        self.assertNotIn("purpose", recorded)
+        self.assertFalse((self.root / "relay" / ("ab" * 16) / "run-record.json").exists())
+        self.assertEqual(recorded["tokens"], 0)
 
 
 def _old_idle(t_write, t_end, trace, timed_out=False, expect_error=False):

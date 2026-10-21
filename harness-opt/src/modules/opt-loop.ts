@@ -1283,7 +1283,7 @@ async function executeScored(
     ewi_trace_ref = null;
   }
   const ewi: ScoredRelayEwi = { ...scored, ewi_trace_ref };
-  const prereg = request.seed === 9 && request.arm === "control"
+  const prereg = request.seed === 9 && request.arm === "control" && scoreStatus === "scored" && reward !== null
     ? reconcilePrereg(request.task.path, request.task.id, request.configPath, request.seed, request.arm)
     : null;
   const mountedSha = sha256File(request.configPath);

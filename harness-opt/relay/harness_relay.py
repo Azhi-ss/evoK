@@ -198,7 +198,7 @@ class Relay:
         if path.is_symlink() or sig.is_symlink():
             if self.open_id == run_id:
                 self.open_id = None
-            return self._fault_report("attest_mismatch")
+            return self._fault_report("attest_mismatch", run_id)
         if sig.is_file():
             if self.open_id == run_id:
                 self.open_id = None
@@ -208,16 +208,16 @@ class Relay:
         if not path.is_file():
             if self.open_id == run_id:
                 self.open_id = None
-            return self._fault_report("usage_missing")
+            return self._fault_report("usage_missing", run_id)
         if self.open_id != run_id:
             # This process does not hold the chain. Mark the file closed red and move on.
             self._finalize_red(run_id, "attest_mismatch")
-            return self._fault_report("attest_mismatch")
+            return self._fault_report("attest_mismatch", run_id)
         state = self._chain.get(run_id)
         if state is None or path.read_bytes() != state["body"]:
             self._finalize_red(run_id, "attest_mismatch")
             self.open_id = None
-            return self._fault_report("attest_mismatch")
+            return self._fault_report("attest_mismatch", run_id)
         if not any(row.get("type") == "close" for row in self._mem_rows(run_id)):
             ts, iso = _stamp()
             self._append_obj(run_id, {"type": "close", "runId": run_id, "ts": ts, "ts_iso": iso})
@@ -349,11 +349,13 @@ class Relay:
             return []
         return [json.loads(line) for line in state["body"].splitlines() if line.strip()]
 
-    def _fault_report(self, fault: str) -> dict:
+    def _fault_report(self, fault: str, run_id: str = "") -> dict:
+        """A fault row's tokens are the in-memory total, or null when this process has no chain."""
+        state = self._chain.get(run_id) if run_id else None
         return {
             "ok": True,
             "fault": fault,
-            "tokens": 0,
+            "tokens": None if state is None else state["tokens"],
             "usageMissing": fault == "usage_missing",
             "refused": None,
             "loopTokens": self.loop_tokens,
@@ -364,11 +366,11 @@ class Relay:
         path = self.log_path(run_id)
         state = self._chain.get(run_id)
         if path.is_symlink():
-            return self._fault_report("attest_mismatch")
+            return self._fault_report("attest_mismatch", run_id)
         if not path.is_file():
-            return self._fault_report("usage_missing")
+            return self._fault_report("usage_missing", run_id)
         if state is None or path.read_bytes() != state["body"]:
-            return self._fault_report("attest_mismatch")
+            return self._fault_report("attest_mismatch", run_id)
         return {
             "ok": True,
             "fault": None,
