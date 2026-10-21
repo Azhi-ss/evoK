@@ -13,9 +13,20 @@ import {
   type VerifiedAttestation,
 } from "./attestation";
 import { assertNoHeldOutLeak } from "./proposer";
-import { DEFAULT_EWI_THRESHOLD_SEC, measureRunEwi, type EwiMetrics } from "./ewi";
+import {
+  absentResultWatcher,
+  DEFAULT_EWI_THRESHOLD_SEC,
+  EWI_THRESHOLD_LABEL,
+  measureRunEwi,
+  PREREGISTERED_RESULT_FILE,
+  resolveEwiIdleScript,
+  scoreRelayEwi,
+  type ResultWriteWatcher,
+  type ScoredRelayEwi,
+} from "./ewi";
 import {
   CommandOptExecutor,
+  copyCheckerBeforeSign,
   createDryRunExecutor,
   hostRunId,
   tokenCap,
@@ -23,6 +34,7 @@ import {
   type OptRunRequest,
   type OptTask,
 } from "./opt-executor";
+import { capHit, signPreRound1 } from "./loop-driver";
 import {
   buildRoleSpawn,
   hostWriteSession,
@@ -130,10 +142,20 @@ export interface RunView {
   readonly timedOut: boolean;
   readonly tokens: number;
   readonly wallS: number;
-  readonly postWriteS: number;
-  readonly idleS: number;
-  readonly gapMaxS: number;
-  readonly ewi: boolean;
+  readonly postWriteS: number | null;
+  readonly idleS: number | null;
+  readonly gapMaxS: number | null;
+  /** True only for an EWI hit. Null is 「EWI不可判」 and is not a clear run. */
+  readonly ewi: boolean | null;
+  readonly ewiVerdict: "EWI不可判" | boolean;
+  readonly referenceIdleS: number | null;
+  readonly referenceEwi: boolean | null;
+  readonly ewi_trace_ref: {
+    readonly idleS: number;
+    readonly gapMaxS: number;
+    readonly postWriteS: number;
+    readonly ewi: boolean;
+  } | null;
 }
 
 export interface ReviewCall {
@@ -184,6 +206,14 @@ export interface OptLoopOptions {
   readonly now?: () => Date;
   /** When set, gap and reviewer are exec'd with this binary and `--tools read`. */
   readonly piBin?: string;
+  /** Host watcher for the preregistered result file. Absent observation stays undecided. */
+  readonly resultWatcher?: ResultWriteWatcher;
+  /** Host total of innovator+critic+ranker relay tokens. Absent means zero. */
+  readonly readOnlyTokens?: () => number;
+  /** Host read-only wall clock in seconds. Absent means the loop's own timer. */
+  readonly readOnlyWallS?: () => number;
+  /** False stops the loop before the next call. */
+  readonly antiForgery?: () => boolean;
 }
 
 export interface AcceptedCandidate {
@@ -197,6 +227,7 @@ export interface AcceptedCandidate {
 export interface OptLoopResult {
   readonly model: string;
   readonly ewiThresholdSec: number;
+  readonly ewiThresholdLabel: typeof EWI_THRESHOLD_LABEL;
   readonly rounds: readonly {
     readonly round: number;
     readonly accepted: boolean;
@@ -208,6 +239,11 @@ export interface OptLoopResult {
   readonly finalBlock: { readonly order: readonly string[] } | null;
   readonly heldOut: { readonly calls: number; readonly gatewayOnly: readonly string[] } | null;
   readonly skippedFinal: boolean;
+  readonly stopReport: {
+    readonly reason: string | null;
+    readonly faultRounds: number;
+    readonly reviewerRejectRounds: number;
+  };
 }
 
 interface ConfigFile {
@@ -224,13 +260,21 @@ interface ScoredRun {
   readonly tokens: number;
   readonly wallS: number;
   readonly timedOut: boolean;
-  readonly ewi: EwiMetrics;
+  readonly ewi: ScoredRelayEwi;
   readonly runDir: string;
   readonly tracePath: string;
   readonly verified: VerifiedAttestation | null;
   readonly attestReasons: readonly string[];
   readonly relayPatchActive: boolean;
 }
+
+const HOST_EVIDENCE_FAULTS = new Set([
+  "attest_mismatch",
+  "prerun_layout",
+  "usage_missing",
+  "relay_restart",
+  "docker_daemon_event",
+]);
 
 interface ClosureRecord {
   round: number;
@@ -260,7 +304,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   assertKeyOutside(options.attestKeyFile, [options.out]);
   const executor = options.executor ?? executorFor(options, env, attestKey);
   const now = options.now ?? (() => new Date());
+  const scoreHost = {
+    now: () => now().getTime() / 1000,
+    watcher: options.resultWatcher ?? absentResultWatcher(),
+  };
   mkdirSync(options.out, { recursive: true });
+  writeJson(join(options.out, "pre-round1.json"), signPreRound1(attestKey, { tools: ["read"] }, { tools: ["read"] }));
 
   const controlPath = join(options.out, "control", "config.json");
   const controlBytes = options.controlConfigPath ? readFileSync(options.controlConfigPath) : Buffer.from(CONTROL_CONFIG_TEXT);
@@ -276,9 +325,39 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let previousReviewSession: string | null = null;
   let previousReviewSha: string | null = null;
   const roundSummaries: OptLoopResult["rounds"][number][] = [];
+  let stopReason: string | null = null;
+  let faultRounds = 0;
+  let reviewerRejectRounds = 0;
+  let consecutiveNoAccept = 0;
+  let realRunWallS = 0;
+  let readOnlyWallS = 0;
+  const loopCap = (startedRounds: number) => capHit({
+    startedRounds,
+    readOnlyTokens: options.readOnlyTokens?.() ?? 0,
+    readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
+    realRunWallS,
+  });
 
   for (let round = 1; round <= rounds; round += 1) {
+    if (existsSync(join(options.out, "STOP"))) {
+      stopReason = "stop_file";
+      break;
+    }
+    if (options.antiForgery?.() === false) {
+      stopReason = "anti_forgery";
+      break;
+    }
+    if (consecutiveNoAccept >= 3) {
+      stopReason = "no_accept";
+      break;
+    }
+    const opened = loopCap(round - 1);
+    if (opened) {
+      stopReason = opened;
+      break;
+    }
     const started = now();
+    const roleMs = started.getTime();
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
       ...traceHints.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
@@ -317,7 +396,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const proposed = await roles.innovate(innovateInput);
     captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
 
+    readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
     if (tried.includes(proposed.summary)) {
+      consecutiveNoAccept += 1;
       const note = "duplicate summary";
       const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, []);
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
@@ -335,7 +416,19 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       previousReview = { accept: false, reason: note };
       previousReviewSession = reviewSpawn.sessionPath;
       previousReviewSha = reviewSha;
+      const afterDuplicate = loopCap(round - 1);
+      if (afterDuplicate) {
+        stopReason = afterDuplicate;
+        break;
+      }
       continue;
+    }
+    const afterRoles = loopCap(round - 1);
+    if (afterRoles) {
+      stopReason = afterRoles;
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
     }
 
     const candidate = mergeConfig(control, proposed.parts);
@@ -350,7 +443,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     tried.push(proposed.summary);
 
     const runs: ScoredRun[] = [];
+    let stopBeforeReview = false;
     for (const seed of seeds) {
+      const beforeSeed = loopCap(round - 1);
+      if (beforeSeed) {
+        stopReason = beforeSeed;
+        stopBeforeReview = true;
+        break;
+      }
+      const seedMs = now().getTime();
       runs.push(await executeScored(executor, {
         task: DEV_TASK,
         seed,
@@ -359,7 +460,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         runDir: join(options.out, `round${round}`, "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
         model,
         tokenCap: tokenCap(DEV_TASK),
-      }, hostFor(options, attestKey, `round${round}`, DEV_TASK.id, `seed${seed}`, "candidate"), threshold));
+      }, hostFor(options, attestKey, `round${round}`, DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost));
+      realRunWallS += Math.max(0, (now().getTime() - seedMs) / 1000);
+      const afterSeed = loopCap(round);
+      if (afterSeed) {
+        stopReason = afterSeed;
+        stopBeforeReview = true;
+        break;
+      }
     }
     const activation = activationRecord({
       runs,
@@ -373,6 +481,28 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     writeJson(join(options.out, `round${round}`, "activation.json"), activation);
     const metrics = summarize(runs, threshold);
     writeJson(join(options.out, `round${round}`, "metrics.json"), metrics);
+    if (runs.some((run) => run.unscoredReason !== undefined && HOST_EVIDENCE_FAULTS.has(run.unscoredReason))) {
+      faultRounds += 1;
+    }
+    if (stopBeforeReview) {
+      writeClosure(options.out, round, {
+        round,
+        closed: false,
+        gapCitedTrace,
+        knobMatched,
+        patchActive: activation.patchActive,
+        reviewFedForward: null,
+      });
+      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash,
+        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      });
+      break;
+    }
 
     const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath]);
     const reviewInput: ReviewCall = {
@@ -399,8 +529,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     });
     writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
     const take = verdict.accept && activation.patchActive && gapCitedTrace;
+    if (!verdict.accept) reviewerRejectRounds += 1;
     if (take) {
       accepted = { round, patchHash, configPath, knob: gap.knob, knobValue };
+      consecutiveNoAccept = 0;
+    } else {
+      consecutiveNoAccept += 1;
     }
     previousReview = { accept: verdict.accept, reason: verdict.reason };
     previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
@@ -418,15 +552,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     });
   }
 
-  if (!accepted) {
+  const stopReport = { reason: stopReason, faultRounds, reviewerRejectRounds };
+  if (!accepted || stopReason) {
     const result: OptLoopResult = {
       model,
       ewiThresholdSec: threshold,
+      ewiThresholdLabel: EWI_THRESHOLD_LABEL,
       rounds: roundSummaries,
-      accepted: null,
+      accepted,
       finalBlock: null,
       heldOut: null,
       skippedFinal: true,
+      stopReport,
     };
     writeJson(join(options.out, "loop-result.json"), result);
     return result;
@@ -444,7 +581,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "control"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold, scoreHost));
     order.push(`X${seed}`);
     finalRuns.push(await executeScored(executor, {
       task: DEV_TASK,
@@ -454,7 +591,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost));
   }
   const finalBlock = { order, control: summarize(finalRuns.filter((run) => run.arm === "control"), threshold), candidate: summarize(finalRuns.filter((run) => run.arm === "candidate"), threshold) };
   writeJson(join(options.out, "final", "order.json"), { order });
@@ -471,7 +608,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
         model,
         tokenCap: tokenCap(task),
-      }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold));
+      }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold, scoreHost));
     }
   }
   const heldOut = {
@@ -488,11 +625,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const result: OptLoopResult = {
     model,
     ewiThresholdSec: threshold,
+    ewiThresholdLabel: EWI_THRESHOLD_LABEL,
     rounds: roundSummaries,
     accepted,
     finalBlock: { order },
     heldOut: { calls: heldOut.calls, gatewayOnly: heldOut.gatewayOnly },
     skippedFinal: false,
+    stopReport,
   };
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -692,7 +831,9 @@ async function executeScored(
   request: Omit<OptRunRequest, "attestDir" | "harnessPath">,
   host: AttestHost,
   threshold: number,
+  scoreHost: { readonly now: () => number; readonly watcher: ResultWriteWatcher },
 ): Promise<ScoredRun> {
+  resolveEwiIdleScript();
   if (existsSync(join(request.runDir, "result.json"))) throw new Error("run dir already exists");
   assertAttestIsolated(host.attestDir, request.runDir);
   const runId = request.runId && request.runId.trim() !== "" ? request.runId : hostRunId();
@@ -707,7 +848,13 @@ async function executeScored(
     nonce,
     relayLogRoot: host.relayLogRoot,
   };
+  const resultFile = join(request.runDir, "outputs", PREREGISTERED_RESULT_FILE);
+  scoreHost.watcher.arm(resultFile);
   const observation = await executor.run(full);
+  copyCheckerBeforeSign(request.runDir, host.relayLogRoot, runId);
+  const tEnd = scoreHost.now();
+  const watch = scoreHost.watcher.snapshot();
+  const responseEnds = relayResponseEnds(join(host.relayLogRoot, runId, "relay.jsonl"));
   const verified = verifyHostAttestation({
     attestDir: host.attestDir,
     key: host.key,
@@ -739,15 +886,32 @@ async function executeScored(
   } else if (reward === null) {
     scoreStatus = "unscored";
   }
-  const ewi = measureRunEwi({
-    task: request.task.id,
-    seed: String(request.seed),
+  const scored = scoreRelayEwi({
+    tFirst: watch.tFirst,
+    tLastWrite: watch.tLastWrite,
+    responseEnds,
+    tEnd,
     timedOut: observation.timedOut,
-    tracePath: observation.tracePath,
-    outputsDir: observation.outputsDir,
-    batchLogPath: observation.batchLogPath,
-    runNumber: 1,
-  }, threshold);
+    thresholdSec: threshold,
+  });
+  let ewi_trace_ref: ScoredRelayEwi["ewi_trace_ref"] = null;
+  try {
+    const ref = measureRunEwi({
+      task: request.task.id,
+      seed: String(request.seed),
+      timedOut: observation.timedOut,
+      tracePath: observation.tracePath,
+      outputsDir: observation.outputsDir,
+      batchLogPath: observation.batchLogPath,
+      runNumber: 1,
+    }, threshold);
+    ewi_trace_ref = { idleS: ref.idleS, gapMaxS: ref.gapMaxS, postWriteS: ref.postWriteS, ewi: ref.ewi };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message.includes("EWI_IDLE_SCRIPT") || message.includes("ewi_idle.py sha")) throw error;
+    ewi_trace_ref = null;
+  }
+  const ewi: ScoredRelayEwi = { ...scored, ewi_trace_ref };
   const mountedSha = sha256File(request.configPath);
   const relayPatchActive = relayActive(join(host.relayLogRoot, runId, "relay.jsonl"), mountedSha);
   return {
@@ -785,15 +949,14 @@ function unscoredRun(
     wallS: 0,
     timedOut: false,
     ewi: {
-      task: request.task.id,
-      seed: String(request.seed),
-      timedOut: false,
-      postWriteS: 0,
-      idleS: 0,
-      gapMaxS: 0,
-      clause1: false,
-      clause2: false,
-      ewi: false,
+      version: "EWI-relay-v1",
+      verdict: "EWI不可判",
+      ewi: null,
+      idleS: null,
+      gapMaxS: null,
+      thresholdSec: DEFAULT_EWI_THRESHOLD_SEC,
+      thresholdLabel: EWI_THRESHOLD_LABEL,
+      ewi_trace_ref: null,
     },
     runDir: request.runDir,
     tracePath: join(request.runDir, "trace.jsonl"),
@@ -854,6 +1017,7 @@ function activationRecord(input: {
 
 function summarize(runs: readonly ScoredRun[], threshold: number): {
   readonly ewiThresholdSec: number;
+  readonly ewiThresholdLabel: typeof EWI_THRESHOLD_LABEL;
   readonly runs: readonly RunView[];
   readonly ewiRuns: readonly RunView[];
   readonly rewardMean: number | null;
@@ -861,11 +1025,12 @@ function summarize(runs: readonly ScoredRun[], threshold: number): {
 } {
   const views = runs.map(toView);
   const scored = views.filter((run) => run.scoreStatus === "scored" && run.reward !== null);
-  const kept = scored.filter((run) => !run.ewi);
+  const kept = scored.filter((run) => run.ewi === false);
   return {
     ewiThresholdSec: threshold,
+    ewiThresholdLabel: EWI_THRESHOLD_LABEL,
     runs: views,
-    ewiRuns: views.filter((run) => run.ewi),
+    ewiRuns: views.filter((run) => run.ewi === true),
     rewardMean: mean(scored.map((run) => run.reward ?? 0)),
     withoutEwi: {
       count: kept.length,
@@ -884,11 +1049,33 @@ function toView(run: ScoredRun): RunView {
     timedOut: run.timedOut,
     tokens: run.tokens,
     wallS: run.wallS,
-    postWriteS: run.ewi.postWriteS,
+    postWriteS: run.ewi.ewi_trace_ref?.postWriteS ?? null,
     idleS: run.ewi.idleS,
     gapMaxS: run.ewi.gapMaxS,
     ewi: run.ewi.ewi,
+    ewiVerdict: run.ewi.verdict,
+    referenceIdleS: run.ewi.ewi_trace_ref?.idleS ?? null,
+    referenceEwi: run.ewi.ewi_trace_ref?.ewi ?? null,
+    ewi_trace_ref: run.ewi.ewi_trace_ref,
   };
+}
+
+function relayResponseEnds(logPath: string): number[] | null {
+  if (!existsSync(logPath)) return null;
+  const ends: number[] = [];
+  for (const line of readFileSync(logPath, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    let row: { type?: unknown; ts_resp_end?: unknown };
+    try {
+      row = JSON.parse(line) as { type?: unknown; ts_resp_end?: unknown };
+    } catch {
+      return null;
+    }
+    if (row.type !== "done") continue;
+    if (typeof row.ts_resp_end !== "number" || !Number.isFinite(row.ts_resp_end)) return null;
+    ends.push(row.ts_resp_end);
+  }
+  return ends;
 }
 
 function mean(values: readonly number[]): number | null {
@@ -1206,8 +1393,11 @@ function writeNotes(
     `ewiThresholdSec: ${threshold}`,
     `controlConfigSha: ${controlSha}`,
     `patchSha: ${patchHash ?? ""}`,
+    `screenshot: round${round}/screenshot.svg`,
+    `sessions: round${round}/sessions`,
     "",
   ];
+  writeText(join(out, `round${round}`, "screenshot.svg"), `<svg xmlns="http://www.w3.org/2000/svg" data-round="${round}"/>\n`);
   writeText(join(out, `round${round}`, "run-notes.md"), lines.join("\n"));
 }
 

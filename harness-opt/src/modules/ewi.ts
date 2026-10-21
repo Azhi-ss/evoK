@@ -1,22 +1,54 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Frozen externally. The loop reads this unless a run passes another threshold. */
+/** Frozen externally. Under EWI-relay-v1 this number is not yet calibrated. */
 export const DEFAULT_EWI_THRESHOLD_SEC = 600;
 
-/** sha256 of the packaged `scripts/ewi_idle.py`. Scoring shells out to that file. */
+/** The 600s cutoff is carried over. It is not a calibrated cutoff for relay timings. */
+export const EWI_THRESHOLD_LABEL = "新口径下未校准";
+
+/** sha256 of the packaged `scripts/ewi_idle.py`. Reference only. Scoring does not use it. */
 export const EWI_IDLE_SHA = "8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69";
 
+/** Preregistered final result, relative to the run's outputs directory. */
+export const PREREGISTERED_RESULT_FILE = "answer.txt";
+
 /**
- * Path of `ewi_idle.py`. `EWI_IDLE_SCRIPT` wins. Otherwise the package copy.
- * `measureRunEwi` runs this script and uses its numbers.
+ * Packaged `ewi_idle.py` only. `EWI_IDLE_SCRIPT` and a caller path are rejected.
  */
 export function resolveEwiIdleScript(configured?: string): string {
   const chosen = (configured ?? process.env.EWI_IDLE_SCRIPT ?? "").trim();
-  if (chosen !== "") return chosen;
+  if (chosen !== "") throw new Error("EWI_IDLE_SCRIPT override is rejected");
   return fileURLToPath(new URL("../../scripts/ewi_idle.py", import.meta.url));
+}
+
+/** Host observation of the preregistered result file. Null means the host did not see a write. */
+export interface ResultWriteSnapshot {
+  readonly tFirst: number | null;
+  readonly tLastWrite: number | null;
+}
+
+/**
+ * Host-side watcher. Inotify inside the container is unverified, so the loop
+ * takes this interface instead of assuming a kernel event source.
+ */
+export interface ResultWriteWatcher {
+  arm(resultFile: string): void;
+  snapshot(): ResultWriteSnapshot;
+}
+
+/** No host observation. Scoring then stays 「EWI不可判」. */
+export function absentResultWatcher(): ResultWriteWatcher {
+  return {
+    arm() {},
+    snapshot() {
+      return { tFirst: null, tLastWrite: null };
+    },
+  };
 }
 
 export interface EwiObservation {
@@ -115,39 +147,106 @@ export function measureEwi(observation: EwiObservation, thresholdSec: number): E
   };
 }
 
-/** Read one run directory by running `ewi_idle.py`. The TypeScript path does not parse the trace. */
+export interface RelayEwiInput {
+  readonly tFirst: number | null;
+  readonly tLastWrite: number | null;
+  readonly responseEnds: readonly number[] | null;
+  readonly tEnd: number | null;
+  readonly timedOut: boolean;
+  readonly thresholdSec: number;
+}
+
+export interface ReferenceEwi {
+  readonly idleS: number;
+  readonly gapMaxS: number;
+  readonly postWriteS: number;
+  readonly ewi: boolean;
+}
+
+export interface ScoredRelayEwi {
+  readonly version: "EWI-relay-v1";
+  readonly verdict: "EWI不可判" | boolean;
+  readonly ewi: boolean | null;
+  readonly idleS: number | null;
+  readonly gapMaxS: number | null;
+  readonly thresholdSec: number;
+  readonly thresholdLabel: typeof EWI_THRESHOLD_LABEL;
+  /** Container trace column from ewi_idle.py. Never the scored verdict. */
+  readonly ewi_trace_ref: ReferenceEwi | null;
+}
+
+/**
+ * Reference column from the approved `ewi_idle.py`. Not the scored verdict.
+ * The summary is written in a temp directory so the run dir stays untouched.
+ */
 export function measureRunEwi(input: RunEwiInput, thresholdSec: number): EwiMetrics {
   if (!Number.isFinite(thresholdSec) || thresholdSec <= 0) {
     throw new Error("EWI threshold must be a positive number of seconds");
   }
   const script = resolveEwiIdleScript();
-  const runDir = dirname(input.batchLogPath);
-  const summary = `${runDir}/summary.csv`;
-  if (!existsSync(summary)) {
-    mkdirSync(runDir, { recursive: true });
+  const digest = createHash("sha256").update(readFileSync(script)).digest("hex");
+  if (digest !== EWI_IDLE_SHA) throw new Error("ewi_idle.py sha does not match the approved script");
+  const temp = mkdtempSync(join(tmpdir(), "ewi-ref-"));
+  try {
+    copyFileSync(input.batchLogPath, join(temp, "batch.log"));
     const timed = input.timedOut ? "True" : "False";
-    writeFileSync(summary, `task,seed,n,timed_out,trace\n${input.task},${input.seed},${input.runNumber ?? 1},${timed},${input.tracePath}\n`);
+    writeFileSync(join(temp, "summary.csv"), `task,seed,n,timed_out,trace\n${input.task},${input.seed},${input.runNumber ?? 1},${timed},${input.tracePath}\n`);
+    const proc = spawnSync("python3", [script, temp], { encoding: "utf8" });
+    if (proc.status !== 0) {
+      throw new Error(`${proc.stderr || ""}${proc.stdout || ""}`.trim() || "ewi_idle.py failed");
+    }
+    const line = proc.stdout.split("\n").find((item) => item.startsWith("{"));
+    if (!line) throw new Error(proc.stdout || "ewi_idle.py printed nothing");
+    const row = JSON.parse(line) as { task: string; seed: string; timed_out: string; post_write: number; idle: number; gap_max: number };
+    const timedOut = row.timed_out === "True";
+    const clause1 = row.idle >= thresholdSec;
+    const clause2 = timedOut && row.gap_max >= thresholdSec;
+    return {
+      task: row.task,
+      seed: String(row.seed),
+      timedOut,
+      postWriteS: row.post_write,
+      idleS: row.idle,
+      gapMaxS: row.gap_max,
+      clause1,
+      clause2,
+      ewi: clause1 || clause2,
+    };
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
   }
-  const proc = spawnSync("python3", [script, runDir], { encoding: "utf8" });
+}
+
+/** Scored EWI. Host timings only. A missing t_first is 「EWI不可判」, never a clear run. */
+export function scoreRelayEwi(input: RelayEwiInput): Omit<ScoredRelayEwi, "ewi_trace_ref"> {
+  if (!Number.isFinite(input.thresholdSec) || input.thresholdSec <= 0) {
+    throw new Error("EWI threshold must be a positive number of seconds");
+  }
+  const script = fileURLToPath(new URL("../../relay/ewi_relay.py", import.meta.url));
+  const proc = spawnSync("python3", [script], {
+    input: JSON.stringify({
+      t_first: input.tFirst,
+      t_last_write: input.tLastWrite,
+      response_ends: input.responseEnds,
+      t_end: input.tEnd,
+      timed_out: input.timedOut,
+      threshold: input.thresholdSec,
+    }),
+    encoding: "utf8",
+  });
   if (proc.status !== 0) {
-    throw new Error(`${proc.stderr || ""}${proc.stdout || ""}`.trim() || "ewi_idle.py failed");
+    throw new Error((proc.stderr || proc.stdout || "ewi_relay.py failed").trim());
   }
-  const line = proc.stdout.split("\n").find((item) => item.startsWith("{"));
-  if (!line) throw new Error(proc.stdout || "ewi_idle.py printed nothing");
-  const row = JSON.parse(line) as { task: string; seed: string; timed_out: string; post_write: number; idle: number; gap_max: number };
-  const timedOut = row.timed_out === "True";
-  const clause1 = row.idle >= thresholdSec;
-  const clause2 = timedOut && row.gap_max >= thresholdSec;
+  const row = JSON.parse(proc.stdout) as { verdict?: unknown; ewi?: unknown; idle?: unknown; gap_max?: unknown };
+  const undecided = row.verdict === "EWI不可判" || row.ewi === null || row.ewi === undefined;
   return {
-    task: row.task,
-    seed: String(row.seed),
-    timedOut,
-    postWriteS: row.post_write,
-    idleS: row.idle,
-    gapMaxS: row.gap_max,
-    clause1,
-    clause2,
-    ewi: clause1 || clause2,
+    version: "EWI-relay-v1",
+    verdict: undecided ? "EWI不可判" : row.ewi === true,
+    ewi: undecided ? null : row.ewi === true,
+    idleS: typeof row.idle === "number" ? row.idle : null,
+    gapMaxS: typeof row.gap_max === "number" ? row.gap_max : null,
+    thresholdSec: input.thresholdSec,
+    thresholdLabel: EWI_THRESHOLD_LABEL,
   };
 }
 

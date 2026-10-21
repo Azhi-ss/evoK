@@ -251,6 +251,7 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   })}\n`);
   if (request.relayLogRoot) {
     plantExecutorRelay(join(request.relayLogRoot, runId, "relay.jsonl"), runId, candidateHashFragment(hash));
+    copyCheckerBeforeSign(request.runDir, request.relayLogRoot, runId);
   }
   if (!attest) return;
   const runPath = resolve(request.runDir);
@@ -276,6 +277,20 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     reward: timing.reward,
     meta,
   });
+}
+
+const COPY_CHECKER_PY = [
+  "import json, sys",
+  "sys.path.insert(0, sys.argv[1])",
+  "import hooks",
+  "print(json.dumps(hooks.copy_checker_before_sign(sys.argv[2], sys.argv[3], sys.argv[4])))",
+].join("\n");
+
+/** Host copy of {run}/verifier into the relay checker directory. Runs before the attestation is signed. */
+export function copyCheckerBeforeSign(runDir: string, relayRoot: string, runId: string): void {
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const proc = spawnSync("python3", ["-c", COPY_CHECKER_PY, relayDir, runDir, runId, relayRoot], { encoding: "utf8" });
+  if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "checker copy failed").trim());
 }
 
 function observationOf(

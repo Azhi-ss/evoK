@@ -35,16 +35,18 @@
 
 不足 200 字节的文件必须整文件匹配。片段还要至少 3 行且至少 200 字节、全文里只出现一次、行对齐，并且 `toolName` 为 `read`、参数路径指向该宿主文件、请求 seq 早于结论。引用的行号必须整个落在片段内，并盖到至少一行非空行。
 
-## 布局、配对和 ITT
+## 布局、循环和检查器拷贝
 
-容器启动前写 `preRunLayout`（`ok`、`checks`、checks 的 sha，再加 HMAC）。`ok` 为假则记 infra `prerun_layout`，容器不启动。检查通过之后，outputs 里出现符号链接或额外目录，记 run `布局违规`。
+容器启动前写 `preRunLayout`（`ok`、`checks`、checks 的 sha，再加 HMAC）。`ok` 为假则记 infra `prerun_layout`，容器不启动。检查通过之后，outputs 里出现符号链接或额外目录，记 run `布局违规`。`classify` 只记录代码，不重跑。
 
-`pair_rerun_decision` 不接收 reward、EWI 或 checker 正文。只有 `final` 或 `dev`、计数器为 0、代码是 `{relay_restart, docker_daemon_event, usage_missing}` 的非空子集、且每条都有宿主证据时才重跑，并作废整对。同一 block 里多对都满足时只重跑最早的一对，其余是 `{action: no, reason: block_cap}`。计数器不为 0 则 `{action: stop, reason: cap}`。决定写入只追加、带 HMAC、并 fsync 的 `pair_decision` 记录。编排器在读任何 reward 之前先做这个决定。
+每次容器都是串行的 `docker run`，argv 含 `--cap-drop NET_RAW`。挂载源或目标落在 `/home/box` 下则拒绝。relay 日志默认在 `/home/box/.harness-relay`，这个目录不挂进容器。
 
-`itt_summary(schedule, results, run_notes, key)` 先检查日程 HMAC。签名失败抛 `ValueError("schedule signature failed")`。日程 sha 和 run-notes 里的 `scheduleSha` 不一致则抛 `ValueError("schedule sha does not match run-notes")`。两种情况都不返回部分数字。签名和 sha 都通过时，分母是未作废的槽位数。
+`devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（测试可以换 relay 根）。第 0 轮宿主拷贝的 sha256 必须是 `6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c`，对不上就拒绝。
+
+第 1 轮之前签 `pre_round1`：种子哈希、seed 0、innovator 上限 200000，以及四项停机上限 `maxRounds=10`、`readOnlyTokenCap=30000000`（innovator+critic+ranker 的 i+o+cacheRead，只认 relay usage）、`readOnlyWallCap=48h`、`realRunWallCap=103h`。先到先停。已经开始的真实运行会跑完并记下。停机报告把宿主证据上的故障轮和 reviewer 拒绝轮分开计数。
 
 ## EWI 和轮询
 
-计分 EWI 调用仓库里的 `scripts/ewi_idle.py`，字节与批准稿相同，sha256 `8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69`。`ts_of` 在列表推导里调用，非有限 `ts` 抛 `ValueError('missing ts')`。`EWI-relay-v1` 是另一套指标，不改这个文件。
+计分 EWI 是 `EWI-relay-v1`（`relay/ewi_relay.py`）。`t_first` 是宿主观察到预注册 `outputs/answer.txt` 第一次写入的时间。没有宿主观测则裁决为 `EWI不可判`，`ewi` 为 null。响应结束时间来自 relay 的 `done.ts_resp_end`，`t_end` 来自宿主时钟。600 秒标成 `新口径下未校准`。`scripts/ewi_idle.py`（sha256 `8a4ec70ff0e060fda168e613f5f6a2cd98eec83d33fab77a7ef25ca83ea6ad69`）只作为 `ewi_trace_ref`，不参与计分。`EWI_IDLE_SCRIPT` 覆盖会被拒绝。
 
-输出监视的单测走 2 秒内容 sha 的 `poll_once`。**未核实：** inotify。token 上限的单测直接调用 `poll_once`，不睡眠 15 秒。
+输出监视的单测走 2 秒内容 sha 的 `poll_once`。**未核实：** inotify 能否看见容器写入。token 上限的单测直接调用 `poll_once`，不睡眠 15 秒。

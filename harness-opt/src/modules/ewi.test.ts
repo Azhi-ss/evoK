@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_EWI_THRESHOLD_SEC, EWI_IDLE_SHA, measureEwi, measureRunEwi, resolveEwiIdleScript, roundTenth } from "./ewi";
@@ -120,6 +120,19 @@ describe("EWI metric", () => {
     expect(metrics.postWriteS).toBe(roundTenth(tEnd - tWrite));
     expect(metrics.idleS).toBe(roundTenth(tEnd - tLast));
     expect(metrics.ewi).toBe(true);
+    expect(existsSync(join(dir, "summary.csv"))).toBe(false);
+  });
+
+  test("an env or argument override is rejected", () => {
+    const previous = process.env.EWI_IDLE_SCRIPT;
+    process.env.EWI_IDLE_SCRIPT = "/tmp/not-the-approved-ewi.py";
+    try {
+      expect(() => resolveEwiIdleScript()).toThrow(/EWI_IDLE_SCRIPT override is rejected/);
+    } finally {
+      if (previous === undefined) delete process.env.EWI_IDLE_SCRIPT;
+      else process.env.EWI_IDLE_SCRIPT = previous;
+    }
+    expect(() => resolveEwiIdleScript("/tmp/other-ewi.py")).toThrow(/EWI_IDLE_SCRIPT override is rejected/);
   });
 
   test("a truncated trace line fails closed instead of scoring the prefix", () => {

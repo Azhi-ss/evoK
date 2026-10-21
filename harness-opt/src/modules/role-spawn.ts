@@ -3,8 +3,8 @@ import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
-/** Gap and reviewer evidence roles. They do not get write, edit, or bash. */
-export const EVIDENCE_ROLES = ["gap-finder", "reviewer-gate"] as const;
+/** Read-only evidence roles. Critic and ranker launch the same way as gap and reviewer. */
+export const EVIDENCE_ROLES = ["gap-finder", "reviewer-gate", "critic", "ranker"] as const;
 
 export const READ_ONLY_ROLE_TOOLS = ["read", "grep", "find", "ls"] as const;
 

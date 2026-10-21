@@ -1,4 +1,4 @@
-"""Relay, ledger, ITT, and pair-rerun tests. Specs through r8 and L96."""
+"""Relay, ledger, and loop-mode tests. classify records codes and does not rerun."""
 import base64
 import hashlib
 import json
@@ -12,6 +12,7 @@ import canon
 import ewi_relay
 import harness_relay
 import hooks
+import loop_mode
 from harness_relay import Relay, UpstreamNetworkError, assert_bind_host, new_run_id
 from ledger import Ledger, classify, load, patch_active, read_evidence, strip_line_prefixes, tokens
 
@@ -243,19 +244,13 @@ def ledger_of(rows, *, errors=None, run=None):
 
 
 class ClassifyCase(unittest.TestCase):
-    def test_08c_zero_requests_are_zero_and_an_ewi_hit_under_itt(self):
+    def test_08c_zero_requests_are_recorded_and_not_rerun(self):
         decision = classify(Ledger())
         self.assertEqual(decision["codes"], ["no_requests"])
         self.assertEqual(decision["unscored_kind"], "infra")
         self.assertIsNone(decision["reward"])
-        key = b"k" * 32
-        schedule = hooks.sign_schedule([{"id": "z", "arm": "C", "seed": 0, "order": 0}], key)
-        summary = hooks.itt_summary(schedule, [{
-            "id": "z", "score_status": "unscored", "unscored_kind": "infra", "codes": ["no_requests"], "reward": None, "ewi": False,
-        }], hooks.run_notes_for(schedule), key)
-        self.assertEqual(summary["denominator"], 1)
-        self.assertEqual(summary["primary"]["by_arm"]["C"]["reward_mean"], 0)
-        self.assertEqual(summary["primary"]["by_arm"]["C"]["ewi_hits"], 1)
+        self.assertNotIn("action", decision)
+        self.assertNotIn("rerun", decision)
 
     def test_08d_disconnect_result_and_cooccurrence(self):
         rid = "ab" * 16
@@ -442,7 +437,21 @@ class HookCase(unittest.TestCase):
         self.assertIn("devii-004-int", argv)
         self.assertNotIn("--add-host", argv)
         self.assertIn("NET_RAW", argv)
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "NET_RAW")
+        self.assertNotIn("/home/box", blob)
         self.assertNotIn("shared", argv)
+        with self.assertRaises(ValueError):
+            hooks.container_argv(
+                image="img", run_id=executor, port=1, network="devii-004-int", env={},
+                mounts=[("/home/box/.harness-relay/abc", "/relay")], command=["run"],
+            )
+        serial = [
+            hooks.container_argv(image="img", run_id=new_run_id(), port=1, network="devii-004-int", env={}, mounts=[("/src/a", "/a")], command=["run"])
+            for _ in range(2)
+        ]
+        for argv_i in serial:
+            self.assertEqual(argv_i[argv_i.index("--cap-drop") + 1], "NET_RAW")
+            self.assertNotIn("/home/box", "\n".join(argv_i))
         self.assertNotIn("open", argv)
         self.assertNotIn("API_KEY", blob)
         self.assertNotIn(role, blob)
@@ -572,123 +581,113 @@ class HookCase(unittest.TestCase):
         self.assertEqual(result["kind"], "run")
 
 
-class IttCase(unittest.TestCase):
-    def setUp(self):
-        self.key = b"schedule-key-0123456789abcdef!!!!"
+class LoopModeCase(unittest.TestCase):
+    def test_11_each_cap_and_forged_trace(self):
+        key = b"k" * 32
+        seed = bytes.fromhex("ab" * 32)
+        signed = loop_mode.pre_round1_sign(key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]})
+        self.assertEqual(signed["seed"], 0)
+        self.assertEqual(signed["innovatorCap"], 200_000)
+        self.assertEqual(signed["maxRounds"], 10)
+        self.assertEqual(signed["readOnlyTokenCap"], 30_000_000)
+        self.assertEqual(signed["readOnlyWallCapS"], 48 * 3600)
+        self.assertEqual(signed["realRunWallCapS"], 103 * 3600)
+        self.assertEqual(signed["ranker"], {"tools": ["read"]})
+        self.assertEqual(signed["critic"], {"tools": ["read"]})
+        self.assertEqual(signed["seedSha"], hashlib.sha256(seed).hexdigest())
+        self.assertTrue(loop_mode.verify_pre_round1(signed, key))
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(key, seed=seed, ranker={}, critic={}, round_started=True)
 
-    def test_10e_infra_stays_in_the_denominator(self):
-        slots = [
-            {"id": "c0", "arm": "C", "seed": 0, "order": 0},
-            {"id": "c1", "arm": "C", "seed": 1, "order": 1},
-            {"id": "x0", "arm": "X", "seed": 0, "order": 2},
-        ]
-        schedule = hooks.sign_schedule(slots, self.key)
-        results = [
-            {"id": "c0", "reward": 1, "ewi": False, "score_status": "scored", "codes": [], "idle_s": None},
-            {"id": "c1", "reward": 1, "ewi": False, "score_status": "unscored", "unscored_kind": "infra", "codes": ["usage_missing"]},
-            {"id": "x0", "reward": 1, "ewi": False, "score_status": "scored", "codes": []},
-        ]
-        summary = hooks.itt_summary(schedule, results, hooks.run_notes_for(schedule), self.key)
-        self.assertEqual(summary["denominator"], 3)
-        self.assertEqual(summary["primary"]["by_arm"]["C"]["reward_mean"], 0.5)
-        self.assertEqual(summary["primary"]["by_arm"]["C"]["ewi_hits"], 1)
-        self.assertEqual(summary["infra_counts"]["C"], 1)
-        self.assertEqual(summary["sensitivity_infra_excluded"]["by_arm"]["C"]["reward_mean"], 1)
-        self.assertEqual(summary["sensitivity_infra_excluded"]["by_arm"]["C"]["n"], 1)
-        self.assertNotEqual(summary["primary"], summary["sensitivity_infra_excluded"])
-        self.assertTrue(summary["no_claim"])
-        self.assertEqual(summary["n_缺失"], 1)
+        ten = loop_mode.drive([{} for _ in range(11)])
+        self.assertEqual(ten["reason"], "maxRounds")
+        self.assertIn("role:10", ten["calls"])
+        self.assertIn("real:10", ten["calls"])
+        self.assertNotIn("role:11", ten["calls"])
+        self.assertNotIn("real:11", ten["calls"])
 
-    def test_l96_bad_signature_or_run_notes_sha_refuses(self):
-        slots = [{"id": "a", "arm": "C", "seed": 0, "order": 0}]
-        schedule = hooks.sign_schedule(slots, self.key)
-        notes = hooks.run_notes_for(schedule)
-        results = [{"id": "a", "reward": 1, "ewi": False, "score_status": "scored", "codes": []}]
-        ok = hooks.itt_summary(schedule, results, notes, self.key)
-        self.assertEqual(ok["denominator"], 1)
-        forged = dict(schedule)
-        forged["hmacSha256"] = "0" * 64
-        with self.assertRaises(ValueError) as signature:
-            hooks.itt_summary(forged, results, notes, self.key)
-        self.assertIn("signature", str(signature.exception))
-        with self.assertRaises(ValueError) as mismatch:
-            hooks.itt_summary(schedule, results, "scheduleSha: " + ("ab" * 32) + "\n", self.key)
-        self.assertIn("run-notes", str(mismatch.exception))
-        self.assertNotIn("signature", str(mismatch.exception))
+        tokens = loop_mode.drive([{}], read_only_tokens_n=30_000_000)
+        self.assertEqual(tokens["reason"], "readOnlyTokenCap")
+        self.assertEqual(tokens["calls"], [])
 
-    def test_10f_pair_rerun(self):
-        block = {"kind": "final", "counter": 0, "seed": 0, "order": ["C0", "X0"]}
-        dev = {"kind": "dev", "counter": 0, "seed": 1, "order": ["C1", "X1"]}
-        host = {"usage_missing": "host", "relay_restart": "host", "docker_daemon_event": "host"}
-        client = hooks.pair_rerun_decision(block, 0, ["upstream_client_error"], host)
-        self.assertEqual(client["action"], "reject")
-        self.assertNotEqual(client["action"], "rerun")
-        missing = hooks.pair_rerun_decision(block, 0, ["usage_missing"], host)
-        self.assertEqual(missing["action"], "rerun")
-        self.assertTrue(missing["voided"])
-        server = hooks.pair_rerun_decision(block, 0, ["upstream_server_error"], {"upstream_server_error": "host"})
-        self.assertNotEqual(server["action"], "rerun")
-        daemon = hooks.pair_rerun_decision(block, 1, ["docker_daemon_event"], host)
-        self.assertEqual(daemon["action"], "rerun")
-        self.assertEqual(daemon["seed"], 0)
-        self.assertEqual(daemon["order"], ["C0", "X0"])
-        stopped = hooks.pair_rerun_decision({**dev, "counter": 1}, 0, ["usage_missing"], host)
-        self.assertEqual(stopped["action"], "stop")
-        held = hooks.pair_rerun_decision({"kind": "held-out", "counter": 0, "seed": 2, "order": ["H0"]}, 0, ["usage_missing"], host)
-        self.assertEqual(held["action"], "reject")
-        run_code = hooks.pair_rerun_decision(block, 0, ["token_cap"], host)
-        self.assertEqual(run_code["action"], "reject")
-        text = hooks.pair_rerun_decision(block, 0, ["relay_restart"], {"relay_restart": "container_text"})
-        self.assertEqual(text["action"], "reject")
-        with self.assertRaises(TypeError):
-            hooks.pair_rerun_decision(block, 0, ["usage_missing"], host, reward=1)
-        with self.assertRaises(TypeError):
-            hooks.pair_rerun_decision(block, 0, ["usage_missing"], host, sealed_checker_sha={"verdict": True})
-        sealed = hooks.pair_rerun_decision(dev, 0, ["usage_missing"], host, sealed_checker_sha="abc123")
-        self.assertEqual(sealed["action"], "rerun")
-        only_c = hooks.pair_rerun_decision(block, 0, {"C": ["relay_restart"], "X": []}, host)
-        self.assertEqual(only_c["action"], "rerun")
-        self.assertTrue(only_c["voided"])
-        path = Path(tempfile.mkdtemp()) / "pair_decision.jsonl"
-        orch = hooks.PairOrchestrator(self.key, path)
-        orch.begin_pair()
-        with self.assertRaises(RuntimeError):
-            orch.read_reward(lambda: 1)
-        first = orch.decide(block, 0, ["relay_restart"], host)
-        self.assertEqual(first["action"], "rerun")
-        self.assertEqual(orch.read_reward(lambda: 0.25), 0.25)
-        self.assertEqual(orch.order[:2], ["decide", "reward"])
-        orch.begin_pair()
-        second = orch.decide(block, 1, ["docker_daemon_event"], host, sealed_checker_sha="abc123")
-        self.assertEqual(second["action"], "no")
-        self.assertEqual(second["reason"], "block_cap")
-        self.assertTrue(hooks.verify_pair_decisions(path, self.key))
-        raw = path.read_bytes()
-        path.write_bytes(raw.replace(b"relay_restart", b"relay_restarX", 1))
-        self.assertFalse(hooks.verify_pair_decisions(path, self.key))
-        key = self.key
-        slots = [
-            {"id": "v", "arm": "C", "seed": 0, "order": 0},
-            {"id": "k", "arm": "X", "seed": 0, "order": 1},
+        wall = loop_mode.drive([{}], read_only_wall_s=48 * 3600)
+        self.assertEqual(wall["reason"], "readOnlyWallCap")
+        self.assertEqual(wall["calls"], [])
+
+        real = loop_mode.drive([{"real_run_wall_s": 103 * 3600}, {}])
+        self.assertEqual(real["calls"], ["role:1", "real:1"])
+        self.assertEqual(real["loggedRuns"], [1])
+        self.assertEqual(real["reason"], "realRunWallCap")
+        self.assertNotIn("role:2", real["calls"])
+
+        usage = {"prompt_tokens": 4, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}
+        huge = {"prompt_tokens": 10 ** 9, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}
+        events = [
+            {"type": "done", "role": "critic", "status": 200, "usage": usage},
+            {"type": "done", "role": "executor", "status": 200, "usage": huge},
         ]
-        schedule = hooks.sign_schedule(slots, key)
-        summary = hooks.itt_summary(schedule, [
-            {"id": "v", "voided": True, "score_status": "unscored", "unscored_kind": "infra", "codes": ["relay_restart"], "reward": 1, "ewi": False},
-            {"id": "k", "reward": 1, "ewi": False, "score_status": "scored", "codes": []},
-        ], hooks.run_notes_for(schedule), key)
-        self.assertEqual(summary["denominator"], 1)
-        self.assertEqual(summary["primary"]["by_arm"]["X"]["reward_mean"], 1)
-        voided = [row for row in summary["unscored_detail"] if row["id"] == "v"]
-        self.assertEqual(voided[0]["codes"], ["relay_restart"])
-        self.assertTrue(voided[0]["voided"])
-        server_slots = [{"id": "s", "arm": "C", "seed": 3, "order": 0}]
-        server_schedule = hooks.sign_schedule(server_slots, key)
-        server_summary = hooks.itt_summary(server_schedule, [{
-            "id": "s", "score_status": "unscored", "unscored_kind": "infra", "codes": ["upstream_server_error"], "reward": None,
-        }], hooks.run_notes_for(server_schedule), key)
-        self.assertEqual(server_summary["upstream_server_error"]["count"], 1)
-        self.assertTrue(server_summary["no_claim"])
-        self.assertFalse(server_summary["no_claim"] and False)
+        self.assertEqual(loop_mode.read_only_tokens(events, {"tokens": 10 ** 9}), 5)
+
+        mixed = loop_mode.drive([
+            {"host_fault": True},
+            {"reviewer_reject": True},
+        ])
+        self.assertEqual(mixed["faultRounds"], 1)
+        self.assertEqual(mixed["reviewerRejectRounds"], 1)
+        self.assertIsNone(mixed["reason"])
+
+    def test_bind_role_and_exclusion(self):
+        run_id = "ab" * 16
+        call = {"seq": 1, "runId": run_id, "outputSha": "aa" * 32}
+        events = [
+            {"type": "req", "seq": 1, "runId": run_id},
+            {"type": "done", "seq": 1, "role": "critic", "respSha": "aa" * 32},
+        ]
+        self.assertTrue(loop_mode.bind_role_call("critic", call, events, session_text="forged")["ok"])
+        self.assertEqual(loop_mode.bind_role_call("ranker", call, [], "session only")["reason"], "missing_relay_record")
+        wrong = loop_mode.bind_role_call("reviewer", call, [
+            {"type": "req", "seq": 1, "runId": "cd" * 16},
+            {"type": "done", "seq": 1, "respSha": "aa" * 32},
+        ])
+        self.assertEqual(wrong["reason"], "wrong_runId")
+        mismatch = loop_mode.bind_role_call("critic", call, [
+            {"type": "req", "seq": 1, "runId": run_id},
+            {"type": "done", "seq": 1, "respSha": "bb" * 32},
+        ])
+        self.assertEqual(mismatch["reason"], "respSha_mismatch")
+        with self.assertRaises(ValueError):
+            loop_mode.bind_role_call("gap", call, events)
+        one = loop_mode.exclude_and_recompute(
+            [{"id": "a", "changedKeys": 2, "configSha": "s"}, {"id": "b", "changedKeys": 1, "configSha": "t"}],
+            ["a"],
+        )
+        self.assertEqual(one["status"], "winner")
+        self.assertEqual(one["winner"], "b")
+        none = loop_mode.exclude_and_recompute([{"id": "a"}, {"id": "b"}], ["a", "b"])
+        self.assertEqual(none, {"status": "no_winner", "reason": "ranker_invalid"})
+
+    def test_checker_copy_and_round0_sha(self):
+        root = Path(tempfile.mkdtemp())
+        run = root / "run"
+        verifier = run / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.txt").write_bytes(b"1\n")
+        run_id = "ab" * 16
+        copied = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
+        dest = Path(copied["dest"])
+        self.assertEqual(dest, root / "relay" / run_id / "checker")
+        self.assertEqual((dest / "reward.txt").read_bytes(), b"1\n")
+        again = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
+        self.assertEqual(again["sha"], copied["sha"])
+        self.assertEqual(str(hooks.checker_dest(run_id)), f"/home/box/.harness-relay/{run_id}/checker")
+        self.assertEqual(hooks.DEFAULT_RELAY_ROOT, harness_relay.DEFAULT_LOG_ROOT)
+        self.assertEqual(hooks.ROUND0_HOST_COPY_SHA, "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c")
+        with self.assertRaises(ValueError) as rejected:
+            hooks.assert_round0_host_copy(b"1\n")
+        self.assertIn("round-0 host copy sha", str(rejected.exception))
+        (verifier / "reward.txt").write_bytes(b"0\n")
+        with self.assertRaises(ValueError):
+            hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
 
 
 class EwiTableCase(unittest.TestCase):

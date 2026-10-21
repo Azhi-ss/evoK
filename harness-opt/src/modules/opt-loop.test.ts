@@ -230,6 +230,25 @@ describe("optimization loop", () => {
       "i014:2:deepseek-v4-1-flash-261017",
     ]);
     expect(roles.reviews).toBe(1);
+    expect(result.stopReport).toEqual({ reason: null, faultRounds: 0, reviewerRejectRounds: 1 });
+    const notes = readFileSync(join(fx.out, "round1/run-notes.md"), "utf8");
+    expect(notes).toContain("screenshot: round1/screenshot.svg");
+    expect(notes).toContain("sessions: round1/sessions");
+    expect(readFileSync(join(fx.out, "round1/screenshot.svg"), "utf8")).toContain("data-round=\"1\"");
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as {
+      maxRounds: number;
+      readOnlyTokenCap: number;
+      readOnlyWallCapS: number;
+      realRunWallCapS: number;
+      seed: number;
+      innovatorCap: number;
+    };
+    expect(pre.maxRounds).toBe(10);
+    expect(pre.readOnlyTokenCap).toBe(30_000_000);
+    expect(pre.readOnlyWallCapS).toBe(48 * 3600);
+    expect(pre.realRunWallCapS).toBe(103 * 3600);
+    expect(pre.seed).toBe(0);
+    expect(pre.innovatorCap).toBe(200_000);
 
     const manifest = JSON.parse(readFileSync(join(fx.out, "round1/sessions/manifest.json"), "utf8")) as {
       sessions: { role: string; file: string; sha256: string }[];
@@ -274,22 +293,127 @@ describe("optimization loop", () => {
 
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       ewiThresholdSec: number;
-      runs: { seed: number; reward: number | null; ewi: boolean }[];
+      ewiThresholdLabel: string;
+      runs: { seed: number; reward: number | null; ewi: boolean | null; ewiVerdict: string }[];
       ewiRuns: { seed: number; reward: number | null }[];
       rewardMean: number;
-      withoutEwi: { count: number; rewardMean: number };
+      withoutEwi: { count: number; rewardMean: number | null; timedOut: number };
     };
     expect(metrics.ewiThresholdSec).toBe(600);
-    expect(metrics.ewiRuns.map((run) => run.seed)).toEqual([1]);
-    expect(metrics.ewiRuns[0]?.reward).toBe(1);
+    expect(metrics.ewiThresholdLabel).toBe("新口径下未校准");
+    expect(result.ewiThresholdLabel).toBe("新口径下未校准");
+    expect(metrics.ewiRuns).toEqual([]);
+    expect(metrics.runs.map((run) => run.ewi)).toEqual([null, null, null]);
+    expect(metrics.runs.map((run) => run.ewiVerdict)).toEqual(["EWI不可判", "EWI不可判", "EWI不可判"]);
     expect(metrics.runs.map((run) => run.reward)).toEqual([1, 1, 0]);
     expect(metrics.rewardMean).toBeCloseTo(2 / 3);
-    expect(metrics.withoutEwi).toEqual({ count: 2, rewardMean: 0.5, timedOut: 0 });
+    expect(metrics.withoutEwi).toEqual({ count: 0, rewardMean: null, timedOut: 0 });
     expect(readFileSync(join(fx.out, "round1/run-notes.md"), "utf8")).toContain(`patchSha: ${patchHash}`);
     const reviewInput = readFileSync(join(fx.out, "round1/review-input.json"), "utf8");
     expect(reviewInput).not.toContain("i030");
     expect(reviewInput).not.toContain("hb003");
     expect(reviewInput).not.toContain("held-out");
+  });
+
+  test("a forged trace or outputs mtime does not change the scored relay EWI", async () => {
+    const fx = fixture();
+    let armed = "";
+    const executor: OptExecutor = {
+      name: "forged",
+      async run(request) {
+        writeRunArtifacts(request, {
+          reward: 1,
+          tokens: 10,
+          wallS: 1,
+          timedOut: false,
+          tWrite: 0,
+          tEnd: 700,
+          assistantTs: [],
+        }, { key: fx.key, harnessPath: fx.harnessPath });
+        writeFileSync(join(request.runDir, "trace.jsonl"), `${JSON.stringify({ type: "assistant_message", ts: 699_000 })}\n`);
+        utimesSync(join(request.runDir, "outputs", "answer.txt"), 699, 699);
+        const log = join(request.relayLogRoot ?? "", request.runId ?? "", "relay.jsonl");
+        const rows = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { type?: string; ts_resp_end?: number });
+        for (const row of rows) if (row.type === "done") row.ts_resp_end = 1010;
+        writeFileSync(log, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+        return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
+      },
+    };
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      seeds: [0],
+      roles: rejectingRoles(fx),
+      executor,
+      now: () => new Date(1050 * 1000),
+      resultWatcher: {
+        arm(file) { armed = file; },
+        snapshot() { return { tFirst: 1000, tLastWrite: 1000 }; },
+      },
+    });
+    expect(armed.endsWith(`${join("outputs", "answer.txt")}`)).toBe(true);
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
+      runs: { ewi: boolean | null; idleS: number; gapMaxS: number; ewi_trace_ref: { idleS: number; ewi: boolean } | null }[];
+    };
+    const runDir = join(fx.out, "round1/runs/i014/seed0/candidate");
+    expect(existsSync(join(runDir, "summary.csv"))).toBe(false);
+    expect(metrics.runs[0]?.ewi).toBe(false);
+    expect(metrics.runs[0]?.idleS).toBe(40);
+    expect(metrics.runs[0]?.gapMaxS).toBe(40);
+    expect(metrics.runs[0]?.ewi_trace_ref?.idleS).toBe(1);
+    expect(metrics.runs[0]?.ewi_trace_ref?.ewi).toBe(false);
+  });
+
+  test("a missing host write observation is EWI不可判", async () => {
+    const fx = fixture();
+    const executor: OptExecutor = {
+      name: "clear-trace",
+      async run(request) {
+        writeRunArtifacts(request, {
+          reward: 1,
+          tokens: 10,
+          wallS: 1,
+          timedOut: false,
+          tWrite: 1_700_000_000,
+          tEnd: 1_700_000_001,
+          assistantTs: [1_700_000_000.2],
+        }, { key: fx.key, harnessPath: fx.harnessPath });
+        return observation(request, { reward: 1, tokens: 10, wallS: 1, timedOut: false });
+      },
+    };
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      seeds: [0],
+      roles: rejectingRoles(fx),
+      executor,
+    });
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
+      runs: { ewi: boolean | null; ewiVerdict: string }[];
+    };
+    expect(metrics.runs[0]?.ewi).toBeNull();
+    expect(metrics.runs[0]?.ewiVerdict).toBe("EWI不可判");
+  });
+
+  test("EWI_IDLE_SCRIPT override is rejected on the scored path", async () => {
+    const fx = fixture();
+    const previous = process.env.EWI_IDLE_SCRIPT;
+    process.env.EWI_IDLE_SCRIPT = "/tmp/not-the-approved-ewi.py";
+    try {
+      await expect(runOptLoop({
+        ...hostOpts(fx),
+        mode: "dry-run",
+        rounds: 1,
+        seeds: [0],
+        roles: rejectingRoles(fx),
+        executor: fakeExecutor(fx).executor,
+      })).rejects.toThrow(/EWI_IDLE_SCRIPT/);
+    } finally {
+      if (previous === undefined) delete process.env.EWI_IDLE_SCRIPT;
+      else process.env.EWI_IDLE_SCRIPT = previous;
+    }
   });
 
   test("the next gap input receives the reviewer reason, and a repeated summary is not run", async () => {
@@ -1028,5 +1152,57 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(result.patchActive).toBe(true);
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
     expect(existsSync(join(fx.out, "round1"))).toBe(false);
+  });
+
+  test("a read-only token cap starts no executor call", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      roles: rejectingRoles(fx),
+      executor: fake.executor,
+      readOnlyTokens: () => 30_000_000,
+    });
+    expect(fake.calls).toEqual([]);
+    expect(result.rounds).toEqual([]);
+    expect(result.skippedFinal).toBe(true);
+    expect(result.stopReport).toEqual({ reason: "readOnlyTokenCap", faultRounds: 0, reviewerRejectRounds: 0 });
+  });
+
+  test("a stop file and three rejects end the loop without a final block", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const roles = rejectingRoles(fx);
+    const rejected = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 5,
+      seeds: [0],
+      roles,
+      executor: fake.executor,
+    });
+    expect(fake.calls).toHaveLength(3);
+    expect(roles.reviews).toBe(3);
+    expect(rejected.stopReport.reason).toBe("no_accept");
+    expect(rejected.stopReport.reviewerRejectRounds).toBe(3);
+    expect(rejected.stopReport.faultRounds).toBe(0);
+    expect(rejected.skippedFinal).toBe(true);
+
+    const stopped = fixture();
+    mkdirSync(stopped.out, { recursive: true });
+    writeFileSync(join(stopped.out, "STOP"), "stop\n");
+    const parked = fakeExecutor(stopped);
+    const early = await runOptLoop({
+      ...hostOpts(stopped),
+      mode: "dry-run",
+      rounds: 2,
+      roles: rejectingRoles(stopped),
+      executor: parked.executor,
+      antiForgery: () => true,
+    });
+    expect(parked.calls).toEqual([]);
+    expect(early.stopReport.reason).toBe("stop_file");
   });
 });

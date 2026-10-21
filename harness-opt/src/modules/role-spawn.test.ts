@@ -37,6 +37,16 @@ describe("role spawn", () => {
     });
     expect(reviewer.tools).toEqual(["read"]);
     expect(roleWrite(reviewer, reviewer.sessionPath, "forged\n")).toBe(false);
+    for (const role of ["critic", "ranker"] as const) {
+      const spawned = buildRoleSpawn({
+        role,
+        cwd: join(root, role),
+        allowedPaths: [trace],
+        sessionPath: join(sessions, `${role}.jsonl`),
+        ledgerPath: join(sessions, "ledger.json"),
+      });
+      expect(spawned.tools).toEqual(["read"]);
+    }
   });
 
   test("a real pi launch receives --tools read and no role run id", () => {

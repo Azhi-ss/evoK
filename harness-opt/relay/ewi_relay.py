@@ -1,4 +1,6 @@
 """EWI-relay-v1. Separate from scripts/ewi_idle.py (mtime + assistant timestamps)."""
+import json
+import sys
 
 VERSION = "EWI-relay-v1"
 
@@ -47,3 +49,21 @@ def ewi_relay_v1(*, t_first, t_last_write=None, response_ends=None, t_end=None, 
         "last_write_idle": last_idle,
         "last_write_gap_max": last_gap,
     }
+
+
+def main() -> None:
+    payload = json.load(sys.stdin)
+    result = ewi_relay_v1(
+        t_first=payload.get("t_first"),
+        t_last_write=payload.get("t_last_write"),
+        response_ends=payload.get("response_ends"),
+        t_end=payload.get("t_end"),
+        timed_out=payload.get("timed_out"),
+        threshold=payload.get("threshold", 600),
+    )
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

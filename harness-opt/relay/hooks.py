@@ -1,19 +1,19 @@
-"""Host hooks around the relay: layout, docker argv, ITT, and pair reruns."""
+"""Host hooks around the relay: layout, docker argv, and classify codes.
+
+classify records codes. This module does not rerun pairs or summarize ITT.
+"""
 import hashlib
 import hmac
 import json
 import os
-import re
 from pathlib import Path
 
 from canon import append_jsonl, canonical
-from ewi_relay import ewi_relay_v1
 from ledger import classify
 
 CONTROL_CONFIG_SHA = "3e5d312d252f8f70a7f16f3a37a109f706fe85db59d4515a323828bdac5c192c"
 ATTEST_NETWORK = "gateway-only"
 DOCKER_NETWORK = "devii-004-int"
-RERUN_CODES = frozenset({"relay_restart", "docker_daemon_event", "usage_missing"})
 RUN_CODES = frozenset({
     "token_cap", "checker_undecided", "client_disconnect", "result_runid_mismatch", "布局违规", "upstream_client_error",
 })
@@ -22,10 +22,21 @@ INFRA_CODES = frozenset({
     "docker_daemon_event", "upstream_server_error",
 })
 POLL_INTERVAL_S = 15
-SHA_RE = re.compile(r"scheduleSha:\s*([0-9a-f]{64})")
+DEFAULT_RELAY_ROOT = "/home/box/.harness-relay"
+# sha256 of the approved round-0 checker snapshot the host copies before it is trusted.
+ROUND0_HOST_COPY_SHA = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c"
+
+
+def _under_home_box(path) -> bool:
+    raw = os.path.normpath(str(path))
+    if raw == "/home/box" or raw.startswith("/home/box" + os.sep):
+        return True
+    resolved = os.path.realpath(raw)
+    return resolved == "/home/box" or resolved.startswith("/home/box" + os.sep)
 
 
 def container_argv(*, image, run_id, port, network, env, mounts, command, role_run_ids=()):
+    """One serial container. Every run drops NET_RAW. Nothing under /home/box is mounted."""
     if network != DOCKER_NETWORK:
         raise ValueError(f"reject network {network}")
     if any(key == "API_KEY" for key in env):
@@ -39,6 +50,8 @@ def container_argv(*, image, run_id, port, network, env, mounts, command, role_r
     ]
     for mount in mounts:
         src, dst = (mount["source"], mount["target"]) if isinstance(mount, dict) else mount
+        if _under_home_box(src) or _under_home_box(dst):
+            raise ValueError("agent container must not mount /home/box")
         if run_id and (run_id in str(src) or run_id in str(dst)):
             raise ValueError("executor run id in a mount")
         argv.extend(["-v", f"{src}:{dst}"])
@@ -234,6 +247,71 @@ def verify_run_binding(*, expected_run_id, attest_run_id, relay_run_id, result_r
     return {"ok": True}
 
 
+def checker_dest(run_id: str, relay_root=None) -> Path:
+    """Host checker directory. The default root is /home/box/.harness-relay, which is not a container mount."""
+    if not isinstance(run_id, str) or len(run_id) != 32 or any(char not in "0123456789abcdef" for char in run_id):
+        raise ValueError("run id")
+    root = Path(DEFAULT_RELAY_ROOT if relay_root is None else relay_root)
+    return root / run_id / "checker"
+
+
+def host_copy_sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def assert_round0_host_copy(data: bytes) -> str:
+    """The round-0 host copy is accepted only when its sha256 is the pinned snapshot."""
+    digest = host_copy_sha(data)
+    if digest != ROUND0_HOST_COPY_SHA:
+        raise ValueError("round-0 host copy sha")
+    return digest
+
+
+def _write_exact(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def copy_checker_before_sign(run_dir, run_id: str, relay_root=None) -> dict:
+    """Copy {run}/verifier to <relay>/<runId>/checker. Call this before the host signs.
+
+    devii_docker_v2 writes the checker under {run}/verifier. The agent container
+    never receives the relay directory as a mount. A second copy of the same
+    bytes is kept. A different second copy is refused.
+    """
+    dest = checker_dest(run_id, relay_root)
+    src = Path(run_dir) / "verifier"
+    if src.is_symlink():
+        raise ValueError("verifier symlink")
+    files = {}
+    if src.is_dir():
+        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = Path(dirpath) / name
+                if path.is_symlink():
+                    raise ValueError("verifier symlink")
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(src).as_posix()
+                data = path.read_bytes()
+                target = dest / rel
+                if target.exists():
+                    if target.is_symlink() or target.read_bytes() != data:
+                        raise ValueError("checker copy changed")
+                else:
+                    _write_exact(target, data)
+                files[rel] = hashlib.sha256(data).hexdigest()
+    dest.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(canonical({"files": files})).hexdigest()
+    return {"dest": str(dest), "sha": digest, "files": files}
+
+
 def innovator_check(ledger, gap_file, expected_sha, candidate_sha, post_patch_sha, knob, expected_knob, cited_lines=None):
     from ledger import read_evidence
     evidence = read_evidence(ledger, gap_file, expected_sha, cited_lines)
@@ -244,269 +322,3 @@ def innovator_check(ledger, gap_file, expected_sha, candidate_sha, post_patch_sh
     if knob != expected_knob:
         return {"ok": False, "reason": "knob"}
     return {"ok": True}
-
-
-def _flat_codes(codes):
-    if isinstance(codes, dict):
-        flat = []
-        for value in codes.values():
-            flat.extend(value)
-        return flat
-    return list(codes)
-
-
-def _evidence_ok(codes, host_evidence) -> bool:
-    for code in codes:
-        evidence = host_evidence.get(code) if isinstance(host_evidence, dict) else None
-        if evidence not in (True, "host"):
-            return False
-    return True
-
-
-def pair_rerun_decision(block, pair_index, codes, host_evidence, sealed_checker_sha=None):
-    """Rerun only for host-proven relay_restart, docker_daemon_event, or usage_missing.
-
-    The signature takes no reward, EWI, or checker payload. A checker that already
-    ran may pass sealedCheckerSha, which is only the sha.
-    """
-    if sealed_checker_sha is not None and not isinstance(sealed_checker_sha, str):
-        raise TypeError("sealedCheckerSha only")
-    flat = _flat_codes(codes)
-    order = list(block.get("order") or [])
-    base = {"pair_index": pair_index, "seed": block.get("seed"), "order": order, "voided": False}
-    if block.get("kind") == "held-out":
-        return {**base, "action": "reject", "reason": "held-out"}
-    if block.get("counter") != 0:
-        return {**base, "action": "stop", "reason": "cap"}
-    if block.get("kind") not in ("final", "dev"):
-        return {**base, "action": "reject", "reason": "block"}
-    if any(code in RUN_CODES for code in flat):
-        return {**base, "action": "reject", "reason": "run_code"}
-    if not flat or any(code not in RERUN_CODES for code in flat):
-        return {**base, "action": "reject", "reason": "codes"}
-    if not _evidence_ok(flat, host_evidence):
-        return {**base, "action": "reject", "reason": "evidence"}
-    return {**base, "action": "rerun", "reason": None, "voided": True, "excluded_from_itt": True}
-
-
-class PairOrchestrator:
-    """Call pair_rerun_decision before any reward read. Records are append-only and signed."""
-
-    def __init__(self, key: bytes, path):
-        self.key = key
-        self.path = path
-        self.decided = False
-        self.reran = False
-        self.order = []
-
-    def begin_pair(self):
-        self.decided = False
-
-    def read_reward(self, fn):
-        if not self.decided:
-            raise RuntimeError("reward read before pair_rerun_decision")
-        self.order.append("reward")
-        return fn()
-
-    def decide(self, block, pair_index, codes, host_evidence, sealed_checker_sha=None):
-        self.order.append("decide")
-        preview = pair_rerun_decision(block, pair_index, codes, host_evidence, sealed_checker_sha=sealed_checker_sha)
-        if self.reran and preview.get("action") == "rerun":
-            decision = {
-                "action": "no",
-                "reason": "block_cap",
-                "pair_index": pair_index,
-                "seed": block.get("seed"),
-                "order": list(block.get("order") or []),
-                "voided": False,
-            }
-        else:
-            decision = preview
-            if decision.get("action") == "rerun":
-                self.reran = True
-        inputs = {
-            "block": block,
-            "pairIndex": pair_index,
-            "codes": codes,
-            "hostEvidence": host_evidence,
-            "sealedCheckerSha": sealed_checker_sha,
-        }
-        _append_decision(self.path, self.key, inputs, decision)
-        self.decided = True
-        return decision
-
-
-def orchestrate_pairs(block, pairs, key, path, reward_reader=None):
-    orch = PairOrchestrator(key, path)
-    decisions = []
-    for pair in pairs:
-        orch.begin_pair()
-        decisions.append(orch.decide(
-            block,
-            pair["pair_index"],
-            pair["codes"],
-            pair["host_evidence"],
-            pair.get("sealed_checker_sha"),
-        ))
-        if reward_reader is not None:
-            orch.read_reward(lambda pair=pair: reward_reader(pair))
-    return {"decisions": decisions, "events": list(orch.order)}
-
-
-def _append_decision(path, key, inputs, decision):
-    body = {"type": "pair_decision", "inputs": inputs, "decision": decision}
-    mac = hmac.new(key, canonical(body), hashlib.sha256).hexdigest()
-    append_jsonl(path, {**body, "hmacSha256": mac})
-
-
-def verify_pair_decisions(path, key: bytes) -> bool:
-    file = Path(path)
-    if not file.is_file():
-        return False
-    lines = [line for line in file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not lines:
-        return False
-    for line in lines:
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            return False
-        mac = obj.pop("hmacSha256", "")
-        if not hmac.compare_digest(str(mac), hmac.new(key, canonical(obj), hashlib.sha256).hexdigest()):
-            return False
-    return True
-
-
-def sign_schedule(slots, key: bytes) -> dict:
-    for slot in slots:
-        for field in ("arm", "seed", "order"):
-            if field not in slot:
-                raise ValueError("schedule slot needs arm, seed, and order")
-    body = {"slots": slots}
-    raw = canonical(body)
-    return {
-        "slots": slots,
-        "signed": True,
-        "scheduleSha": hashlib.sha256(raw).hexdigest(),
-        "hmacSha256": hmac.new(key, raw, hashlib.sha256).hexdigest(),
-    }
-
-
-def _notes_sha(run_notes):
-    if isinstance(run_notes, dict):
-        return run_notes.get("scheduleSha")
-    match = SHA_RE.search(str(run_notes))
-    return match.group(1) if match else None
-
-
-def _require_schedule(schedule, run_notes, key: bytes) -> str:
-    slots = schedule.get("slots")
-    if not isinstance(slots, list) or not slots:
-        raise ValueError("schedule signature failed")
-    for slot in slots:
-        for field in ("arm", "seed", "order"):
-            if field not in slot:
-                raise ValueError("schedule signature failed")
-    digest = hashlib.sha256(canonical({"slots": slots})).hexdigest()
-    mac = hmac.new(key, canonical({"slots": slots}), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(mac, str(schedule.get("hmacSha256") or "")):
-        raise ValueError("schedule signature failed")
-    if _notes_sha(run_notes) != digest:
-        raise ValueError("schedule sha does not match run-notes")
-    return digest
-
-
-def _has_infra(row) -> bool:
-    return any(code in INFRA_CODES for code in (row.get("codes") or []))
-
-
-def _itt_reward(row):
-    if row.get("score_status") == "unscored" or row.get("unscored_kind"):
-        return 0.0
-    reward = row.get("reward", None)
-    if reward is None:
-        return None
-    return float(reward)
-
-
-def _itt_ewi(row) -> bool:
-    if row.get("score_status") == "unscored" or row.get("unscored_kind"):
-        return True
-    return bool(row.get("ewi"))
-
-
-def _arm_stats(rows):
-    out = {}
-    for row in rows:
-        arm = row["arm"]
-        bucket = out.setdefault(arm, {"n": 0, "reward_sum": 0.0, "reward_n": 0, "ewi_hits": 0})
-        bucket["n"] += 1
-        reward = _itt_reward(row)
-        if reward is not None:
-            bucket["reward_sum"] += reward
-            bucket["reward_n"] += 1
-        if _itt_ewi(row):
-            bucket["ewi_hits"] += 1
-    return {
-        arm: {
-            "n": bucket["n"],
-            "reward_mean": (bucket["reward_sum"] / bucket["reward_n"]) if bucket["reward_n"] else None,
-            "ewi_hits": bucket["ewi_hits"],
-        }
-        for arm, bucket in out.items()
-    }
-
-
-def itt_summary(schedule, results, run_notes, key: bytes) -> dict:
-    """ITT over the signed schedule. Throws if the signature or run-notes sha fails."""
-    _require_schedule(schedule, run_notes, key)
-    by_id = {row["id"]: row for row in results}
-    joined = []
-    for slot in schedule["slots"]:
-        found = by_id.get(slot["id"], {
-            "id": slot["id"],
-            "score_status": "unscored",
-            "unscored_kind": "infra",
-            "codes": ["no_requests"],
-            "reward": None,
-            "ewi": None,
-        })
-        joined.append({**slot, **found, "arm": slot["arm"]})
-    active = [row for row in joined if not row.get("voided")]
-    infra_counts = {}
-    for row in active:
-        if _has_infra(row):
-            infra_counts[row["arm"]] = infra_counts.get(row["arm"], 0) + 1
-    server = [
-        {"id": row["id"], "arm": row["arm"], "seed": row.get("seed"), "codes": list(row.get("codes") or [])}
-        for row in joined if "upstream_server_error" in (row.get("codes") or [])
-    ]
-    detail = []
-    for row in joined:
-        if row.get("voided") or row.get("score_status") == "unscored" or row.get("codes"):
-            if row.get("voided") or row.get("score_status") == "unscored":
-                detail.append({
-                    "id": row["id"],
-                    "arm": row["arm"],
-                    "codes": list(row.get("codes") or []),
-                    "voided": bool(row.get("voided")),
-                    "unscored_kind": row.get("unscored_kind"),
-                })
-    missing = 0
-    for row in active:
-        if row.get("missing_continuous") or ("idle_s" in row and row.get("idle_s") is None) or ("gap_max_s" in row and row.get("gap_max_s") is None):
-            missing += 1
-    return {
-        "denominator": len(active),
-        "primary": {"by_arm": _arm_stats(active)},
-        "sensitivity_infra_excluded": {"by_arm": _arm_stats([row for row in active if not _has_infra(row)])},
-        "infra_counts": infra_counts,
-        "upstream_server_error": {"count": len(server), "runs": server},
-        "unscored_detail": detail,
-        "n_缺失": missing,
-        "no_claim": any(_has_infra(row) for row in active),
-    }
-
-
-def run_notes_for(schedule) -> str:
-    return f"scheduleSha: {schedule['scheduleSha']}\n"
