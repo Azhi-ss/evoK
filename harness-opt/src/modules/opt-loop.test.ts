@@ -241,7 +241,9 @@ describe("optimization loop", () => {
       readOnlyWallCapS: number;
       realRunWallCapS: number;
       seed: number;
+      seedSha: string;
       innovatorCap: number;
+      round0Record: { srcPath: string; srcSha256: string; hostCopyPath: string };
     };
     expect(pre.maxRounds).toBe(10);
     expect(pre.readOnlyTokenCap).toBe(30_000_000);
@@ -249,6 +251,13 @@ describe("optimization loop", () => {
     expect(pre.realRunWallCapS).toBe(103 * 3600);
     expect(pre.seed).toBe(0);
     expect(pre.innovatorCap).toBe(200_000);
+    expect(pre.seedSha).toMatch(/^[0-9a-f]{64}$/);
+    expect(pre.round0Record).toEqual({
+      srcPath: "/workspace/company/runs/2026-10-21-real-executor-full/probe/i014/seed1/workspace/runs/task-g3un6z/trace.jsonl",
+      srcSha256: "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c",
+      hostCopyPath: "",
+    });
+    expect(notes).toContain("reward:");
 
     const manifest = JSON.parse(readFileSync(join(fx.out, "round1/sessions/manifest.json"), "utf8")) as {
       sessions: { role: string; file: string; sha256: string }[];
@@ -769,7 +778,8 @@ describe("optimization loop", () => {
     expect(result.finalBlock).toBeNull();
     expect(result.heldOut).toBeNull();
     expect(existsSync(join(fx.out, "final/order.json"))).toBe(false);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(1);
+    expect(result.stopReport.reason).toBe("anti_forgery");
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { scoreStatus: string; unscoredReason?: string; reward: number | null }[];
     };
@@ -929,6 +939,84 @@ describe("optimization loop", () => {
       runs: { scoreStatus: string; unscoredReason?: string; reward: number | null }[];
     };
     expect(metrics.runs[0]).toMatchObject({ scoreStatus: "unscored", unscoredReason: "result_runid_mismatch", reward: null });
+  });
+
+  test("a signed round-0 host copy is the gap target", async () => {
+    const fx = fixture();
+    const trace = join(fx.root, "round0.jsonl");
+    const body = "alpha\nbeta\ngamma\n";
+    writeFileSync(trace, body);
+    const fake = fakeExecutor(fx);
+    const citing = citingRoles(fx.key);
+    const rejecting = rejectingRoles(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      seeds: [0],
+      roles: { gap: citing.gap, innovate: citing.innovate, review: rejecting.review },
+      executor: fake.executor,
+      round0TracePath: trace,
+    });
+    expect(fake.calls).toHaveLength(1);
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.rounds).toHaveLength(1);
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as {
+      round0Record: { srcSha256: string; hostCopyPath: string };
+    };
+    expect(pre.round0Record.srcSha256).toBe(createHash("sha256").update(body).digest("hex"));
+    expect(pre.round0Record.hostCopyPath.startsWith(`${fx.attestRoot}/`)).toBe(true);
+    expect(pre.round0Record.hostCopyPath.startsWith(`${fx.out}/`)).toBe(false);
+    expect(readFileSync(pre.round0Record.hostCopyPath, "utf8")).toBe(body);
+    const gap = JSON.parse(readFileSync(join(fx.out, "round1/gap-input.json"), "utf8")) as {
+      traces: { file: string; sha256: string }[];
+    };
+    expect(gap.traces[0]?.file).toBe(pre.round0Record.hostCopyPath);
+    expect(gap.traces[0]?.sha256).toBe(pre.round0Record.srcSha256);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
+    expect(closure.gapCitedTrace).toBe(true);
+  });
+
+  test("a changed round-0 host copy stops before any call", async () => {
+    const fx = fixture();
+    const trace = join(fx.root, "round0.jsonl");
+    writeFileSync(trace, "alpha\nbeta\ngamma\n");
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      seeds: [0],
+      roles: citingRoles(fx.key),
+      executor: fake.executor,
+      round0TracePath: trace,
+      round0Tamper: true,
+    });
+    expect(fake.calls).toHaveLength(0);
+    expect(result.rounds).toEqual([]);
+    expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(existsSync(join(fx.out, "round1/gap-input.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("an unsigned round-0 target stops the loop before the executor", async () => {
+    const fx = fixture();
+    const trace = join(fx.root, "round0.jsonl");
+    writeFileSync(trace, "alpha\nbeta\ngamma\n");
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      seeds: [0],
+      roles: stubOptRoles(fx.key),
+      executor: fake.executor,
+      round0TracePath: trace,
+    });
+    expect(fake.calls).toHaveLength(0);
+    expect(result.rounds).toEqual([{ round: 1, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] }]);
+    expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
   });
 });
 

@@ -23,7 +23,7 @@ INFRA_CODES = frozenset({
 })
 POLL_INTERVAL_S = 15
 DEFAULT_RELAY_ROOT = "/home/box/.harness-relay"
-# sha256 of the approved round-0 checker snapshot the host copies before it is trusted.
+# Pinned sha256 of the declared round-0 trace. That file is not in this repo.
 ROUND0_HOST_COPY_SHA = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c"
 
 
@@ -308,8 +308,120 @@ def copy_checker_before_sign(run_dir, run_id: str, relay_root=None) -> dict:
                     _write_exact(target, data)
                 files[rel] = hashlib.sha256(data).hexdigest()
     dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
     digest = hashlib.sha256(canonical({"files": files})).hexdigest()
     return {"dest": str(dest), "sha": digest, "files": files}
+
+
+def checker_tree_sha(checker_dir) -> str:
+    root = Path(checker_dir)
+    files = {}
+    if root.is_dir() and not root.is_symlink():
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = Path(dirpath) / name
+                if path.is_symlink() or not path.is_file():
+                    continue
+                rel = path.relative_to(root).as_posix()
+                files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(canonical({"files": files})).hexdigest()
+
+
+def parse_reward_text(text: str):
+    raw = text.strip()
+    if raw == "":
+        raise ValueError("reward")
+    value = float(raw)
+    if value != value:
+        raise ValueError("reward")
+    if value == int(value):
+        return int(value)
+    return value
+
+
+def read_checker_reward(checker_dir):
+    file = Path(checker_dir) / "reward.txt"
+    if file.is_symlink() or not file.is_file():
+        raise ValueError("reward")
+    return parse_reward_text(file.read_text(encoding="utf-8"))
+
+
+def sign_run_record(key: bytes, checker_dir, *, relay_log_sha="", relay_sha="", boot_id="", network="devii-004-int", ewi_version="EWI-relay-v1", expected_run_id="") -> dict:
+    """checkerOutputSha and reward enter the run signature. The checker directory is the host copy."""
+    body = {
+        "type": "run_record",
+        "checkerOutputSha": checker_tree_sha(checker_dir),
+        "reward": read_checker_reward(checker_dir),
+        "relayLogSha": relay_log_sha,
+        "relaySha": relay_sha,
+        "bootId": boot_id,
+        "network": network,
+        "ewiVersion": ewi_version,
+        "expectedRunId": expected_run_id,
+    }
+    return {**body, "hmacSha256": hmac.new(key, canonical(body), hashlib.sha256).hexdigest()}
+
+
+def _same_reward(left, right) -> bool:
+    return left == right
+
+
+def verify_run_record(run_sig, checker_out, reward, key: bytes, container_dir=None) -> dict:
+    """Shared by reviewer input and run-notes. A mismatch is attest_mismatch.
+
+    `reward` is the value the caller is about to trust. run-notes may display it,
+    and that display is not itself evidence. Container result.json and verifier/reward.txt
+    have to match the signed reward when `container_dir` is set.
+    """
+    if not isinstance(run_sig, dict):
+        return {"ok": False, "reason": "attest_mismatch"}
+    body = {k: v for k, v in run_sig.items() if k != "hmacSha256"}
+    mac = run_sig.get("hmacSha256") or ""
+    expected = hmac.new(key, canonical(body), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(str(mac), expected):
+        return {"ok": False, "reason": "attest_mismatch"}
+    try:
+        digest = checker_tree_sha(checker_out)
+        disk_reward = read_checker_reward(checker_out)
+    except (OSError, ValueError):
+        return {"ok": False, "reason": "attest_mismatch"}
+    if digest != run_sig.get("checkerOutputSha") or not _same_reward(disk_reward, run_sig.get("reward")):
+        return {"ok": False, "reason": "attest_mismatch"}
+    if not _same_reward(reward, run_sig.get("reward")):
+        return {"ok": False, "reason": "attest_mismatch"}
+    if container_dir is not None:
+        try:
+            container_reward = read_checker_reward(Path(container_dir) / "verifier")
+        except (OSError, ValueError):
+            return {"ok": False, "reason": "attest_mismatch"}
+        if not _same_reward(container_reward, run_sig.get("reward")):
+            return {"ok": False, "reason": "attest_mismatch"}
+        result = Path(container_dir) / "result.json"
+        if result.is_file() and not result.is_symlink():
+            try:
+                parsed = json.loads(result.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return {"ok": False, "reason": "attest_mismatch"}
+            if "reward" in parsed and not _same_reward(parsed["reward"], run_sig.get("reward")):
+                return {"ok": False, "reason": "attest_mismatch"}
+    return {"ok": True}
+
+
+def notes_reward(notes: str):
+    for line in notes.splitlines():
+        if line.startswith("reward:"):
+            return parse_reward_text(line.split(":", 1)[1])
+    raise ValueError("reward")
+
+
+def verify_notes_reward(notes: str, run_sig, checker_out, key: bytes) -> dict:
+    """The reward line in run-notes is display. It still has to match the signed record."""
+    try:
+        shown = notes_reward(notes)
+    except ValueError:
+        return {"ok": False, "reason": "attest_mismatch"}
+    return verify_run_record(run_sig, checker_out, shown, key)
 
 
 def innovator_check(ledger, gap_file, expected_sha, candidate_sha, post_patch_sha, knob, expected_knob, cited_lines=None):

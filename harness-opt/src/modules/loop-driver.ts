@@ -42,6 +42,8 @@ export interface DriveRound {
   readonly realRunWallS?: number;
   readonly hostFault?: boolean;
   readonly reviewerReject?: boolean;
+  /** Set when this round's anti-forgery check failed. The next round does not start. */
+  readonly antiForgery?: string | boolean;
 }
 
 /** Same stop rules as loop_mode.drive. An in-progress real run is logged before the loop stops. */
@@ -74,6 +76,10 @@ export function driveCappedLoop(rounds: readonly DriveRound[], initial: Partial<
     logged.push(index);
     if (rnd.hostFault) faultRounds += 1;
     if (rnd.reviewerReject) reviewerRejectRounds += 1;
+    if (rnd.antiForgery) {
+      reason = "anti_forgery";
+      break;
+    }
     const after = capHit({ startedRounds: index, readOnlyTokens: tokens, readOnlyWallS: readWall, realRunWallS: realWall });
     if (after) {
       reason = after;
@@ -83,13 +89,19 @@ export function driveCappedLoop(rounds: readonly DriveRound[], initial: Partial<
   return { reason, faultRounds, reviewerRejectRounds, calls, loggedRuns: logged };
 }
 
-export function signPreRound1(key: Buffer, ranker: unknown, critic: unknown): Record<string, unknown> {
+export interface Round0Sign {
+  readonly srcPath: string;
+  readonly hostCopyPath: string;
+}
+
+export function signPreRound1(key: Buffer, ranker: unknown, critic: unknown, round0?: Round0Sign): Record<string, unknown> {
   const proc = spawnSync("python3", [SCRIPT, "pre-round1"], {
     input: JSON.stringify({
       key: key.toString("hex"),
       seed: randomBytes(32).toString("hex"),
       ranker,
       critic,
+      ...(round0 ? { round0Src: round0.srcPath, hostCopyPath: round0.hostCopyPath } : {}),
     }),
     encoding: "utf8",
   });

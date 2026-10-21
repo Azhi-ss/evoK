@@ -2,7 +2,9 @@
 import hashlib
 import hmac
 import json
+import os
 import sys
+from pathlib import Path
 
 from canon import canonical
 from ledger import weight
@@ -13,7 +15,13 @@ READ_ONLY_TOKEN_CAP = 30_000_000
 READ_ONLY_WALL_S = 48 * 3600
 REAL_RUN_WALL_S = 103 * 3600
 READ_ONLY_ROLES = frozenset({"innovator", "critic", "ranker"})
+RANKING_ROLES = frozenset({"critic", "ranker"})
 BIND_ROLES = frozenset({"critic", "ranker", "reviewer"})
+RANKING_ROUND_CAP = 3_000_000
+# Declared round-0 trace. seedSha is retained and is not used to order anything.
+ROUND0_SRC_PATH = "/workspace/company/runs/2026-10-21-real-executor-full/probe/i014/seed1/workspace/runs/task-g3un6z/trace.jsonl"
+ROUND0_SRC_SHA = "6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c"
+ANTI_FORGERY = frozenset({"attest_mismatch", "reward", "round0Record"})
 
 CAPS = {
     "maxRounds": MAX_ROUNDS,
@@ -27,14 +35,66 @@ def _mac(body, key: bytes) -> str:
     return hmac.new(key, canonical(body), hashlib.sha256).hexdigest()
 
 
-def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round_started: bool = False) -> dict:
-    """Seed hash, seed 0, the 200k innovator cap, role config, and the four stop caps."""
+def _write_private(path, data: bytes) -> None:
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest.parent, 0o700)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def copy_round0(src_path, host_copy_path, *, mounts=()) -> dict:
+    """Copy the round-0 trace onto a host-private path and return the signed record fields."""
+    src = Path(src_path)
+    if src.is_symlink() or not src.is_file():
+        raise ValueError("round0Record missing")
+    data = src.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    dest = Path(host_copy_path)
+    for mount in mounts:
+        source = mount["source"] if isinstance(mount, dict) else mount[0]
+        if _path_inside(dest, source) or _path_inside(src, source):
+            raise ValueError("round0Record is inside a mount")
+    _write_private(dest, data)
+    copied = dest.read_bytes()
+    if hashlib.sha256(copied).hexdigest() != digest:
+        raise ValueError("round0Record sha")
+    return {"srcPath": str(src), "srcSha256": digest, "hostCopyPath": str(dest)}
+
+
+def _path_inside(path, root) -> bool:
+    child = os.path.realpath(path)
+    base = os.path.realpath(root)
+    return child == base or child.startswith(base + os.sep)
+
+
+def declared_round0() -> dict:
+    """Pinned source identity. hostCopyPath stays empty until the host actually copies the file."""
+    return {"srcPath": ROUND0_SRC_PATH, "srcSha256": ROUND0_SRC_SHA, "hostCopyPath": ""}
+
+
+def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
+    """Sign the caps, an inert seedSha, and round0Record before round 1.
+
+    seedSha is not used to shuffle comparison order. It stays in the signed body only.
+    """
     if round_started:
         raise ValueError("pre_round1_sign is before round 1")
     if not isinstance(seed, (bytes, bytearray)) or len(seed) == 0:
         raise ValueError("seed")
+    if round0_src:
+        if not host_copy_path:
+            raise ValueError("round0Record hostCopyPath")
+        record = copy_round0(round0_src, host_copy_path, mounts=mounts)
+    else:
+        record = declared_round0()
     body = {
         "type": "pre_round1",
+        "round0Record": record,
         "seedSha": hashlib.sha256(bytes(seed)).hexdigest(),
         "seed": 0,
         "innovatorCap": INNOVATOR_CAP,
@@ -68,6 +128,37 @@ def read_only_tokens(events, trace=None) -> int:
             continue
         total += weight(usage)
     return total
+
+
+def ranking_budget(events) -> dict:
+    """Per-round critic+ranker sub-cap. Innovator tokens are not part of this sub-cap."""
+    per_round = {}
+    for event in events or []:
+        if (event.get("role") or event.get("kind")) not in RANKING_ROLES:
+            continue
+        if event.get("type") != "done":
+            continue
+        status = event.get("status", 200)
+        if isinstance(status, bool) or status is None or not 200 <= int(status) <= 299:
+            continue
+        usage = event.get("usage")
+        if usage is None:
+            continue
+        rnd = event.get("round", 1)
+        per_round[rnd] = per_round.get(rnd, 0) + weight(usage)
+    hit = any(total >= RANKING_ROUND_CAP for total in per_round.values())
+    return {"perRound": per_round, "cap": RANKING_ROUND_CAP, "capHit": hit, "reason": "no_winner:cap_hit" if hit else None}
+
+
+def budget_status(events) -> dict:
+    """The 3M sub-cap and the 30M cumulative cap are decided independently."""
+    ranking = ranking_budget(events)
+    cumulative = read_only_tokens(events)
+    return {
+        "ranking": ranking,
+        "readOnlyTokens": cumulative,
+        "readOnlyCapHit": cumulative >= READ_ONLY_TOKEN_CAP,
+    }
 
 
 def cap_hit(*, started_rounds, read_only_tokens_n, read_only_wall_s, real_run_wall_s, caps=None) -> str | None:
@@ -113,6 +204,9 @@ def drive(rounds, *, caps=None, read_only_tokens_n=0, read_only_wall_s=0, real_r
             fault_rounds += 1
         if rnd.get("reviewer_reject"):
             reviewer_reject_rounds += 1
+        if rnd.get("anti_forgery"):
+            reason = "anti_forgery"
+            break
         hit = cap_hit(started_rounds=index, read_only_tokens_n=tokens, read_only_wall_s=read_wall, real_run_wall_s=real_wall, caps=limits)
         if hit:
             reason = hit
@@ -174,6 +268,9 @@ def main(argv=None) -> None:
             ranker=payload["ranker"],
             critic=payload["critic"],
             round_started=bool(payload.get("roundStarted")),
+            round0_src=payload.get("round0Src"),
+            host_copy_path=payload.get("hostCopyPath"),
+            mounts=payload.get("mounts") or (),
         )
         json.dump(signed, sys.stdout)
         return

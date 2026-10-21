@@ -33,7 +33,7 @@
 
 **未核实：** Pi 真实前缀是否就是 `N|`。这里按这个格式钉死。
 
-不足 200 字节的文件必须整文件匹配。片段还要至少 3 行且至少 200 字节、全文里只出现一次、行对齐，并且 `toolName` 为 `read`、参数路径指向该宿主文件、请求 seq 早于结论。引用的行号必须整个落在片段内，并盖到至少一行非空行。
+不足 200 字节的文件必须整文件匹配。片段还要至少 3 行且至少 200 字节、全文里只出现一次、行对齐，并且 `toolName` 为 `read`、参数路径指向该宿主文件、请求 seq 早于结论。引用的行号必须整个落在片段内，并盖到至少一行非空行。第 1 轮 gap 的目标是 `pre_round1` 里 `round0Record` 的宿主私有副本，按签名里的 sha 判定。未签名文件、改过一字节的副本或 sha 不符都是防伪失败，循环停止，不再开下一轮。
 
 ## 布局、循环和检查器拷贝
 
@@ -41,9 +41,9 @@
 
 每次容器都是串行的 `docker run`，argv 含 `--cap-drop NET_RAW`。挂载源或目标落在 `/home/box` 下则拒绝。relay 日志默认在 `/home/box/.harness-relay`，这个目录不挂进容器。
 
-`devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（测试可以换 relay 根）。第 0 轮宿主拷贝的 sha256 必须是 `6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c`，对不上就拒绝。
+`devii_docker_v2.py` 把 checker 写到 `{run}/verifier`。宿主在签名前把该目录原样拷到 `/home/box/.harness-relay/<runId>/checker/`（模式 `0700`，测试可以换 relay 根）。这个目录不在任何容器挂载里。`checkerOutputSha` 和 `reward` 进入运行签名。`verify_run_record(runSig, checkerOut, reward)` 同时给 reviewer 输入和 run-notes 写入用。容器里的 `verifier/reward.txt`、`result.json` 的 reward、宿主 checker 输出或 run-notes 里展示的 reward 有一处对不上，就是 `attest_mismatch`，循环停止。run-notes 里的 reward 只作展示。
 
-第 1 轮之前签 `pre_round1`：种子哈希、seed 0、innovator 上限 200000，以及四项停机上限 `maxRounds=10`、`readOnlyTokenCap=30000000`（innovator+critic+ranker 的 i+o+cacheRead，只认 relay usage）、`readOnlyWallCap=48h`、`realRunWallCap=103h`。先到先停。已经开始的真实运行会跑完并记下。停机报告把宿主证据上的故障轮和 reviewer 拒绝轮分开计数。
+第 1 轮之前签 `pre_round1`。里面有 `round0Record`（`srcPath`、`srcSha256`、`hostCopyPath`）。有源文件时，宿主把它拷到私有路径再按实际字节签名。没有源文件时，声明的身份是 `srcPath=/workspace/company/runs/2026-10-21-real-executor-full/probe/i014/seed1/workspace/runs/task-g3un6z/trace.jsonl`、`srcSha256=6a213acd3b0b84c54609fbcfa492b5b2911926bafebc85b155d8e16d0f5a1e6c`，`hostCopyPath` 为空。`seedSha` 仍在签名里，不参与排序。另外还有 seed 0、innovator 上限 200000，以及四项停机上限 `maxRounds=10`、`readOnlyTokenCap=30000000`（innovator+critic+ranker 的 i+o+cacheRead，只认 relay usage）、`readOnlyWallCap=48h`、`realRunWallCap=103h`。critic+ranker 另有每轮 3M 子上限，到顶记 `no_winner:cap_hit`；它和 30M 累计分开判定，innovator 只计入 30M。先到先停。已经开始的真实运行会跑完并记下。`attest_mismatch`、reward 验签失败、`round0Record` 验签失败同样立即停环。停机报告把宿主证据上的故障轮和 reviewer 拒绝轮分开计数。
 
 ## EWI 和轮询
 

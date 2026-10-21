@@ -90,6 +90,23 @@ print(loop_mode.read_only_tokens(events, {"tokens": 10 ** 9}))
     expect(report.faultRounds).toBe(1);
     expect(report.reviewerRejectRounds).toBe(1);
     expect(report.reason).toBeNull();
+    for (const kind of ["attest_mismatch", "reward", "round0Record"]) {
+      const stopped = driveCappedLoop([{ antiForgery: kind }, {}]);
+      expect(stopped.reason).toBe("anti_forgery");
+      expect(stopped.calls).toEqual(["role:1", "real:1"]);
+      expect(stopped.loggedRuns).toEqual([1]);
+    }
+    const budget = python(`
+import loop_mode
+critic = {"type": "done", "role": "critic", "status": 200, "round": 1, "usage": {"prompt_tokens": 3000000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}}
+innovator = {"type": "done", "role": "innovator", "status": 200, "round": 1, "usage": {"prompt_tokens": 30000000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}}
+rank = loop_mode.budget_status([critic])
+wide = loop_mode.budget_status([innovator])
+assert rank["ranking"]["capHit"] and rank["ranking"]["reason"] == "no_winner:cap_hit" and not rank["readOnlyCapHit"]
+assert not wide["ranking"]["capHit"] and wide["readOnlyCapHit"]
+print("ok")
+`);
+    expect(budget).toBe("ok");
   });
 
   test("8 bind_role_call requires the role's own relay record", () => {
@@ -197,28 +214,95 @@ print(copied["sha"])
     expect(text).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test("13 the default checker directory is under /home/box/.harness-relay", () => {
+  test("13 a signed round-0 copy passes and a changed copy stops", () => {
     const text = python(`
-import hooks
-from harness_relay import DEFAULT_LOG_ROOT
-run_id = "cd" * 16
-assert hooks.DEFAULT_RELAY_ROOT == DEFAULT_LOG_ROOT == "/home/box/.harness-relay"
-print(hooks.checker_dest(run_id))
+import hashlib, os, stat, tempfile
+from pathlib import Path
+import harness_relay, loop_mode
+from ledger import read_evidence
+key = b"k" * 32
+root = Path(tempfile.mkdtemp())
+body = b"alpha\\nbeta\\ngamma\\n"
+src = root / "trace.jsonl"
+src.write_bytes(body)
+dest = root / "private" / "round0-trace.jsonl"
+signed = loop_mode.pre_round1_sign(key, seed=b"s" * 32, ranker={"tools": ["read"]}, critic={"tools": ["read"]}, round0_src=src, host_copy_path=dest)
+assert loop_mode.verify_pre_round1(signed, key)
+record = signed["round0Record"]
+assert record["srcSha256"] == hashlib.sha256(body).hexdigest()
+assert Path(record["hostCopyPath"]).read_bytes() == body
+assert stat.S_IMODE(dest.parent.stat().st_mode) == 0o700
+log = root / "gap.jsonl"
+run_id = "ab" * 16
+harness_relay.plant_read(log, run_id, record["hostCopyPath"])
+assert read_evidence(log, record["hostCopyPath"], record["srcSha256"])["ok"]
+other = root / "unsigned.jsonl"
+other.write_bytes(body)
+ulog = root / "unsigned-log.jsonl"
+harness_relay.plant_read(ulog, run_id, other)
+assert read_evidence(ulog, record["hostCopyPath"], record["srcSha256"])["ok"] is False
+flipped = bytearray(Path(record["hostCopyPath"]).read_bytes())
+flipped[0] ^= 1
+Path(record["hostCopyPath"]).write_bytes(bytes(flipped))
+assert read_evidence(log, record["hostCopyPath"], record["srcSha256"])["reason"] == "file_sha"
+forged = dict(signed)
+forged["round0Record"] = dict(record)
+forged["round0Record"]["srcSha256"] = "0" * 64
+assert loop_mode.verify_pre_round1(forged, key) is False
+stopped = loop_mode.drive([{"anti_forgery": "round0Record"}, {}])
+assert stopped["reason"] == "anti_forgery" and "role:2" not in stopped["calls"]
+declared = loop_mode.declared_round0()
+assert declared["srcSha256"] == "${ROUND0}"
+assert declared["hostCopyPath"] == ""
+print("ok")
 `);
-    expect(text).toBe(`/home/box/.harness-relay/${"cd".repeat(16)}/checker`);
+    expect(text).toBe("ok");
   });
 
-  test("14 the round-0 host copy sha is pinned", () => {
+  test("14 tampered reward or checker output stops and the checker path is not mounted", () => {
     const text = python(`
-import hooks
-assert hooks.ROUND0_HOST_COPY_SHA == "${ROUND0}"
+import json, stat, tempfile
+from pathlib import Path
+import hooks, loop_mode
+key = b"k" * 32
+root = Path(tempfile.mkdtemp())
+run = root / "run"
+verifier = run / "verifier"
+verifier.mkdir(parents=True)
+(verifier / "reward.txt").write_text("1\\n", encoding="utf-8")
+(run / "result.json").write_text(json.dumps({"reward": 1}) + "\\n", encoding="utf-8")
+run_id = "ab" * 16
+copied = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
+dest = Path(copied["dest"])
+assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+sig = hooks.sign_run_record(key, dest, expected_run_id=run_id)
+assert hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"]
+assert hooks.verify_notes_reward("reward: 1\\n", sig, dest, key)["ok"]
+(verifier / "reward.txt").write_text("0\\n", encoding="utf-8")
+assert hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)["reason"] == "attest_mismatch"
+(verifier / "reward.txt").write_text("1\\n", encoding="utf-8")
+(run / "result.json").write_text(json.dumps({"reward": 0}) + "\\n", encoding="utf-8")
+assert hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)["reason"] == "attest_mismatch"
+(run / "result.json").write_text(json.dumps({"reward": 1}) + "\\n", encoding="utf-8")
+(dest / "reward.txt").write_text("0\\n", encoding="utf-8")
+assert hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)["reason"] == "attest_mismatch"
+(dest / "reward.txt").write_text("1\\n", encoding="utf-8")
+assert hooks.verify_notes_reward("reward: 0\\n", sig, dest, key)["reason"] == "attest_mismatch"
+assert hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"]
+stopped = loop_mode.drive([{"anti_forgery": "attest_mismatch"}, {}])
+assert stopped["reason"] == "anti_forgery" and stopped["calls"] == ["role:1", "real:1"]
+default = str(hooks.checker_dest(run_id))
+assert default == "/home/box/.harness-relay/%s/checker" % run_id
 try:
-    hooks.assert_round0_host_copy(b"not-the-snapshot")
-    raise SystemExit("accepted")
+    hooks.container_argv(image="img", run_id=run_id, port=1, network="devii-004-int", env={}, mounts=[(default, "/checker")], command=["run"])
+    raise SystemExit("mounted")
 except ValueError as exc:
-    assert "round-0 host copy sha" in str(exc)
-print(hooks.ROUND0_HOST_COPY_SHA)
+    assert "home/box" in str(exc)
+argv = hooks.container_argv(image="img", run_id=run_id, port=1, network="devii-004-int", env={}, mounts=[("/src/config", "/config")], command=["run"])
+blob = "\\n".join(argv)
+assert "/home/box" not in blob and default not in blob
+print("ok")
 `);
-    expect(text).toBe(ROUND0);
+    expect(text).toBe("ok");
   });
 });

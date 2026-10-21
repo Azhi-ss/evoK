@@ -636,6 +636,131 @@ class LoopModeCase(unittest.TestCase):
         self.assertEqual(mixed["reviewerRejectRounds"], 1)
         self.assertIsNone(mixed["reason"])
 
+        record = signed["round0Record"]
+        self.assertEqual(record["srcPath"], loop_mode.ROUND0_SRC_PATH)
+        self.assertEqual(record["srcSha256"], loop_mode.ROUND0_SRC_SHA)
+        self.assertEqual(record["hostCopyPath"], "")
+        critic = {"type": "done", "role": "critic", "status": 200, "round": 1, "usage": {"prompt_tokens": 3_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}}
+        ranking_only = loop_mode.budget_status([critic])
+        self.assertTrue(ranking_only["ranking"]["capHit"])
+        self.assertEqual(ranking_only["ranking"]["reason"], "no_winner:cap_hit")
+        self.assertFalse(ranking_only["readOnlyCapHit"])
+        innovator = {"type": "done", "role": "innovator", "status": 200, "round": 1, "usage": {"prompt_tokens": 30_000_000, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0}}}
+        cumulative_only = loop_mode.budget_status([innovator])
+        self.assertFalse(cumulative_only["ranking"]["capHit"])
+        self.assertTrue(cumulative_only["readOnlyCapHit"])
+        for kind in ("attest_mismatch", "reward", "round0Record"):
+            stopped = loop_mode.drive([{"anti_forgery": kind}, {}])
+            self.assertEqual(stopped["calls"], ["role:1", "real:1"])
+            self.assertEqual(stopped["loggedRuns"], [1])
+            self.assertEqual(stopped["reason"], "anti_forgery")
+            self.assertNotIn("role:2", stopped["calls"])
+            self.assertNotIn("real:2", stopped["calls"])
+
+    def test_13_round0_record(self):
+        key = b"k" * 32
+        seed = b"s" * 32
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        src = root / "trace.jsonl"
+        body = b"alpha\nbeta\ngamma\n"
+        src.write_bytes(body)
+        dest = root / "private" / "round0-trace.jsonl"
+        signed = loop_mode.pre_round1_sign(
+            key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+            round0_src=src, host_copy_path=dest,
+        )
+        self.assertTrue(loop_mode.verify_pre_round1(signed, key))
+        record = signed["round0Record"]
+        self.assertEqual(record["srcSha256"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(record["srcPath"], str(src))
+        self.assertEqual(Path(record["hostCopyPath"]).read_bytes(), body)
+        self.assertEqual(stat.S_IMODE(dest.parent.stat().st_mode), 0o700)
+        self.assertNotEqual(record["srcSha256"], "")
+        log = root / "relay" / "gap-finder.jsonl"
+        run_id = "ab" * 16
+        harness_relay.plant_read(log, run_id, record["hostCopyPath"])
+        evidence = read_evidence(log, record["hostCopyPath"], record["srcSha256"])
+        self.assertTrue(evidence["ok"])
+        other = root / "unsigned.jsonl"
+        other.write_bytes(body)
+        unsigned_log = root / "relay" / "unsigned.jsonl"
+        harness_relay.plant_read(unsigned_log, run_id, other)
+        missed = read_evidence(unsigned_log, record["hostCopyPath"], record["srcSha256"])
+        self.assertFalse(missed["ok"])
+        flipped = bytearray(Path(record["hostCopyPath"]).read_bytes())
+        flipped[0] ^= 1
+        Path(record["hostCopyPath"]).write_bytes(bytes(flipped))
+        changed = read_evidence(log, record["hostCopyPath"], record["srcSha256"])
+        self.assertEqual(changed["reason"], "file_sha")
+        forged = dict(signed)
+        forged["round0Record"] = dict(record)
+        forged["round0Record"]["srcSha256"] = "0" * 64
+        self.assertFalse(loop_mode.verify_pre_round1(forged, key))
+        stopped = loop_mode.drive([{"anti_forgery": "round0Record"}, {}])
+        self.assertEqual(stopped["reason"], "anti_forgery")
+        self.assertEqual(stopped["calls"], ["role:1", "real:1"])
+        self.assertNotIn("role:2", stopped["calls"])
+        with self.assertRaises(ValueError):
+            loop_mode.copy_round0(src, root / "mounted" / "trace.jsonl", mounts=[(str(root), "/in")])
+        tmp.cleanup()
+
+    def test_14_reward_signature(self):
+        key = b"k" * 32
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        run = root / "run"
+        verifier = run / "verifier"
+        verifier.mkdir(parents=True)
+        (verifier / "reward.txt").write_text("1\n", encoding="utf-8")
+        (run / "result.json").write_text(json.dumps({"reward": 1}) + "\n", encoding="utf-8")
+        run_id = "ab" * 16
+        copied = hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
+        dest = Path(copied["dest"])
+        self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o700)
+        sig = hooks.sign_run_record(key, dest, expected_run_id=run_id)
+        self.assertEqual(sig["checkerOutputSha"], copied["sha"])
+        self.assertEqual(sig["reward"], 1)
+        self.assertIn("relayLogSha", sig)
+        self.assertTrue(hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"])
+        self.assertTrue(hooks.verify_notes_reward("reward: 1\n", sig, dest, key)["ok"])
+        (verifier / "reward.txt").write_text("0\n", encoding="utf-8")
+        bad_file = hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)
+        self.assertEqual(bad_file, {"ok": False, "reason": "attest_mismatch"})
+        (verifier / "reward.txt").write_text("1\n", encoding="utf-8")
+        (run / "result.json").write_text(json.dumps({"reward": 0}) + "\n", encoding="utf-8")
+        bad_result = hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)
+        self.assertEqual(bad_result["reason"], "attest_mismatch")
+        (run / "result.json").write_text(json.dumps({"reward": 1}) + "\n", encoding="utf-8")
+        (dest / "reward.txt").write_text("0\n", encoding="utf-8")
+        bad_host = hooks.verify_run_record(sig, dest, sig["reward"], key, container_dir=run)
+        self.assertEqual(bad_host["reason"], "attest_mismatch")
+        (dest / "reward.txt").write_text("1\n", encoding="utf-8")
+        bad_notes = hooks.verify_notes_reward("start: x\nreward: 0\n", sig, dest, key)
+        self.assertEqual(bad_notes["reason"], "attest_mismatch")
+        self.assertTrue(hooks.verify_run_record(sig, dest, 1, key, container_dir=run)["ok"])
+        self.assertTrue(hooks.verify_notes_reward("reward: 1\n", sig, dest, key)["ok"])
+        stopped = loop_mode.drive([{"anti_forgery": "reward"}, {}])
+        self.assertEqual(stopped["calls"], ["role:1", "real:1"])
+        self.assertEqual(stopped["reason"], "anti_forgery")
+        self.assertNotIn("role:2", stopped["calls"])
+        default = str(hooks.checker_dest(run_id))
+        self.assertEqual(default, f"/home/box/.harness-relay/{run_id}/checker")
+        with self.assertRaises(ValueError) as rejected:
+            hooks.container_argv(
+                image="img", run_id=run_id, port=1, network="devii-004-int", env={},
+                mounts=[(default, "/checker")], command=["run"],
+            )
+        self.assertIn("home/box", str(rejected.exception))
+        argv = hooks.container_argv(
+            image="img", run_id=run_id, port=1, network="devii-004-int", env={},
+            mounts=[("/src/config", "/config")], command=["run"],
+        )
+        blob = "\n".join(argv)
+        self.assertNotIn("/home/box", blob)
+        self.assertNotIn(default, blob)
+        tmp.cleanup()
+
     def test_bind_role_and_exclusion(self):
         run_id = "ab" * 16
         call = {"seq": 1, "runId": run_id, "outputSha": "aa" * 32}

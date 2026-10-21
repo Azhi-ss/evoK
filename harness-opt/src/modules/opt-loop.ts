@@ -214,6 +214,10 @@ export interface OptLoopOptions {
   readonly readOnlyWallS?: () => number;
   /** False stops the loop before the next call. */
   readonly antiForgery?: () => boolean;
+  /** Round-0 trace to copy onto a host-private path and sign before round 1. */
+  readonly round0TracePath?: string;
+  /** Flip one byte of the host copy after it is signed. */
+  readonly round0Tamper?: boolean;
 }
 
 export interface AcceptedCandidate {
@@ -266,6 +270,8 @@ interface ScoredRun {
   readonly verified: VerifiedAttestation | null;
   readonly attestReasons: readonly string[];
   readonly relayPatchActive: boolean;
+  /** Host run signature. Reviewer input and run-notes both verify this file. */
+  readonly runRecordPath?: string;
 }
 
 const HOST_EVIDENCE_FAULTS = new Set([
@@ -309,7 +315,22 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     watcher: options.resultWatcher ?? absentResultWatcher(),
   };
   mkdirSync(options.out, { recursive: true });
-  writeJson(join(options.out, "pre-round1.json"), signPreRound1(attestKey, { tools: ["read"] }, { tools: ["read"] }));
+  const round0Copy = options.round0TracePath
+    ? { srcPath: options.round0TracePath, hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
+    : undefined;
+  const preRound1 = signPreRound1(attestKey, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
+  writeJson(join(options.out, "pre-round1.json"), preRound1);
+  const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
+  let round0: { readonly hostCopyPath: string; readonly srcSha256: string } | null = null;
+  if (signedRound0 && typeof signedRound0.hostCopyPath === "string" && signedRound0.hostCopyPath !== "" && typeof signedRound0.srcSha256 === "string") {
+    round0 = { hostCopyPath: signedRound0.hostCopyPath, srcSha256: signedRound0.srcSha256 };
+    if (options.round0Tamper) {
+      const bytes = readFileSync(round0.hostCopyPath);
+      const flipped = Buffer.from(bytes);
+      flipped[0] = flipped[0] === 0 ? 1 : 0;
+      writeFileSync(round0.hostCopyPath, flipped);
+    }
+  }
 
   const controlPath = join(options.out, "control", "config.json");
   const controlBytes = options.controlConfigPath ? readFileSync(options.controlConfigPath) : Buffer.from(CONTROL_CONFIG_TEXT);
@@ -356,15 +377,22 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       stopReason = opened;
       break;
     }
+    if (round0 && sha256(readFileSync(round0.hostCopyPath)) !== round0.srcSha256) {
+      stopReason = "anti_forgery";
+      break;
+    }
     const started = now();
     const roleMs = started.getTime();
+    const gapTraces = round === 1 && round0
+      ? [{ file: round0.hostCopyPath, line: 1, sha256: round0.srcSha256 }, ...traceHints]
+      : traceHints;
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
-      ...traceHints.map((hint) => hint.file),
+      ...gapTraces.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
     ]);
     const gapInput: GapCall = {
       round,
-      traces: traceHints,
+      traces: gapTraces,
       previousReview,
       previousReviewSession,
       sessionPath: gapSpawn.sessionPath,
@@ -375,7 +403,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gap = await roles.gap(gapInput);
     const gapCaptured = captureSession(options.out, round, "gap-finder", gapSpawn.sessionPath, attestKey);
     const gapLog = join(options.out, `round${round}`, "relay", "gap-finder.jsonl");
-    const gapCitedTrace = traceHints.length > 0 && traceHints.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
+    const gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256));
+    if (round === 1 && round0 && !relayCited(gapLog, round0.hostCopyPath, round0.srcSha256)) {
+      stopReason = "anti_forgery";
+      writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
+      roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+      break;
+    }
     if (round > 1 && previousReviewSession && previousReviewSha) {
       const fed = relayCited(gapLog, previousReviewSession, previousReviewSha);
       const prior = JSON.parse(readFileSync(join(options.out, `round${round - 1}`, "closure.json"), "utf8")) as ClosureRecord;
@@ -462,6 +496,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         tokenCap: tokenCap(DEV_TASK),
       }, hostFor(options, attestKey, `round${round}`, DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost));
       realRunWallS += Math.max(0, (now().getTime() - seedMs) / 1000);
+      if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch") {
+        stopReason = "anti_forgery";
+        stopBeforeReview = true;
+        break;
+      }
       const afterSeed = loopCap(round);
       if (afterSeed) {
         stopReason = afterSeed;
@@ -493,7 +532,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         patchActive: activation.patchActive,
         reviewFedForward: null,
       });
-      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
+      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
+      if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+        stopReason = "anti_forgery";
+      }
       roundSummaries.push({
         round,
         accepted: false,
@@ -504,6 +546,29 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
 
+    if (runs.some((run) => run.runRecordPath !== undefined && !storedRecordOk(attestKey, run))) {
+      stopReason = "anti_forgery";
+      writeClosure(options.out, round, {
+        round,
+        closed: false,
+        gapCitedTrace,
+        knobMatched,
+        patchActive: activation.patchActive,
+        reviewFedForward: null,
+      });
+      writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
+      if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+        stopReason = "anti_forgery";
+      }
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash,
+        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      });
+      break;
+    }
     const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath]);
     const reviewInput: ReviewCall = {
       round,
@@ -527,7 +592,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       patchActive: activation.patchActive,
       reviewFedForward: null,
     });
-    writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha);
+    writeNotes(options.out, round, started, now(), threshold, patchHash, controlSha, runs[0]?.reward ?? null);
+    if (!displayedRewardOk(attestKey, runs[0], join(options.out, `round${round}`, "run-notes.md"))) {
+      stopReason = "anti_forgery";
+      roundSummaries.push({
+        round,
+        accepted: false,
+        duplicate: false,
+        patchHash,
+        ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
+      });
+      break;
+    }
     const take = verdict.accept && activation.patchActive && gapCitedTrace;
     if (!verdict.accept) reviewerRejectRounds += 1;
     if (take) {
@@ -571,9 +647,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
 
   const order: string[] = [];
   const finalRuns: ScoredRun[] = [];
+  let halt = false;
   for (const seed of seeds) {
     order.push(`C${seed}`);
-    finalRuns.push(await executeScored(executor, {
+    const controlRun = await executeScored(executor, {
       task: DEV_TASK,
       seed,
       arm: "control",
@@ -581,9 +658,15 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "control"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold, scoreHost));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "control"), threshold, scoreHost);
+    finalRuns.push(controlRun);
+    if (controlRun.unscoredReason === "attest_mismatch") {
+      stopReason = "anti_forgery";
+      halt = true;
+      break;
+    }
     order.push(`X${seed}`);
-    finalRuns.push(await executeScored(executor, {
+    const candidateRun = await executeScored(executor, {
       task: DEV_TASK,
       seed,
       arm: "candidate",
@@ -591,24 +674,39 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runDir: join(options.out, "final", "runs", DEV_TASK.id, `seed${seed}`, "candidate"),
       model,
       tokenCap: tokenCap(DEV_TASK),
-    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost));
+    }, hostFor(options, attestKey, "final", DEV_TASK.id, `seed${seed}`, "candidate"), threshold, scoreHost);
+    finalRuns.push(candidateRun);
+    if (candidateRun.unscoredReason === "attest_mismatch") {
+      stopReason = "anti_forgery";
+      halt = true;
+      break;
+    }
   }
   const finalBlock = { order, control: summarize(finalRuns.filter((run) => run.arm === "control"), threshold), candidate: summarize(finalRuns.filter((run) => run.arm === "candidate"), threshold) };
   writeJson(join(options.out, "final", "order.json"), { order });
   writeJson(join(options.out, "final", "metrics.json"), finalBlock);
 
   const heldRuns: ScoredRun[] = [];
-  for (const task of HELD_OUT_TASKS) {
-    for (const seed of seeds) {
-      heldRuns.push(await executeScored(executor, {
-        task,
-        seed,
-        arm: "candidate",
-        configPath: accepted.configPath,
-        runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
-        model,
-        tokenCap: tokenCap(task),
-      }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold, scoreHost));
+  if (!halt) {
+    for (const task of HELD_OUT_TASKS) {
+      for (const seed of seeds) {
+        const held = await executeScored(executor, {
+          task,
+          seed,
+          arm: "candidate",
+          configPath: accepted.configPath,
+          runDir: join(options.out, "heldout", "runs", task.id, `seed${seed}`, "candidate"),
+          model,
+          tokenCap: tokenCap(task),
+        }, hostFor(options, attestKey, "heldout", task.id, `seed${seed}`, "candidate"), threshold, scoreHost);
+        heldRuns.push(held);
+        if (held.unscoredReason === "attest_mismatch") {
+          stopReason = "anti_forgery";
+          halt = true;
+          break;
+        }
+      }
+      if (halt) break;
     }
   }
   const heldOut = {
@@ -631,7 +729,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     finalBlock: { order },
     heldOut: { calls: heldOut.calls, gatewayOnly: heldOut.gatewayOnly },
     skippedFinal: false,
-    stopReport,
+    stopReport: { reason: stopReason, faultRounds, reviewerRejectRounds },
   };
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -886,6 +984,19 @@ async function executeScored(
   } else if (reward === null) {
     scoreStatus = "unscored";
   }
+  const checkerDir = join(host.relayLogRoot, runId, "checker");
+  let runRecordPath: string | undefined;
+  if (existsSync(join(checkerDir, "reward.txt"))) {
+    const signed = signRunRecord(host.key, checkerDir, request.runDir, runId);
+    if (!signed) {
+      scoreStatus = "unscored";
+      reward = null;
+      unscoredReason = "attest_mismatch";
+    } else {
+      runRecordPath = join(host.relayLogRoot, runId, "run-record.json");
+      writeFileSync(runRecordPath, `${JSON.stringify(signed)}\n`);
+    }
+  }
   const scored = scoreRelayEwi({
     tFirst: watch.tFirst,
     tLastWrite: watch.tLastWrite,
@@ -930,6 +1041,7 @@ async function executeScored(
     verified: verified.ok ? verified : null,
     attestReasons: verified.ok ? [] : verified.reasons,
     relayPatchActive,
+    ...(runRecordPath ? { runRecordPath } : {}),
   };
 }
 
@@ -1357,6 +1469,78 @@ function relayActive(logPath: string, mountedSha: string): boolean {
   }
 }
 
+const RUN_RECORD_PY = [
+  "import json, sys",
+  "sys.path.insert(0, sys.argv[1])",
+  "import hooks",
+  "key = bytes.fromhex(sys.argv[2])",
+  "checker = sys.argv[3]",
+  "container = sys.argv[4] or None",
+  "mode = sys.argv[5]",
+  "extra = sys.argv[6] if len(sys.argv) > 6 else ''",
+  "if mode == 'sign':",
+  "    try:",
+  "        sig = hooks.sign_run_record(key, checker, expected_run_id=extra)",
+  "    except Exception:",
+  "        print(json.dumps({'ok': False}))",
+  "        raise SystemExit(0)",
+  "    result = hooks.verify_run_record(sig, checker, sig['reward'], key, container_dir=container)",
+  "    print(json.dumps({'ok': result.get('ok') is True, 'sig': sig}))",
+  "elif mode == 'verify':",
+  "    sig = json.loads(sys.stdin.read())",
+  "    reward = json.loads(extra)",
+  "    print(json.dumps(hooks.verify_run_record(sig, checker, reward, key, container_dir=container)))",
+  "elif mode == 'notes':",
+  "    sig = json.loads(sys.stdin.read())",
+  "    notes = open(extra, encoding='utf-8').read()",
+  "    print(json.dumps(hooks.verify_notes_reward(notes, sig, checker, key)))",
+  "else:",
+  "    print(json.dumps({'ok': False}))",
+].join("\n");
+
+function runRecord(key: Buffer, mode: "sign" | "verify" | "notes", checkerDir: string, containerDir: string, extra: string, input?: string): { ok?: boolean; sig?: Record<string, unknown> } | null {
+  const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
+  const proc = spawnSync("python3", ["-c", RUN_RECORD_PY, relayDir, key.toString("hex"), checkerDir, containerDir, mode, extra], {
+    encoding: "utf8",
+    ...(input !== undefined ? { input } : {}),
+  });
+  if (proc.status !== 0 || !proc.stdout) return null;
+  try {
+    return JSON.parse(proc.stdout) as { ok?: boolean; sig?: Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+function signRunRecord(key: Buffer, checkerDir: string, runDir: string, runId: string): Record<string, unknown> | null {
+  const parsed = runRecord(key, "sign", checkerDir, runDir, runId);
+  if (!parsed || parsed.ok !== true || !parsed.sig) return null;
+  return parsed.sig;
+}
+
+function storedRecordOk(key: Buffer, run: ScoredRun): boolean {
+  if (!run.runRecordPath || !existsSync(run.runRecordPath)) return false;
+  const raw = readFileSync(run.runRecordPath, "utf8");
+  let sig: { reward?: unknown };
+  try {
+    sig = JSON.parse(raw) as { reward?: unknown };
+  } catch {
+    return false;
+  }
+  const checker = join(run.runRecordPath, "..", "checker");
+  const reward = run.reward === null ? sig.reward : run.reward;
+  const parsed = runRecord(key, "verify", checker, run.runDir, JSON.stringify(reward), raw);
+  return parsed?.ok === true;
+}
+
+function displayedRewardOk(key: Buffer, run: ScoredRun | undefined, notesPath: string): boolean {
+  if (!run?.runRecordPath || run.reward === null) return true;
+  if (!existsSync(run.runRecordPath) || !existsSync(notesPath)) return false;
+  const checker = join(run.runRecordPath, "..", "checker");
+  const parsed = runRecord(key, "notes", checker, "", notesPath, readFileSync(run.runRecordPath, "utf8"));
+  return parsed?.ok === true;
+}
+
 function relayCited(logPath: string, hostFile: string, sha: string): boolean {
   if (!existsSync(logPath) || !existsSync(hostFile)) return false;
   const script = fileURLToPath(new URL("../../relay/ledger.py", import.meta.url));
@@ -1386,6 +1570,7 @@ function writeNotes(
   threshold: number,
   patchHash: string | null,
   controlSha: string,
+  reward: number | null = null,
 ): void {
   const lines = [
     `start: ${started.toISOString()}`,
@@ -1393,6 +1578,7 @@ function writeNotes(
     `ewiThresholdSec: ${threshold}`,
     `controlConfigSha: ${controlSha}`,
     `patchSha: ${patchHash ?? ""}`,
+    `reward: ${reward ?? ""}`,
     `screenshot: round${round}/screenshot.svg`,
     `sessions: round${round}/sessions`,
     "",
