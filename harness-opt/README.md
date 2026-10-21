@@ -178,7 +178,7 @@ bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 要带 `--pi-bin <path>`。环在每次 relay `open` 之后，用这份二进制以 `--print` 拉起角色。`--system-prompt` 是 `harness-opt/agents/<role>.md`（gap-finder、innovator、critic、ranker、reviewer-gate；子进程的 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 也指向这个目录），位置参数是这一轮的任务提示（trace、候选、缺口这些输入）。证据角色的 `--tools` 只有 `read`，innovator 是一条 `--tools read,write`。argv 里不放 runId。子进程的 `BASE_URL` 是这次 relay run，并写进该进程自己的 `PI_CODING_AGENT_DIR/models.json`，`API_KEY` 只用占位符。证明密钥、relay 日志根和上游密钥不进入这个环境。结论取该 run 最后一条 done 的 assistant 文本。对不上环要的字段就停，不会进 docker。没给 `--pi-bin` 时，`--execute` 仍然以 `execute mode needs roles` 失败。`pre_round1` 仍由 `runOptLoop` 在第 1 轮之前签名，没有第二条签名路径。innovator 单次 20 万和只读 3000 万仍由这条 relay 记账，`sessions/*.spawn.json` 仍是 roleFacing，不含 `relayLog`。省略 `--executor-cmd` 时，种子 0 的真实运行才是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 要带 `--pi-bin <path>`。环在每次 relay `open` 之后，用这份二进制以 `--print` 拉起角色。`--system-prompt` 是 `harness-opt/agents/<role>.md`（gap-finder、innovator、critic、ranker、reviewer-gate；子进程的 `PI_SUBAGENT_EXTRA_AGENT_DIRS` 也指向这个目录），位置参数是这一轮的任务提示（trace、候选、缺口这些输入）。证据角色的 `--tools` 只有 `read`，innovator 是一条 `--tools read,write`。argv 里不放 runId。子进程的 `BASE_URL` 是这次 relay run，并写进该进程自己的 `PI_CODING_AGENT_DIR/models.json`，`API_KEY` 只用占位符。`models.json` 的 `maxTokens` 按角色默认是 ranker、critic、reviewer-gate `32768`，gap-finder 和 innovator `16384`；DeepSeek V4.1 Flash 在 pi-ai 目录里的输出上限是 `384000`，更低时用那个数。`--role-max-tokens role=n` 可按角色改。选中的上限写在 `sessions/*.spawn.json` 的 `maxTokens` 和 `sessions/*.argv.json` 的 `{ argv, maxTokens }` 里。Pi 从 `models.json` 读取这个上限。角色非 0 退出、标准输出和 assistant 都空、且 stderr 是 Pi 的输出长度上限那一句时，停机原因是 `role_output_truncated`。其它非 0 退出仍是 `pi exited N`。证明密钥、relay 日志根和上游密钥不进入这个环境。结论取该 run 最后一条 done 的 assistant 文本。对不上环要的字段就停，不会进 docker。没给 `--pi-bin` 时，`--execute` 仍然以 `execute mode needs roles` 失败。`pre_round1` 仍由 `runOptLoop` 在第 1 轮之前签名，没有第二条签名路径。innovator 单次 20 万和只读 3000 万仍由这条 relay 记账，`sessions/*.spawn.json` 仍是 roleFacing，不含 `relayLog`。省略 `--executor-cmd` 时，种子 0 的真实运行才是 `devii_docker_v2.py once`：环先在自己的 relay 上 `open`（kind `executor`），再带 `--relay-external` 调用同一条命令，容器退出后由环 `close`。`--attest-root` 必须在 `--out` 外面。
 
 单独跑一题一种子一臂（盒子上 hb003、seed 9、control 的对账）不经过环，由这条命令自己监听 relay、分配 runId、打开并关闭：
 
@@ -236,7 +236,9 @@ bun harness-opt/src/cli.ts optimize --execute --rounds 1 \
   --round0-sha 3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76
 ```
 
-角色冒烟默认跳过。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN`、`LOOP_LIVE_ROUND0`、`LOOP_LIVE_ROUND0_SHA` 都设置时，用真实 Pi 跑一轮角色链：gap-finder、六名 innovator、critic、ranker（或 walkover）、reviewer-gate，然后停，不调用 `once`，不启动 docker。gap-finder 拿到的是环境变量里的 round-0 trace（路径和 sha）以及测试签好的 control 证明；引用检查就是环里的 `anti_forgery`。任何检查失败，包括引用检查，测试失败。每个跑过的角色都要退出码 0，并且自己的 relay 账本里至少有一条 done，usage 折成的 tokens 大于 0。测试自己把 relay 绑到 `127.0.0.1`，日志放在临时目录。上游密钥沿用 `RELAY_UPSTREAM_KEY_FILE`。盒子上的 Pi 是 `/home/box/.local/bin/pi`（CLI 1.3.0），PATH 里要有 Node 22（`~/.nvm/versions/node/v22.23.3/bin`）。
+同一条 `--execute` 命令加上 `--stop-before-run` 会跑完角色链并写下 closure 和角色记录，然后在 `once` / docker 之前停下。角色冒烟走的就是这个旗标。
+
+角色冒烟默认跳过。`LOOP_LIVE_SMOKE=1` 且 `PI_BIN`、`LOOP_LIVE_ROUND0`、`LOOP_LIVE_ROUND0_SHA` 都设置时，测试调用 `optimize --execute --stop-before-run`，用真实 Pi 跑一轮角色链：gap-finder、六名 innovator、critic、ranker（或 walkover）、reviewer-gate，然后停，不调用 `once`，不启动 docker。gap-finder 拿到的是环境变量里的 round-0 trace（路径和 sha）以及测试签好的 control 证明；引用检查就是环里的 `anti_forgery`。任何检查失败，包括引用检查，测试失败。每个跑过的角色都要退出码 0，并且自己的 relay 账本里至少有一条 done，usage 折成的 tokens 大于 0。测试自己把 relay 绑到 `127.0.0.1`，日志放在临时目录。上游密钥沿用 `RELAY_UPSTREAM_KEY_FILE`。盒子上的 Pi 是 `/home/box/.local/bin/pi`（CLI 1.3.0），PATH 里要有 Node 22（`~/.nvm/versions/node/v22.23.3/bin`）。
 
 ```bash
 LOOP_LIVE_SMOKE=1 PI_BIN="$PI_BIN" \

@@ -28,6 +28,56 @@ export interface RoleSpawnConfig {
   readonly relayLog?: string;
   /** Relay data-plane URL for this call. Spawned as BASE_URL. */
   readonly baseUrl?: string;
+  /** Output-token cap written into this role's models.json. */
+  readonly maxTokens: number;
+}
+
+/**
+ * Per-role output cap. Ranker, critic, and reviewer-gate need room for a full
+ * pairwise or review answer. Gap-finder and innovator stay smaller.
+ */
+export const ROLE_OUTPUT_CAPS: Readonly<Record<OptRoleName, number>> = {
+  "gap-finder": 16_384,
+  innovator: 16_384,
+  critic: 32_768,
+  ranker: 32_768,
+  "reviewer-gate": 32_768,
+};
+
+/**
+ * DeepSeek V4.1 Flash output max. pi-ai 1.3.0 `providers/data/deepseek.json`,
+ * model `deepseek-flash` (`name` "DeepSeek V4.1 Flash"). The local id
+ * `deepseek-v4-1-flash-261017` is that model. A lower catalog max wins.
+ */
+export const DOCUMENTED_MODEL_MAX_TOKENS = 384_000;
+
+/** `min(role setting, documented model max)`. The role setting defaults from `ROLE_OUTPUT_CAPS`. */
+export function roleOutputCap(role: OptRoleName, override?: number, documentedMax: number = DOCUMENTED_MODEL_MAX_TOKENS): number {
+  const requested = override ?? ROLE_OUTPUT_CAPS[role];
+  if (!Number.isInteger(requested) || requested <= 0) throw new Error(`role ${role} output cap`);
+  if (!Number.isInteger(documentedMax) || documentedMax <= 0) throw new Error(`role ${role} documented max`);
+  return Math.min(requested, documentedMax);
+}
+
+/** Pi print mode writes this to stderr and exits 1 when `stopReason` is `length`. */
+export const PI_OUTPUT_LIMIT_STDERR = "Response was truncated: the model reached its output token limit.";
+
+export const ROLE_OUTPUT_TRUNCATED = "role_output_truncated";
+
+export class RoleOutputTruncated extends Error {
+  readonly reason = ROLE_OUTPUT_TRUNCATED;
+  constructor(readonly role: string) {
+    super(ROLE_OUTPUT_TRUNCATED);
+    this.name = "RoleOutputTruncated";
+  }
+}
+
+/** Non-zero exit, no stdout and no assistant text, and Pi's length-limit line. */
+export function outputHitLengthLimit(status: number | null, stdout: string, stderr: string, assistant: string | null): boolean {
+  if (status === null || status === 0) return false;
+  if (stdout.trim() !== "") return false;
+  if (assistant !== null && assistant.trim() !== "") return false;
+  return stderr.includes(PI_OUTPUT_LIMIT_STDERR);
 }
 
 export function evidenceRoleTools(): readonly string[] {
@@ -42,9 +92,24 @@ export function buildRoleSpawn(input: {
   readonly ledgerPath: string;
   readonly relayLog?: string;
   readonly baseUrl?: string;
+  /** Per-role override. Absent uses `ROLE_OUTPUT_CAPS`. */
+  readonly maxTokens?: number;
+  /** Test seam. Absent uses `DOCUMENTED_MODEL_MAX_TOKENS`. */
+  readonly documentedMaxTokens?: number;
 }): RoleSpawnConfig {
   const tools = input.role === "innovator" ? ["read", "write"] : evidenceRoleTools();
-  const config: RoleSpawnConfig = { ...input, tools };
+  const maxTokens = roleOutputCap(input.role, input.maxTokens, input.documentedMaxTokens);
+  const config: RoleSpawnConfig = {
+    role: input.role,
+    cwd: input.cwd,
+    allowedPaths: input.allowedPaths,
+    tools,
+    sessionPath: input.sessionPath,
+    ledgerPath: input.ledgerPath,
+    ...(input.relayLog !== undefined ? { relayLog: input.relayLog } : {}),
+    ...(input.baseUrl !== undefined ? { baseUrl: input.baseUrl } : {}),
+    maxTokens,
+  };
   assertRoleSpawn(config);
   return config;
 }
@@ -162,7 +227,21 @@ export function rolePiArgv(piBin: string, config: RoleSpawnConfig, prompt: strin
   ];
 }
 
-export function launchRolePi(piBin: string, config: RoleSpawnConfig, prompt: string): { readonly status: number | null; readonly argv: readonly string[] } {
+export interface RoleArgvRecord {
+  readonly argv: readonly string[];
+  readonly maxTokens: number;
+}
+
+/** The argv Pi receives, plus the output cap that `models.json` enforces. Pi has no max-tokens flag. */
+export function roleArgvRecord(config: RoleSpawnConfig, argv: readonly string[]): RoleArgvRecord {
+  return { argv, maxTokens: config.maxTokens };
+}
+
+export function launchRolePi(
+  piBin: string,
+  config: RoleSpawnConfig,
+  prompt: string,
+): { readonly status: number | null; readonly argv: readonly string[]; readonly stdout: string; readonly stderr: string } {
   const argv = rolePiArgv(piBin, config, prompt);
   const [bin, ...args] = argv;
   if (!bin) throw new Error("pi binary is empty");
@@ -178,7 +257,7 @@ export function launchRolePi(piBin: string, config: RoleSpawnConfig, prompt: str
     cwd: config.cwd,
     env,
   });
-  return { status: child.status, argv };
+  return { status: child.status, argv, stdout: child.stdout ?? "", stderr: child.stderr ?? "" };
 }
 
 function roleModel(role: OptRoleName): string {
@@ -210,7 +289,7 @@ function pinRoleRelay(env: NodeJS.ProcessEnv, config: RoleSpawnConfig): void {
           name: id,
           reasoning: false,
           contextWindow: 131072,
-          maxTokens: 8192,
+          maxTokens: config.maxTokens,
           compat: { supportsDeveloperRole: false },
         }],
       },

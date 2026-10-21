@@ -41,9 +41,13 @@ import {
   buildRoleSpawn,
   hostWriteSession,
   launchRolePi,
+  outputHitLengthLimit,
   recordLedgerRank,
   recordedSessionSha,
+  RoleOutputTruncated,
+  roleArgvRecord,
   rolePiArgv,
+  type OptRoleName,
   type RoleSpawnConfig,
 } from "./role-spawn";
 
@@ -260,10 +264,12 @@ export interface OptLoopOptions {
   /** Flip one byte of the host copy after it is signed. */
   readonly round0Tamper?: boolean;
   /**
-   * Live chain only. After the roles finish, skip once/docker and still run reviewer-gate.
-   * The production CLI does not set this.
+   * After the roles finish, skip once/docker and still run reviewer-gate.
+   * `optimize --execute --stop-before-run` sets this. The live smoke uses that flag.
    */
   readonly stopBeforeRun?: boolean;
+  /** Per-role output cap override. Absent roles use `ROLE_OUTPUT_CAPS`, then the documented model max. */
+  readonly roleMaxTokens?: Partial<Record<OptRoleName, number>>;
 }
 
 export interface AcceptedCandidate {
@@ -481,6 +487,19 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const started = now();
     const roleMs = started.getTime();
     let roundRank: "walkover" | undefined;
+    const takeRole = async <T>(relay: RoleRelay, run: () => Promise<T>): Promise<T | null> => {
+      try {
+        return await run();
+      } catch (error) {
+        if (!(error instanceof RoleOutputTruncated)) throw error;
+        await closeRelay(relay.runId);
+        faultRounds += 1;
+        stopReason = error.reason;
+        writeNotes(options.out, round, started, now(), threshold, null, controlSha, null);
+        roundSummaries.push({ round, accepted: false, duplicate: false, patchHash: null, ewiSeeds: [] });
+        return null;
+      }
+    };
     const gapCwd = join(options.out, `round${round}`, "roles", "gap-finder");
     let gapTraces: TraceHint[];
     try {
@@ -498,7 +517,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gapSpawn = prepareRole(options.out, round, "gap-finder", options.piBin, [
       ...gapTraces.map((hint) => hint.file),
       ...(previousReviewSession ? [previousReviewSession] : []),
-    ], gapRelay, gapPrompt);
+    ], gapRelay, gapPrompt, "gap-finder", options.roleMaxTokens?.["gap-finder"]);
     const gapInput: GapCall = {
       round,
       traces: gapTraces,
@@ -511,7 +530,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(gapInput, "gap input");
     writeJson(join(options.out, `round${round}`, "gap-input.json"), gapInput);
     await relayRpc({ op: "open", runId: gapRelay.runId, kind: "role:gap-finder", expectedSha: controlSha });
-    const gap = await roles.gap(gapInput);
+    const gap = await takeRole(gapRelay, () => roles.gap(gapInput));
+    if (!gap) break;
     const gapReport = await closeRelay(gapRelay.runId);
     const gapFault = gapReport.fault;
     if (gapFault) {
@@ -538,7 +558,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const closeWithoutRun = (note: string, duplicate: boolean): boolean => {
       consecutiveNoAccept += 1;
-      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env), "这一轮没有候选，不评测。");
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env), "这一轮没有候选，不评测。", "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
       writeClosure(options.out, round, {
@@ -574,7 +594,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         triedSummaries: [...tried],
         control,
       });
-      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, innovatePrompt, sessionName);
+      const innovatorSpawn = prepareRole(options.out, round, "innovator", options.piBin, [], innovatorRelay, innovatePrompt, sessionName, options.roleMaxTokens?.innovator);
       const innovateInput: InnovateCall = {
         round,
         knob: gap.knob,
@@ -588,7 +608,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       assertNoHeldOutLeak(innovateInput, "innovator input");
       writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), innovateInput);
       await relayRpc({ op: "open", runId: innovatorRelay.runId, kind: "role:innovator", expectedSha: controlSha });
-      const turn = await roles.innovate(innovateInput);
+      const turn = await takeRole(innovatorRelay, () => roles.innovate(innovateInput));
+      if (!turn) break;
       const innovatorReport = await closeRelay(innovatorRelay.runId);
       captureSession(options.out, round, "innovator", innovatorSpawn.sessionPath, attestKey);
       if (innovatorReport.fault) {
@@ -616,6 +637,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       proposals.push({ id: `c${slot}`, slot, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
     }
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
+    if (stopReason === "role_output_truncated") break;
     if (innovatorFault) {
       faultRounds += 1;
       stopReason = innovatorFault;
@@ -638,7 +660,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const listed = proposals.map((item) => ({ id: item.id, summary: item.summary, changedKeys: item.changedKeys }));
     const criticRelay = roleRelay(relayRoot, env);
     const criticPrompt = criticTaskPrompt({ round, candidates: listed });
-    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay, criticPrompt);
+    const criticSpawn = prepareRole(options.out, round, "critic", options.piBin, [], criticRelay, criticPrompt, "critic", options.roleMaxTokens?.critic);
     const criticInput: CriticCall = {
       round,
       candidates: listed,
@@ -649,7 +671,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(criticInput, "critic input");
     writeJson(join(options.out, `round${round}`, "critic-input.json"), criticInput);
     await relayRpc({ op: "open", runId: criticRelay.runId, kind: "role:critic", expectedSha: controlSha });
-    const criticTurn = await roles.critic(criticInput);
+    const criticTurn = await takeRole(criticRelay, () => roles.critic(criticInput));
+    if (!criticTurn) break;
     const criticReport = await closeRelay(criticRelay.runId);
     captureSession(options.out, round, "critic", criticSpawn.sessionPath, attestKey);
     if (criticReport.fault) {
@@ -705,7 +728,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     } else {
       const rankerRelay = roleRelay(relayRoot, env);
       const rankerPrompt = rankerTaskPrompt({ round, candidates: listed, excluded });
-      const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt);
+      const rankerSpawn = prepareRole(options.out, round, "ranker", options.piBin, [], rankerRelay, rankerPrompt, "ranker", options.roleMaxTokens?.ranker);
       const rankerInput: RankerCall = {
         round,
         candidates: listed,
@@ -717,7 +740,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       assertNoHeldOutLeak(rankerInput, "ranker input");
       writeJson(join(options.out, `round${round}`, "ranker-input.json"), rankerInput);
       await relayRpc({ op: "open", runId: rankerRelay.runId, kind: "role:ranker", expectedSha: controlSha });
-      const rankerTurn = await roles.ranker(rankerInput);
+      const rankerTurn = await takeRole(rankerRelay, () => roles.ranker(rankerInput));
+      if (!rankerTurn) break;
       const rankerReport = await closeRelay(rankerRelay.runId);
       captureSession(options.out, round, "ranker", rankerSpawn.sessionPath, attestKey);
       if (rankerReport.fault) {
@@ -882,7 +906,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       runs: metrics.runs,
       ewiSeeds: metrics.ewiRuns.map((run) => run.seed),
     });
-    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay, reviewPrompt);
+    const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [diffPath], reviewRelay, reviewPrompt, "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
     const reviewInput: ReviewCall = {
       round,
       patchHash,
@@ -897,7 +921,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     assertNoHeldOutLeak(reviewInput, "reviewer input");
     writeJson(join(options.out, `round${round}`, "review-input.json"), reviewInput);
     await relayRpc({ op: "open", runId: reviewRelay.runId, kind: "role:reviewer", expectedSha: controlSha });
-    const verdict = await roles.review(reviewInput);
+    const verdict = await takeRole(reviewRelay, () => roles.review(reviewInput));
+    if (!verdict) break;
     const reviewReport = await closeRelay(reviewRelay.runId);
     const reviewGate = reviewReport.fault;
     const reviewCaptured = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey);
@@ -1161,8 +1186,9 @@ export function piSubagentRoles(piBin: string): OptRoles {
 
 function piConclusion(piBin: string, spawn: RoleSpawnConfig, baseUrl: string, prompt: string): string {
   const launched = launchRolePi(piBin, spawn, prompt);
-  if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
   const text = lastDoneAssistant(baseUrl);
+  if (outputHitLengthLimit(launched.status, launched.stdout, launched.stderr, text)) throw new RoleOutputTruncated(spawn.role);
+  if (launched.status !== 0) throw new Error(`role ${spawn.role} pi exited ${launched.status ?? "null"}`);
   if (text === null) throw new Error(`role ${spawn.role} returned no conclusion`);
   return text;
 }
@@ -1987,6 +2013,7 @@ function prepareRole(
   relay: RoleRelay,
   prompt: string,
   sessionName: string = role,
+  maxTokens?: number,
 ): RoleSpawnConfig {
   const cwd = join(out, `round${round}`, "roles", sessionName);
   mkdirSync(cwd, { recursive: true });
@@ -1998,10 +2025,11 @@ function prepareRole(
     ledgerPath: join(out, `round${round}`, "sessions", "ledger.json"),
     relayLog: relay.relayLog,
     baseUrl: relay.baseUrl,
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
   });
   writeJson(join(out, `round${round}`, "sessions", `${sessionName}.spawn.json`), roleFacing(config));
   const argv = rolePiArgv(piBin ?? "pi", config, prompt);
-  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), argv);
+  writeJson(join(out, `round${round}`, "sessions", `${sessionName}.argv.json`), roleArgvRecord(config, argv));
   return config;
 }
 
@@ -2014,7 +2042,7 @@ export function assertLiveRoleCall(role: string, status: number | null, relayLog
 }
 
 /**
- * Real round-1 chain: gap-finder, innovators, critic, ranker or walkover, reviewer-gate.
+ * Real round-1 chain through `optimize --execute --stop-before-run`.
  * Citation is the loop's anti_forgery check against the traces/ copies.
  * Stops before once/docker. Opt-in via LOOP_LIVE_SMOKE, PI_BIN, LOOP_LIVE_ROUND0, and LOOP_LIVE_ROUND0_SHA.
  */
@@ -2036,32 +2064,42 @@ export async function runLiveRoleSmoke(options: {
   if (!existsSync(options.round0TracePath)) throw new Error("live chain round-0 trace is missing");
   const pinned = sha256(readFileSync(options.round0TracePath));
   if (pinned !== options.round0TraceSha) throw new Error("live chain round-0 sha mismatch");
-  let dockerRuns = 0;
-  const result = await runOptLoop({
-    out: options.out,
-    attestRoot: options.attestRoot,
-    attestKeyFile: options.attestKeyFile,
-    harnessPath: options.harnessPath,
-    controlAttests: options.controlAttests,
-    controlConfigPath: options.controlConfigPath,
-    task: options.task,
-    round0TracePath: options.round0TracePath,
-    round0TraceSha: options.round0TraceSha,
-    mode: "execute",
-    piBin: options.piBin,
-    rounds: 1,
-    stopBeforeRun: true,
-    env,
-    executor: {
-      name: "no-docker",
-      async run() {
-        dockerRuns += 1;
-        throw new Error("docker must not start");
-      },
-    },
-  });
-  if (dockerRuns !== 0) throw new Error("docker must not start");
-  if (result.stopReport.reason) throw new Error(`live chain stopped: ${result.stopReport.reason}`);
+  const saved = applySmokeEnv(env);
+  let stderr = "";
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const { main } = await import("../cli");
+    const code = await main([
+      "optimize",
+      "--execute",
+      "--stop-before-run",
+      "--rounds", "1",
+      "--out", options.out,
+      "--pi-bin", options.piBin,
+      "--attest-root", options.attestRoot,
+      "--attest-key-file", options.attestKeyFile,
+      "--harness", options.harnessPath,
+      "--control-config", options.controlConfigPath,
+      ...options.controlAttests.flatMap((dir) => ["--control-attest", dir]),
+      "--task", options.task.id,
+      "--task-path", options.task.path,
+      "--network", options.task.network,
+      "--token-w", String(options.task.tokenW),
+      "--round0-trace", options.round0TracePath,
+      "--round0-sha", options.round0TraceSha,
+    ]);
+    if (code !== 0) throw new Error(stderr.trim() || "live chain failed");
+  } finally {
+    process.stderr.write = write;
+    restoreSmokeEnv(saved);
+  }
+  if (existsSync(join(options.out, "round1", "runs"))) throw new Error("docker must not start");
+  const loop = JSON.parse(readFileSync(join(options.out, "loop-result.json"), "utf8")) as { stopReport?: { reason?: string | null } };
+  if (loop.stopReport?.reason) throw new Error(`live chain stopped: ${loop.stopReport.reason}`);
   const closurePath = join(options.out, "round1", "closure.json");
   if (!existsSync(closurePath)) throw new Error("live chain citation check failed");
   const closure = JSON.parse(readFileSync(closurePath, "utf8")) as { gapCitedTrace?: boolean; rank?: string };
@@ -2079,7 +2117,38 @@ export async function runLiveRoleSmoke(options: {
   const rank = closure.rank === "walkover" ? "walkover" as const : null;
   if (rank !== "walkover" && !kinds.includes("role:ranker")) throw new Error("role role:ranker made no relay request");
   if (rank === "walkover" && kinds.includes("role:ranker")) throw new Error("walkover must not call ranker");
-  return { dockerRuns, gapCitedTrace: true, rank };
+  return { dockerRuns: 0, gapCitedTrace: true, rank };
+}
+
+const SMOKE_ENV_KEYS = [
+  "BASE_URL",
+  "HARNESS_RELAY_BIND",
+  "HARNESS_RELAY_LOG_ROOT",
+  "HARNESS_RELAY_PORT",
+  "HARNESS_RELAY_UPSTREAM",
+  "RELAY_UPSTREAM_KEY_FILE",
+  "HARNESS_ATTEST_KEY_FILE",
+] as const;
+
+function applySmokeEnv(env: NodeJS.ProcessEnv): Record<string, string | undefined> | null {
+  if (env === process.env) return null;
+  const saved: Record<string, string | undefined> = {};
+  for (const key of SMOKE_ENV_KEYS) {
+    saved[key] = process.env[key];
+    const value = env[key];
+    if (typeof value === "string") process.env[key] = value;
+    else delete process.env[key];
+  }
+  return saved;
+}
+
+function restoreSmokeEnv(saved: Record<string, string | undefined> | null): void {
+  if (!saved) return;
+  for (const key of SMOKE_ENV_KEYS) {
+    const value = saved[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 }
 
 function relayRoleKinds(relayRoot: string): string[] {

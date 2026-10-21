@@ -6,6 +6,7 @@ import { flag, hasFlag } from "./args";
 import { runEmpty } from "./empty-run";
 import { runOptLoop, runOptOnce } from "./modules/opt-loop";
 import { CommandOptExecutor, type OptTask } from "./modules/opt-executor";
+import type { OptRoleName } from "./modules/role-spawn";
 import { dispatchHarnessCommand, formatCommandResult, runClosedLoopDemo, type CommandResult } from "./session";
 
 const USAGE = [
@@ -17,8 +18,8 @@ const USAGE = [
   "  demo                  one closed loop on the sample trace; prints per-stage status",
   "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        one loop; task and round-0 path/sha are required and have no default",
-  "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
-  "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails",
+  "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails; --stop-before-run writes the closure and stops before once/docker",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
   "                        one candidate seed to prove activation; task flags are required",
 ].join("\n");
@@ -66,6 +67,16 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
   }
   if (dry && execute) {
     process.stderr.write("optimize received both --dry-run and --execute\n");
+    return 1;
+  }
+  const stopBeforeRun = hasFlag(argv, "--stop-before-run");
+  if (stopBeforeRun && !execute) {
+    process.stderr.write("optimize --stop-before-run needs --execute\n");
+    return 1;
+  }
+  const roleCaps = roleMaxTokensFlag(argv);
+  if (roleCaps instanceof Error) {
+    process.stderr.write(`${roleCaps.message}\n`);
     return 1;
   }
   const out = flag(argv, "--out") ?? mkdtempSync(join(tmpdir(), "harness-opt-opt-"));
@@ -129,6 +140,8 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       ...(executorCommand ? { executorCommand } : {}),
       ...(driver ? { driver } : {}),
       ...(execute && piBin ? { piBin } : {}),
+      ...(stopBeforeRun ? { stopBeforeRun: true } : {}),
+      ...(Object.keys(roleCaps).length > 0 ? { roleMaxTokens: roleCaps } : {}),
     });
     process.stdout.write(`${JSON.stringify({ out, ...result }, null, 2)}\n`);
     return 0;
@@ -233,6 +246,23 @@ function seedFlag(argv: readonly string[]): number | Error {
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0) return new Error("optimize-one --seed must be a non-negative integer");
   return value;
+}
+
+const ROLE_CAP_NAMES = ["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"] as const;
+
+function roleMaxTokensFlag(argv: readonly string[]): Partial<Record<OptRoleName, number>> | Error {
+  const caps: Partial<Record<OptRoleName, number>> = {};
+  for (const raw of repeatFlag(argv, "--role-max-tokens")) {
+    const match = /^([a-z-]+)=(\d+)$/.exec(raw);
+    if (!match?.[1] || !match[2]) return new Error("optimize --role-max-tokens must be role=tokens");
+    if (!(ROLE_CAP_NAMES as readonly string[]).includes(match[1])) {
+      return new Error("optimize --role-max-tokens role must be gap-finder, innovator, critic, ranker, or reviewer-gate");
+    }
+    const value = Number(match[2]);
+    if (!Number.isInteger(value) || value <= 0) return new Error("optimize --role-max-tokens must be a positive integer");
+    caps[match[1] as OptRoleName] = value;
+  }
+  return caps;
 }
 
 function repeatFlag(argv: readonly string[], name: string): string[] {

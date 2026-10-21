@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -274,6 +274,67 @@ async function postRole(baseUrl: string): Promise<void> {
   });
   if (!response.ok) throw new Error(`relay ${response.status}`);
   await response.arrayBuffer();
+}
+
+const ECHO_UPSTREAM_PY = `
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length)
+        content = "{}"
+        try:
+            body = json.loads(raw.decode())
+            messages = body.get("messages") or []
+            if messages and isinstance(messages[-1], dict):
+                content = messages[-1].get("content") or content
+        except Exception:
+            content = "{}"
+        payload = json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 1}},
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        return
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+`;
+
+/** Separate process. A server inside this test deadlocks under spawnSync. */
+function startEchoUpstream(): Promise<{ readonly url: string; close(): Promise<void> }> {
+  const child = spawn("python3", ["-c", ECHO_UPSTREAM_PY], { stdio: ["ignore", "pipe", "pipe"] });
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => reject(new Error("echo upstream did not listen")), 5_000);
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      buf += chunk;
+      const line = buf.split("\n")[0]?.trim() ?? "";
+      if (!/^\d+$/.test(line)) return;
+      clearTimeout(timer);
+      resolve({
+        url: `http://127.0.0.1:${line}/v1/chat/completions`,
+        close: () => {
+          child.kill();
+          return Promise.resolve();
+        },
+      });
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 function listenEchoUpstream(): Promise<{ readonly url: string; readonly hits: number; close(): Promise<void> }> {
@@ -1276,7 +1337,7 @@ describe("optimization loop", () => {
     expect(round0Copy && readFileSync(round0Copy.file, "utf8")).toBe(body);
     expect(round0Copy && (statSync(round0Copy.file).mode & 0o777)).toBe(0o444);
     expect(controlCopy && (statSync(controlCopy.file).mode & 0o777)).toBe(0o444);
-    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[]).at(-1) ?? "";
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
     expect(prompt).toContain("/traces/round0-trace.jsonl");
     expect(prompt).toContain("/traces/control-trace.jsonl");
     expect(prompt).not.toContain("private");
@@ -1484,6 +1545,33 @@ function captureStderr(run: () => Promise<number>): Promise<{ readonly code: num
   });
 }
 
+describe("optimization loop role caps", () => {
+  test("role output caps are recorded on the argv and spawn files", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: stubOptRoles(fx.key),
+      roleMaxTokens: { "gap-finder": 2_000 },
+    });
+    const gapSpawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { maxTokens: number };
+    const gapArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as { argv: string[]; maxTokens: number };
+    expect(gapSpawn.maxTokens).toBe(2_000);
+    expect(gapArgv.maxTokens).toBe(2_000);
+    expect(gapArgv.argv).not.toContain("--max-tokens");
+    expect((gapArgv.argv.at(-1) ?? "").length).toBeGreaterThan(0);
+    const innovator = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as { maxTokens: number };
+    const critic = JSON.parse(readFileSync(join(fx.out, "round1/sessions/critic.spawn.json"), "utf8")) as { maxTokens: number };
+    const review = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as { maxTokens: number };
+    expect(innovator.maxTokens).toBe(16_384);
+    expect(critic.maxTokens).toBe(32_768);
+    expect(review.maxTokens).toBe(32_768);
+    expect(existsSync(join(fx.out, "round1/sessions/ranker.spawn.json"))).toBe(false);
+  });
+});
+
 describe("optimize command", () => {
   test("dry-run finishes a round without a model process", async () => {
     const fx = fixture();
@@ -1617,6 +1705,204 @@ describe("optimize command", () => {
       else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
     }
   });
+
+  test("optimize --stop-before-run needs --execute", async () => {
+    const fx = fixture();
+    const { code, stderr } = await captureStderr(() => main([
+      "optimize", "--out", fx.out, "--dry-run", "--stop-before-run",
+      "--attest-root", fx.attestRoot,
+      "--attest-key-file", fx.keyFile,
+      "--harness", fx.harnessPath,
+      ...taskFlags(),
+      ...round0Flags(),
+    ]));
+    expect(code).toBe(1);
+    expect(stderr).toContain("--stop-before-run needs --execute");
+    const bad = await captureStderr(() => main([
+      "optimize", "--out", fx.out, "--execute", "--role-max-tokens", "nope=10",
+      "--attest-root", fx.attestRoot,
+      "--attest-key-file", fx.keyFile,
+      "--harness", fx.harnessPath,
+      ...taskFlags(),
+      ...round0Flags(),
+    ]));
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("--role-max-tokens");
+  });
+
+  test("a length-limit exit with empty output is role_output_truncated", async () => {
+    const fx = fixture();
+    const bin = join(fx.root, "pi");
+    writeFileSync(bin, "#!/bin/sh\necho 'Response was truncated: the model reached its output token limit.' >&2\nexit 1\n");
+    chmodSync(bin, 0o755);
+    const previous = {
+      base: process.env.BASE_URL,
+      bind: process.env.HARNESS_RELAY_BIND,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+    };
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    process.env.HARNESS_RELAY_LOG_ROOT = join(fx.root, "relay-logs");
+    try {
+      const code = await main([
+        "optimize", "--out", fx.out, "--execute", "--rounds", "1",
+        "--pi-bin", bin,
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]);
+      expect(code).toBe(0);
+      const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null; faultRounds: number } };
+      expect(loop.stopReport.reason).toBe("role_output_truncated");
+      expect(loop.stopReport.faultRounds).toBe(1);
+      expect(existsSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"))).toBe(true);
+      expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    } finally {
+      if (previous.base === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous.base;
+      if (previous.bind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previous.bind;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+    }
+  });
+
+  test("a non-zero exit that is not a length limit stays a generic failure", async () => {
+    const fx = fixture();
+    const bin = join(fx.root, "pi");
+    writeFileSync(bin, "#!/bin/sh\necho boom >&2\nexit 1\n");
+    chmodSync(bin, 0o755);
+    const previous = {
+      base: process.env.BASE_URL,
+      bind: process.env.HARNESS_RELAY_BIND,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+    };
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    process.env.HARNESS_RELAY_LOG_ROOT = join(fx.root, "relay-logs");
+    try {
+      const { code, stderr } = await captureStderr(() => main([
+        "optimize", "--out", fx.out, "--execute", "--rounds", "1",
+        "--pi-bin", bin,
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]));
+      expect(code).toBe(1);
+      expect(stderr).toContain("role gap-finder pi exited 1");
+      expect(stderr).not.toContain("role_output_truncated");
+    } finally {
+      if (previous.base === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous.base;
+      if (previous.bind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previous.bind;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+    }
+  });
+
+  test("optimize --execute --stop-before-run writes the closure and does not start docker", async () => {
+    const fx = fixture();
+    const upstream = await startEchoUpstream();
+    const script = join(fx.root, "answer.mjs");
+    const bin = join(fx.root, "pi");
+    writeFileSync(script, [
+      "import { readFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      "const system = args[args.indexOf('--system-prompt') + 1] ?? '';",
+      "const role = system.split('/').pop()?.replace(/\\.md$/, '') ?? '';",
+      "const prompt = args.at(-1) ?? '';",
+      "const base = process.env.BASE_URL ?? '';",
+      "async function post(messages) {",
+      "  const response = await fetch(base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ messages }) });",
+      "  if (!response.ok) { process.stderr.write('relay ' + response.status + '\\n'); process.exit(2); }",
+      "  await response.arrayBuffer();",
+      "}",
+      "const slot = process.cwd().match(/innovator-(\\d+)/)?.[1] ?? '0';",
+      "const maxSteps = slot === '1' ? 20 : 24;",
+      "const bodies = {",
+      "  'gap-finder': { knob: 'agent-loop.maxSteps', failureClass: 'idle-loop', summary: 'early write then idle', citations: [] },",
+      "  innovator: { summary: 'agent-loop.maxSteps=' + maxSteps, parts: { 'agent-loop': { maxSteps } } },",
+      "  critic: { excluded: [] },",
+      "  ranker: { winnerId: 'c0' },",
+      "  'reviewer-gate': { accept: false, reason: 'hold' },",
+      "};",
+      "const body = bodies[role];",
+      "if (!body) { process.stderr.write('unknown role ' + role + '\\n'); process.exit(2); }",
+      "if (role === 'gap-finder') {",
+      "  const files = prompt.split('\\n').flatMap((line) => { const path = line.split(' ')[0] ?? ''; return path.includes('/traces/') ? [path] : []; });",
+      "  const messages = [];",
+      "  files.forEach((file, index) => {",
+      "    const id = 'c' + index;",
+      "    messages.push({ role: 'assistant', tool_calls: [{ id, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } }] });",
+      "    messages.push({ role: 'tool', tool_call_id: id, content: readFileSync(file, 'utf8') });",
+      "  });",
+      "  messages.push({ role: 'user', content: '{}' });",
+      "  await post(messages);",
+      "}",
+      "await post([{ role: 'user', content: JSON.stringify(body) }]);",
+      "",
+    ].join("\n"));
+    writeFileSync(bin, `#!/bin/sh\nexec node ${JSON.stringify(script)} "$@"\n`);
+    chmodSync(bin, 0o755);
+    const previous = {
+      base: process.env.BASE_URL,
+      bind: process.env.HARNESS_RELAY_BIND,
+      root: process.env.HARNESS_RELAY_LOG_ROOT,
+      upstream: process.env.HARNESS_RELAY_UPSTREAM,
+    };
+    process.env.BASE_URL = "http://127.0.0.1:9";
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    process.env.HARNESS_RELAY_LOG_ROOT = join(fx.root, "relay-logs");
+    process.env.HARNESS_RELAY_UPSTREAM = upstream.url;
+    try {
+      const { code, stderr } = await captureStderr(() => main([
+        "optimize", "--out", fx.out, "--execute", "--stop-before-run", "--rounds", "1",
+        "--pi-bin", bin,
+        "--role-max-tokens", "ranker=4096",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(),
+        ...round0Flags(),
+      ]));
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+      expect(existsSync(join(fx.out, "round1/closure.json"))).toBe(true);
+      const loop = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
+      expect(loop.stopReport.reason).toBeNull();
+      const ranker = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.spawn.json"), "utf8")) as { maxTokens: number };
+      const rankerArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/ranker.argv.json"), "utf8")) as { maxTokens: number; argv: string[] };
+      expect(ranker.maxTokens).toBe(4096);
+      expect(rankerArgv.maxTokens).toBe(4096);
+      expect(rankerArgv.argv).not.toContain("--max-tokens");
+      const gap = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as { maxTokens: number };
+      expect(gap.maxTokens).toBe(16_384);
+      expect(existsSync(join(fx.out, "round1/sessions/reviewer-gate.argv.json"))).toBe(true);
+      expect(existsSync(join(fx.out, "round1/sessions/critic.argv.json"))).toBe(true);
+    } finally {
+      await upstream.close();
+      if (previous.base === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = previous.base;
+      if (previous.bind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previous.bind;
+      if (previous.root === undefined) delete process.env.HARNESS_RELAY_LOG_ROOT;
+      else process.env.HARNESS_RELAY_LOG_ROOT = previous.root;
+      if (previous.upstream === undefined) delete process.env.HARNESS_RELAY_UPSTREAM;
+      else process.env.HARNESS_RELAY_UPSTREAM = previous.upstream;
+    }
+  }, 60_000);
 
   test("execute without --pi-bin still needs roles", async () => {
     const fx = fixture();
@@ -1807,7 +2093,9 @@ const liveRoleSmoke = process.env.LOOP_LIVE_SMOKE === "1" && Boolean(process.env
       expect(report.dockerRuns).toBe(0);
       expect(report.gapCitedTrace).toBe(true);
       expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
-      const gapArgv = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as string[];
+      const gapArgvRecord = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as { argv: string[]; maxTokens: number };
+      const gapArgv = gapArgvRecord.argv;
+      expect(gapArgvRecord.maxTokens).toBe(16_384);
       const prompt = gapArgv.at(-1) ?? "";
       expect(prompt).toContain("/traces/round0-trace.jsonl");
       expect(prompt).toContain("/traces/control-trace.jsonl");
