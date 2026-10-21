@@ -135,6 +135,20 @@ pi-subagents 0.79.1 的默认 intercom bridge 模式是 `always`。桥打开时�
 - `novelty`（`NoveltyFilter`）
 - `ParetoArchive`
 
+## 多轮优化环
+
+`optimize` 把 gap-finder、innovator、reviewer-gate 接到一次 Dev-II 执行上。默认协议：只做 i014，3 轮，每轮 1 个候选，dev 种子 0/1/2。三轮里最后一个被接受的候选，再和 control 按 `C0,X0,C1,X1,C2,X2` 交替重跑 i014，然后 held-out 跑 002、i030、hb003 各 3 个种子。002 的网络是 gateway-only。三轮都没有接受的候选时，不跑终比，也不跑 held-out。模型名是 `deepseek-v4-1-flash-261017`，地址只从环境变量 `BASE_URL` 读。
+
+执行器命令由调用方给，不写 box 上的路径或镜像。`--executor-cmd` 是 JSON 数组，占位符有 `{task}` `{taskPath}` `{seed}` `{arm}` `{config}` `{runDir}` `{model}` `{patchHash}` `{marker}` `{network}` `{tokenCap}` `{driver}`。`{driver}` 来自 `--driver` 或 `HARNESS_OPT_DRIVER`。驱动要在 `{runDir}` 留下 `trace.jsonl`（第 1 行 `run_start` 带 `candidateConfigHash`、`effective`，并把 `{marker}` 写进 `systemPrompt`）、`outputs/`、`batch.log`（`<时间> run 1 done`）、`verifier/reward.txt`、`result.json`。单次 tokens 超过该题 `6×W` 记 unscored。
+
+每一轮落下三个角色的 Pi session jsonl 和 sha、`patch.diff`、以及 `activation.json`：补丁哈希必须出现在本轮 dev run 的 system prompt 里，并且和候选 config 的 sha 一致。EWI 按预注册的 idle / gap_max 两条计算，阈值是 `--ewi-threshold`，默认 600 秒，由外部冻结。EWI 的 run 照常计分，并在 `metrics.json` 的 `ewiRuns` 里单独列出；`withoutEwi` 是去掉这些 run 之后的敏感度。
+
+```bash
+bun harness-opt/src/cli.ts optimize --out /tmp/harness-opt-loop --dry-run
+```
+
+`--dry-run` 用桩角色和桩执行器，不发模型请求。`--execute` 才会按命令真的拉起驱动。
+
 ## 本地闭环
 
 ```bash
