@@ -232,9 +232,11 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     effective: flatten(config.parts ?? {}),
   };
   const messages = timing.assistantTs.map((stamp) => ({ type: "assistant_message", ts: stamp * 1000 }));
+  // 25 is the default continuation cap. This line is inside the signed trace.
+  const runEnd = { type: "run_end", goalContinuationTurns: 25 };
   writeFileSync(
     join(request.runDir, "trace.jsonl"),
-    [start, ...messages].map((line) => JSON.stringify(line)).join("\n") + "\n",
+    [start, ...messages, runEnd].map((line) => JSON.stringify(line)).join("\n") + "\n",
   );
   writeFileSync(join(request.runDir, "batch.log"), `${new Date(timing.tEnd * 1000).toISOString()} run 1 done\n`);
   mkdirSync(join(request.runDir, "verifier"), { recursive: true });
