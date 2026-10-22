@@ -40,6 +40,21 @@ import {
 } from "./opt-executor";
 import { EFFECTIVE_KNOBS, flatDottedKeys, formatKnobLine, harnessEffectiveKeys, isEffectiveKnob, knobCatalog, leafKnobPaths, noopKeys } from "./effective-knobs";
 import { bindRoleCall, capHit, LOOP_CAPS, rankCandidates, rankingBudget, relayCallUsage, signPreRound1 } from "./loop-driver";
+import { Node, type Lineage } from "../lineage";
+import {
+  SEARCH_TREE_FILE,
+  attachChild,
+  ensureRoot,
+  importIdPrefix,
+  importLoopHistory,
+  noteReview,
+  openLineage,
+  parentTried,
+  pickParent,
+  readSearchTree,
+  writeSearchTree,
+  type SearchTreeBody,
+} from "./search-tree";
 import { evaluatePreflightGates, evaluateReviewerGates, parseAgentTimeoutSec, patchTookEffect } from "./reviewer-gates";
 import {
   buildRoleSpawn,
@@ -119,6 +134,11 @@ export interface GapCall {
   readonly baseUrl: string;
   /** Host control config. The prompt catalog shows its current effective values. */
   readonly control: unknown;
+  /**
+   * Search-tree history for this call. Present only when the preregistered
+   * from-round has been reached. The text is already truncated.
+   */
+  readonly searchHistory?: string;
 }
 
 export interface GapTurn {
@@ -138,6 +158,11 @@ export interface InnovateCall {
   readonly sessionPath: string;
   readonly spawn: RoleSpawnConfig;
   readonly baseUrl: string;
+  /**
+   * Search-tree history for this call. Present only when the preregistered
+   * from-round has been reached. The text is already truncated.
+   */
+  readonly searchHistory?: string;
 }
 
 export interface InnovatorTurn {
@@ -336,6 +361,17 @@ export interface OptLoopOptions {
   readonly campaignRegistry?: string;
   /** Test seam. Absent waits `ROLE_RETRY_DELAYS_MS`. */
   readonly roleRetrySleep?: (ms: number) => Promise<void>;
+  /**
+   * First round that wires the lineage. Omitted stays off: prompts, parent
+   * pick, and the on-disk tree are unchanged. A fresh loop writes this into
+   * the signed pre-round1. Resume keeps that pin.
+   */
+  readonly searchTreeFromRound?: number;
+  /**
+   * Finished loop directories to read into the tree when the pin is on.
+   * Read-only. Ignored until `searchTreeFromRound` is set.
+   */
+  readonly searchTreeImports?: readonly string[];
 }
 
 export interface AcceptedCandidate {
@@ -1915,6 +1951,55 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   };
 }
 
+/**
+ * Pin from the signed pre-round1, unless this launch passes the same number.
+ * Omitted on both sides leaves the tree off.
+ */
+function freshTreeId(lin: Lineage, base: string): string {
+  let id = base;
+  let n = 2;
+  while (lin.nodes.has(id)) {
+    id = `${base}-${n}`;
+    n += 1;
+  }
+  return id;
+}
+
+function searchTreePin(pre: Record<string, unknown>, requested: number | undefined): number | undefined {
+  const signed = pre.searchTreeFromRound;
+  const pinned = typeof signed === "number" && Number.isInteger(signed) && signed >= 1 ? signed : undefined;
+  if (signed !== undefined && pinned === undefined) throw new Error("search tree from-round");
+  if (requested !== undefined && (!Number.isInteger(requested) || requested < 1)) throw new Error("search tree from-round");
+  if (requested !== undefined && pinned !== undefined && requested !== pinned) {
+    throw new Error("search tree from-round disagrees with preregistration");
+  }
+  return requested ?? pinned;
+}
+
+function resumeTree(resume: ResumeState, searchFrom: number, nonce: string, key: Buffer): SearchTreeBody | null {
+  const file = join(resume.source, SEARCH_TREE_FILE);
+  if (!isRegularFile(file)) {
+    if (resume.completedRounds >= searchFrom) throw new Error("search tree missing");
+    return null;
+  }
+  const body = readSearchTree(file, key);
+  if (body.nonce !== nonce || body.outRel !== campaignOutRel(resume.source) || body.searchTreeFromRound !== searchFrom) {
+    throw new Error("search tree signature rejected");
+  }
+  return body;
+}
+
+function carryTree(options: OptLoopOptions, key: Buffer): SearchTreeBody | null {
+  const from = options.carryFrom?.trim() ?? "";
+  if (from === "") return null;
+  const file = join(from, SEARCH_TREE_FILE);
+  if (!isRegularFile(file)) return null;
+  const body = readSearchTree(file, key);
+  const disk = readCampaign(from, key);
+  if (!disk || body.nonce !== disk.nonce || body.outRel !== campaignOutRel(from)) throw new Error("search tree signature rejected");
+  return body;
+}
+
 /** Gap, six innovators, critic, ranker, one seed-0 run, reviewer. No model call lives in this function. */
 export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult> {
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
@@ -2020,7 +2105,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         : {}),
     };
     campaignNonce = claimNonce(options.attestRoot);
-    preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy, campaignNonce);
+    preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy, campaignNonce, options.searchTreeFromRound);
     writeJson(join(options.out, "pre-round1.json"), preRound1);
     chainPrev = macOf(preRound1);
     assertRegistryOutside(registryFile, [options.out]);
@@ -2062,6 +2147,18 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     ? resume.baselineEffective
     : round0Effective ?? (controlTrace ? readRunEdges(controlTrace).effective : null);
   let previousEffective: Record<string, unknown> | null = resume ? resume.previousEffective : null;
+
+  const searchFrom = searchTreePin(preRound1, options.searchTreeFromRound);
+  if ((options.searchTreeImports?.length ?? 0) > 0 && searchFrom === undefined) {
+    throw new Error("search tree import needs a from-round");
+  }
+  let lineage: Lineage | null = null;
+  let treeImported = false;
+  if (searchFrom !== undefined) {
+    const snapshot = resume ? resumeTree(resume, searchFrom, campaignNonce, attestKey) : carryTree(options, attestKey);
+    lineage = openLineage(join(options.out, "lineage"), snapshot);
+    if (snapshot) treeImported = true;
+  }
 
   const tried: string[] = [];
   let accepted: AcceptedCandidate | null = resume?.accepted ?? null;
@@ -2395,7 +2492,32 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       break;
     }
     writeJson(join(options.out, `round${round}`, "gap-traces.json"), { traces: gapTraces });
-    const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview, control });
+    let treeParent: Node | null = null;
+    let searchHistory: string | undefined;
+    const treeChildIds = new Map<string, string>();
+    if (lineage && searchFrom !== undefined && round >= searchFrom) {
+      if (!treeImported) {
+        let parent = ensureRoot(lineage, baselineReward);
+        for (const dir of options.searchTreeImports ?? []) {
+          parent = importLoopHistory(lineage, dir, parent, importIdPrefix(dir));
+        }
+        if (resume) parent = importLoopHistory(lineage, resume.source, parent, "src");
+        const carry = options.carryFrom?.trim() ?? "";
+        if (carry !== "") parent = importLoopHistory(lineage, carry, parent, "carry");
+        importLoopHistory(lineage, options.out, parent, "self", searchFrom);
+        treeImported = true;
+      }
+      try {
+        treeParent = pickParent(lineage);
+        tried.splice(0, tried.length, ...parentTried(lineage, treeParent));
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "no evaluated unlocked node") throw error;
+        treeParent = null;
+        tried.splice(0, tried.length);
+      }
+      searchHistory = searchHistorySection(lineage.roleView());
+    }
+    const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview, control, ...(searchHistory ? { searchHistory } : {}) });
     const launchGap = () => attemptRole({
       sessionName: "gap-finder",
       kind: "role:gap-finder",
@@ -2415,6 +2537,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           spawn: roleFacing(spawn),
           baseUrl: relay.baseUrl,
           control,
+          ...(searchHistory ? { searchHistory } : {}),
         };
         assertNoHeldOutLeak(input, "gap input");
         writeJson(join(options.out, `round${round}`, "gap-input.json"), input);
@@ -2515,12 +2638,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     let innovatorHalted = false;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
+      const innovatorHistory = lineage && searchFrom !== undefined && round >= searchFrom ? searchHistorySection(lineage.roleView()) : undefined;
       const innovatePrompt = innovatorTaskPrompt({
         round,
         knob: gap.knob,
         gapSummary: gap.summary,
         triedSummaries: [...tried],
         control,
+        ...(innovatorHistory ? { searchHistory: innovatorHistory } : {}),
       });
       const innovatorRun = await attemptRole({
         sessionName,
@@ -2539,6 +2664,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
             sessionPath: spawn.sessionPath,
             spawn: roleFacing(spawn),
             baseUrl: relay.baseUrl,
+            ...(innovatorHistory ? { searchHistory: innovatorHistory } : {}),
           };
           assertNoHeldOutLeak(input, "innovator input");
           writeJson(join(options.out, `round${round}`, `${sessionName}-input.json`), input);
@@ -2618,6 +2744,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       }
       seen.add(turn.summary);
       tried.push(turn.summary);
+      if (lineage && treeParent) {
+        const childId = freshTreeId(lineage, `r${round}-c${slot}`);
+        treeChildIds.set(`c${slot}`, childId);
+        attachChild(lineage, treeParent, childId, `round${round}/proposals/c${slot}`, turn.summary);
+      }
       proposals.push({ id: `c${slot}`, slot, summary: turn.summary, changedKeys: leafCount(turn.parts), parts: turn.parts });
     }
     readOnlyWallS += Math.max(0, (now().getTime() - roleMs) / 1000);
@@ -3136,6 +3267,21 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       consecutiveNoAccept += 1;
     }
     previousReview = { accept: take, reason: verdict.reason };
+    if (lineage && treeParent && winner) {
+      const child = lineage.nodes.get(treeChildIds.get(winner.id) ?? "");
+      if (child) {
+        child.configPath = `round${round}/candidate/config.json`;
+        noteReview(lineage, child, {
+          accept: take,
+          reason: verdict.reason,
+          reward: seeded?.reward ?? null,
+          knob: gap.knob,
+          round,
+          patch: existsSync(diffPath) ? readFileSync(diffPath, "utf8") : "",
+          gates: hostVerdict.gates,
+        });
+      }
+    }
     previousReviewSession = reviewCaptured ? reviewSpawn.sessionPath : null;
     previousReviewSha = reviewCaptured?.sha256 ?? null;
     traceHints = runs.flatMap((run) => {
@@ -3211,6 +3357,13 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const boundRound = completedRounds;
   const campaignRelayLogs = mergeCountedRelayLogs(resume?.relayLogs ?? carriedRelayLogs(options, attestKey), measureCountedRelayLog(relayRoot));
   assertVoidLedger(campaignVoids);
+  if (lineage && searchFrom !== undefined && treeImported) {
+    writeSearchTree(join(options.out, SEARCH_TREE_FILE), attestKey, lineage, {
+      nonce: campaignNonce,
+      outRel,
+      searchTreeFromRound: searchFrom,
+    });
+  }
   writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),
@@ -3676,7 +3829,19 @@ export function gapArtifactText(text: string, tracePath: string): string {
   return `${capArtifact(trimLongString(text))}\n${tracePath}`;
 }
 
-function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown }): string {
+/**
+ * Role view of the lineage, bounded the same way as a gap trace artifact.
+ * `trimLongString` first: over 5100 characters, keep the first 2500 and the last 2500.
+ * `capArtifact` second: 20480 characters, suffix `\n... (truncated)`.
+ * Gate scores are not in this text. `roleView` drops them.
+ */
+export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
+  const body = JSON.stringify({ events: view.events(), nodes: view.nodeSummaries() });
+  const bounded = capArtifact(trimLongString(body));
+  return `搜索树：${bounded}\n截断：超过 5100 字先留头 2500 和尾 2500，再以 20480 字为上限。`;
+}
+
+function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown; readonly searchHistory?: string }): string {
   const traces = input.traces.map((hint) => {
     let raw = "";
     try {
@@ -3692,6 +3857,7 @@ function gapTaskPrompt(input: { readonly round: number; readonly traces: readonl
     "只读下面列出的 traces/ 文件，归纳一个共同失败模式。",
     traces || "没有附带 trace。",
     `上一轮评语：${review}`,
+    ...(input.searchHistory ? [input.searchHistory] : []),
     "knob 必须是下面这些有效旋钮之一。同一份名单在 cwd 的 effective-knobs.json。每一行带当前有效值、类型，以及已知的范围。碰了名单以外的键，这一轮停，原因是 invalid: non_effective_key。",
     ...knobCatalog(input.control).map(formatKnobLine),
     "最后一条 assistant 消息只放一个 JSON 对象，字段为 knob、failureClass、summary、citations。",
@@ -3700,12 +3866,13 @@ function gapTaskPrompt(input: { readonly round: number; readonly traces: readonl
   ].join("\n");
 }
 
-function innovatorTaskPrompt(input: { readonly round: number; readonly knob: string; readonly gapSummary: string; readonly triedSummaries: readonly string[]; readonly control: unknown }): string {
+function innovatorTaskPrompt(input: { readonly round: number; readonly knob: string; readonly gapSummary: string; readonly triedSummaries: readonly string[]; readonly control: unknown; readonly searchHistory?: string }): string {
   return [
     `第 ${input.round} 轮 innovator。`,
     `旋钮 ${input.knob}。`,
     `缺口：${input.gapSummary}`,
     `已试过：${input.triedSummaries.join(" | ") || "无"}`,
+    ...(input.searchHistory ? [input.searchHistory] : []),
     `control：${JSON.stringify(input.control)}`,
     "最后一条 assistant 消息只放一个 JSON 对象。summary 是字符串。parts 的键是 part 名，值是要改的字段。",
     "part 只能是 agent-loop、context、memory、toolchain、skills。",

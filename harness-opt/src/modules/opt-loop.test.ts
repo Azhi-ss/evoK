@@ -7555,6 +7555,251 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
   });
 });
 
+describe("search tree", () => {
+  function rolePrompt(out: string, round: number, session: string): string {
+    const recorded = JSON.parse(readFileSync(join(out, `round${round}`, "sessions", `${session}.argv.json`), "utf8")) as { argv: string[] };
+    return recorded.argv[recorded.argv.length - 1] ?? "";
+  }
+
+  function treeText(out: string): string {
+    return readFileSync(join(out, "search-tree.json"), "utf8");
+  }
+
+  test("the search tree stays off unless a from-round is pinned", async () => {
+    const fx = fixture();
+    await runScoredRound(fx);
+    expect(existsSync(join(fx.out, "search-tree.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "lineage"))).toBe(false);
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { searchTreeFromRound?: unknown };
+    expect(pre.searchTreeFromRound).toBeUndefined();
+    const prompt = rolePrompt(fx.out, 1, "gap-finder");
+    expect(prompt.includes("搜索树")).toBe(false);
+    expect(prompt.includes("上一轮评语")).toBe(true);
+    const { code, stderr } = await captureStderr(() => main([
+      "optimize", "--dry-run", "--search-tree-from-round", "0",
+      "--attest-root", fx.attestRoot, "--attest-key-file", fx.keyFile, "--harness", fx.harnessPath,
+      ...taskFlags(fx.root), ...round0Flags(),
+    ]));
+    expect(code).toBe(1);
+    expect(stderr).toContain("optimize --search-tree-from-round must be a positive integer");
+  });
+
+  test("a signed tree round-trips through resume and the next prompt lists the prior round", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      searchTreeFromRound: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    mirrorTaskCopy(join(fx.out, "round2", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    const saved = treeText(fx.out);
+    expect(attestationJsonMacOk(fx.key, saved)).toBe(true);
+    const body = JSON.parse(saved) as {
+      searchTreeFromRound: number;
+      tried: string[];
+      nodes: { id: string; parentId: string | null; patchSummary: string; devScores: number[]; status: string }[];
+      gates: { gates?: { id: string }[] }[];
+    };
+    expect(body.searchTreeFromRound).toBe(1);
+    expect(body.tried.includes("agent-loop.maxSteps=24")).toBe(true);
+    const round1 = body.nodes.find((node) => node.patchSummary === "agent-loop.maxSteps=24");
+    expect(round1?.parentId).toBe("root");
+    expect(round1?.devScores).toEqual([1]);
+    expect(round1?.status).toBe("evaluated");
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { searchTreeFromRound?: number };
+    expect(pre.searchTreeFromRound).toBe(1);
+    const gap2 = rolePrompt(fx.out, 2, "gap-finder");
+    const innov2 = rolePrompt(fx.out, 2, "innovator-0");
+    expect(gap2.includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(gap2.includes("accept the idle cap")).toBe(true);
+    expect(gap2.includes("\"parentId\":\"root\"") || gap2.includes("\"parentId\": \"root\"")).toBe(true);
+    expect(innov2.includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(innov2.includes("已试过：")).toBe(true);
+    expect(gap2.includes("超过 5100 字")).toBe(true);
+    const next = join(fx.root, "out-tree-resume");
+    const continued = await runOptLoop({
+      ...hostOpts(fx),
+      out: next,
+      attestRoot: attestWrite(fx, "attest-tree-resume"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-tree-resume")),
+    });
+    expect(continued.rounds[continued.rounds.length - 1]?.round).toBe(3);
+    expect(treeText(fx.out)).toBe(saved);
+    const resumed = JSON.parse(treeText(next)) as { tried: string[]; nodes: { patchSummary: string }[] };
+    expect(attestationJsonMacOk(fx.key, treeText(next))).toBe(true);
+    expect(resumed.tried.includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(resumed.nodes.some((node) => node.patchSummary === "agent-loop.maxSteps=23")).toBe(true);
+    expect(rolePrompt(next, 3, "gap-finder").includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(rolePrompt(next, 3, "gap-finder").includes("agent-loop.maxSteps=23")).toBe(true);
+  });
+
+  test("carry-from keeps the signed tree", async () => {
+    const fx = fixture();
+    await runScoredRound(fx, { searchTreeFromRound: 1 });
+    const saved = treeText(fx.out);
+    const freshOut = join(fx.root, "fresh-tree");
+    const freshAttest = attestWrite(fx, "attest-fresh-tree");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: freshOut,
+      attestRoot: freshAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      mode: "dry-run",
+      rounds: 1,
+      searchTreeFromRound: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, freshAttest),
+    });
+    expect(treeText(fx.out)).toBe(saved);
+    const carried = JSON.parse(treeText(freshOut)) as { tried: string[]; nonce: string };
+    expect(attestationJsonMacOk(fx.key, treeText(freshOut))).toBe(true);
+    expect(carried.tried.includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(rolePrompt(freshOut, 1, "gap-finder").includes("agent-loop.maxSteps=24")).toBe(true);
+    expect(rolePrompt(freshOut, 1, "innovator-0").includes("agent-loop.maxSteps=24")).toBe(true);
+    const source = JSON.parse(saved) as { nonce: string };
+    expect(carried.nonce).not.toBe(source.nonce);
+  });
+
+  test("search tree history is truncated head and tail", async () => {
+    const fx = fixture();
+    const legacy = join(fx.root, "huge-loop");
+    const patch = `HEADMARK_START${"A".repeat(4000)}MIDDLEMARK_GONE${"B".repeat(4000)}TAILMARK_END`;
+    const roundDir = join(legacy, "round1");
+    mkdirSync(roundDir, { recursive: true });
+    writeFileSync(join(roundDir, "patch.diff"), patch);
+    writeFileSync(join(roundDir, "run-notes.md"), "reward: 0.2\n");
+    writeFileSync(join(roundDir, "closure.json"), JSON.stringify({ round: 1, accepted: true, reviewReason: "huge prior" }));
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      searchTreeFromRound: 1,
+      searchTreeImports: [legacy],
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const prompt = rolePrompt(fx.out, 1, "gap-finder");
+    expect(prompt.includes("HEADMARK_START")).toBe(true);
+    expect(prompt.includes("TAILMARK_END")).toBe(true);
+    expect(prompt.includes("characters truncated")).toBe(true);
+    expect(prompt.includes("MIDDLEMARK_GONE")).toBe(false);
+    expect(prompt.includes("超过 5100 字")).toBe(true);
+    expect(readFileSync(join(legacy, "round1", "patch.diff"), "utf8")).toBe(patch);
+  });
+
+  test("the tree stays quiet until the pinned round", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 2,
+      searchTreeFromRound: 2,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    expect(rolePrompt(fx.out, 1, "gap-finder").includes("搜索树")).toBe(false);
+    expect(rolePrompt(fx.out, 1, "innovator-0").includes("搜索树")).toBe(false);
+    const second = rolePrompt(fx.out, 2, "gap-finder");
+    expect(second.includes("搜索树")).toBe(true);
+    expect(second.includes("accept the idle cap")).toBe(true);
+    expect(second.includes("上一轮评语")).toBe(true);
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { searchTreeFromRound?: number };
+    expect(pre.searchTreeFromRound).toBe(2);
+  });
+
+  test("a tampered search tree is rejected", async () => {
+    const fx = fixture();
+    await runScoredRound(fx, { searchTreeFromRound: 1 });
+    const file = join(fx.out, "search-tree.json");
+    const original = readFileSync(file, "utf8");
+    const flipped = original.replace("\"hmacSha256\": \"", "\"hmacSha256\": \"00");
+    expect(flipped).not.toBe(original);
+    writeFileSync(file, flipped);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-tampered-tree"),
+      attestRoot: attestWrite(fx, "attest-tampered-tree"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-tampered-tree")),
+    })).rejects.toThrow("search tree signature rejected");
+    expect(existsSync(join(fx.root, "out-tampered-tree", "round2"))).toBe(false);
+  });
+
+  test("legacy loop dirs are imported read-only", async () => {
+    const fx = fixture();
+    const dirs = [
+      { name: "round1-r3", round: 1, patch: "LEGACY_PATCH_R1", reason: "legacy-accept-1", reward: 0.4 },
+      { name: "round2", round: 2, patch: "LEGACY_PATCH_R2", reason: "legacy-accept-2", reward: 0.8 },
+      { name: "round3-e92ce52f-r2", round: 3, patch: "LEGACY_PATCH_R3", reason: "legacy-reject-3", reward: 0.3 },
+    ];
+    for (const item of dirs) {
+      const root = join(fx.root, item.name);
+      const roundDir = join(root, `round${item.round}`);
+      mkdirSync(join(roundDir, "roles", "reviewer-gate", "candidates"), { recursive: true });
+      writeFileSync(join(root, "canary.txt"), "keep");
+      writeFileSync(join(roundDir, "patch.diff"), item.patch);
+      writeFileSync(join(roundDir, "run-notes.md"), `reward: ${item.reward}\n`);
+      writeFileSync(join(roundDir, "closure.json"), JSON.stringify({
+        round: item.round,
+        accepted: item.round !== 3,
+        reviewReason: item.reason,
+        gates: [{ id: "G2", pass: item.round !== 3 }],
+      }));
+      writeFileSync(join(roundDir, "roles", "reviewer-gate", "candidates", "gap.json"), JSON.stringify({ knob: "agent-loop.maxSteps" }));
+    }
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      searchTreeFromRound: 1,
+      searchTreeImports: dirs.map((item) => join(fx.root, item.name)),
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    for (const item of dirs) {
+      expect(readFileSync(join(fx.root, item.name, "canary.txt"), "utf8")).toBe("keep");
+      expect(existsSync(join(fx.root, item.name, "search-tree.json"))).toBe(false);
+    }
+    const prompt = rolePrompt(fx.out, 1, "gap-finder");
+    expect(prompt.includes("LEGACY_PATCH_R1")).toBe(true);
+    expect(prompt.includes("LEGACY_PATCH_R2")).toBe(true);
+    expect(prompt.includes("LEGACY_PATCH_R3")).toBe(true);
+    expect(prompt.includes("legacy-accept-1")).toBe(true);
+    expect(prompt.includes("legacy-accept-2")).toBe(true);
+    expect(prompt.includes("legacy-reject-3")).toBe(true);
+    expect(prompt.includes("\"id\":\"G2\"") || prompt.includes("\"id\": \"G2\"")).toBe(false);
+    const body = JSON.parse(treeText(fx.out)) as {
+      nodes: { id: string; parentId: string | null; devScores: number[]; status: string }[];
+      gates: { node?: string; gates?: { id?: string }[] }[];
+    };
+    const first = body.nodes.find((node) => node.id === "round1-r3-r1");
+    const second = body.nodes.find((node) => node.id === "round2-r2");
+    const third = body.nodes.find((node) => node.id === "round3-e92ce52f-r2-r3");
+    expect(first?.parentId).toBe("root");
+    expect(first?.devScores).toEqual([0.4]);
+    expect(first?.status).toBe("evaluated");
+    expect(second?.parentId).toBe("round1-r3-r1");
+    expect(second?.devScores).toEqual([0.8]);
+    expect(third?.parentId).toBe("round2-r2");
+    expect(third?.status).toBe("rejected");
+    expect(body.gates.some((event) => event.gates?.some((gate) => gate.id === "G2"))).toBe(true);
+    expect(rolePrompt(fx.out, 1, "innovator-0").includes("LEGACY_PATCH_R2")).toBe(true);
+  });
+});
+
 /** sha256 of sorted relay logs: each file is `<relative path> NUL <bytes> NUL`. */
 function shaOfLogs(files: readonly { rel: string; abs: string }[]): string {
   const ordered = [...files].sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));

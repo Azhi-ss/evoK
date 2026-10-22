@@ -20,6 +20,8 @@ const USAGE = [
   "                        one loop; task and round-0 path/sha are required and have no default; --harness-sha or HARNESS_PIN_SHA overrides the default harness pin",
   "  optimize --carry-from <loopOut> --carry-attest <attestRoot> [--carry-relay-logs <dir>] [--void-spend <relay-log-dir>]",
   "                        fresh loop, not --resume; carry run.tokens plus role spend from that loop's signed records into the 30M cap; --void-spend is repeatable and adds that relay-log dir's usage, including unfinished requests, as a signed VOID entry",
+  "  optimize --search-tree-from-round <n> [--search-tree-import <loopOut>]",
+  "                        off unless <n> is set; <n> is written into signed pre-round1; --search-tree-import is repeatable and read-only",
   "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> --attest-out <newAttest> [--source-relay-logs <dir>] [--campaign-registry <file>] [--rounds <n>]",
   "                        read that loop and its --attest-root read-only; write round N+1 into --out and new attestations and relay logs into --attest-out; --out and --attest-out must not sit inside the source run or the source attest root; gap input is the previous real-run trace, sha-checked; --source-relay-logs is the source role relay directory when it is not the recorded relayLogRoot; --campaign-registry is the host campaign-nonce file outside the out dir (default is campaign-registry.jsonl under the attest root); --rounds is how many further rounds (default 1)",
   "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
@@ -171,6 +173,16 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
   const carryRelayLogs = flag(argv, "--carry-relay-logs");
   const voidSpend = repeatFlag(argv, "--void-spend");
   const campaignRegistry = flag(argv, "--campaign-registry");
+  const searchTreeRaw = flag(argv, "--search-tree-from-round");
+  let searchTreeFromRound: number | undefined;
+  if (searchTreeRaw !== undefined) {
+    if (!/^[1-9][0-9]*$/.test(searchTreeRaw)) {
+      process.stderr.write("optimize --search-tree-from-round must be a positive integer\n");
+      return 1;
+    }
+    searchTreeFromRound = Number(searchTreeRaw);
+  }
+  const searchTreeImports = repeatFlag(argv, "--search-tree-import");
   if (carryFrom && resumeFrom) {
     process.stderr.write("optimize --carry-from is a fresh loop and does not resume\n");
     return 1;
@@ -212,6 +224,8 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       ...(round0 ? { round0TracePath: round0.path, round0TraceSha: round0.sha } : {}),
       ...(resumeFrom ? { resumeFrom, attestSource: attestRoot, ...(sourceRelayLogs ? { sourceRelayLogs } : {}) } : {}),
       ...(campaignRegistry ? { campaignRegistry } : {}),
+      ...(searchTreeFromRound !== undefined ? { searchTreeFromRound } : {}),
+      ...(searchTreeImports.length > 0 ? { searchTreeImports } : {}),
       ...(controlConfigPath ? { controlConfigPath } : {}),
       ...(rounds !== undefined ? { rounds } : {}),
       ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),

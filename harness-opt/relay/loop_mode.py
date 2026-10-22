@@ -105,7 +105,7 @@ def gate_rule_sha() -> str:
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
-def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=(), campaign_nonce=None) -> dict:
+def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=(), campaign_nonce=None, search_tree_from_round=None) -> dict:
     """Sign the caps, an inert seedSha, and round0Record before round 1.
 
     round0_path and round0_sha are required. There is no built-in trace.
@@ -150,6 +150,11 @@ def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None
         if not isinstance(campaign_nonce, str) or len(campaign_nonce) != 32 or any(char not in "0123456789abcdef" for char in campaign_nonce):
             raise ValueError("campaignNonce")
         body["campaignNonce"] = campaign_nonce
+    # Optional pin. Absent keeps every existing pre-round1 body unchanged.
+    if search_tree_from_round is not None:
+        if isinstance(search_tree_from_round, bool) or not isinstance(search_tree_from_round, int) or search_tree_from_round < 1:
+            raise ValueError("searchTreeFromRound")
+        body["searchTreeFromRound"] = search_tree_from_round
     return {**body, "hmacSha256": _mac(body, key)}
 
 
@@ -414,6 +419,7 @@ def main(argv=None) -> None:
             host_copy_path=payload.get("hostCopyPath"),
             mounts=payload.get("mounts") or (),
             campaign_nonce=payload.get("campaignNonce"),
+            search_tree_from_round=payload.get("searchTreeFromRound"),
         )
         json.dump(signed, sys.stdout)
         return

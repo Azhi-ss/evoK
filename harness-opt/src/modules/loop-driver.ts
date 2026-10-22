@@ -96,7 +96,7 @@ export interface Round0Sign {
   readonly hostCopyPath?: string;
 }
 
-export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown, round0: Round0Sign, campaignNonce: string): Record<string, unknown> {
+export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown, round0: Round0Sign, campaignNonce: string, searchTreeFromRound?: number): Record<string, unknown> {
   if (round0.srcPath.trim() === "" || !/^[0-9a-f]{64}$/.test(round0.srcSha256)) {
     throw new Error("pre_round1 needs round0 path and sha");
   }
@@ -109,6 +109,7 @@ export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown,
       round0Path: round0.srcPath,
       round0Sha: round0.srcSha256,
       campaignNonce,
+      ...(searchTreeFromRound !== undefined ? { searchTreeFromRound } : {}),
       ...(round0.hostCopyPath ? { round0Src: round0.srcPath, hostCopyPath: round0.hostCopyPath } : {}),
     }),
     encoding: "utf8",

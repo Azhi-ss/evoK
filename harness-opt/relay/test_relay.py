@@ -1745,6 +1745,34 @@ class LoopModeCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             hooks.copy_checker_before_sign(run, run_id, relay_root=root / "relay")
 
+    def test_search_tree_from_round_is_optional_on_pre_round1(self):
+        key = b"k" * 32
+        seed = bytes.fromhex("ab" * 32)
+        path = "heldout/hb003/seed0/.../trace.jsonl"
+        sha = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76"
+        plain = loop_mode.pre_round1_sign(
+            key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+            round0_path=path, round0_sha=sha,
+        )
+        self.assertNotIn("searchTreeFromRound", plain)
+        self.assertTrue(loop_mode.verify_pre_round1(plain, key))
+        pinned = loop_mode.pre_round1_sign(
+            key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+            round0_path=path, round0_sha=sha, search_tree_from_round=2,
+        )
+        self.assertEqual(pinned["searchTreeFromRound"], 2)
+        self.assertTrue(loop_mode.verify_pre_round1(pinned, key))
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(
+                key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+                round0_path=path, round0_sha=sha, search_tree_from_round=0,
+            )
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(
+                key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+                round0_path=path, round0_sha=sha, search_tree_from_round=True,
+            )
+
 
 class LaunchCase(unittest.TestCase):
     def test_production_launch_uses_container_argv_and_the_host_lock(self):
