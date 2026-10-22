@@ -239,8 +239,13 @@ export interface OptLoopOptions {
   readonly ewiThresholdSec?: number;
   readonly model?: string;
   readonly mode: "dry-run" | "execute";
-  /** Directory outside `out`. The loop assigns `{attestDir}` under it before spawn. */
+  /** Directory outside `out`. The loop assigns `{attestDir}` under it before spawn. Writes go here. */
   readonly attestRoot: string;
+  /**
+   * Resume only. Read-only attest root of the source loop.
+   * Previous attestations and relay logs are read from here and never written.
+   */
+  readonly attestSource?: string;
   /** Host key file. Also read by the wrapper from `HARNESS_ATTEST_KEY_FILE`. Never placed on argv. */
   readonly attestKeyFile: string;
   /** Harness file the wrapper mounts. Its sha is checked against `mountedHarnessSha` when set. */
@@ -389,6 +394,7 @@ const HOST_EVIDENCE_FAULTS = new Set([
   "relay_restart",
   "docker_daemon_event",
   "relay_log_missing",
+  "relay_log_empty",
 ]);
 
 /** A relay log that is not on disk. That is an integrity fault, not an active patch. */
@@ -397,6 +403,15 @@ class RelayLogMissing extends Error {
   constructor() {
     super("relay log is missing");
     this.name = "RelayLogMissing";
+  }
+}
+
+/** A relay log that exists and is empty. That is an integrity fault, not an active patch. */
+class RelayLogEmpty extends Error {
+  readonly fault = "relay_log_empty";
+  constructor() {
+    super("relay log is empty");
+    this.name = "RelayLogEmpty";
   }
 }
 
@@ -809,9 +824,12 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
 }
 
 /**
- * Token spend already signed into previous rounds.
+ * Token spend already signed into previous rounds, plus the role spend recorded
+ * for those rounds (gap-finder, innovator, critic, ranker, reviewer-gate).
  * An old layout has no campaign.json, so this sum is the 30M carry.
- * The current relay log directory is not recounted.
+ * Role totals come from the source attest root's relay logs named by that round's
+ * spawn files. The current relay log directory is not recounted, and an executor
+ * log that no spawn file names is left out.
  */
 function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string): number {
   let sum = 0;
@@ -828,16 +846,72 @@ function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harn
       outDir: out,
     });
     if (!verified.ok) throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
-    sum += verified.tokens;
+    sum += verified.tokens + recordedRoleTokens(out, round, attestRoot);
   }
   return sum;
+}
+
+const ROLE_SPEND_ROLES = new Set(["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"]);
+
+/**
+ * Recorded token spend of one round's roles.
+ * Run ids come from `sessions/*.spawn.json` (`attempts[].runId` and `baseUrl`).
+ * Each id's `relay-logs/<id>/relay.jsonl` under the source attest root contributes
+ * its 2xx done usage. The same id is counted once.
+ */
+export function recordedRoleTokens(out: string, round: number, attestRoot: string): number {
+  const sessions = join(out, `round${round}`, "sessions");
+  if (!existsSync(sessions)) return 0;
+  const ids = new Set<string>();
+  for (const name of readdirSync(sessions)) {
+    if (!name.endsWith(".spawn.json")) continue;
+    let parsed: { role?: unknown; baseUrl?: unknown; attempts?: unknown };
+    try {
+      parsed = JSON.parse(readFileSync(join(sessions, name), "utf8")) as { role?: unknown; baseUrl?: unknown; attempts?: unknown };
+    } catch {
+      continue;
+    }
+    if (typeof parsed.role !== "string" || !ROLE_SPEND_ROLES.has(parsed.role)) continue;
+    if (typeof parsed.baseUrl === "string") {
+      const id = recordedRunId(parsed.baseUrl);
+      if (id) ids.add(id);
+    }
+    if (Array.isArray(parsed.attempts)) {
+      for (const attempt of parsed.attempts) {
+        if (!attempt || typeof attempt !== "object") continue;
+        const runId = (attempt as { runId?: unknown }).runId;
+        if (typeof runId === "string" && /^[0-9a-f]{32}$/.test(runId)) ids.add(runId);
+      }
+    }
+  }
+  let sum = 0;
+  for (const id of ids) sum += weighedLogTokens(join(attestRoot, "relay-logs", id, "relay.jsonl"));
+  return sum;
+}
+
+function recordedRunId(baseUrl: string): string | null {
+  const runId = baseUrl.split("/r/")[1]?.split("/")[0] ?? "";
+  return /^[0-9a-f]{32}$/.test(runId) ? runId : null;
+}
+
+/** The source attest root and the source run stay read-only. Writes go to a new attest dir. */
+function assertResumeAttest(sourceRun: string, sourceAttest: string, writeAttest: string): void {
+  const write = resolve(writeAttest);
+  const source = resolve(sourceAttest);
+  const run = resolve(sourceRun);
+  if (write === source || write.startsWith(source + sep) || write === run || write.startsWith(run + sep)) {
+    throw new Error("resume refuses to write into the source attest directory");
+  }
 }
 
 function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   const from = options.resumeFrom;
   if (!from) throw new Error("resume directory is missing");
   if (resolve(from) === resolve(options.out)) throw new Error("resume writes into a new directory");
+  const sourceAttest = options.attestSource;
+  if (!sourceAttest || sourceAttest.trim() === "") throw new Error("resume needs a source attest directory");
   const source = resolve(from);
+  assertResumeAttest(source, sourceAttest, options.attestRoot);
   const task = requireLoopTask(options.task);
   const rounds = roundNumbers(source);
   if (rounds.length === 0) throw new Error("resume found no completed round");
@@ -846,7 +920,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   if (completedRounds < 1) throw new Error("resume found no completed round");
   const gapRound = disk?.gapRound ?? latestRunRound(source, task.id, rounds);
   if (gapRound === null) throw new Error("resume found no real-run trace");
-  const gap = attestedGapTrace(source, options.attestRoot, key, options.harnessPath, task.id, gapRound);
+  const gap = attestedGapTrace(source, sourceAttest, key, options.harnessPath, task.id, gapRound);
   const baselinePath = join(source, "baseline", "config.json");
   let baselineText: string;
   let baselineReward = disk?.baselineReward ?? null;
@@ -859,7 +933,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
       baselineText = readFileSync(acceptedConfig, "utf8");
       if (baselineReward === null) {
         const verified = verifyHostAttestation({
-          attestDir: join(options.attestRoot, `round${acceptedRound}`, task.id, "seed0", "candidate"),
+          attestDir: join(sourceAttest, `round${acceptedRound}`, task.id, "seed0", "candidate"),
           key,
           configPath: acceptedConfig,
           harnessPath: options.harnessPath,
@@ -874,7 +948,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
       baselineText = readFileSync(controlPath, "utf8");
     }
   }
-  const readOnlyTokens = disk ? disk.readOnlyTokens : signedReadOnlyTokens(source, options.attestRoot, key, options.harnessPath, task.id);
+  const readOnlyTokens = disk ? disk.readOnlyTokens : signedReadOnlyTokens(source, sourceAttest, key, options.harnessPath, task.id);
   return {
     source,
     nextRound: completedRounds + 1,
@@ -1743,7 +1817,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         tokenCap: tokenCap(task),
       }, hostFor(options, attestKey, `round${round}`, task.id, `seed${seed}`, "candidate"), threshold, scoreHost));
       realRunWallS += Math.max(0, (now().getTime() - seedMs) / 1000);
-      if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch" || runs[runs.length - 1]?.unscoredReason === "relay_log_missing") {
+      if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch" || runs[runs.length - 1]?.unscoredReason === "relay_log_missing" || runs[runs.length - 1]?.unscoredReason === "relay_log_empty") {
         stopReason = "anti_forgery";
         stopBeforeReview = true;
       } else {
@@ -2240,7 +2314,7 @@ export async function runOptOnce(options: OptOnceOptions): Promise<OptOnceResult
   try {
     relayPatchActive = relayActive(join(relayLogRoot, runId, "relay.jsonl"), candidateSha);
   } catch (error) {
-    if (!(error instanceof RelayLogMissing)) throw error;
+    if (!(error instanceof RelayLogMissing) && !(error instanceof RelayLogEmpty)) throw error;
   }
   const activation = {
     seed,
@@ -2549,9 +2623,16 @@ export function capArtifact(text: string): string {
   return `${text.slice(0, maxChars)}\n... (truncated)`;
 }
 
-/** Head+tail trim, then the per-artifact cap, then the full trace path (PRD 5.2). */
+/**
+ * Per-artifact cap, then the head/tail trim, then the full trace path (PRD 5.2).
+ * OpenEvolve `max_artifact_bytes` (20480) runs first, so an artifact longer than that hits the cap.
+ * AI Scientist-v2 `trim_long_string` then keeps the first 2500 and last 2500 of that capped text.
+ * The capped text is still over 5100, so the head/tail marker is present too.
+ * Borrow map section 1: literature/2026-10-22-autoresearch-borrow-map.md (sha 20c93bae).
+ * No other cap.
+ */
 export function gapArtifactText(text: string, tracePath: string): string {
-  return `${capArtifact(trimLongString(text))}\n${tracePath}`;
+  return `${trimLongString(capArtifact(text))}\n${tracePath}`;
 }
 
 function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown }): string {
@@ -2892,6 +2973,7 @@ export function realRunCommand(): readonly string[] {
     "--model", "{model}",
     "--token-cap", "{tokenCap}",
     "--attest-dir", "{attestDir}",
+    "--out", "{outDir}",
     "--nonce", "{nonce}",
   ];
 }
@@ -3063,18 +3145,19 @@ async function executeScored(
     : null;
   const mountedSha = sha256File(request.configPath);
   let relayPatchActive = false;
-  let relayLogFault = false;
+  let relayLogFault: "relay_log_missing" | "relay_log_empty" | null = null;
   try {
     relayPatchActive = relayActive(join(scoredRelayRoot, runId, "relay.jsonl"), mountedSha);
   } catch (error) {
-    if (!(error instanceof RelayLogMissing)) throw error;
-    relayLogFault = true;
+    if (error instanceof RelayLogMissing) relayLogFault = "relay_log_missing";
+    else if (error instanceof RelayLogEmpty) relayLogFault = "relay_log_empty";
+    else throw error;
   }
-  // A missing log makes signRunRecord fail too. That is this fault, once the host attestation itself verified.
+  // A missing or emptied log makes signRunRecord fail too. That is this fault, once the host attestation itself verified.
   if (relayLogFault && (hostAttestOk || !unscoredReason || !HOST_EVIDENCE_FAULTS.has(unscoredReason))) {
     scoreStatus = "unscored";
     reward = null;
-    unscoredReason = "relay_log_missing";
+    unscoredReason = relayLogFault;
   }
   return {
     task: request.task.id,
@@ -4163,6 +4246,7 @@ function relayActive(logPath: string, mountedSha: string): boolean {
   } catch {
     return false;
   }
+  if (text.trim() === "") throw new RelayLogEmpty();
   const events: unknown[] = [];
   for (const raw of text.split("\n")) {
     const trimmed = raw.trim();

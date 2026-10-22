@@ -289,6 +289,57 @@ describe("devii-opt-attest/v1", () => {
     expect(outside.ok).toBe(false);
     if (!outside.ok) expect(outside.reasons).toContain("runDir");
   });
+
+  test("a copied legacy absolute attestation verifies when the relative remainder matches", () => {
+    const host = layout("legacy-copy");
+    const written = spawnSync("python3", ["-c", PYTHON_WRITE, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    expect(written.status).toBe(0);
+    const inPlace = verifyHostAttestation({
+      attestDir: host.attestDir,
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: host.root,
+      runDir: host.runDir,
+    });
+    expect(inPlace.ok).toBe(true);
+    const dest = join(host.root, "relocated");
+    cpSync(host.runDir, join(dest, "run"), { recursive: true });
+    cpSync(host.attestDir, join(dest, "attest"), { recursive: true });
+    const moved = verifyHostAttestation({
+      attestDir: join(dest, "attest"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: dest,
+      runDir: join(dest, "run"),
+    });
+    expect(moved.ok).toBe(true);
+    writeFileSync(join(dest, "run", "trace.jsonl"), "{\"type\":\"run_start\",\"tampered\":true}\n");
+    const tampered = verifyHostAttestation({
+      attestDir: join(dest, "attest"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: dest,
+      runDir: join(dest, "run"),
+    });
+    expect(tampered.ok).toBe(false);
+    if (!tampered.ok) expect(tampered.reasons).toContain("trace");
+    const mismatched = join(host.root, "other-layout");
+    cpSync(host.runDir, join(mismatched, "xb", "run"), { recursive: true });
+    cpSync(host.attestDir, join(mismatched, "attest"), { recursive: true });
+    const escaped = verifyHostAttestation({
+      attestDir: join(mismatched, "attest"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: mismatched,
+      runDir: join(mismatched, "xb", "run"),
+    });
+    expect(escaped.ok).toBe(false);
+    if (!escaped.ok) expect(escaped.reasons).toContain("runDir");
+  });
 });
 
 const PYTHON_WRITE = `

@@ -2018,6 +2018,7 @@ class OnceCase(unittest.TestCase):
             "--task", "hb003", "--seed", "9", "--arm", "control",
             "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
             "--run-id", run_id, "--nonce", "cd" * 16, "--attest-dir", str(attest),
+            "--out", str(run.parent),
             *extra,
         ], popen=popen, call=checker, preflight=lambda **_kwargs: None,
            stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
@@ -2051,6 +2052,7 @@ class OnceCase(unittest.TestCase):
             "  runDir: process.env.RUN,",
             "  runId: process.env.RUN_ID,",
             "  expectedNonce: process.env.NONCE,",
+            "  outDir: process.env.OUT,",
             "});",
             "process.stdout.write(JSON.stringify(result));",
         ])
@@ -2058,6 +2060,7 @@ class OnceCase(unittest.TestCase):
         env.update({
             "ATTEST": str(attest), "KEY": str(self.key), "CONFIG": str(self.config),
             "HARNESS": str(self.harness), "RUN": str(run), "RUN_ID": run_id, "NONCE": "cd" * 16,
+            "OUT": str(Path(run).parent),
         })
         proc = subprocess.run([bun, "-e", code], cwd=str(HERE.parent.parent), capture_output=True, text=True, env=env)
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
@@ -2403,6 +2406,7 @@ class OnceCase(unittest.TestCase):
             "--task", "hb003", "--seed", "9", "--arm", "control",
             "--config", str(self.config), "--run-dir", str(run), "--harness", str(self.harness),
             "--run-id", run_id, "--nonce", "cd" * 16, "--attest-dir", str(attest),
+            "--out", str(run.parent),
         ], popen=popen, call=call, preflight=lambda **_kwargs: None,
            stage=lambda _task, dst: Path(dst).mkdir(parents=True, exist_ok=True),
            limits_of=lambda _task: {"agent_timeout_sec": 3600, "verifier_timeout_sec": 60, "allow_internet": True},
@@ -2461,7 +2465,7 @@ class OnceCase(unittest.TestCase):
         os.walk = boom
         try:
             with self.assertRaises(self.box.OnceError) as caught:
-                self.box.attest_from_run(run, self.harness, self.config, self.root / "locked-attest")
+                self.box.attest_from_run(run, self.harness, self.config, self.root / "locked-attest", run.parent)
             self.assertIn("attest cannot read", str(caught.exception))
             self.assertNotIn("PermissionError", str(caught.exception))
             self.assertNotIn("Traceback", str(caught.exception))
@@ -2470,7 +2474,7 @@ class OnceCase(unittest.TestCase):
             sys.argv = [
                 "devii_docker_v2.py", "attest",
                 "--run-dir", str(run), "--harness", str(self.harness), "--config", str(self.config),
-                "--attest-dir", str(self.root / "locked-attest-cli"),
+                "--attest-dir", str(self.root / "locked-attest-cli"), "--out", str(run.parent),
             ]
             try:
                 with contextlib.redirect_stderr(stderr):

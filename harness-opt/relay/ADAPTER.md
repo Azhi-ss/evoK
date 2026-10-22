@@ -57,7 +57,8 @@ python3 harness-opt/relay/devii_docker_v2.py once \
   --config /workspace/harness-opt-runs/config/control.json \
   --run-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5 \
   --harness /workspace/harness-opt-runs/config/harness.pr202.mjs \
-  --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest
+  --attest-dir /workspace/harness-opt-runs/reconcile/hb003/seed9/control-r5-attest \
+  --out /workspace/harness-opt-runs/reconcile/hb003/seed9
 ```
 
 第 1 轮：

@@ -427,6 +427,20 @@ def _attest_tree(run_dir, name):
         return nested.parent/name
     return top
 
+def _relative_out_path(out_dir, target):
+    """Posix path of `target` inside `out_dir`. A path that leaves the out dir is refused."""
+    if out_dir is None or str(out_dir).strip()=="":
+        raise OnceError("attestation out dir is empty")
+    out=os.path.abspath(out_dir)
+    dest=os.path.abspath(target)
+    rel=os.path.relpath(dest, out)
+    if rel in (".", ""):
+        raise OnceError("attestation run path escapes the out dir")
+    posix=rel.replace(os.sep, "/")
+    if os.path.isabs(rel) or any(part in ("..", "") for part in posix.split("/")):
+        raise OnceError("attestation run path escapes the out dir")
+    return posix
+
 def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta):
     """Host attestation outside the run dir. HMAC bytes match canon.canonical.
 
@@ -461,8 +475,11 @@ def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta
     (attest/"attestation.json").write_text(json.dumps(signed, indent=2, ensure_ascii=False)+"\n")
     return signed
 
-def attest_from_run(run, harness, config, attest_dir):
-    """Host attestation for a finished once run. Same writer as once --attest-dir. Does not start docker."""
+def attest_from_run(run, harness, config, attest_dir, out_dir):
+    """Host attestation for a finished once run. Same writer as once --attest-dir. Does not start docker.
+
+    `runDir` and `runPath` are relative to `out_dir`, so a copied tree still verifies.
+    """
     from datetime import datetime, timezone
     run_dir=Path(run)
     if run_dir.is_symlink() or not run_dir.is_dir():
@@ -493,13 +510,14 @@ def attest_from_run(run, harness, config, attest_dir):
     tokens=recorded.get("tokens") if recorded.get("tokens") is not None else 0
     if isinstance(tokens, bool) or not isinstance(tokens, (int, float)):
         raise OnceError("tokens")
+    run_rel=_relative_out_path(out_dir, run_dir)
     meta={
         "arm": arm,
         "at": datetime.now(timezone.utc).isoformat(),
         "exit": recorded.get("exit") if recorded.get("exit") is not None else 0,
-        "runDir": os.path.abspath(run_dir),
+        "runDir": run_rel,
         "runId": run_id,
-        "runPath": os.path.abspath(run_dir),
+        "runPath": run_rel,
         "score_status": recorded.get("score_status") or "unscored",
         "seed": seed,
         "task": str(recorded.get("task") or ""),
@@ -557,7 +575,7 @@ def _clear_orphan_container(name, docker, log):
     log.flush()
     return cid
 
-def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None):
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, out_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None):
     """One task, one seed, one arm. The host owns the run id and the relay open/close.
 
     `external` means a relay is already listening and has this run open. This process
@@ -602,7 +620,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
     try:
         if external:
             if not log_path.is_file():
-                return _once_unscored(run, resolved, seed, arm, run_id, root, harness_sha, cap, "usage_missing", attest_dir, nonce, harness, config_path)
+                return _once_unscored(run, resolved, seed, arm, run_id, root, harness_sha, cap, "usage_missing", attest_dir, nonce, harness, config_path, out_dir)
         else:
             if relay is None:
                 relay=_standalone_relay(root, port)
@@ -756,13 +774,14 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             recorded["runRecord"]=signed
         if attest_dir:
             from datetime import datetime, timezone
+            run_rel=_relative_out_path(out_dir, run)
             meta={
                 "arm": arm,
                 "at": datetime.now(timezone.utc).isoformat(),
                 "exit": recorded.get("exit") if recorded.get("exit") is not None else 0,
-                "runDir": os.path.abspath(run),
+                "runDir": run_rel,
                 "runId": run_id,
-                "runPath": os.path.abspath(run),
+                "runPath": run_rel,
                 "score_status": recorded.get("score_status") or "unscored",
                 "seed": seed,
                 "task": resolved,
@@ -790,7 +809,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
         if lock_fd is not None:
             release_run_lock(lock_fd)
 
-def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason, attest_dir, nonce, harness, config):
+def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason, attest_dir, nonce, harness, config, out_dir):
     run=Path(run)
     res={"task":task,"seed":seed,"arm":arm,"exit":reason,"wall_s":0,"timed_out":False,"token_killed":True,"tokens":0,"tokens_used":0,"token_cap":cap,"mountedHarnessSha":harness_sha,"score_status":"unscored","reward":None,"unscored_reason":reason,"checker_exit":"skipped_token_cap","net":"devii-004-int"}
     for name in ("workspace","verifier"):
@@ -798,7 +817,8 @@ def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason,
     recorded=finalize_launch(run, run_id, root, res)
     if attest_dir:
         from datetime import datetime, timezone
-        meta={"arm":arm,"at":datetime.now(timezone.utc).isoformat(),"exit":reason,"runDir":os.path.abspath(run),"runId":run_id,"runPath":os.path.abspath(run),"score_status":"unscored","seed":seed,"task":task,"tokens":0}
+        run_rel=_relative_out_path(out_dir, run)
+        meta={"arm":arm,"at":datetime.now(timezone.utc).isoformat(),"exit":reason,"runDir":run_rel,"runId":run_id,"runPath":run_rel,"score_status":"unscored","seed":seed,"task":task,"tokens":0}
         if isinstance(nonce, str) and nonce!="":
             meta["nonce"]=nonce
         write_run_attestation(attest_dir, run, key=_attest_key(), harness=harness, config=config, reward=None, meta=meta)
@@ -830,11 +850,13 @@ def once_from_flags(argv, **deps):
         run_id=run_id or log.parent.name
     if flags.get("reconcile") and hooks._task_name(flags.get("expected-task"))=="":
         raise OnceError("expected task")
+    if flags.get("attest-dir") and not flags.get("out"):
+        raise OnceError("once needs --out")
     return run_once(
         flags["task"], seed, flags["arm"], flags["config"], flags["run-dir"], flags["harness"],
         run_id=run_id, relay_root=relay_root, external=bool(flags.get("relay-external")),
         model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
-        attest_dir=flags.get("attest-dir"), nonce=flags.get("nonce"),
+        attest_dir=flags.get("attest-dir"), out_dir=flags.get("out"), nonce=flags.get("nonce"),
         reconcile=bool(flags.get("reconcile")), expected_task=flags.get("expected-task"), **deps,
     )
 
@@ -941,10 +963,10 @@ def main():
     elif a[:1]==["attest"]:
         try:
             flags=_once_args(a[1:])
-            missing=[name for name in ("run-dir","harness","config","attest-dir") if name not in flags]
+            missing=[name for name in ("run-dir","harness","config","attest-dir","out") if name not in flags]
             if missing:
                 raise OnceError("attest needs "+", ".join("--"+name for name in missing))
-            attest_from_run(flags["run-dir"], flags["harness"], flags["config"], flags["attest-dir"])
+            attest_from_run(flags["run-dir"], flags["harness"], flags["config"], flags["attest-dir"], flags["out"])
             print(json.dumps({"attestation": str(Path(flags["attest-dir"])/"attestation.json")}), flush=True)
         except OnceError as exc:
             print(str(exc), file=sys.stderr)

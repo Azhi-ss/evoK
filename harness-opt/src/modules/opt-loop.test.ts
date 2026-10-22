@@ -31,6 +31,7 @@ import {
   trimLongString,
   capArtifact,
   gapArtifactText,
+  recordedRoleTokens,
   reviewerSchemaDetail,
   ReviewerSchemaError,
   stubOptRoles,
@@ -112,6 +113,12 @@ function fixture(harnessSource?: string): Fixture {
     controlAttest: control.attestDir,
     controlTrace: control.tracePath,
   };
+}
+
+function attestWrite(fx: Fixture, name: string): string {
+  const dir = join(fx.root, name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath" | "env" | "task" | "round0TracePath" | "round0TraceSha"> {
@@ -1012,6 +1019,7 @@ describe("optimization loop", () => {
       runId: "ab".repeat(16),
       nonce: "cd".repeat(16),
       relayLogRoot: join(fx.root, "relay"),
+      outDir: fx.out,
       model: OPT_MODEL,
       tokenCap: tokenCap(LOOP_TASK),
     };
@@ -1627,6 +1635,7 @@ function onceStyleAttest(fx: Fixture, candidateConfigHash: string): string {
     "--harness", fx.harnessPath,
     "--config", fx.controlConfig,
     "--attest-dir", attest,
+    "--out", fx.root,
   ], {
     encoding: "utf8",
     env: { ...process.env, HARNESS_ATTEST_KEY_FILE: fx.keyFile },
@@ -1676,6 +1685,7 @@ function taskStyleAttest(fx: Fixture, candidateConfigHash: string): {
     "--harness", fx.harnessPath,
     "--config", fx.controlConfig,
     "--attest-dir", attest,
+    "--out", fx.root,
   ], {
     encoding: "utf8",
     env: { ...process.env, HARNESS_ATTEST_KEY_FILE: fx.keyFile },
@@ -5180,6 +5190,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       const stopped = await runOptLoop({
         ...hostOpts(fx),
         out: spikeOut,
+        attestRoot: attestWrite(fx, `attest-spike-${reason}`),
+        attestSource: fx.attestRoot,
         mode: "dry-run",
         resumeFrom: fx.out,
         readOnlyTokens: () => 0,
@@ -5196,10 +5208,14 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     await spike({ completedRounds: 10 }, "maxRounds");
 
     const next = join(fx.root, "out-next");
+    const continuedAttest = attestWrite(fx, "attest-next");
     const before = stampTree(fx.out);
+    const beforeAttest = stampTree(fx.attestRoot);
     const continued = await runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: continuedAttest,
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       readOnlyTokens: () => 2_000,
@@ -5207,6 +5223,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: citing,
     });
     expect(stampTree(fx.out)).toEqual(before);
+    expect(stampTree(fx.attestRoot)).toEqual(beforeAttest);
     expect(continued.rounds.map((round) => round.round)).toEqual([1, 2]);
     expect(existsSync(join(fx.out, "round1"))).toBe(true);
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
@@ -5222,9 +5239,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
 
     const cappedOut = join(fx.root, "out-cap");
     const cappedBefore = stampTree(next);
+    const cappedAttestBefore = stampTree(continuedAttest);
     const capped = await runOptLoop({
       ...hostOpts(fx),
       out: cappedOut,
+      attestRoot: attestWrite(fx, "attest-cap"),
+      attestSource: continuedAttest,
       mode: "dry-run",
       resumeFrom: next,
       readOnlyTokens: () => 30_000_000,
@@ -5232,6 +5252,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: citing,
     });
     expect(stampTree(next)).toEqual(cappedBefore);
+    expect(stampTree(continuedAttest)).toEqual(cappedAttestBefore);
     expect(capped.stopReport.reason).toBe("readOnlyTokenCap");
     expect(existsSync(join(cappedOut, "round3"))).toBe(false);
     expect(existsSync(join(next, "round3"))).toBe(false);
@@ -5256,6 +5277,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     await expect(runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: attestWrite(fx, "attest-sha"),
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: fakeExecutor(fx).executor,
@@ -5282,9 +5305,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
     const next = join(fx.root, "out-rejected");
     const before = stampTree(fx.out);
+    const beforeAttest = stampTree(fx.attestRoot);
     const second = await runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: attestWrite(fx, "attest-rejected"),
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: {
@@ -5299,6 +5325,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     expect(second.rounds.map((round) => round.round)).toEqual([1, 2]);
     expect(stampTree(fx.out)).toEqual(before);
+    expect(stampTree(fx.attestRoot)).toEqual(beforeAttest);
     expect(second.rounds[1]?.accepted).toBe(false);
     expect(second.accepted?.round).toBe(1);
     expect(readFileSync(join(fx.out, "baseline", "config.json"), "utf8")).toBe(acceptedBaseline);
@@ -5334,13 +5361,26 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       executor: fakeExecutor(fx).executor,
     });
     const next = join(fx.root, "out-from");
+    const attestOut = attestWrite(fx, "attest-from");
     const before = stampTree(fx.out);
+    const beforeAttest = stampTree(fx.attestRoot);
     const previousBind = process.env.HARNESS_RELAY_BIND;
     process.env.HARNESS_RELAY_BIND = "127.0.0.1";
     try {
+      const missingAttest = await main([
+        "optimize", "--from-round", fx.out, "--out", next, "--dry-run", "--rounds", "1",
+        "--attest-root", fx.attestRoot,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        ...taskFlags(fx.root),
+      ]);
+      expect(missingAttest).toBe(1);
       const code = await main([
         "optimize", "--from-round", fx.out, "--out", next, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
+        "--attest-out", attestOut,
         "--attest-key-file", fx.keyFile,
         "--harness", fx.harnessPath,
         "--control-config", fx.controlConfig,
@@ -5353,8 +5393,11 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       else process.env.HARNESS_RELAY_BIND = previousBind;
     }
     expect(stampTree(fx.out)).toEqual(before);
+    expect(stampTree(fx.attestRoot)).toEqual(beforeAttest);
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
     expect(existsSync(join(next, "round2/closure.json"))).toBe(true);
+    expect(existsSync(join(attestOut, "upstream.key"))).toBe(true);
+    expect(existsSync(join(fx.attestRoot, "round2"))).toBe(false);
     const result = JSON.parse(readFileSync(join(next, "loop-result.json"), "utf8")) as { rounds: { round: number }[] };
     expect(result.rounds.map((round) => round.round)).toEqual([1, 2]);
   });
@@ -5499,6 +5542,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const second = await runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: attestWrite(fx, "attest-noop"),
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       roles: {
@@ -5545,6 +5590,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     await expect(runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: attestWrite(fx, "attest-ledger"),
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       round0TracePath: join(fx.root, "operator.jsonl"),
@@ -5629,6 +5676,11 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(shown.endsWith(`\n${path}`)).toBe(true);
     expect(shown).toContain("[101 characters truncated]");
     expect(shown).not.toContain("\n... (truncated)");
+    const huge = gapArtifactText("h".repeat(20481), path);
+    expect(huge.endsWith(`\n${path}`)).toBe(true);
+    expect(huge).toContain("\n... (truncated)");
+    expect(huge).toContain("characters truncated");
+    expect(huge.startsWith("h".repeat(2500))).toBe(true);
   });
 
   test("a missing relay log is an integrity fault and not an active patch", async () => {
@@ -5665,6 +5717,35 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; accepted?: boolean };
     expect(closure.reason).toBe("anti_forgery");
     expect(closure.accepted).not.toBe(true);
+  });
+
+  test("an emptied relay log is relay_log_empty and not an active patch", async () => {
+    const fx = fixture();
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: cited,
+      executor: {
+        name: "empty-log",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          const recorded = JSON.parse(readFileSync(join(request.runDir, "result.json"), "utf8")) as { runId: string };
+          writeFileSync(join(request.relayLogRoot ?? "", recorded.runId, "relay.jsonl"), "\n");
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(result.accepted).toBeNull();
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
+      runs: { unscoredReason?: string }[];
+    };
+    expect(metrics.runs[0]?.unscoredReason).toBe("relay_log_empty");
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
+    expect(activation.patchActive).toBe(false);
   });
 
   test("an old layout without campaign.json imports signed tokens from round-2-shaped records", async () => {
@@ -5766,9 +5847,33 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     const next = join(fx.root, "out-old");
     const before = stampTree(fx.out);
+    const beforeAttest = stampTree(fx.attestRoot);
+    const roleSpend = recordedRoleTokens(fx.out, 1, fx.attestRoot);
+    expect(roleSpend).toBeGreaterThan(0);
+    let everyLog = 0;
+    const logRoot = join(fx.attestRoot, "relay-logs");
+    for (const id of readdirSync(logRoot)) {
+      const file = join(logRoot, id, "relay.jsonl");
+      if (!existsSync(file)) continue;
+      for (const line of readFileSync(file, "utf8").split("\n")) {
+        if (line.trim() === "") continue;
+        const row = JSON.parse(line) as { type?: string; status?: number; usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } };
+        if (row.type !== "done") continue;
+        const status = row.status ?? 200;
+        if (status < 200 || status > 299) continue;
+        const prompt = row.usage?.prompt_tokens;
+        const completion = row.usage?.completion_tokens;
+        const cache = row.usage?.prompt_tokens_details?.cached_tokens;
+        if (typeof prompt !== "number" || typeof completion !== "number" || typeof cache !== "number") continue;
+        everyLog += prompt - cache + completion + cache;
+      }
+    }
+    expect(everyLog - roleSpend).toBeGreaterThanOrEqual(100);
     const resumed = await runOptLoop({
       ...hostOpts(fx),
       out: next,
+      attestRoot: attestWrite(fx, "attest-old"),
+      attestSource: fx.attestRoot,
       mode: "dry-run",
       resumeFrom: fx.out,
       readOnlyTokens: () => 1_000_000,
@@ -5776,11 +5881,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: cited,
     });
     expect(stampTree(fx.out)).toEqual(before);
+    expect(stampTree(fx.attestRoot)).toEqual(beforeAttest);
     expect(resumed.stopReport.reason).toBe("readOnlyTokenCap");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
     expect(existsSync(join(next, "round2"))).toBe(false);
     const carried = JSON.parse(readFileSync(join(next, "campaign.json"), "utf8")) as { readOnlyTokens: number };
-    expect(carried.readOnlyTokens).toBe(30_000_000);
+    expect(carried.readOnlyTokens).toBe(29_000_000 + roleSpend + 1_000_000);
   });
 });
 

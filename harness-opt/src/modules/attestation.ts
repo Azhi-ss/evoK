@@ -241,8 +241,8 @@ export function verifyHostAttestation(input: {
   if (!signedRunDir || !arm) reasons.push("runDir");
   if (!signedRunPath) reasons.push("runPath");
   if (!signedRunId) reasons.push("runId");
-  const locatedDir = signedRunDir ? locateSignedRunPath(signedRunDir, input.outDir, input.attestDir) : null;
-  const locatedPath = signedRunPath ? locateSignedRunPath(signedRunPath, input.outDir, input.attestDir) : null;
+  const locatedDir = signedRunDir ? locateSignedRunPath(signedRunDir, input.outDir, input.attestDir, input.runDir) : null;
+  const locatedPath = signedRunPath ? locateSignedRunPath(signedRunPath, input.outDir, input.attestDir, input.runDir) : null;
   if (!locatedDir || locatedDir.escaped) reasons.push("runDir");
   if (!locatedPath || locatedPath.escaped) reasons.push("runPath");
   const runDir = locatedDir && !locatedDir.escaped ? locatedDir.abs : "";
@@ -302,27 +302,48 @@ export function verifyHostAttestation(input: {
 /**
  * A signed run path is relative to the out dir.
  * `..`, an empty segment, or a path that resolves outside that directory is an escape.
- * An absolute path is the legacy docker writer. It is kept only when it stays inside
- * the out dir (when one was given) and matches the host run.
+ * An absolute path is a legacy docker attestation. In place, it is kept when it stays
+ * inside the out dir (when one was given). After a copy, it is kept when the relative
+ * remainder below the signed out dir equals the host run's path below the new out dir.
+ * The match needs a path-separator boundary and a non-empty prefix, so `/a/xb/run`
+ * does not satisfy a remainder of `b/run`.
  */
 function locateSignedRunPath(
   signed: string,
   outDir: string | undefined,
   attestDir: string,
+  hostRunDir?: string,
 ): { readonly abs: string; readonly escaped: boolean } {
   if (signed.trim() === "" || signed.split(/[\\/]/).some((part) => part === "..")) {
     return { abs: "", escaped: true };
   }
   if (isAbsolute(signed)) {
     const abs = resolve(signed);
-    if (outDir && !insideDir(outDir, abs)) return { abs, escaped: true };
-    return { abs, escaped: false };
+    if (!outDir || insideDir(outDir, abs)) return { abs, escaped: false };
+    const relocated = relocatedLegacyRun(abs, outDir, hostRunDir);
+    if (relocated) return { abs: relocated, escaped: false };
+    return { abs, escaped: true };
   }
   if (signed.split(/[\\/]/).some((part) => part === "")) return { abs: "", escaped: true };
   const base = outDir ? resolve(outDir) : resolve(dirname(attestDir));
   const abs = resolve(base, signed);
   if (!insideDir(base, abs)) return { abs, escaped: true };
   return { abs, escaped: false };
+}
+
+/** Legacy absolute path relocated onto `hostRunDir` when its remainder matches. */
+function relocatedLegacyRun(signedAbs: string, outDir: string, hostRunDir: string | undefined): string | null {
+  if (!hostRunDir) return null;
+  const host = resolve(hostRunDir);
+  const base = resolve(outDir);
+  if (host === base || !insideDir(base, host)) return null;
+  const rel = relative(base, host).split(sep).join("/");
+  if (rel === "" || rel.split("/").some((part) => part === "" || part === "..")) return null;
+  const signedPosix = signedAbs.split(sep).join("/");
+  const suffix = `/${rel}`;
+  if (!signedPosix.endsWith(suffix)) return null;
+  if (signedPosix.slice(0, -suffix.length) === "") return null;
+  return host;
 }
 
 function insideDir(root: string, target: string): boolean {
