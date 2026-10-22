@@ -2452,6 +2452,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const gapLog = gapRelay.relayLog;
     gapCitedTrace = gapTraces.length > 0 && gapTraces.every((hint) => relayCited(gapLog, hint.file, hint.sha256, gapSpawn.cwd));
     const round0Copy = gapTraces.find((hint) => basename(hint.file) === "round0-trace.jsonl");
+    // A read of any in-cwd name whose file sha equals round0's also counts. ledger.read_evidence applies that.
     if (round === 1 && round0 && (!round0Copy || !relayCited(gapLog, round0Copy.file, round0.srcSha256, gapSpawn.cwd))) {
       stopReason = "anti_forgery";
       emitClosure({
@@ -3614,7 +3615,15 @@ function gapTraceSources(
       : `trace-${index}.jsonl`;
     sources.push({ file: hint.file, sha256: hint.sha256, name });
   });
-  return sources;
+  // Round 0 is listed first, so a shared sha keeps the name round0-trace.jsonl.
+  const kept: { file: string; sha256: string; name: string }[] = [];
+  const seen = new Set<string>();
+  for (const source of sources) {
+    if (seen.has(source.sha256)) continue;
+    seen.add(source.sha256);
+    kept.push(source);
+  }
+  return kept;
 }
 
 function stageGapTraces(

@@ -354,6 +354,52 @@ def _read_path_matches(tool_path, host_file_path, role_cwd) -> bool:
     return resolved == attested
 
 
+def _round0_file(host_file_path) -> bool:
+    return os.path.basename(str(host_file_path)) == "round0-trace.jsonl"
+
+
+def _resolved_inside_cwd(tool_path, role_cwd):
+    """A tool path that stays inside the role cwd, relative or absolute."""
+    if not isinstance(tool_path, str) or tool_path == "" or not role_cwd:
+        return None
+    if not os.path.isabs(tool_path):
+        return _role_relative_realpath(tool_path, role_cwd)
+    try:
+        cwd_real = os.path.realpath(role_cwd)
+    except OSError:
+        return None
+    if not os.path.isdir(cwd_real):
+        return None
+    lexical = os.path.abspath(tool_path)
+    if not _within(lexical, cwd_real):
+        return None
+    try:
+        resolved = os.path.realpath(tool_path)
+    except OSError:
+        return None
+    if not _within(resolved, cwd_real) or not os.path.isfile(resolved):
+        return None
+    return resolved
+
+
+def _file_sha(path) -> str | None:
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _counts_as_round0(tool_path, host_file_path, expected_sha, role_cwd) -> bool:
+    """Another in-cwd name counts as round0 when that file's sha is round0's."""
+    if not _round0_file(host_file_path):
+        return False
+    resolved = _resolved_inside_cwd(tool_path, role_cwd)
+    if resolved is None:
+        return False
+    return _file_sha(resolved) == expected_sha
+
+
 def _expand_cited(cited):
     lines = []
     for item in cited:
@@ -426,7 +472,9 @@ def read_evidence(role_ledger, host_file_path, expected_file_sha, cited_lines=No
             if tool.get("toolName") not in READ_TOOLS:
                 continue
             path = _args_path(tool.get("args"))
-            if not path or not _read_path_matches(path, host_file_path, role_cwd):
+            if not path:
+                continue
+            if not _read_path_matches(path, host_file_path, role_cwd) and not _counts_as_round0(path, host_file_path, digest, role_cwd):
                 continue
             raw = ledger.tool_text(tool.get("sha256"))
             if raw is None:

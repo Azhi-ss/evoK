@@ -1513,6 +1513,39 @@ describe("optimization loop", () => {
     expect(closure.gapCitedTrace).toBe(true);
   });
 
+  test("identical round-0 and control traces are delivered once as round0-trace.jsonl and citing that copy passes", async () => {
+    const fx = fixture();
+    const body = readFileSync(fx.controlTrace);
+    const trace = join(fx.root, "round0-same.jsonl");
+    writeFileSync(trace, body);
+    const sha = createHash("sha256").update(body).digest("hex");
+    const fake = fakeExecutor(fx);
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const rejecting = rejectingRoles(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: { gap: citing.gap, innovate: citing.innovate, critic: citing.critic, ranker: citing.ranker, review: rejecting.review },
+      executor: fake.executor,
+      round0TracePath: trace,
+      round0TraceSha: sha,
+    });
+    expect(fake.calls).toHaveLength(1);
+    expect(result.stopReport.reason).toBeNull();
+    const gap = JSON.parse(readFileSync(join(fx.out, "round1/gap-traces.json"), "utf8")) as {
+      traces: { file: string; sha256: string }[];
+    };
+    expect(gap.traces.map((hint) => hint.file.slice(hint.file.lastIndexOf("/traces/")))).toEqual(["/traces/round0-trace.jsonl"]);
+    expect(gap.traces[0]?.sha256).toBe(sha);
+    expect(existsSync(join(fx.out, "round1/roles/gap-finder/traces/control-trace.jsonl"))).toBe(false);
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
+    expect(prompt).toContain("/traces/round0-trace.jsonl");
+    expect(prompt).not.toContain("control-trace.jsonl");
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gapCitedTrace: boolean };
+    expect(closure.gapCitedTrace).toBe(true);
+  });
+
   test("a changed round-0 host copy stops before any call", async () => {
     const fx = fixture();
     const trace = join(fx.root, "round0.jsonl");
@@ -1844,6 +1877,49 @@ describe("optimize command", () => {
     ])));
     expect(replay.code).toBe(0);
     expect(JSON.parse(replay.stdout).ok).toBe(true);
+  });
+
+  test("a same-sha control-named read counts as citing round0", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    const body = "alpha\nbeta\ngamma\n";
+    mkdirSync(join(role, "traces"), { recursive: true });
+    const round0 = join(role, "traces", "round0-trace.jsonl");
+    const control = join(role, "traces", "control-trace.jsonl");
+    writeFileSync(round0, body);
+    writeFileSync(control, body);
+    const sha = createHash("sha256").update(body).digest("hex");
+    const saved = relayReadLog(join(fx.root, "saved"), "traces/control-trace.jsonl", body);
+    const replay = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", saved.log, "--cwd", role, "--file", round0, "--sha", sha,
+    ])));
+    expect(replay.code).toBe(0);
+    expect(JSON.parse(replay.stdout).ok).toBe(true);
+  });
+
+  test("a different-sha control read does not cite round0, and citing round0 does", async () => {
+    const fx = fixture();
+    const role = join(fx.root, "role");
+    const round0Body = "alpha\nbeta\ngamma\n";
+    const controlBody = "delta\nepsilon\nzeta\n";
+    mkdirSync(join(role, "traces"), { recursive: true });
+    const round0 = join(role, "traces", "round0-trace.jsonl");
+    const control = join(role, "traces", "control-trace.jsonl");
+    writeFileSync(round0, round0Body);
+    writeFileSync(control, controlBody);
+    const round0Sha = createHash("sha256").update(round0Body).digest("hex");
+    const controlOnly = relayReadLog(join(fx.root, "saved-control"), "traces/control-trace.jsonl", controlBody);
+    const missed = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", controlOnly.log, "--cwd", role, "--file", round0, "--sha", round0Sha,
+    ])));
+    expect(missed.code).toBe(1);
+    expect(JSON.parse(missed.stdout).ok).toBe(false);
+    const round0Only = relayReadLog(join(fx.root, "saved-round0"), "traces/round0-trace.jsonl", round0Body);
+    const hit = await captureStdout(() => Promise.resolve(main([
+      "cite-check", "--log", round0Only.log, "--cwd", role, "--file", round0, "--sha", round0Sha,
+    ])));
+    expect(hit.code).toBe(0);
+    expect(JSON.parse(hit.stdout).ok).toBe(true);
   });
 
   test("dry-run finishes a round without a model process", async () => {

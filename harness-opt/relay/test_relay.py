@@ -1152,6 +1152,22 @@ class RelativeRoleReadCase(unittest.TestCase):
         self.assertTrue(read_evidence(ledger, self.copy, self.digest, role_cwd=self.role)["ok"])
         self.assertTrue(read_evidence(ledger, self.copy, self.digest)["ok"])
 
+    def test_same_sha_control_name_counts_as_round0(self):
+        control = self.role / "traces" / "control-trace.jsonl"
+        control.write_text(self.body, encoding="utf-8")
+        ledger = _read_ledger("traces/control-trace.jsonl", self.body)
+        got = read_evidence(ledger, self.copy, self.digest, role_cwd=self.role)
+        self.assertTrue(got["ok"], got)
+
+    def test_different_sha_control_name_does_not_count_as_round0(self):
+        other = "delta\nepsilon\nzeta\n"
+        control = self.role / "traces" / "control-trace.jsonl"
+        control.write_text(other, encoding="utf-8")
+        missed = read_evidence(_read_ledger("traces/control-trace.jsonl", other), self.copy, self.digest, role_cwd=self.role)
+        self.assertFalse(missed["ok"])
+        hit = read_evidence(_read_ledger("traces/round0-trace.jsonl", self.body), self.copy, self.digest, role_cwd=self.role)
+        self.assertTrue(hit["ok"], hit)
+
 
 class HookCase(unittest.TestCase):
     def test_06_and_08b_argv(self):
