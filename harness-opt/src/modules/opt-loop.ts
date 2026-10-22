@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, relayRequestsActive, runStartConfigHash, type ActivationInspection } from "./activation";
 import {
@@ -274,6 +274,12 @@ export interface OptLoopOptions {
   readonly carryAttest?: string;
   /** Role relay logs for `carryFrom`. Absent uses `<carryAttest>/relay-logs`. */
   readonly carryRelayLogs?: string;
+  /**
+   * Fresh `--carry-from` only. Each directory is one voided, unsigned preflight's relay logs.
+   * Usage already in those logs, including a non-2xx or unfinished line, is summed and recorded
+   * on the signed campaign. Repeatable. A directory already in this carry chain is rejected.
+   */
+  readonly voidSpend?: readonly string[];
   /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
   readonly controlConfigPath?: string;
   /** Host attestation directories for the round-1 control runs. Not trace paths and not stdout. */
@@ -693,6 +699,20 @@ interface CampaignDisk {
   baselineEffective?: Record<string, unknown> | null;
   /** Absent on a campaign written before this field existed. */
   previousEffective?: Record<string, unknown> | null;
+  /**
+   * Voided preflight spend already counted on this carry chain.
+   * Absent on a campaign written before this field existed.
+   * Each entry is a separate signed record, not a round link.
+   */
+  voids?: readonly VoidLedgerEntry[];
+}
+
+/** One voided relay-log directory counted on the signed campaign. `dir` is its realpath. `sha` covers the log bytes. */
+interface VoidLedgerEntry {
+  readonly kind: "VOID";
+  readonly dir: string;
+  readonly tokens: number;
+  readonly sha: string;
 }
 
 /** Relative out-dir identity: the directory's basename, so a copied tree keeps it only when the name matches. */
@@ -721,6 +741,8 @@ interface ResumeState {
   readonly previousEffective: Record<string, unknown> | null;
   /** Last campaign-ledger hmac. Null on an old layout that has no campaign chain. */
   readonly campaignTip: string | null;
+  /** VOID entries already counted. Empty when the source campaign has none. */
+  readonly voids: readonly VoidLedgerEntry[];
 }
 
 class ResumeTraceError extends Error {
@@ -794,7 +816,29 @@ function readCampaign(out: string, key: Buffer): CampaignDisk | null {
     ...("previousEffective" in parsed
       ? { previousEffective: plainRecord(parsed.previousEffective) }
       : {}),
+    ...("voids" in parsed ? { voids: requireVoidEntries(parsed.voids) } : {}),
   };
+}
+
+function requireVoidEntries(value: unknown): VoidLedgerEntry[] {
+  const entries = parseVoidEntries(value);
+  if (!entries) throw new Error("resume campaign signature rejected");
+  return entries;
+}
+
+function parseVoidEntries(value: unknown): VoidLedgerEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: VoidLedgerEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const row = item as { kind?: unknown; dir?: unknown; tokens?: unknown; sha?: unknown };
+    if (row.kind !== "VOID") return null;
+    if (typeof row.dir !== "string" || row.dir.trim() === "") return null;
+    if (typeof row.tokens !== "number" || !Number.isSafeInteger(row.tokens) || row.tokens < 0) return null;
+    if (typeof row.sha !== "string" || !/^[0-9a-f]{64}$/.test(row.sha)) return null;
+    entries.push({ kind: "VOID", dir: row.dir, tokens: row.tokens, sha: row.sha });
+  }
+  return entries;
 }
 
 function plainRecord(value: unknown): Record<string, unknown> | null {
@@ -1307,6 +1351,153 @@ function carrySignedTokens(options: OptLoopOptions, key: Buffer, taskId: string)
   return Math.max(disk?.readOnlyTokens ?? 0, recomputed);
 }
 
+/** VOID entries on the carry source. They are already inside its signed readOnlyTokens. */
+function carriedVoidEntries(options: OptLoopOptions, key: Buffer): readonly VoidLedgerEntry[] {
+  const from = options.carryFrom?.trim() ?? "";
+  if (from === "" || !isRegularFile(join(from, CAMPAIGN_FILE))) return [];
+  return readCampaign(from, key)?.voids ?? [];
+}
+
+/**
+ * Sum usage the relay logs actually contain and reject a directory this chain already counted.
+ * A 2xx `done` is not required. A truncated line still counts when its usage object is complete.
+ * A row with no weighable usage adds nothing.
+ */
+function collectVoidSpend(dirs: readonly string[], prior: readonly VoidLedgerEntry[]): VoidLedgerEntry[] {
+  const seen = new Set(prior.map((entry) => countedVoidDir(entry.dir)));
+  const entries: VoidLedgerEntry[] = [];
+  for (const raw of dirs) {
+    const spent = measureVoidSpend(raw);
+    if (seen.has(spent.dir)) throw new Error("void-spend dir already counted");
+    seen.add(spent.dir);
+    entries.push({ kind: "VOID", dir: spent.dir, tokens: spent.tokens, sha: spent.sha });
+  }
+  return entries;
+}
+
+/** Realpath when the recorded directory is still there. Otherwise the stored string. */
+function countedVoidDir(dir: string): string {
+  try {
+    const resolved = realpathSync(dir);
+    if (lstatSync(resolved).isDirectory()) return resolved;
+  } catch {
+    // The recorded directory is gone. The stored string remains the identity.
+  }
+  return dir;
+}
+
+function measureVoidSpend(raw: string): { readonly dir: string; readonly tokens: number; readonly sha: string } {
+  const trimmed = raw.trim();
+  if (trimmed === "") throw new Error("void-spend relay log dir is missing");
+  let dir: string;
+  try {
+    dir = realpathSync(trimmed);
+  } catch {
+    throw new Error("void-spend relay log dir is missing");
+  }
+  let linked;
+  try {
+    linked = lstatSync(dir);
+  } catch {
+    throw new Error("void-spend relay log dir is missing");
+  }
+  if (!linked.isDirectory()) throw new Error("void-spend relay log dir is missing");
+  const files = relayLogsUnder(dir);
+  const hash = createHash("sha256");
+  let tokens = 0;
+  for (const file of files) {
+    const bytes = readFileSync(file.abs);
+    hash.update(file.rel);
+    hash.update("\0");
+    hash.update(bytes);
+    hash.update("\0");
+    tokens += shownLogTokens(bytes.toString("utf8"));
+  }
+  if (!Number.isSafeInteger(tokens)) throw new Error("void-spend tokens");
+  return { dir, tokens, sha: hash.digest("hex") };
+}
+
+/** Regular `relay.jsonl` files under `dir`, in relative-path order. A symlink log is refused. */
+function relayLogsUnder(dir: string): { readonly rel: string; readonly abs: string }[] {
+  const found: { rel: string; abs: string }[] = [];
+  const stack = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    for (const name of readdirSync(current)) {
+      const abs = join(current, name);
+      const linked = lstatSync(abs);
+      if (linked.isSymbolicLink()) {
+        if (name === "relay.jsonl") throw new Error("void-spend relay log is not a regular file");
+        continue;
+      }
+      if (linked.isDirectory()) {
+        stack.push(abs);
+        continue;
+      }
+      if (!linked.isFile() || name !== "relay.jsonl") continue;
+      found.push({ rel: relative(dir, abs).split(sep).join("/"), abs });
+    }
+  }
+  found.sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));
+  return found;
+}
+
+/** Usage objects the text actually contains. Missing fields are not treated as zero. */
+function shownLogTokens(text: string): number {
+  let total = 0;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    let usage: unknown;
+    try {
+      const parsed = JSON.parse(trimmed) as { usage?: unknown };
+      usage = parsed && typeof parsed === "object" ? parsed.usage : null;
+    } catch {
+      usage = usageObjectIn(trimmed);
+    }
+    const weighed = weightUsage(usage);
+    if (weighed !== null) total += weighed;
+  }
+  return total;
+}
+
+/** First complete `"usage"` object on a line that is not itself JSON. */
+function usageObjectIn(text: string): unknown {
+  const match = /"usage"\s*:/.exec(text);
+  if (!match) return null;
+  const start = text.indexOf("{", match.index + match[0].length);
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, index + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 const ROLE_SPEND_ROLES = new Set(["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"]);
 
 /**
@@ -1511,6 +1702,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
       : readRunEdges(gap.path).effective,
     previousEffective: readRunEdges(gap.path).effective,
     campaignTip,
+    voids: disk?.voids ?? [],
   };
 }
 
@@ -1527,6 +1719,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
   const attestKey = loadAttestKey(options.attestKeyFile);
+  if ((options.voidSpend?.length ?? 0) > 0 && (resumeRequested || (options.carryFrom?.trim() ?? "") === "")) {
+    throw new Error("void-spend needs a fresh carry-from loop");
+  }
+  const addedVoids = (options.voidSpend?.length ?? 0) > 0
+    ? collectVoidSpend(options.voidSpend ?? [], carriedVoidEntries(options, attestKey))
+    : [];
   const officialTask = resolveOfficialTask(task.path, options.taskDataRoot ?? onceAssignedPath("DATA"), options.taskMirrorRoot ?? onceAssignedPath("TOML_MIRROR"));
   const officialTimeoutSec = officialTask.timeoutSec;
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : options.piBin ? piSubagentRoles(options.piBin) : undefined);
@@ -1677,7 +1875,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const carriedReadOnly = resume?.readOnlyTokens ?? carrySignedTokens(options, attestKey, task.id);
+  const priorVoids = resume?.voids ?? carriedVoidEntries(options, attestKey);
+  const voidTokens = addedVoids.reduce((sum, entry) => sum + entry.tokens, 0);
+  const carriedReadOnly = (resume?.readOnlyTokens ?? carrySignedTokens(options, attestKey, task.id)) + voidTokens;
+  const campaignVoids = [...priorVoids, ...addedVoids];
   const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode, carriedReadOnly);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
@@ -2811,6 +3012,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     outRel,
     round: boundRound,
     nonce: campaignNonce,
+    ...(campaignVoids.length > 0 ? { voids: campaignVoids } : {}),
   }));
   writeJson(join(options.out, "loop-result.json"), result);
   return result;

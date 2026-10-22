@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../cli";
 import { relayRequestsActive } from "./activation";
-import { signedAttestationJson, writeHostAttestation } from "./attestation";
+import { attestationJsonMacOk, signedAttestationJson, writeHostAttestation } from "./attestation";
 import {
   claimNonce,
   CONTROL_CONFIG_SHA,
@@ -5873,6 +5873,232 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(again.readOnlyTokens).toBe(fresh.readOnlyTokens + againPreflight);
   });
 
+  test("void-spend records unfinished relay usage on a fresh carry-from ledger", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const sourceTokens = (JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { readOnlyTokens: number }).readOnlyTokens;
+    const voidA = join(fx.root, "void-a");
+    const voidB = join(fx.root, "void-b");
+    mkdirSync(join(voidA, "run-a"), { recursive: true });
+    mkdirSync(join(voidB, "run-b"), { recursive: true });
+    const fileA = [
+      JSON.stringify({ type: "open", kind: "role:innovator" }),
+      JSON.stringify({ type: "req", seq: 1 }),
+      JSON.stringify({ type: "done", seq: 1, status: 500, usage: { prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 1 } } }),
+      JSON.stringify({ type: "req", seq: 2, usage: { prompt_tokens: 5, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } }),
+      JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 9, completion_tokens: 9 } }),
+      '{"type":"done","seq":3,"status":200,"usage":{"prompt_tokens":3,"completion_tokens":1,"prompt_cache_hit_tokens":0}',
+    ].join("\n") + "\n";
+    const pathA = join(voidA, "run-a", "relay.jsonl");
+    writeFileSync(pathA, fileA);
+    const pathB = join(voidB, "run-b", "relay.jsonl");
+    writeFileSync(pathB, `${JSON.stringify({ type: "done", seq: 1, status: 429, usage: { prompt_tokens: 2, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 2 } } })}\n`);
+    const freshOut = join(fx.root, "fresh-void");
+    const freshAttest = attestWrite(fx, "attest-void");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: freshOut,
+      attestRoot: freshAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidA, voidB],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, freshAttest),
+    });
+    const freshText = readFileSync(join(freshOut, "campaign.json"), "utf8");
+    expect(attestationJsonMacOk(fx.key, freshText)).toBe(true);
+    const fresh = JSON.parse(freshText) as { readOnlyTokens: number; voids: { kind: string; dir: string; tokens: number; sha: string }[] };
+    expect(fresh.voids).toEqual([
+      { kind: "VOID", dir: realpathSync(voidA), tokens: 23, sha: shaOfLogs([{ rel: "run-a/relay.jsonl", abs: pathA }]) },
+      { kind: "VOID", dir: realpathSync(voidB), tokens: 4, sha: shaOfLogs([{ rel: "run-b/relay.jsonl", abs: pathB }]) },
+    ]);
+    const logs = join(freshAttest, "relay-logs");
+    const preflight = weighRoleLogs(logs);
+    expect(preflight).toBeGreaterThan(0);
+    expect(carriedTokensOf(logs)).toBe(sourceTokens + 27);
+    expect(fresh.readOnlyTokens).toBe(sourceTokens + 27 + preflight);
+  });
+
+  test("a void-spend dir already counted in the carry chain is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const voidDir = join(fx.root, "void-chain");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    const logPath = join(voidDir, "run", "relay.jsonl");
+    writeFileSync(logPath, `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 7, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const recordedSha = shaOfLogs([{ rel: "run/relay.jsonl", abs: logPath }]);
+    const freshOut = join(fx.root, "fresh-chain");
+    const freshAttest = attestWrite(fx, "attest-chain");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: freshOut,
+      attestRoot: freshAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, freshAttest),
+    });
+    const fresh = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as { readOnlyTokens: number; voids: { kind: string; dir: string; tokens: number; sha: string }[] };
+    expect(fresh.voids).toEqual([{ kind: "VOID", dir: realpathSync(voidDir), tokens: 7, sha: recordedSha }]);
+    appendFileSync(logPath, "{\"type\":\"done\"\n");
+    const link = join(fx.root, "void-chain-link");
+    symlinkSync(voidDir, link);
+    const again = (dir: string, outName: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, outName),
+      attestRoot: attestWrite(fx, `attest-${outName}`),
+      carryFrom: freshOut,
+      carryAttest: freshAttest,
+      voidSpend: [dir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, `attest-${outName}`)),
+    });
+    await expect(again(voidDir, "chain-same")).rejects.toThrow("void-spend dir already counted");
+    await expect(again(link, "chain-link")).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(join(fx.root, "chain-same", "campaign.json"))).toBe(false);
+    const keptOut = join(fx.root, "chain-kept");
+    const keptAttest = attestWrite(fx, "attest-chain-kept");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: keptOut,
+      attestRoot: keptAttest,
+      carryFrom: freshOut,
+      carryAttest: freshAttest,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, keptAttest),
+    });
+    const keptLogs = join(keptAttest, "relay-logs");
+    const keptPreflight = weighRoleLogs(keptLogs);
+    expect(keptPreflight).toBeGreaterThan(0);
+    expect(carriedTokensOf(keptLogs)).toBe(fresh.readOnlyTokens);
+    const kept = JSON.parse(readFileSync(join(keptOut, "campaign.json"), "utf8")) as { readOnlyTokens: number; voids: { kind: string; dir: string; tokens: number; sha: string }[] };
+    expect(kept.voids).toEqual(fresh.voids);
+    expect(kept.voids[0]?.sha).toBe(recordedSha);
+    expect(kept.readOnlyTokens).toBe(fresh.readOnlyTokens + keptPreflight);
+  });
+
+  test("void-spend counts toward the 30M cap", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const sourceTokens = (JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { readOnlyTokens: number }).readOnlyTokens;
+    const gap = 30_000_000 - sourceTokens;
+    expect(gap).toBeGreaterThan(100);
+    const small = join(fx.root, "void-small");
+    const rest = join(fx.root, "void-rest");
+    mkdirSync(join(small, "run"), { recursive: true });
+    mkdirSync(join(rest, "run"), { recursive: true });
+    writeFileSync(join(small, "run", "relay.jsonl"), `${JSON.stringify({ type: "req", usage: { prompt_tokens: 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    writeFileSync(join(rest, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 500, usage: { prompt_tokens: gap - 100, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const freshOut = join(fx.root, "fresh-cap");
+    const freshAttest = attestWrite(fx, "attest-cap");
+    const previousBind = process.env.HARNESS_RELAY_BIND;
+    process.env.HARNESS_RELAY_BIND = "127.0.0.1";
+    try {
+      const ran = await captureStdout(() => main([
+        "optimize", "--dry-run", "--rounds", "1",
+        "--out", freshOut,
+        "--attest-root", freshAttest,
+        "--attest-key-file", fx.keyFile,
+        "--harness", fx.harnessPath,
+        "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
+        "--control-config", fx.controlConfig,
+        "--control-attest", fx.controlAttest,
+        "--carry-from", fx.out,
+        "--carry-attest", fx.attestRoot,
+        "--void-spend", small,
+        "--void-spend", rest,
+        ...taskFlags(fx.root),
+        ...round0Flags(),
+      ]));
+      expect(ran.code).toBe(0);
+      const printed = JSON.parse(ran.stdout) as { stopReport: { reason: string | null }; rounds: unknown[] };
+      expect(printed.stopReport.reason).toBe("readOnlyTokenCap");
+      expect(printed.rounds).toEqual([]);
+    } finally {
+      if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
+      else process.env.HARNESS_RELAY_BIND = previousBind;
+    }
+    const stopped = JSON.parse(readFileSync(join(freshOut, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null }; rounds: unknown[] };
+    expect(stopped.stopReport.reason).toBe("readOnlyTokenCap");
+    expect(stopped.rounds).toEqual([]);
+    const campaign = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as { readOnlyTokens: number; voids: { kind: string; tokens: number }[] };
+    expect(campaign.voids.map((entry) => entry.kind)).toEqual(["VOID", "VOID"]);
+    expect(campaign.voids.map((entry) => entry.tokens)).toEqual([100, gap - 100]);
+    expect(campaign.readOnlyTokens).toBe(30_000_000);
+  });
+
+  test("void-spend requires a fresh carry-from loop", async () => {
+    const fx = fixture();
+    const { code, stderr } = await captureStderr(() => main(["optimize", "--dry-run", "--void-spend", join(fx.root, "missing")]));
+    expect(code).toBe(1);
+    expect(stderr).toContain("optimize --void-spend needs --carry-from");
+    const missingOut = join(fx.root, "void-missing-out");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: missingOut,
+      attestRoot: attestWrite(fx, "attest-void-missing"),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [join(fx.root, "no-such-void")],
+      mode: "dry-run",
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow("void-spend relay log dir is missing");
+    expect(existsSync(missingOut)).toBe(false);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      voidSpend: [fx.root],
+      mode: "dry-run",
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow("void-spend needs a fresh carry-from loop");
+    const twice = join(fx.root, "void-twice");
+    mkdirSync(join(twice, "run"), { recursive: true });
+    writeFileSync(join(twice, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const twiceOut = join(fx.root, "void-twice-out");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: twiceOut,
+      attestRoot: attestWrite(fx, "attest-void-twice"),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [twice, twice],
+      mode: "dry-run",
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(twiceOut)).toBe(false);
+  });
+
   test("a carried total near 30M makes the relay stop at the cap", async () => {
     const fx = fixture();
     const citing = citingRoles(fx.key, fx.attestRoot);
@@ -6866,6 +7092,54 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(all - review).toBeGreaterThan(0);
   });
 });
+
+/** sha256 of sorted relay logs: each file is `<relative path> NUL <bytes> NUL`. */
+function shaOfLogs(files: readonly { rel: string; abs: string }[]): string {
+  const ordered = [...files].sort((left, right) => (left.rel < right.rel ? -1 : left.rel > right.rel ? 1 : 0));
+  const hash = createHash("sha256");
+  for (const file of ordered) {
+    hash.update(file.rel);
+    hash.update("\0");
+    hash.update(readFileSync(file.abs));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+/** 2xx role usage in a fresh loop's own relay logs. Void logs are not in this tree. */
+function weighRoleLogs(root: string): number {
+  if (!existsSync(root)) return 0;
+  let sum = 0;
+  for (const name of readdirSync(root)) {
+    const file = join(root, name, "relay.jsonl");
+    if (!existsSync(file)) continue;
+    const text = readFileSync(file, "utf8");
+    if (!text.includes('"kind":"role:')) continue;
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      const row = JSON.parse(line) as { type?: string; status?: number; usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } };
+      if (row.type !== "done") continue;
+      const status = row.status ?? 200;
+      if (status < 200 || status > 299) continue;
+      const prompt = row.usage?.prompt_tokens;
+      const completion = row.usage?.completion_tokens;
+      const cache = row.usage?.prompt_tokens_details?.cached_tokens;
+      if (typeof prompt !== "number" || typeof completion !== "number" || typeof cache !== "number") continue;
+      sum += prompt - cache + completion + cache;
+    }
+  }
+  return sum;
+}
+
+function carriedTokensOf(root: string): number {
+  for (const name of readdirSync(root)) {
+    const sigPath = join(root, name, "relay.jsonl.sig");
+    if (!existsSync(sigPath)) continue;
+    const sig = JSON.parse(readFileSync(sigPath, "utf8")) as { carriedTokens?: number };
+    if (typeof sig.carriedTokens === "number") return sig.carriedTokens;
+  }
+  throw new Error("missing carriedTokens");
+}
 
 /** Source proofs and relay logs. The campaign registry is the host append log resume is allowed to extend. */
 function stampTree(root: string): string[] {
