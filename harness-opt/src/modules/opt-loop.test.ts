@@ -32,6 +32,7 @@ import {
   trimLongString,
   capArtifact,
   gapArtifactText,
+  searchHistorySection,
   recordedRoleTokens,
   reviewerSchemaDetail,
   ReviewerSchemaError,
@@ -7620,7 +7621,8 @@ describe("search tree", () => {
     expect(gap2.includes("\"parentId\":\"root\"") || gap2.includes("\"parentId\": \"root\"")).toBe(true);
     expect(innov2.includes("agent-loop.maxSteps=24")).toBe(true);
     expect(innov2.includes("已试过：")).toBe(true);
-    expect(gap2.includes("12000")).toBe(true);
+    expect(gap2.includes("24000")).toBe(true);
+    expect(gap2.includes("最近一轮保留全文")).toBe(true);
     const next = join(fx.root, "out-tree-resume");
     const continued = await runOptLoop({
       ...hostOpts(fx),
@@ -7670,60 +7672,98 @@ describe("search tree", () => {
     expect(carried.nonce).not.toBe(source.nonce);
   });
 
-  test("search tree history keeps the last two rounds and compresses older ones under 12000", async () => {
-    const fx = fixture();
-    const legacy = join(fx.root, "compress-loop");
-    const control = "{\"parts\":{\"agent-loop\":{\"maxSteps\":25}}}\n";
-    mkdirSync(join(legacy, "control"), { recursive: true });
-    mkdirSync(join(legacy, "baseline"), { recursive: true });
-    writeFileSync(join(legacy, "control", "config.json"), control);
-    writeFileSync(join(legacy, "baseline", "config.json"), control);
-    const rounds = [
-      { round: 1, knob: "agent-loop.maxSteps", reward: 0.2, accept: false, reason: "oldest reason stays", patch: `OLDEST_PATCH_MARK${"A".repeat(8000)}` },
-      { round: 2, knob: "agent-loop.maxNudges", reward: 0.3, accept: false, reason: "second oldest stays", patch: `SECOND_PATCH_MARK${"B".repeat(8000)}` },
-      { round: 3, knob: "context.window", reward: 0.4, accept: true, reason: "recent A stays full", patch: `RECENT_A_MARK${"C".repeat(3000)}` },
-      { round: 4, knob: "memory.maxItems", reward: 0.5, accept: true, reason: "recent B stays full", patch: `RECENT_B_MARK${"D".repeat(3000)}` },
+  test("search tree history keeps every summary line and drops recent details whole", () => {
+    const metaToken = `ONLY_IN_DETAILS_${"A".repeat(8000)}A_TAIL_OK`;
+    const midToken = `MEDIUM_STAYS_${"M".repeat(4000)}`;
+    const patchToken = `PATCH_DROP_${"Q".repeat(20000)}`;
+    const oldCandidates = [0, 1, 2].map((slot) => ({ id: `old-c${slot}`, summary: `OLD_C${slot}` }));
+    const events: Record<string, unknown>[] = [
+      {
+        kind: "round",
+        seq: 1,
+        group: "old-r1",
+        source: "old",
+        round: 1,
+        accept: false,
+        reason: "old reason",
+        reward: 0,
+        candidates: oldCandidates,
+        critic: { excluded: ["c0"] },
+        ranker: { winnerId: "c1", codeWinner: "c2" },
+        gates: "absent in source",
+      },
+      {
+        kind: "round",
+        seq: 2,
+        group: "new-r1",
+        source: "new",
+        round: 1,
+        accept: true,
+        reason: "new reason",
+        reward: 1,
+        traceNote: metaToken,
+        candidates: [
+          { id: "new-c0", summary: "NEW_C0" },
+          { id: "new-c1", summary: "NEW_C1" },
+          { id: "new-c2", summary: "NEW_C2", marker: midToken },
+        ],
+        patch: patchToken,
+        critic: { excluded: [] },
+        ranker: { winnerId: "c0", order: ["c0", "c1", "c2"], codeWinner: "c0" },
+        gates: [{ id: "G0", pass: true, reason: "gate ok" }],
+      },
     ];
-    for (const item of rounds) {
-      const roundDir = join(legacy, `round${item.round}`);
-      mkdirSync(join(roundDir, "roles", "innovator-0"), { recursive: true });
-      writeFileSync(join(roundDir, "patch.diff"), item.patch);
-      writeFileSync(join(roundDir, "run-notes.md"), `reward: ${item.reward}\n`);
-      writeFileSync(join(roundDir, "closure.json"), JSON.stringify({
-        round: item.round,
-        accepted: item.accept,
-        reviewReason: item.reason,
-      }));
-      writeFileSync(join(roundDir, "review-input.json"), JSON.stringify({ knob: item.knob }));
-      writeFileSync(join(roundDir, "roles", "innovator-0", "patch.json"), JSON.stringify({ summary: `round-${item.round}-summary` }));
-      writeFileSync(join(roundDir, "roles", "innovator-0", "config.json"), `{"round":${item.round}}\n`);
-    }
-    await runOptLoop({
-      ...hostOpts(fx),
-      mode: "dry-run",
-      rounds: 1,
-      searchTreeFromRound: 1,
-      searchTreeImports: [legacy],
-      executor: fakeExecutor(fx).executor,
-      roles: citingRoles(fx.key, fx.attestRoot),
+    const text = searchHistorySection({
+      events: () => events,
+      nodeSummaries: () => [
+        { id: "old-c0", parentId: "root", patchSummary: "OLD_NODE_TOKEN" },
+        { id: "new-c0", parentId: "root", patchSummary: "NEW_NODE_TOKEN" },
+      ],
     });
-    const prompt = rolePrompt(fx.out, 1, "gap-finder");
-    const start = prompt.indexOf("搜索树：");
-    const end = prompt.indexOf("\n截断：", start);
-    const body = prompt.slice(start + "搜索树：".length, end);
-    expect(body.length).toBeLessThanOrEqual(12000);
-    expect(body.includes("OLDEST_PATCH_MARK")).toBe(false);
-    expect(body.includes("SECOND_PATCH_MARK")).toBe(false);
-    expect(body.includes("agent-loop.maxSteps reward=0.2 reject oldest reason stays")).toBe(true);
-    expect(body.includes("agent-loop.maxNudges reward=0.3 reject second oldest stays")).toBe(true);
-    expect(body.includes("RECENT_A_MARK")).toBe(true);
-    expect(body.includes("RECENT_B_MARK")).toBe(true);
-    expect(body.includes("recent A stays full")).toBe(true);
-    expect(body.includes("recent B stays full")).toBe(true);
-    expect(prompt.includes("最近两轮保留全文")).toBe(true);
-    expect(prompt.includes("计入只读 token 上限")).toBe(true);
-    expect(prompt.includes("characters truncated")).toBe(false);
-    expect(rolePrompt(fx.out, 1, "innovator-0").includes("RECENT_B_MARK")).toBe(true);
+    const start = text.indexOf("搜索树：");
+    const end = text.indexOf("\n截断：", start);
+    const body = text.slice(start + "搜索树：".length, end);
+    expect(body.length).toBeLessThanOrEqual(24000);
+    const parsed = JSON.parse(body) as { summaries: string[]; details: { marker?: string; traceNote?: string; patch?: string; nodes?: { id: string }[] }[] };
+    expect(parsed.summaries.filter((line) => line.includes("OLD_C")).length).toBe(3);
+    expect(parsed.summaries.some((line) => line.includes("id=old-c0") && line.includes("critic=excluded") && line.includes("code=c2"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=old-c1") && line.includes("ranker=chosen"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=new-c0") && line.includes("ranker=chosen") && line.includes("critic=kept"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=new-c1") && line.includes("ranker=2"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=new-c2") && line.includes("knob=NEW_C2"))).toBe(true);
+    expect(body.includes("PATCH_DROP_")).toBe(false);
+    expect(body.includes("Q".repeat(40))).toBe(false);
+    expect(body.includes("A_TAIL_OK")).toBe(true);
+    expect(body.includes("MEDIUM_STAYS_")).toBe(true);
+    expect(body.includes("NEW_NODE_TOKEN")).toBe(true);
+    expect(body.includes("OLD_NODE_TOKEN")).toBe(false);
+    expect(parsed.details.some((item) => item.traceNote?.endsWith("A_TAIL_OK"))).toBe(true);
+    expect(parsed.details.some((item) => item.marker?.startsWith("MEDIUM_STAYS_"))).toBe(true);
+    expect(parsed.details.some((item) => item.patch !== undefined)).toBe(false);
+    expect(text.includes("characters truncated")).toBe(false);
+    expect(text.includes("24000")).toBe(true);
+    expect(text.includes("最近一轮保留全文")).toBe(true);
+    expect(text.includes("这些行不丢")).toBe(true);
+    expect(text.includes("计入只读 token 上限")).toBe(true);
+  });
+
+  test("search tree history fails when summary lines alone exceed 24000", () => {
+    const events: Record<string, unknown>[] = [{
+      kind: "round",
+      seq: 1,
+      group: "big",
+      source: "big",
+      round: 1,
+      accept: false,
+      reward: 0,
+      reason: "x",
+      candidates: [{ id: "c0", summary: `KNOB_${"Z".repeat(25000)}` }],
+      patch: `PATCH_SHOULD_NOT_BE_SLICED_${"P".repeat(1000)}`,
+    }];
+    expect(() => searchHistorySection({
+      events: () => events,
+      nodeSummaries: () => [],
+    })).toThrow("search tree history summaries exceed 24000");
   });
 
   test("the tree stays quiet until the pinned round", async () => {
@@ -7770,70 +7810,46 @@ describe("search tree", () => {
   test("real loop layouts import every candidate, the gates, and the true parents", async () => {
     const fx = fixture();
     const control = "{\"parts\":{\"agent-loop\":{\"maxSteps\":25}},\"mark\":\"control\"}\n";
-    const round1Winner = "{\"parts\":{\"agent-loop\":{\"maxSteps\":20}},\"mark\":\"round1-winner\"}\n";
+    const gatesPass = ["G0", "G1", "G2", "G3"].map((id) => ({ id, pass: true }));
     const specs = [
       {
         name: "round1-r3",
-        baseline: control,
-        control,
-        reward: 0.4,
-        knob: "agent-loop.maxSteps",
-        reason: "round1 kept the idle cap.",
-        acceptInLoop: true,
+        reward: 0,
+        acceptInLoop: false,
         closureAccepted: undefined as boolean | undefined,
-        gatesInClosure: false,
-        gates: [
-          { id: "G0", pass: true },
-          { id: "G1", pass: true },
-          { id: "G2", pass: false, code: "inactive_key" },
-          { id: "G3", pass: true },
-        ],
-        critic: ["c4"],
-        winner: "c0",
+        reviewReason: "",
+        excluded: ["c0", "c4", "c5"],
+        wrongSession: ["c1"],
+        winner: "c3",
+        codeWinner: "c1",
         invalid: [] as string[],
         summaries: ["R1_C0", "R1_C1", "R1_C2", "R1_C3", "R1_C4", "R1_C5"],
       },
       {
         name: "round2-1c104724",
-        baseline: round1Winner,
-        control,
         reward: 1,
-        knob: "agent-loop.maxContinuationTurns",
-        reason: "round2 cleared the gate.",
         acceptInLoop: true,
         closureAccepted: undefined as boolean | undefined,
-        gatesInClosure: true,
-        gates: [
-          { id: "G0", pass: true },
-          { id: "G1", pass: true },
-          { id: "G2", pass: true },
-          { id: "G3", pass: true },
-        ],
-        critic: [] as string[],
+        reviewReason: "round2 cleared the gate.",
+        excluded: [] as string[],
+        wrongSession: ["c0"],
         winner: "c0",
-        invalid: [] as string[],
+        codeWinner: "c0",
+        invalid: ["c3", "c5"],
         summaries: ["R2_C0", "R2_C1", "R2_C2", "R2_C3", "R2_C4", "R2_C5"],
       },
       {
         name: "round3-e92ce52f-r2",
-        baseline: control,
-        control,
-        reward: 0.3,
-        knob: "memory.recall",
-        reason: "round3 reward fell.",
+        reward: 0,
         acceptInLoop: false,
-        closureAccepted: false,
-        gatesInClosure: true,
-        gates: [
-          { id: "G0", pass: true },
-          { id: "G1", pass: true },
-          { id: "G2", pass: true },
-          { id: "G3", pass: false, reason: "reward below baseline" },
-        ],
-        critic: ["c1"],
-        winner: "c0",
+        closureAccepted: false as boolean | undefined,
+        reviewReason: "round3 reward fell.",
+        excluded: ["c2"],
+        wrongSession: [] as string[],
+        winner: "c4",
+        codeWinner: "c0",
         invalid: ["c3", "c5"],
-        summaries: ["R3_C0", "R3_C1", "R3_C2", "R3_C3", "R3_C4", "R3_C5"],
+        summaries: ["R3_C0", "R3_C1", "NUDGE_EARLY_C2", "R3_C3", "R3_C4", "R3_C5"],
       },
     ];
     for (const spec of specs) {
@@ -7841,44 +7857,62 @@ describe("search tree", () => {
       const roundDir = join(root, "round1");
       mkdirSync(join(root, "control"), { recursive: true });
       mkdirSync(join(root, "baseline"), { recursive: true });
-      mkdirSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes"), { recursive: true });
       mkdirSync(join(roundDir, "sessions"), { recursive: true });
       writeFileSync(join(root, "canary.txt"), "keep");
-      writeFileSync(join(root, "control", "config.json"), spec.control);
-      writeFileSync(join(root, "baseline", "config.json"), spec.baseline);
+      writeFileSync(join(root, "control", "config.json"), control);
+      writeFileSync(join(root, "baseline", "config.json"), control);
       writeFileSync(join(roundDir, "run-notes.md"), `reward: ${spec.reward}\n`);
       writeFileSync(join(roundDir, "patch.diff"), `PATCH_${spec.name}\n`);
-      writeFileSync(join(roundDir, "review-input.json"), JSON.stringify({ knob: spec.knob, summary: spec.reason }));
+      writeFileSync(join(roundDir, "review-input.json"), JSON.stringify({ knob: "agent-loop.maxSteps" }));
       const closure: Record<string, unknown> = { round: 1, reviewFedForward: null };
       if (spec.closureAccepted !== undefined) closure.accepted = spec.closureAccepted;
-      if (spec.name !== "round1-r3") closure.reviewReason = spec.reason;
-      if (spec.gatesInClosure) closure.gates = spec.gates;
+      if (spec.reviewReason !== "") closure.reviewReason = spec.reviewReason;
+      if (spec.name === "round2-1c104724") closure.gates = gatesPass;
+      if (spec.name === "round3-e92ce52f-r2") {
+        closure.gates = [
+          { id: "G0", pass: true },
+          { id: "G1", pass: true },
+          { id: "G2", pass: true },
+          { id: "G3", pass: false },
+        ];
+      }
       if (spec.invalid.length > 0) {
         closure.invalidCandidates = spec.invalid.map((id) => ({ id, role: `innovator-${id.slice(1)}`, reason: "no_conclusion" }));
       }
       writeFileSync(join(roundDir, "closure.json"), JSON.stringify(closure));
       writeFileSync(join(root, "loop-result.json"), JSON.stringify({
         rounds: [{ round: 1, accepted: spec.acceptInLoop, ...(spec.invalid.length > 0 ? { invalidCandidates: closure.invalidCandidates } : {}) }],
-        ...(spec.acceptInLoop ? { accepted: { round: 1, knob: spec.knob } } : {}),
       }));
-      if (spec.name === "round1-r3") {
-        writeFileSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes", "gates.json"), JSON.stringify({ gates: spec.gates }));
-        writeFileSync(join(roundDir, "sessions", "reviewer-gate.jsonl"), `${JSON.stringify({ type: "message", role: "assistant", text: spec.reason })}\n`);
-      } else {
-        mkdirSync(join(roundDir, "roles", "reviewer-gate", "candidates"), { recursive: true });
-        writeFileSync(join(roundDir, "roles", "reviewer-gate", "candidates", "gap.json"), JSON.stringify({ knob: spec.knob }));
+      writeFileSync(join(roundDir, "ranker-input.json"), JSON.stringify({ round: 1, candidates: [], excluded: spec.excluded }));
+      writeFileSync(join(roundDir, "sessions", "critic.jsonl"), `${JSON.stringify({ type: "message", role: "assistant", text: JSON.stringify({ excluded: spec.wrongSession }) })}\n`);
+      writeFileSync(join(roundDir, "ranking.json"), JSON.stringify({ rankerWinnerId: spec.winner, codeWinner: spec.codeWinner, codeStatus: "ranked" }));
+      if (spec.name === "round2-1c104724") {
+        mkdirSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes"), { recursive: true });
+        writeFileSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes", "gates.json"), JSON.stringify({
+          gates: ["G0", "G1", "G2", "G3"].map((id) => ({ id, pass: true, reason: `R2_${id}_REASON` })),
+        }));
       }
-      writeFileSync(join(roundDir, "sessions", "critic.jsonl"), `${JSON.stringify({ type: "message", role: "assistant", text: JSON.stringify({ excluded: spec.critic }) })}\n`);
-      writeFileSync(join(roundDir, "ranking.json"), JSON.stringify({ rankerWinnerId: spec.winner, codeWinner: spec.winner, codeStatus: "ranked" }));
+      if (spec.name === "round3-e92ce52f-r2") {
+        mkdirSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes"), { recursive: true });
+        writeFileSync(join(roundDir, "roles", "reviewer-gate", "state", "nodes", "gates.json"), JSON.stringify({
+          gates: [{ id: "G3", pass: false, reason: "R3_G3_REASON" }],
+        }));
+      }
       for (let slot = 0; slot < 6; slot += 1) {
         const id = `c${slot}`;
         const roleDir = join(roundDir, "roles", `innovator-${slot}`);
         mkdirSync(roleDir, { recursive: true });
-        if (spec.invalid.includes(id)) continue;
-        const config = slot === 0 && spec.name === "round1-r3" ? round1Winner : `{"parts":{"agent-loop":{"maxSteps":${20 + slot}}},"mark":"${spec.name}-c${slot}"}\n`;
+        const config = `{"parts":{"agent-loop":{"maxSteps":${20 + slot}}},"mark":"${spec.name}-c${slot}"}\n`;
         writeFileSync(join(roleDir, "config.json"), config);
-        writeFileSync(join(roleDir, "patch.json"), JSON.stringify({ summary: spec.summaries[slot] }));
-        if (slot === 0) {
+        if (spec.name === "round3-e92ce52f-r2" && slot === 2) {
+          const named = join(roleDir, "candidates", "nudge-early");
+          mkdirSync(named, { recursive: true });
+          writeFileSync(join(named, "patch.json"), JSON.stringify({ summary: spec.summaries[slot] }));
+          writeFileSync(join(named, "config.json"), config);
+        } else {
+          writeFileSync(join(roleDir, "patch.json"), JSON.stringify({ summary: spec.summaries[slot] }));
+        }
+        if (slot === Number(spec.winner.slice(1))) {
           mkdirSync(join(roundDir, "candidate"), { recursive: true });
           writeFileSync(join(roundDir, "candidate", "config.json"), config);
         }
@@ -7899,35 +7933,50 @@ describe("search tree", () => {
     }
     const prompt = rolePrompt(fx.out, 1, "gap-finder");
     const innovator = rolePrompt(fx.out, 1, "innovator-0");
-    for (const spec of specs) {
-      for (const summary of spec.summaries) {
-        if (spec.invalid.includes(`c${spec.summaries.indexOf(summary)}`)) {
-          expect(prompt.includes(`invalid no_conclusion`)).toBe(true);
-          expect(innovator.includes("invalid no_conclusion")).toBe(true);
-          continue;
-        }
-        expect(prompt.includes(summary)).toBe(true);
-        expect(innovator.includes(summary)).toBe(true);
-      }
-      expect(prompt.includes(spec.knob)).toBe(true);
-      expect(prompt.includes(spec.reason)).toBe(true);
-      expect(prompt.includes("commentary")).toBe(true);
-      for (const gate of spec.gates) {
-        expect(prompt.includes(`"id":"${gate.id}"`)).toBe(true);
-        expect(prompt.includes(`"pass":${gate.pass}`)).toBe(true);
-      }
+    const start = prompt.indexOf("搜索树：");
+    const end = prompt.indexOf("\n截断：", start);
+    const history = prompt.slice(start + "搜索树：".length, end);
+    expect(history.length).toBeLessThanOrEqual(24000);
+    const rendered = JSON.parse(history) as { summaries: string[] };
+    expect(rendered.summaries.length).toBe(18);
+    const round2Gates = "G0:pass:R2_G0_REASON,G1:pass:R2_G1_REASON,G2:pass:R2_G2_REASON,G3:pass:R2_G3_REASON";
+    const round3Gates = "G0:pass,G1:pass,G2:pass,G3:fail:R3_G3_REASON";
+    const lines = [
+      "round=round1-r3/1 id=round1-r3-r1-c0 knob=R1_C0 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      "round=round1-r3/1 id=round1-r3-r1-c1 knob=R1_C1 critic=kept ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      "round=round1-r3/1 id=round1-r3-r1-c2 knob=R1_C2 critic=kept ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      "round=round1-r3/1 id=round1-r3-r1-c3 knob=R1_C3 critic=kept ranker=chosen code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      "round=round1-r3/1 id=round1-r3-r1-c4 knob=R1_C4 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      "round=round1-r3/1 id=round1-r3-r1-c5 knob=R1_C5 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c0 knob=R2_C0 critic=kept ranker=chosen code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c1 knob=R2_C1 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c2 knob=R2_C2 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c3 knob=R2_C3 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c4 knob=R2_C4 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round2-1c104724/1 id=round2-1c104724-r1-c5 knob=R2_C5 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c0 knob=R3_C0 critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c1 knob=R3_C1 critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c2 knob=NUDGE_EARLY_C2 critic=excluded ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c3 knob=R3_C3 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c4 knob=R3_C4 critic=kept ranker=chosen code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c5 knob=R3_C5 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+    ];
+    expect(lines.length).toBe(36 / 2);
+    expect(rendered.summaries).toEqual(lines);
+    for (const line of lines) {
+      expect(prompt.includes(line)).toBe(true);
+      expect(innovator.includes(line)).toBe(true);
     }
-    expect(prompt.includes("round2 cleared the gate.")).toBe(true);
-    expect(prompt.includes("\"accept\":true")).toBe(true);
-    expect(prompt.includes("\"excluded\":[\"c4\"]")).toBe(true);
-    expect(prompt.includes("\"excluded\":[\"c1\"]")).toBe(true);
-    expect(prompt.includes("\"winnerId\":\"c0\"")).toBe(true);
-    expect(prompt.includes("inactive_key")).toBe(true);
-    expect(prompt.includes("reward below baseline")).toBe(true);
-    const body = JSON.parse(treeText(fx.out)) as {
+    expect(prompt.includes("PATCH_round3-e92ce52f-r2")).toBe(true);
+    expect(prompt.includes("PATCH_round1-r3")).toBe(false);
+    expect(prompt.includes("PATCH_round2-1c104724")).toBe(false);
+    expect(prompt.includes("commentary")).toBe(true);
+    expect(prompt.includes("c9")).toBe(false);
+    const saved = JSON.parse(treeText(fx.out)) as {
       nodes: { id: string; parentId: string | null; status: string; devScores: number[] }[];
+      events: { source?: string; accept?: unknown; reason?: string; critic?: { excluded?: string[] }; gates?: { id?: string; pass?: boolean; reason?: string }[]; candidates?: { id: string; summary: string }[] }[];
     };
-    const children = (prefix: string) => body.nodes.filter((node) => node.id.startsWith(prefix));
+    const children = (prefix: string) => saved.nodes.filter((node) => node.id.startsWith(prefix));
     const round1 = children("round1-r3-r1-c");
     const round2 = children("round2-1c104724-r1-c");
     const round3 = children("round3-e92ce52f-r2-r1-c");
@@ -7935,18 +7984,32 @@ describe("search tree", () => {
     expect(round2.length).toBe(6);
     expect(round3.length).toBe(6);
     expect(round1.every((node) => node.parentId === "root")).toBe(true);
+    expect(round2.every((node) => node.parentId === "root")).toBe(true);
     expect(round3.every((node) => node.parentId === "root")).toBe(true);
-    expect(round2.every((node) => node.parentId === "round1-r3-r1-c0")).toBe(true);
-    expect(round3.some((node) => node.parentId === round2[0]?.id)).toBe(false);
-    expect(round1.find((node) => node.id === "round1-r3-r1-c0")?.status).toBe("evaluated");
-    expect(round1.find((node) => node.id === "round1-r3-r1-c0")?.devScores).toEqual([0.4]);
+    expect(round1.find((node) => node.id === "round1-r3-r1-c3")?.status).toBe("rejected");
+    expect(round1.find((node) => node.id === "round1-r3-r1-c3")?.devScores).toEqual([]);
+    expect(round1.find((node) => node.id === "round1-r3-r1-c0")?.status).toBe("pending");
     expect(round2.find((node) => node.id === "round2-1c104724-r1-c0")?.status).toBe("evaluated");
     expect(round2.find((node) => node.id === "round2-1c104724-r1-c0")?.devScores).toEqual([1]);
+    expect(round2.find((node) => node.id === "round2-1c104724-r1-c3")?.status).toBe("failed");
+    expect(round2.find((node) => node.id === "round2-1c104724-r1-c5")?.status).toBe("failed");
+    expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c2")?.status).toBe("pending");
+    expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c2")?.id).toBe("round3-e92ce52f-r2-r1-c2");
     expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c3")?.status).toBe("failed");
     expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c5")?.status).toBe("failed");
-    expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c0")?.status).toBe("rejected");
-    const round2Event = JSON.parse(treeText(fx.out)) as { events: { source?: string; accept?: unknown }[] };
-    expect(round2Event.events.find((event) => event.source === "round2-1c104724")?.accept).toBe(true);
+    expect(round3.find((node) => node.id === "round3-e92ce52f-r2-r1-c4")?.status).toBe("rejected");
+    const event = (source: string) => saved.events.find((item) => item.source === source);
+    expect(event("round1-r3")?.accept).toBe(false);
+    expect(event("round1-r3")?.reason).toBe("absent in source");
+    expect(event("round1-r3")?.critic?.excluded).toEqual(["c0", "c4", "c5"]);
+    expect(event("round1-r3")?.gates).toBe("absent in source");
+    expect(event("round2-1c104724")?.accept).toBe(true);
+    expect(event("round2-1c104724")?.critic?.excluded).toEqual([]);
+    expect(event("round2-1c104724")?.gates?.map((gate) => gate.reason)).toEqual(["R2_G0_REASON", "R2_G1_REASON", "R2_G2_REASON", "R2_G3_REASON"]);
+    expect(event("round3-e92ce52f-r2")?.accept).toBe(false);
+    expect(event("round3-e92ce52f-r2")?.critic?.excluded).toEqual(["c2"]);
+    expect(event("round3-e92ce52f-r2")?.gates?.find((gate) => gate.id === "G3")).toEqual({ id: "G3", pass: false, reason: "R3_G3_REASON" });
+    expect(event("round3-e92ce52f-r2")?.candidates?.find((item) => item.id.endsWith("-c2"))?.summary).toBe("NUDGE_EARLY_C2");
   });
 
   test("a loop with no baseline reward still selects the control root", async () => {
@@ -7974,11 +8037,27 @@ describe("search tree", () => {
         at: "2026-10-21T00:00:00+09:00",
       },
     });
+    const high = join(fx.root, "high-reward");
+    const highRound = join(high, "round1");
+    const highConfig = "{\"parts\":{\"agent-loop\":{\"maxSteps\":12}},\"mark\":\"high\"}\n";
+    mkdirSync(join(high, "control"), { recursive: true });
+    mkdirSync(join(high, "baseline"), { recursive: true });
+    mkdirSync(join(highRound, "roles", "innovator-0"), { recursive: true });
+    mkdirSync(join(highRound, "candidate"), { recursive: true });
+    writeFileSync(join(high, "control", "config.json"), highConfig);
+    writeFileSync(join(high, "baseline", "config.json"), highConfig);
+    writeFileSync(join(highRound, "run-notes.md"), "reward: 1\n");
+    writeFileSync(join(highRound, "closure.json"), JSON.stringify({ round: 1, accepted: true }));
+    writeFileSync(join(highRound, "ranking.json"), JSON.stringify({ rankerWinnerId: "c0", codeWinner: "c0" }));
+    writeFileSync(join(highRound, "roles", "innovator-0", "patch.json"), JSON.stringify({ summary: "HIGH_DEV" }));
+    writeFileSync(join(highRound, "roles", "innovator-0", "config.json"), highConfig);
+    writeFileSync(join(highRound, "candidate", "config.json"), highConfig);
     await runOptLoop({
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
       searchTreeFromRound: 1,
+      searchTreeImports: [high],
       executor: fakeExecutor(fx).executor,
       roles: citingRoles(fx.key, fx.attestRoot),
     });
@@ -7989,8 +8068,13 @@ describe("search tree", () => {
     expect(root?.id).toBe("root");
     expect(root?.configPath).toBe("control/config.json");
     expect(root?.status).toBe("evaluated");
-    const child = body.nodes.find((node) => node.id !== "root");
-    expect(child?.parentId).toBe("root");
+    const imported = body.nodes.find((node) => node.id === "high-reward-r1-c0");
+    expect(imported?.status).toBe("evaluated");
+    expect(imported?.devScores).toEqual([1]);
+    const live = body.nodes.filter((node) => node.id.startsWith("r1-"));
+    expect(live.length).toBeGreaterThan(0);
+    expect(live.every((node) => node.parentId === "root")).toBe(true);
+    expect(live.some((node) => node.parentId === imported?.id)).toBe(false);
     expect(rolePrompt(fx.out, 1, "gap-finder").includes("搜索树")).toBe(true);
   });
 });

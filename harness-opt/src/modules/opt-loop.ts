@@ -50,7 +50,7 @@ import {
   noteReview,
   openLineage,
   parentTried,
-  pickParent,
+  selectParent,
   readSearchTree,
   writeSearchTree,
   type SearchTreeBody,
@@ -2508,7 +2508,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         treeImported = true;
       }
       try {
-        treeParent = pickParent(lineage);
+        treeParent = selectParent(lineage, baselineReward);
         tried.splice(0, tried.length, ...parentTried(lineage, treeParent));
       } catch (error) {
         if (!(error instanceof Error) || error.message !== "no evaluated unlocked node") throw error;
@@ -3829,46 +3829,28 @@ export function gapArtifactText(text: string, tracePath: string): string {
   return `${capArtifact(trimLongString(text))}\n${tracePath}`;
 }
 
-const SEARCH_HISTORY_CAP = 12_000;
-const SEARCH_HISTORY_RULE = "截断：历史块最多 12000 字。超出时从最老的一轮压成一行（knob、reward、accept/reject、一句 reason）。最近两轮保留全文。这段在角色 prompt 里，计入只读 token 上限。";
+const SEARCH_HISTORY_CAP = 24_000;
+const SEARCH_HISTORY_RULE = "截断：历史块最多 24000 字。每一轮的每个候选一行摘要（round、候选 id、旋钮改动、critic 排除或保留、ranker 选中或名次、G0–G3 过否和原因、reward、accept/reject），这些行不丢。最近一轮保留全文。超出时先按整条丢掉最近一轮的详情，不从字符串中间截，不拆开 JSON。摘要行本身超过 24000 字就报错，不截断。这段在角色 prompt 里，计入只读 token 上限。";
 
 /**
- * Role view of the lineage. The history block is at most 12,000 characters.
- * Over that, the oldest round becomes one line (knob, reward, accept/reject,
- * one sentence of the reviewer commentary) and the most recent two rounds stay
- * full. This replaces the trace head/tail trim for this block only.
- * The block is part of the gap-finder and innovator prompt, so its tokens sit
- * inside the innovator cap and the read-only cap.
+ * Role view of the lineage. Every candidate of every round keeps one summary
+ * line. Only the most recent round also keeps full detail entries. The JSON
+ * body is at most 24,000 characters. Over that, detail entries drop from the
+ * end, whole entries only. Summary lines are never cut. If they alone exceed
+ * the cap, this throws. The block sits in the gap-finder and innovator prompt,
+ * so its tokens count toward the innovator cap and the read-only cap.
  * Gate pass/fail rows are on the round and review events.
  */
 export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
   const groups = groupHistory(view.events());
-  const lines = groups.map((group) => historyLine(group.events));
-  const keep = groups.map(() => true);
-  const dropped = new Set<number>();
-  const render = () => JSON.stringify({
-    nodes: view.nodeSummaries(),
-    rounds: groups.flatMap((group, index) => {
-      if (dropped.has(index)) return [];
-      return [keep[index] ? { full: group.events } : { line: lines[index] }];
-    }),
-  });
-  let guard = 0;
-  while (render().length > SEARCH_HISTORY_CAP && guard < groups.length) {
-    const oldestFull = keep.findIndex((full, index) => full && index < Math.max(0, groups.length - 2));
-    if (oldestFull < 0) break;
-    keep[oldestFull] = false;
-    guard += 1;
-  }
-  let body = render();
-  while (body.length > SEARCH_HISTORY_CAP) {
-    const oldestLine = groups.findIndex((_, index) => !keep[index] && !dropped.has(index) && index < Math.max(0, groups.length - 2));
-    if (oldestLine < 0) break;
-    dropped.add(oldestLine);
-    body = render();
-  }
-  if (body.length > SEARCH_HISTORY_CAP) body = body.slice(body.length - SEARCH_HISTORY_CAP);
-  return `搜索树：${body}\n${SEARCH_HISTORY_RULE}`;
+  const nodes = view.nodeSummaries();
+  const summaries = groups.flatMap((group) => summaryLines(group.events, nodes));
+  const recent = groups.length === 0 ? null : groups[groups.length - 1];
+  let details = recent ? detailEntries(recent.events, nodes) : [];
+  const render = (): string => JSON.stringify({ summaries, details });
+  while (render().length > SEARCH_HISTORY_CAP && details.length > 0) details = details.slice(0, -1);
+  if (render().length > SEARCH_HISTORY_CAP) throw new Error("search tree history summaries exceed 24000");
+  return `搜索树：${render()}\n${SEARCH_HISTORY_RULE}`;
 }
 
 function groupHistory(events: readonly Record<string, unknown>[]): { readonly seq: number; readonly events: Record<string, unknown>[] }[] {
@@ -3888,20 +3870,149 @@ function groupHistory(events: readonly Record<string, unknown>[]): { readonly se
   return [...groups.values()].sort((left, right) => left.seq - right.seq);
 }
 
-function historyLine(events: readonly Record<string, unknown>[]): string {
-  const event = events.find((item) => item.kind === "round" || item.kind === "review") ?? {};
-  const knob = typeof event.knob === "string" && event.knob !== "" ? event.knob : "absent in source";
-  const reward = event.reward === undefined || event.reward === null ? "absent in source" : String(event.reward);
-  const accept = event.accept === true ? "accept" : event.accept === false ? "reject" : typeof event.accept === "string" ? event.accept : "absent in source";
-  const reason = typeof event.reason === "string" ? firstSentence(event.reason) : "absent in source";
-  return `${knob} reward=${reward} ${accept} ${reason}`;
+function summaryLines(events: readonly Record<string, unknown>[], nodes: readonly Record<string, unknown>[]): string[] {
+  const event = events.find((item) => item.kind === "round" || item.kind === "review");
+  if (!event) return [];
+  if (Array.isArray(event.candidates) && event.candidates.length > 0) {
+    return event.candidates.map((candidate) => {
+      const row = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Record<string, unknown> : {};
+      const id = typeof row.id === "string" && row.id !== "" ? row.id : "absent in source";
+      return formatSummary(event, id, row, nodes);
+    });
+  }
+  const id = typeof event.node === "string" && event.node !== "" ? event.node : "absent in source";
+  return [formatSummary(event, id, {}, nodes)];
 }
 
-function firstSentence(text: string): string {
-  const trimmed = text.trim();
-  const mark = trimmed.search(/[。.!？?]/);
-  const sentence = mark >= 0 ? trimmed.slice(0, mark + 1) : trimmed;
-  return sentence.length <= 180 ? sentence : sentence.slice(0, 180);
+function detailEntries(events: readonly Record<string, unknown>[], nodes: readonly Record<string, unknown>[]): unknown[] {
+  const event = events.find((item) => item.kind === "round" || item.kind === "review");
+  if (!event) return [];
+  const meta: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(event)) {
+    if (key === "patch" || key === "candidates") continue;
+    meta[key] = value;
+  }
+  const entries: unknown[] = [meta];
+  const ids = new Set<string>();
+  if (typeof event.node === "string" && event.node !== "") ids.add(event.node);
+  if (Array.isArray(event.candidates)) {
+    for (const candidate of event.candidates) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      entries.push(candidate);
+      const id = (candidate as Record<string, unknown>).id;
+      if (typeof id === "string" && id !== "") ids.add(id);
+    }
+  }
+  const related = nodes.filter((node) => typeof node.id === "string" && ids.has(node.id));
+  if (related.length > 0) entries.push({ nodes: related });
+  if (typeof event.patch === "string" && event.patch !== "") entries.push({ patch: event.patch });
+  return entries;
+}
+
+function formatSummary(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>, nodes: readonly Record<string, unknown>[]): string {
+  const code = codeField(event.ranker);
+  const parts = [
+    `round=${roundField(event)}`,
+    `id=${flattenField(id)}`,
+    `knob=${knobField(event, id, candidate, nodes)}`,
+    `critic=${criticField(event.critic, id)}`,
+    `ranker=${rankerField(event.ranker, id)}`,
+  ];
+  if (code !== "") parts.push(`code=${flattenField(code)}`);
+  parts.push(
+    `gates=${gatesField(event.gates)}`,
+    `reward=${rewardField(event.reward)}`,
+    `verdict=${verdictField(event.accept)}`,
+    `reason=${reasonField(event)}`,
+  );
+  return parts.join(" ");
+}
+
+function roundField(event: Record<string, unknown>): string {
+  if (typeof event.source === "string" && event.source !== "" && (typeof event.round === "number" || typeof event.round === "string")) {
+    return `${event.source}/${String(event.round)}`;
+  }
+  if (typeof event.group === "string" && event.group !== "") return event.group;
+  return "absent in source";
+}
+
+function knobField(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>, nodes: readonly Record<string, unknown>[]): string {
+  if (typeof candidate.summary === "string" && candidate.summary !== "") return flattenField(candidate.summary);
+  const node = nodes.find((item) => item.id === id);
+  if (node && typeof node.patchSummary === "string" && node.patchSummary !== "") return flattenField(node.patchSummary);
+  if (typeof event.knob === "string" && event.knob !== "") return flattenField(event.knob);
+  return "absent in source";
+}
+
+function slotKey(id: string): string {
+  const match = /(?:^|-)(c\d+)$/.exec(id);
+  return match?.[1] ?? "";
+}
+
+function criticField(critic: unknown, id: string): string {
+  if (!critic || typeof critic !== "object" || Array.isArray(critic)) return "absent in source";
+  const excluded = (critic as Record<string, unknown>).excluded;
+  if (!Array.isArray(excluded) || !excluded.every((item) => typeof item === "string")) return "absent in source";
+  const slot = slotKey(id);
+  if (excluded.includes(id) || (slot !== "" && excluded.includes(slot))) return "excluded";
+  return "kept";
+}
+
+function rankerField(ranker: unknown, id: string): string {
+  if (!ranker || typeof ranker !== "object" || Array.isArray(ranker)) return "absent in source";
+  const record = ranker as Record<string, unknown>;
+  const slot = slotKey(id);
+  if (typeof record.winnerId === "string" && record.winnerId !== "" && (record.winnerId === id || record.winnerId === slot)) return "chosen";
+  if (Array.isArray(record.order) && record.order.every((item) => typeof item === "string")) {
+    const index = record.order.findIndex((item) => item === id || item === slot);
+    if (index >= 0) return String(index + 1);
+  }
+  return "absent in source";
+}
+
+function codeField(ranker: unknown): string {
+  if (!ranker || typeof ranker !== "object" || Array.isArray(ranker)) return "";
+  const code = (ranker as Record<string, unknown>).codeWinner;
+  return typeof code === "string" && code !== "" ? code : "";
+}
+
+function gatesField(gates: unknown): string {
+  if (typeof gates === "string" && gates !== "") return flattenField(gates);
+  if (!Array.isArray(gates) || gates.length === 0) return "absent in source";
+  const parts: string[] = [];
+  for (const item of gates) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.id !== "string" || row.id === "") continue;
+    const pass = row.pass === true ? "pass" : row.pass === false ? "fail" : "absent in source";
+    let text = `${row.id}:${pass}`;
+    if (typeof row.code === "string" && row.code !== "") text += `:${flattenField(row.code)}`;
+    if (typeof row.reason === "string" && row.reason !== "") text += `:${flattenField(row.reason)}`;
+    parts.push(text);
+  }
+  return parts.length === 0 ? "absent in source" : parts.join(",");
+}
+
+function rewardField(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value !== "") return flattenField(value);
+  return "absent in source";
+}
+
+function verdictField(value: unknown): string {
+  if (value === true) return "accept";
+  if (value === false) return "reject";
+  if (typeof value === "string" && value !== "") return flattenField(value);
+  return "absent in source";
+}
+
+function reasonField(event: Record<string, unknown>): string {
+  if (typeof event.reason === "string" && event.reason !== "") return flattenField(event.reason);
+  return "absent in source";
+}
+
+function flattenField(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown; readonly searchHistory?: string }): string {

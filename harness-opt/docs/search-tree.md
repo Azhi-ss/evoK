@@ -12,17 +12,25 @@ N 及以后的轮次才用树。用到的都是原有函数：
 
 文件是 loop 输出目录里的 `search-tree.json`，旁边是 `campaign.json`。正文带 `nonce`、`outRel`、`searchTreeFromRound`、节点、事件、gate 日志，以及由节点 `patchSummary` 算出的 `tried`。签名不对、或 `tried` 和节点对不上，续跑和 `--carry-from` 都拒绝。源目录只读。`--carry-from` 在新循环也打开了从第 N 轮生效时，核对源文件后把节点带进新的签名文件。
 
-控制节点始终是 evaluated 的根，`GreedySelector.pick` 因此选得到父节点。reward 落在 `[0, 1]` 时写入 `devScores`。没有这样的 baseline reward 时，`configPath` 是 `control/config.json`，`devScores` 是 `[0]`。这个 0 不是测出来的 reward，只为了现有 selector 能选中它。
+控制节点始终是 evaluated 的根。reward 落在 `[0, 1]` 时写入 `devScores`，父节点走 `GreedySelector.pick`。没有这样的 baseline reward 时，`configPath` 是 `control/config.json`，`devScores` 是 `[0]`。这个 0 不是测出来的 reward。这时 `selectParent` 按 id 固定返回控制节点，不看 dev 分数的高低，所以导入进来的高分候选不能抢走根的位置。
 
-gap-finder 和 innovator 走原来塞「上一轮评语」的那条 prompt。历史块是角色事件和节点摘要。G0–G3 的 pass/fail（以及 code、reason）写在同一条 `log` 事件上，所以会出现在 prompt 里；`gate.jsonl` 仍另记一份。`roleView` 照旧不读 `gate.jsonl`，held-out 字段照旧被去掉。
+gap-finder 和 innovator 走原来塞「上一轮评语」的那条 prompt。历史块是每一轮每个候选的摘要行，加上最近一轮的详情。G0–G3 的 pass/fail（以及 code、reason）写在同一条 `log` 事件上，所以会出现在 prompt 里；`gate.jsonl` 仍另记一份。`roleView` 照旧不读 `gate.jsonl`，held-out 字段照旧被去掉。
 
 ## 截断
 
-这条只作用于搜索树历史块，不再用 trace 的 `trimLongString` 头尾截断。历史块最多 **12000** 字。超出时从最老的一轮开始，把该轮压成一行：knob、reward、accept/reject、一句 reason。最近两轮保留全文。压完仍超过 12000 时，先丢掉更老的一行，最后才从块的开头截到 12000。规则原文接在块后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
+这条只作用于搜索树历史块，不再用 trace 的 `trimLongString` 头尾截断，也不再把块从末尾切成 12000 字。历史块的 JSON 正文最多 **24000** 字。这是预注册的修正：上限写在本文，不新增 `pre-round1.json` 的签名字段。没打开搜索树时，预注册文件跟以前一样。
+
+两层。每一轮的每个候选各一行固定摘要，字段是 round、候选 id、旋钮改动、critic 排除或保留、ranker 选中或名次、G0–G3 过否和原因、reward、accept/reject，以及评语。这些行不丢。最近一轮另保留全文详情。超出 24000 时，先按整条丢掉最近一轮的详情，从最后一条开始。不从字符串中间截，不拆开 JSON，不丢摘要行。摘要行本身超过 24000 字就报错，不截断。规则原文接在 JSON 后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
 
 ## 导入
 
-`--search-tree-import <loopOut>` 可重复，只读。每一轮读入全部 innovator 候选（含 `no_conclusion` 这类无效候选，标成 invalid）、critic 的 `excluded`、ranker 的 `winnerId`、每个候选的 summary、G0–G3、accept/reject、评语（`reasonLabel` 为 `commentary`）和 reward。
+`--search-tree-import <loopOut>` 可重复，只读。每一轮读入全部 innovator 候选（含 `no_conclusion` 这类无效候选，标成 invalid）、critic 的 `excluded`、ranker 的 `winnerId`、每个候选的 summary、G0–G3（含原因）、accept/reject、评语（`reasonLabel` 为 `commentary`）和 reward。
+
+critic 的 `excluded` 以该轮 `ranker-input.json` 为准。空数组是「没有排除」，不是缺失。这份文件没有字符串数组时，才回落到 `sessions/critic.jsonl`。
+
+门的原因合并 closure 的 `gates` 和 `roles/reviewer-gate/state/nodes/gates.json`。同一 id 先留下已有的 pass，再补上缺失的 code 和 reason。源记录里的 reason 文本原样抄过来。
+
+候选补丁按该候选的真实目录名读。`roles/innovator-N/patch.json` 有 summary 时用它。否则读 `roles/innovator-N/candidates/<目录名>/patch.json`（跳过 `base`；只有一个目录时用它，多个目录时按补丁 id 或目录名对上 `cN`）。`candidates/nudge-early/patch.json` 就是这种真实目录名。round 级的 `candidates/<目录名>/patch.json` 只在补丁或目录名对得上该槽位时使用。
 
 accept 的权威来源按布局读，缺了不默认成 reject：
 
@@ -32,7 +40,7 @@ accept 的权威来源按布局读，缺了不默认成 reject：
 
 knob、门、评语按该目录里实际有的文件读：`candidates/gap.json`、`review-input.json`、`state/nodes/gates.json`、closure 的 `gates` / `reviewReason`、reviewer 会话。源里真没有的字段写成 `absent in source`，不猜。
 
-父子关系看配置字节，不把三次运行串成一条链。一轮的父节点是 `baseline/config.json` 对得上的那个已有节点。round2 的 baseline 是 round1 当时用的配置，所以 round2 的候选挂在 round1 的那个候选下面。round3 的 baseline 是 control，所以它的候选和 round1 的候选都挂在控制根上，彼此是兄弟。对不上任何别人的配置时，父节点也是控制根。每一轮自己的候选（含无效的）都是该轮父节点的子节点。本仓库不自带那三份运行目录，只有传入路径才导入。
+父子关系看配置字节，不把三次运行串成一条链。一轮的父节点是 `baseline/config.json` 对得上的那个已有节点。这三份真实目录的 baseline 字节都和各自的 control 相同，而 control 登记在控制根上，所以 18 个候选都是控制根的子节点，彼此是兄弟。对不上任何别人的配置时，父节点也是控制根。每一轮自己的候选（含无效的）都是该轮父节点的子节点。accept 会把 baseline 覆盖成胜出候选；和本轮自己的候选撞上时忽略这次匹配，退回控制根。本仓库不自带那三份运行目录，只有传入路径才导入。
 
 ## 现有模块里没有、因此没有新造的
 

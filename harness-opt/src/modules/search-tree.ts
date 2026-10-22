@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { attestationJsonMacOk, signedAttestationJson } from "./attestation";
 import { appendContained } from "../containment";
 import { Lineage, Node, type NodeJson } from "../lineage";
@@ -92,10 +92,10 @@ export function openLineage(dir: string, snapshot: SearchTreeBody | null): Linea
 }
 
 /**
- * Control node, always evaluated, so `GreedySelector.pick` has a parent.
- * A reward in [0, 1] is stored. Without one, `devScores` is [0] because the
- * existing selector only picks an evaluated node that has a mean. That 0 is
- * not a measured reward.
+ * Control node, always evaluated, so a parent exists.
+ * A reward in [0, 1] is stored. Without one, `devScores` is [0]. That 0 is
+ * not a measured reward and is not what selects the parent: `selectParent`
+ * returns this node by id when the baseline reward is missing.
  */
 export function ensureRoot(lin: Lineage, reward: number | null): string {
   const existing = [...lin.nodes.values()].find((node) => node.parentId === null);
@@ -121,6 +121,19 @@ export function importIdPrefix(dir: string): string {
 
 export function pickParent(lin: Lineage): Node {
   return getSelector(DEFAULT_SELECTOR_ID).pick(lin);
+}
+
+/**
+ * With a measured baseline reward, the parent is `GreedySelector.pick`.
+ * With none, the parent is the control node (`id` `root`). That choice does
+ * not depend on dev-score order, so an imported candidate with a higher
+ * mean cannot take the root's place.
+ */
+export function selectParent(lin: Lineage, baselineReward: number | null): Node {
+  if (unitReward(baselineReward) !== null) return pickParent(lin);
+  const root = [...lin.nodes.values()].find((node) => node.id === "root" && node.parentId === null);
+  if (!root) throw new Error("lineage has no root node");
+  return root;
 }
 
 /** Selected parent's children. Same expression as `orchestrator.ts`. */
@@ -409,17 +422,61 @@ function publicGate(value: unknown): Record<string, unknown> | null {
   if (typeof source.id !== "string" || typeof source.pass !== "boolean") return null;
   const row: Record<string, unknown> = { id: source.id, pass: source.pass };
   if (typeof source.code === "string" && source.code !== "") row.code = source.code;
-  if (typeof source.reason === "string" && source.reason !== "") row.reason = source.reason;
+  const reason = gateReason(source);
+  if (reason !== "") row.reason = reason;
   return row;
 }
 
+function gateReason(source: Record<string, unknown>): string {
+  const direct = reasonText(source.reason);
+  if (direct !== "") return direct;
+  const extras = Object.entries(source).filter(([key, value]) => {
+    if (key === "id" || key === "pass" || key === "code") return false;
+    return typeof value === "string" && value !== "";
+  });
+  const named = extras.find(([key]) => key.toLowerCase().includes("reason"));
+  if (named && typeof named[1] === "string") return named[1];
+  if (extras.length === 1 && typeof extras[0]?.[1] === "string") return extras[0][1];
+  return "";
+}
+
+function reasonText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const record = value as Record<string, unknown>;
+  for (const key of ["text", "message", "reason"]) {
+    if (typeof record[key] === "string" && record[key] !== "") return record[key];
+  }
+  return "";
+}
+
 function readGates(closure: Record<string, unknown> | null, roundDir: string): Record<string, unknown>[] | typeof ABSENT {
-  const fromClosure = publicGates(Array.isArray(closure?.gates) ? closure.gates : undefined);
-  if (fromClosure !== ABSENT) return fromClosure;
-  const file = join(roundDir, "roles", "reviewer-gate", "state", "nodes", "gates.json");
-  const record = readRecord(file);
-  if (record && Array.isArray(record.gates)) return publicGates(record.gates);
-  return ABSENT;
+  const merged = new Map<string, Record<string, unknown>>();
+  const absorb = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const item of value) {
+      const row = publicGate(item);
+      if (!row || typeof row.id !== "string") continue;
+      const existing = merged.get(row.id);
+      if (!existing) {
+        merged.set(row.id, row);
+        continue;
+      }
+      if (existing.code === undefined && row.code !== undefined) existing.code = row.code;
+      if (existing.reason === undefined && row.reason !== undefined) existing.reason = row.reason;
+    }
+  };
+  absorb(closure?.gates);
+  const record = readRecord(join(roundDir, "roles", "reviewer-gate", "state", "nodes", "gates.json"));
+  if (record) absorb(record.gates);
+  if (record?.reasons && typeof record.reasons === "object" && !Array.isArray(record.reasons)) {
+    for (const [id, reason] of Object.entries(record.reasons as Record<string, unknown>)) {
+      if (typeof reason !== "string" || reason === "") continue;
+      const row = merged.get(id);
+      if (row && row.reason === undefined) row.reason = reason;
+    }
+  }
+  return merged.size === 0 ? ABSENT : [...merged.values()];
 }
 
 function readKnob(roundDir: string, loop: Record<string, unknown> | null, round: number): string {
@@ -463,6 +520,10 @@ function readAccept(closure: Record<string, unknown> | null, loop: Record<string
 }
 
 function readCritic(roundDir: string): { readonly excluded: readonly string[] } | typeof ABSENT {
+  const input = readRecord(join(roundDir, "ranker-input.json"));
+  if (input && Array.isArray(input.excluded) && input.excluded.every((id) => typeof id === "string")) {
+    return { excluded: input.excluded as string[] };
+  }
   for (const text of assistantTexts(join(roundDir, "sessions", "critic.jsonl"))) {
     const parsed = jsonObject(text);
     if (parsed && Array.isArray(parsed.excluded) && parsed.excluded.every((id) => typeof id === "string")) {
@@ -525,16 +586,15 @@ function readCandidates(
     const key = `c${slot}`;
     const reason = invalid.get(key) ?? "";
     const marked = reason !== "";
-    const configFile = join(roundDir, "roles", `innovator-${slot}`, "config.json");
-    const summary = candidateSummary(roundDir, slot, marked, reason);
+    const found = candidateSummary(roundDir, slot, marked, reason);
+    const summary = found.summary;
+    const configFile = found.configFile;
     const winner = named !== "" ? key === named : !marked && slot === (winnerSlot ? Number(winnerSlot) : 0);
     const scored = winner && accept === true && score !== null;
     const node = new Node({
       id,
       parentId: "root",
-      configPath: winner && existsSync(join(roundDir, "candidate", "config.json"))
-        ? `round${round}/candidate/config.json`
-        : `round${round}/roles/innovator-${slot}/config.json`,
+      configPath: configLabel(round, slot, configFile, roundDir, winner && existsSync(join(roundDir, "candidate", "config.json"))),
       patchSummary: summary,
       status: marked ? "failed" : scored ? "evaluated" : accept === false && winner ? "rejected" : "pending",
       ...(scored ? { devScores: [score] } : {}),
@@ -545,23 +605,70 @@ function readCandidates(
       invalid: marked,
       invalidReason: reason,
       winner,
-      configFile: existsSync(configFile) ? configFile : "",
+      configFile,
     });
   }
   return out;
 }
 
-function candidateSummary(roundDir: string, slot: number, invalid: boolean, reason: string): string {
-  const patch = readRecord(join(roundDir, "roles", `innovator-${slot}`, "patch.json"));
-  const written = stringField(patch, "summary");
-  if (written !== "") return invalid ? `${written} invalid ${reason}` : written;
+function configLabel(round: number, slot: number, configFile: string, roundDir: string, winnerConfig: boolean): string {
+  if (winnerConfig) return `round${round}/candidate/config.json`;
+  if (configFile !== "") {
+    const rel = relative(roundDir, configFile).split("\\").join("/");
+    if (rel !== "" && !rel.startsWith("..")) return `round${round}/${rel}`;
+  }
+  return `round${round}/roles/innovator-${slot}/config.json`;
+}
+
+function candidateSummary(roundDir: string, slot: number, invalid: boolean, reason: string): { summary: string; configFile: string } {
+  const located = locateCandidatePatch(roundDir, slot);
+  const decorate = (summary: string): string => (invalid ? `${summary} invalid ${reason}` : summary);
+  if (located.summary !== "") return { summary: decorate(located.summary), configFile: located.configFile };
   for (const text of assistantTexts(join(roundDir, "sessions", `innovator-${slot}.jsonl`))) {
     const parsed = jsonObject(text);
     const summary = parsed && typeof parsed.summary === "string" ? parsed.summary : !parsed ? text.trim() : "";
-    if (summary !== "" && summary !== "innovator") return invalid ? `${summary} invalid ${reason}` : summary;
+    if (summary !== "" && summary !== "innovator") return { summary: decorate(summary), configFile: located.configFile };
   }
-  if (invalid) return `invalid ${reason}`;
-  return ABSENT;
+  if (invalid) return { summary: `invalid ${reason}`, configFile: located.configFile };
+  return { summary: ABSENT, configFile: located.configFile };
+}
+
+/** Role `patch.json` wins. Otherwise the innovator's real `candidates/<dir>/patch.json`. */
+function locateCandidatePatch(roundDir: string, slot: number): { summary: string; configFile: string } {
+  const roleDir = join(roundDir, "roles", `innovator-${slot}`);
+  const topSummary = stringField(readRecord(join(roleDir, "patch.json")), "summary");
+  const roleConfig = join(roleDir, "config.json");
+  if (topSummary !== "") return { summary: topSummary, configFile: existsSync(roleConfig) ? roleConfig : "" };
+  const named = namedPatch(join(roleDir, "candidates"), slot, false);
+  if (named) return named;
+  const shared = namedPatch(join(roundDir, "candidates"), slot, true);
+  if (shared) return shared;
+  return { summary: "", configFile: existsSync(roleConfig) ? roleConfig : "" };
+}
+
+function namedPatch(dir: string, slot: number, requireMatch: boolean): { summary: string; configFile: string } | null {
+  if (!existsSync(dir)) return null;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const hits: { summary: string; configFile: string; matched: boolean }[] = [];
+  for (const name of names.sort()) {
+    if (name === "base") continue;
+    const patch = readRecord(join(dir, name, "patch.json"));
+    const summary = stringField(patch, "summary");
+    if (summary === "") continue;
+    const label = stringField(patch, "id") || stringField(patch, "candidateId") || stringField(patch, "slot");
+    const matched = label === `c${slot}` || label === `innovator-${slot}` || name === `c${slot}` || name === `innovator-${slot}`;
+    const config = join(dir, name, "config.json");
+    hits.push({ summary, configFile: existsSync(config) ? config : "", matched });
+  }
+  const matched = hits.find((hit) => hit.matched);
+  if (matched) return { summary: matched.summary, configFile: matched.configFile };
+  if (!requireMatch && hits.length === 1) return { summary: hits[0]?.summary ?? "", configFile: hits[0]?.configFile ?? "" };
+  return null;
 }
 
 function invalidById(closure: Record<string, unknown> | null, loop: Record<string, unknown> | null, round: number): Map<string, string> {
