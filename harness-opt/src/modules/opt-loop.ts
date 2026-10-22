@@ -659,7 +659,7 @@ function round0IsFile(path: string): boolean {
 }
 
 const CAMPAIGN_FILE = "campaign.json";
-/** Signed `{round, nonce, outRel}` next to the round the campaign closes. */
+/** Signed `{round, nonce, outRel, prev}` for every round. `prev` is the prior hmac. */
 const CAMPAIGN_LEDGER = "campaign-ledger.json";
 
 interface CampaignDisk {
@@ -676,7 +676,7 @@ interface CampaignDisk {
   outRel: string;
   /** Round number this campaign closes. It has to match the latest round directory. */
   round: number;
-  /** Nonce also stored in that round's signed attestation, when one exists, and in the campaign ledger. */
+  /** Nonce stored in this out dir's signed pre-round1, each round ledger, and any scored attestation. */
   nonce: string;
   /** Absent on a campaign written before this field existed. */
   baselineEffective?: Record<string, unknown> | null;
@@ -789,13 +789,26 @@ function plainRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
-function writeCampaignLedger(out: string, round: number, nonce: string, outRel: string, key: Buffer): void {
-  const dir = join(out, `round${round}`);
-  mkdirSync(dir, { recursive: true });
-  writeText(join(dir, CAMPAIGN_LEDGER), signedAttestationJson(key, { round, nonce, outRel }));
+interface CampaignLedger {
+  readonly round: number;
+  readonly nonce: string;
+  readonly outRel: string;
+  readonly prev: string;
+  readonly mac: string;
 }
 
-function readCampaignLedger(out: string, round: number, key: Buffer): { readonly round: number; readonly nonce: string; readonly outRel: string } | null {
+/** Write one link. `prev` is the hmac of pre-round1, or of the previous round's ledger. Returns this link's hmac. */
+function writeCampaignLedger(out: string, round: number, nonce: string, outRel: string, prev: string, key: Buffer): string {
+  const dir = join(out, `round${round}`);
+  mkdirSync(dir, { recursive: true });
+  const text = signedAttestationJson(key, { round, nonce, outRel, prev });
+  writeText(join(dir, CAMPAIGN_LEDGER), text);
+  const mac = (JSON.parse(text) as { hmacSha256?: unknown }).hmacSha256;
+  if (typeof mac !== "string" || mac === "") throw new Error("resume campaign binding rejected");
+  return mac;
+}
+
+function readCampaignLedger(out: string, round: number, key: Buffer): CampaignLedger | null {
   const file = join(out, `round${round}`, CAMPAIGN_LEDGER);
   if (!isRegularFile(file)) return null;
   let text: string;
@@ -806,57 +819,142 @@ function readCampaignLedger(out: string, round: number, key: Buffer): { readonly
   }
   if (!attestationJsonMacOk(key, text)) return null;
   try {
-    const parsed = JSON.parse(text) as { round?: unknown; nonce?: unknown; outRel?: unknown };
-    if (parsed.round !== round || typeof parsed.nonce !== "string" || typeof parsed.outRel !== "string") return null;
-    return { round, nonce: parsed.nonce, outRel: parsed.outRel };
+    const parsed = JSON.parse(text) as { round?: unknown; nonce?: unknown; outRel?: unknown; prev?: unknown; hmacSha256?: unknown };
+    if (parsed.round !== round || typeof parsed.nonce !== "string" || typeof parsed.outRel !== "string" || typeof parsed.prev !== "string" || parsed.prev === "") return null;
+    if (typeof parsed.hmacSha256 !== "string" || parsed.hmacSha256 === "") return null;
+    return { round, nonce: parsed.nonce, outRel: parsed.outRel, prev: parsed.prev, mac: parsed.hmacSha256 };
   } catch {
     return null;
   }
 }
 
-/** `run.nonce` from a signed attestation. A missing file is null. A bad mac is a binding failure. */
-function attestationNonce(attestDir: string, key: Buffer): string | null {
-  const file = join(attestDir, "attestation.json");
-  if (!isRegularFile(file)) return null;
+function campaignNonceOf(signed: Record<string, unknown>): string | null {
+  const nonce = signed.campaignNonce;
+  return typeof nonce === "string" && nonce !== "" ? nonce : null;
+}
+
+function macOf(signed: Record<string, unknown>): string {
+  const mac = signed.hmacSha256;
+  if (typeof mac !== "string" || !/^[0-9a-f]{64}$/.test(mac)) throw new Error("resume campaign binding rejected");
+  return mac;
+}
+
+/** Re-sign a copied pre-round1 in the destination only, adding the campaign nonce. The source file stays as read. */
+function resignPreRound1(pre: Record<string, unknown>, nonce: string, key: Buffer): { readonly text: string; readonly signed: Record<string, unknown> } {
+  const body: Record<string, unknown> = { ...pre, campaignNonce: nonce };
+  delete body.hmacSha256;
+  const text = signedAttestationJson(key, body);
+  return { text, signed: JSON.parse(text) as Record<string, unknown> };
+}
+
+/**
+ * Ledgers in a new out dir, chained to that dir's pre-round1 hmac.
+ * Round 1's `prev` is the pre-round1 hmac. Each later round's `prev` is the previous ledger hmac.
+ */
+function rewriteCampaignChain(dest: string, throughRound: number, nonce: string, outRel: string, preMac: string, key: Buffer): string {
+  let prev = preMac;
+  for (let round = 1; round <= throughRound; round += 1) {
+    prev = writeCampaignLedger(dest, round, nonce, outRel, prev, key);
+  }
+  return prev;
+}
+
+function walkNamed(root: string, fileName: string, found: string[]): void {
+  let linked;
+  try {
+    linked = lstatSync(root);
+  } catch {
+    return;
+  }
+  if (linked.isSymbolicLink()) return;
+  if (linked.isDirectory()) {
+    let names: string[];
+    try {
+      names = readdirSync(root);
+    } catch {
+      return;
+    }
+    for (const name of names) walkNamed(join(root, name), fileName, found);
+    return;
+  }
+  if (linked.isFile() && basename(root) === fileName) found.push(root);
+}
+
+function readSignedJson(file: string): { readonly text: string; readonly parsed: Record<string, unknown> | null } {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch {
-    throw new Error("resume campaign binding rejected");
+    throw new Error("resume campaign signature rejected");
   }
-  if (!attestationJsonMacOk(key, text)) throw new Error("resume campaign binding rejected");
   try {
-    const parsed = JSON.parse(text) as { run?: { nonce?: unknown } };
-    const nonce = parsed.run?.nonce;
-    return typeof nonce === "string" && nonce !== "" ? nonce : null;
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { text, parsed: null };
+    return { text, parsed: parsed as Record<string, unknown> };
   } catch {
-    throw new Error("resume campaign binding rejected");
+    return { text, parsed: null };
   }
 }
 
 /**
- * The campaign nonce is the scored run's attestation nonce when that file exists.
- * Otherwise the host issues one and the campaign ledger is the signed record.
+ * New layout is signed. A campaign ledger, or a campaign nonce on pre-round1 or an attestation,
+ * means campaign.json is required. A file that claims one and fails its mac is not an old layout.
  */
-function issuedCampaignNonce(attestRoot: string, round: number, taskId: string, key: Buffer): string {
-  const fromAttest = attestationNonce(join(attestRoot, `round${round}`, taskId, "seed0", "candidate"), key);
-  if (fromAttest) return fromAttest;
-  return claimNonce(attestRoot);
+function signedCampaignMentioned(source: string, attestSource: string, key: Buffer): boolean {
+  let mentioned = false;
+  const ledgers: string[] = [];
+  walkNamed(source, CAMPAIGN_LEDGER, ledgers);
+  for (const file of ledgers) {
+    const { text } = readSignedJson(file);
+    if (!attestationJsonMacOk(key, text)) throw new Error("resume campaign signature rejected");
+    mentioned = true;
+  }
+  const preFile = join(source, "pre-round1.json");
+  if (isRegularFile(preFile)) {
+    const { text, parsed } = readSignedJson(preFile);
+    if (parsed && typeof parsed.campaignNonce === "string") {
+      if (!attestationJsonMacOk(key, text) || parsed.campaignNonce === "") throw new Error("resume campaign signature rejected");
+      mentioned = true;
+    }
+  }
+  const attests: string[] = [];
+  walkNamed(source, "attestation.json", attests);
+  walkNamed(attestSource, "attestation.json", attests);
+  for (const file of attests) {
+    const { text, parsed } = readSignedJson(file);
+    if (!parsed || typeof parsed.campaignNonce !== "string") continue;
+    if (!attestationJsonMacOk(key, text) || parsed.campaignNonce === "") throw new Error("resume campaign signature rejected");
+    mentioned = true;
+  }
+  return mentioned;
 }
 
 /**
- * Same key is not enough. The signed out-dir basename, round, and nonce have to match
- * this directory's latest round and the nonce in its attestation or campaign ledger.
+ * The campaign nonce lives in this out dir's pre-round1. Every round's ledger chains to it
+ * by prev mac, scored or not. A scored attestation in this attest root has to carry the same nonce.
+ * Copying campaign.json and the ledgers without this dir's pre-round1 does not verify.
  */
 function assertCampaignBound(source: string, disk: CampaignDisk, key: Buffer, attestSource: string, taskId: string): void {
   const latest = roundNumbers(source).at(-1);
   if (disk.outRel !== campaignOutRel(source) || disk.round !== latest) throw new Error("resume campaign binding rejected");
-  const ledger = readCampaignLedger(source, disk.round, key);
-  if (!ledger || ledger.nonce !== disk.nonce || ledger.outRel !== disk.outRel || ledger.round !== disk.round) {
-    throw new Error("resume campaign binding rejected");
+  const preFile = join(source, "pre-round1.json");
+  if (!isRegularFile(preFile)) throw new Error("resume campaign binding rejected");
+  const { text, parsed } = readSignedJson(preFile);
+  if (!parsed || !attestationJsonMacOk(key, text)) throw new Error("resume campaign binding rejected");
+  if (campaignNonceOf(parsed) !== disk.nonce) throw new Error("resume campaign binding rejected");
+  let prev = macOf(parsed);
+  for (let round = 1; round <= disk.round; round += 1) {
+    const ledger = readCampaignLedger(source, round, key);
+    if (!ledger || ledger.prev !== prev || ledger.nonce !== disk.nonce || ledger.outRel !== disk.outRel || ledger.round !== round) {
+      throw new Error("resume campaign binding rejected");
+    }
+    prev = ledger.mac;
+    const attest = join(attestSource, `round${round}`, taskId, "seed0", "candidate", "attestation.json");
+    if (!isRegularFile(attest)) continue;
+    const signed = readSignedJson(attest);
+    if (!signed.parsed || !attestationJsonMacOk(key, signed.text)) throw new Error("resume campaign binding rejected");
+    if (signed.parsed.campaignNonce !== disk.nonce) throw new Error("resume campaign binding rejected");
   }
-  const signedNonce = attestationNonce(join(attestSource, `round${disk.round}`, taskId, "seed0", "candidate"), key);
-  if (signedNonce !== null && signedNonce !== disk.nonce) throw new Error("resume campaign binding rejected");
 }
 
 function priorRoundSummaries(out: string, nextRound: number): OptLoopResult["rounds"][number][] {
@@ -1156,7 +1254,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   const rounds = roundNumbers(source);
   if (rounds.length === 0) throw new Error("resume found no completed round");
   const campaignPath = join(source, CAMPAIGN_FILE);
-  if (!isRegularFile(campaignPath) && isRegularFile(join(source, RELAY_LOG_ROOT_FILE))) {
+  if (!isRegularFile(campaignPath) && signedCampaignMentioned(source, sourceAttest, key)) {
     throw new Error("resume campaign.json is missing");
   }
   const disk = isRegularFile(campaignPath) ? readCampaign(source, key) : null;
@@ -1265,12 +1363,29 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const round0Pin = resume ? null : requireRound0(options.round0TracePath, options.round0TraceSha);
   let preRound1: Record<string, unknown>;
   let round0: { readonly hostCopyPath: string; readonly srcSha256: string } | null = null;
+  let campaignNonce = "";
+  let chainPrev = "";
+  const outRel = campaignOutRel(options.out);
   if (resume) {
     const signed = join(resume.source, "pre-round1.json");
     if (!existsSync(signed)) throw new Error("resume needs pre-round1.json");
     const signedBytes = readFileSync(signed);
     preRound1 = JSON.parse(signedBytes.toString("utf8")) as Record<string, unknown>;
     writeFileSync(join(options.out, "pre-round1.json"), signedBytes);
+    const carriedNonce = campaignNonceOf(preRound1);
+    const carriedMac = typeof preRound1.hmacSha256 === "string" ? preRound1.hmacSha256 : "";
+    // The signed chain follows the round directories, not a spiked completedRounds counter.
+    const chainThrough = roundNumbers(resume.source).at(-1) ?? 0;
+    if (carriedNonce && carriedMac !== "") {
+      campaignNonce = carriedNonce;
+      chainPrev = rewriteCampaignChain(options.out, chainThrough, campaignNonce, outRel, carriedMac, attestKey);
+    } else {
+      campaignNonce = claimNonce(options.attestRoot);
+      const resigned = resignPreRound1(preRound1, campaignNonce, attestKey);
+      preRound1 = resigned.signed;
+      writeFileSync(join(options.out, "pre-round1.json"), resigned.text);
+      chainPrev = rewriteCampaignChain(options.out, chainThrough, campaignNonce, outRel, macOf(preRound1), attestKey);
+    }
   } else if (round0Pin) {
     const round0Copy = {
       srcPath: round0Pin.path,
@@ -1279,8 +1394,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         ? { hostCopyPath: join(options.attestRoot, "private", "round0-trace.jsonl") }
         : {}),
     };
-    preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy);
+    campaignNonce = claimNonce(options.attestRoot);
+    preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy, campaignNonce);
     writeJson(join(options.out, "pre-round1.json"), preRound1);
+    chainPrev = macOf(preRound1);
     const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
     if (signedRound0 && typeof signedRound0.hostCopyPath === "string" && signedRound0.hostCopyPath !== "" && typeof signedRound0.srcSha256 === "string") {
       round0 = { hostCopyPath: signedRound0.hostCopyPath, srcSha256: signedRound0.srcSha256 };
@@ -2077,6 +2194,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         runDir: join(options.out, `round${round}`, "runs", task.id, `seed${seed}`, "candidate"),
         model,
         tokenCap: tokenCap(task),
+        campaignNonce,
       }, hostFor(options, attestKey, `round${round}`, task.id, `seed${seed}`, "candidate"), threshold, scoreHost));
       realRunWallS += Math.max(0, (now().getTime() - seedMs) / 1000);
       if (runs[runs.length - 1]?.unscoredReason === "attest_mismatch" || runs[runs.length - 1]?.unscoredReason === "relay_log_missing" || runs[runs.length - 1]?.unscoredReason === "relay_log_empty") {
@@ -2424,6 +2542,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       const message = error instanceof Error ? error.message : String(error);
       stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) }, pendingReview);
       break;
+    } finally {
+      chainPrev = writeCampaignLedger(options.out, round, campaignNonce, outRel, chainPrev, attestKey);
     }
   }
 
@@ -2448,12 +2568,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
-  const outRel = campaignOutRel(options.out);
   const boundRound = completedRounds;
-  const campaignNonce = boundRound >= 1
-    ? issuedCampaignNonce(options.attestRoot, boundRound, task.id, attestKey)
-    : claimNonce(options.attestRoot);
-  if (boundRound >= 1) writeCampaignLedger(options.out, boundRound, campaignNonce, outRel, attestKey);
   writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),
@@ -3250,6 +3365,7 @@ export function realRunCommand(harnessPin: string = DEFAULT_HARNESS_PIN): readon
     "--attest-dir", "{attestDir}",
     "--out", "{outDir}",
     "--nonce", "{nonce}",
+    "--campaign-nonce", "{campaignNonce}",
   ];
 }
 

@@ -34,6 +34,8 @@ export interface OptRunRequest {
   readonly runId?: string;
   /** One-time nonce bound into the attestation. */
   readonly nonce?: string;
+  /** Campaign nonce from pre-round1. Signed separately from the run nonce. */
+  readonly campaignNonce?: string;
   /** Host directory for the relay log of this run. Outside every mount. */
   readonly relayLogRoot?: string;
   readonly model: string;
@@ -100,6 +102,7 @@ const PLACEHOLDERS = [
   "outDir",
   "runId",
   "nonce",
+  "campaignNonce",
   "relayLog",
   "attestDir",
   "harness",
@@ -282,6 +285,7 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
     runDir: runPath,
     runId,
     ...(request.nonce ? { nonce: request.nonce } : {}),
+    ...(request.campaignNonce ? { campaignNonce: request.campaignNonce } : {}),
     runPath,
     at: attest.at ?? "2026-10-21T00:00:00+09:00",
   };
@@ -410,6 +414,10 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!request.nonce || request.nonce.trim() === "") throw new Error("executor command needs a nonce for {nonce}");
     return request.nonce;
   }
+  if (name === "campaignNonce") {
+    if (!request.campaignNonce || request.campaignNonce.trim() === "") throw new Error("executor command needs a campaign nonce for {campaignNonce}");
+    return request.campaignNonce;
+  }
   if (name === "relayLog") {
     if (!request.relayLogRoot || !request.runId) throw new Error("executor command needs a relay log for {relayLog}");
     return join(request.relayLogRoot, request.runId, "relay.jsonl");
@@ -418,7 +426,7 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!request.outDir || request.outDir.trim() === "") throw new Error("executor command needs an out dir for {outDir}");
     return request.outDir;
   }
-  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId" | "nonce" | "relayLog" | "outDir">, string> = {
+  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId" | "nonce" | "campaignNonce" | "relayLog" | "outDir">, string> = {
     task: request.task.id,
     taskPath: request.task.path,
     seed: String(request.seed),

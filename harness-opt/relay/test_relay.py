@@ -1349,6 +1349,17 @@ class LoopModeCase(unittest.TestCase):
         self.assertEqual(signed["critic"], {"tools": ["read"]})
         self.assertEqual(signed["seedSha"], hashlib.sha256(seed).hexdigest())
         self.assertTrue(loop_mode.verify_pre_round1(signed, key))
+        chained = loop_mode.pre_round1_sign(
+            key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+            round0_path=round0_path, round0_sha=round0_sha, campaign_nonce="ab" * 16,
+        )
+        self.assertEqual(chained["campaignNonce"], "ab" * 16)
+        self.assertTrue(loop_mode.verify_pre_round1(chained, key))
+        with self.assertRaises(ValueError):
+            loop_mode.pre_round1_sign(
+                key, seed=seed, ranker={"tools": ["read"]}, critic={"tools": ["read"]},
+                round0_path=round0_path, round0_sha=round0_sha, campaign_nonce="nope",
+            )
         with self.assertRaises(ValueError):
             loop_mode.pre_round1_sign(key, seed=seed, ranker={}, critic={}, round_started=True)
 

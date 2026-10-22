@@ -1020,6 +1020,7 @@ describe("optimization loop", () => {
       harnessPath: fx.harnessPath,
       runId: "ab".repeat(16),
       nonce: "cd".repeat(16),
+      campaignNonce: "ef".repeat(16),
       relayLogRoot: join(fx.root, "relay"),
       outDir: fx.out,
       model: OPT_MODEL,
@@ -5421,12 +5422,15 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const parsed = JSON.parse(saved) as { outRel: string; round: number; nonce: string };
     expect(parsed.outRel).toBe("out");
     expect(parsed.round).toBe(1);
-    const ledger = JSON.parse(readFileSync(join(fx.out, "round1", "campaign-ledger.json"), "utf8")) as { nonce: string; outRel: string; round: number };
+    const ledger = JSON.parse(readFileSync(join(fx.out, "round1", "campaign-ledger.json"), "utf8")) as { nonce: string; outRel: string; round: number; prev: string };
+    const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { campaignNonce?: string; hmacSha256?: string };
+    expect(pre.campaignNonce).toBe(parsed.nonce);
     expect(ledger.nonce).toBe(parsed.nonce);
     expect(ledger.outRel).toBe(parsed.outRel);
     expect(ledger.round).toBe(parsed.round);
-    const attest = JSON.parse(readFileSync(join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate", "attestation.json"), "utf8")) as { run?: { nonce?: string } };
-    expect(attest.run?.nonce).toBe(parsed.nonce);
+    expect(ledger.prev).toBe(pre.hmacSha256);
+    const attest = JSON.parse(readFileSync(join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate", "attestation.json"), "utf8")) as { campaignNonce?: string };
+    expect(attest.campaignNonce).toBe(parsed.nonce);
     const resume = (name: string, from: string) => runOptLoop({
       ...hostOpts(fx),
       out: join(fx.root, name),
@@ -5451,6 +5455,86 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     await expect(resume("out-rel", fx.out)).rejects.toThrow("resume campaign binding rejected");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
     writeFileSync(join(fx.out, "campaign.json"), saved);
+  });
+
+  test("deleting campaign.json and relay-log-root.json on a new-layout run is a hard error", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const saved = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { readOnlyWallS: number; consecutiveNoAccept: number };
+    expect(saved.readOnlyWallS).not.toBe(0);
+    unlinkSync(join(fx.out, "campaign.json"));
+    unlinkSync(join(fx.out, "relay-log-root.json"));
+    expect(existsSync(join(fx.out, "round1", "campaign-ledger.json"))).toBe(true);
+    const dest = join(fx.root, "out-deleted-both");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: dest,
+      attestRoot: attestWrite(fx, "attest-deleted-both"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume campaign.json is missing");
+    expect(existsSync(join(dest, "campaign.json"))).toBe(false);
+    expect(existsSync(join(dest, "round2"))).toBe(false);
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("a copied campaign.json and ledger with the same basename is rejected", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+    });
+    const sourcePre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { campaignNonce: string; hmacSha256: string };
+    const sourceLedger = JSON.parse(readFileSync(join(fx.out, "round1", "campaign-ledger.json"), "utf8")) as { prev: string; nonce: string };
+    expect(sourceLedger.prev).toBe(sourcePre.hmacSha256);
+    expect(sourceLedger.nonce).toBe(sourcePre.campaignNonce);
+    expect(existsSync(join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate", "attestation.json"))).toBe(false);
+    const body = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as Record<string, unknown>;
+    delete body.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, completedRounds: 3 }));
+    const victim = join(fx.root, "same-name", "out");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: victim,
+      attestRoot: attestWrite(fx, "attest-victim"),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+    });
+    const victimPre = JSON.parse(readFileSync(join(victim, "pre-round1.json"), "utf8")) as { campaignNonce: string };
+    expect(victimPre.campaignNonce).not.toBe(sourcePre.campaignNonce);
+    cpSync(join(fx.out, "campaign.json"), join(victim, "campaign.json"));
+    cpSync(join(fx.out, "round1", "campaign-ledger.json"), join(victim, "round1", "campaign-ledger.json"));
+    const resume = (name: string, from: string, attest: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, name),
+      attestRoot: attestWrite(fx, `attest-${name}`),
+      attestSource: attest,
+      mode: "dry-run",
+      resumeFrom: from,
+      stopBeforeRun: true,
+    });
+    await expect(resume("out-swap", victim, join(fx.root, "attest-victim"))).rejects.toThrow("resume campaign binding rejected");
+    expect(existsSync(join(fx.root, "out-swap", "campaign.json"))).toBe(false);
+    const fresh = join(fx.root, "pure", "out");
+    mkdirSync(join(fresh, "round1"), { recursive: true });
+    cpSync(join(fx.out, "campaign.json"), join(fresh, "campaign.json"));
+    cpSync(join(fx.out, "round1", "campaign-ledger.json"), join(fresh, "round1", "campaign-ledger.json"));
+    await expect(resume("out-pure", fresh, attestWrite(fx, "attest-pure"))).rejects.toThrow("resume campaign binding rejected");
+    expect(existsSync(join(fx.root, "out-pure", "round2"))).toBe(false);
+    expect(existsSync(join(victim, "round2"))).toBe(false);
   });
 
   test("a fresh loop carries round-2 signed tokens without resume", async () => {
@@ -6314,6 +6398,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       },
     });
     unlinkSync(join(fx.out, "campaign.json"));
+    const prePath = join(fx.out, "pre-round1.json");
+    const preBody = JSON.parse(readFileSync(prePath, "utf8")) as Record<string, unknown>;
+    delete preBody.campaignNonce;
+    delete preBody.hmacSha256;
+    writeFileSync(prePath, signedAttestationJson(fx.key, preBody));
+    unlinkSync(join(fx.out, "round1", "campaign-ledger.json"));
     const candidate = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
     const signedRun = JSON.parse(readFileSync(join(candidate, "result.json"), "utf8")) as { runId: string };
     writeHostAttestation({

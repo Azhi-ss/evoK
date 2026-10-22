@@ -105,7 +105,7 @@ def gate_rule_sha() -> str:
     return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
 
 
-def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=()) -> dict:
+def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None, round0_sha=None, round_started: bool = False, round0_src=None, host_copy_path=None, mounts=(), campaign_nonce=None) -> dict:
     """Sign the caps, an inert seedSha, and round0Record before round 1.
 
     round0_path and round0_sha are required. There is no built-in trace.
@@ -144,6 +144,12 @@ def pre_round1_sign(key: bytes, *, seed: bytes, ranker, critic, round0_path=None
         "critic": critic,
         **CAPS,
     }
+    # Campaign nonce is part of this out dir's signed root. A later campaign.json
+    # has to match it. Omitting the field keeps a pre-campaign signature valid.
+    if campaign_nonce is not None:
+        if not isinstance(campaign_nonce, str) or len(campaign_nonce) != 32 or any(char not in "0123456789abcdef" for char in campaign_nonce):
+            raise ValueError("campaignNonce")
+        body["campaignNonce"] = campaign_nonce
     return {**body, "hmacSha256": _mac(body, key)}
 
 
@@ -407,6 +413,7 @@ def main(argv=None) -> None:
             round0_src=payload.get("round0Src"),
             host_copy_path=payload.get("hostCopyPath"),
             mounts=payload.get("mounts") or (),
+            campaign_nonce=payload.get("campaignNonce"),
         )
         json.dump(signed, sys.stdout)
         return

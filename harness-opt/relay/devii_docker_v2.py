@@ -456,7 +456,7 @@ def _relative_out_path(out_dir, target):
         raise OnceError("attestation run path escapes the out dir")
     return posix
 
-def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta):
+def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta, campaign_nonce=None):
     """Host attestation outside the run dir. HMAC bytes match canon.canonical.
 
     A regular `<run>/task-copy/trace.jsonl` is hashed when once left one.
@@ -483,6 +483,10 @@ def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta
         "resultSha": _file_sha(run_dir/"result.json"),
         "run": meta,
     }
+    if isinstance(campaign_nonce, str) and campaign_nonce != "":
+        if len(campaign_nonce) != 32 or any(char not in "0123456789abcdef" for char in campaign_nonce):
+            raise OnceError("campaignNonce")
+        body["campaignNonce"] = campaign_nonce
     if not isinstance(body["mountedHarnessSha"], str) or not isinstance(body["mountedConfigSha"], str):
         raise OnceError("attestation sha")
     signed={**body, "hmacSha256": hmac_sha(key, canon.canonical(body))}
@@ -592,7 +596,7 @@ def _clear_orphan_container(name, docker, log):
     log.flush()
     return cid
 
-def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, out_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None, harness_pin=None):
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, out_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None, harness_pin=None, campaign_nonce=None):
     """One task, one seed, one arm. The host owns the run id and the relay open/close.
 
     `external` means a relay is already listening and has this run open. This process
@@ -637,7 +641,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
     try:
         if external:
             if not log_path.is_file():
-                return _once_unscored(run, resolved, seed, arm, run_id, root, harness_sha, cap, "usage_missing", attest_dir, nonce, harness, config_path, out_dir)
+                return _once_unscored(run, resolved, seed, arm, run_id, root, harness_sha, cap, "usage_missing", attest_dir, nonce, harness, config_path, out_dir, campaign_nonce)
         else:
             if relay is None:
                 relay=_standalone_relay(root, port)
@@ -809,7 +813,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
             write_run_attestation(
                 attest_dir, run, key=_attest_key(), harness=harness, config=config_path,
                 reward=recorded.get("reward") if recorded.get("score_status")=="scored" else None,
-                meta=meta,
+                meta=meta, campaign_nonce=campaign_nonce,
             )
         return recorded
     finally:
@@ -826,7 +830,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
         if lock_fd is not None:
             release_run_lock(lock_fd)
 
-def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason, attest_dir, nonce, harness, config, out_dir):
+def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason, attest_dir, nonce, harness, config, out_dir, campaign_nonce=None):
     run=Path(run)
     res={"task":task,"seed":seed,"arm":arm,"exit":reason,"wall_s":0,"timed_out":False,"token_killed":True,"tokens":0,"tokens_used":0,"token_cap":cap,"mountedHarnessSha":harness_sha,"score_status":"unscored","reward":None,"unscored_reason":reason,"checker_exit":"skipped_token_cap","net":"devii-004-int"}
     for name in ("workspace","verifier"):
@@ -838,7 +842,7 @@ def _once_unscored(run, task, seed, arm, run_id, root, harness_sha, cap, reason,
         meta={"arm":arm,"at":datetime.now(timezone.utc).isoformat(),"exit":reason,"runDir":run_rel,"runId":run_id,"runPath":run_rel,"score_status":"unscored","seed":seed,"task":task,"tokens":0}
         if isinstance(nonce, str) and nonce!="":
             meta["nonce"]=nonce
-        write_run_attestation(attest_dir, run, key=_attest_key(), harness=harness, config=config, reward=None, meta=meta)
+        write_run_attestation(attest_dir, run, key=_attest_key(), harness=harness, config=config, reward=None, meta=meta, campaign_nonce=campaign_nonce)
     return recorded
 
 def once_from_flags(argv, **deps):
@@ -875,7 +879,7 @@ def once_from_flags(argv, **deps):
         model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
         attest_dir=flags.get("attest-dir"), out_dir=flags.get("out"), nonce=flags.get("nonce"),
         reconcile=bool(flags.get("reconcile")), expected_task=flags.get("expected-task"),
-        harness_pin=flags.get("harness-sha"), **deps,
+        harness_pin=flags.get("harness-sha"), campaign_nonce=flags.get("campaign-nonce"), **deps,
     )
 
 def main():

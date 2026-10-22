@@ -44,6 +44,8 @@ export interface AttestRunMeta {
   readonly at: string;
   /** One-time host nonce. Present only when the loop issued one. */
   readonly nonce?: string;
+  /** Campaign nonce from this out dir's signed pre-round1. Not the run nonce. */
+  readonly campaignNonce?: string;
 }
 
 export interface HostAttestationWrite {
@@ -404,6 +406,7 @@ function attestBody(input: HostAttestationWrite): JsonNode {
   const layout = attestLayout(runAbs);
   const pairs: (readonly [string, JsonNode])[] = [
     [ATTEST_FIELDS.schema, { t: "str", v: ATTEST_SCHEMA }],
+    ...(input.meta.campaignNonce ? [["campaignNonce", { t: "str", v: input.meta.campaignNonce }] as const] : []),
     [ATTEST_FIELDS.harness, { t: "str", v: sha256File(input.harnessPath) }],
     [ATTEST_FIELDS.config, { t: "str", v: sha256File(input.configPath) }],
     [ATTEST_FIELDS.trace, shaNode(fileShaOrNull(layout.trace))],
