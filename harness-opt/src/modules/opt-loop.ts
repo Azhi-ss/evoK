@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, relayRequestsActive, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -319,6 +319,12 @@ export interface OptLoopOptions {
   readonly stopBeforeRun?: boolean;
   /** Per-role output cap override. Absent roles use `ROLE_OUTPUT_CAPS`, then the documented model max. */
   readonly roleMaxTokens?: Partial<Record<OptRoleName, number>>;
+  /**
+   * Host file of campaign nonces and resume heads. Outside every out dir.
+   * Absent uses `<attest root>/campaign-registry.jsonl`: the source attest root on resume,
+   * otherwise the write attest root.
+   */
+  readonly campaignRegistry?: string;
   /** Test seam. Absent waits `ROLE_RETRY_DELAYS_MS`. */
   readonly roleRetrySleep?: (ms: number) => Promise<void>;
 }
@@ -661,6 +667,11 @@ function round0IsFile(path: string): boolean {
 const CAMPAIGN_FILE = "campaign.json";
 /** Signed `{round, nonce, outRel, prev}` for every round. `prev` is the prior hmac. */
 const CAMPAIGN_LEDGER = "campaign-ledger.json";
+/**
+ * Append-only HMAC chain of `{nonce, head, prev}` outside the out dir.
+ * `head` is the campaign chain tip a resume must present. `prev` is the previous line's hmac.
+ */
+const CAMPAIGN_REGISTRY = "campaign-registry.jsonl";
 
 interface CampaignDisk {
   completedRounds: number;
@@ -708,6 +719,8 @@ interface ResumeState {
   readonly accepted: AcceptedCandidate | null;
   readonly baselineEffective: Record<string, unknown> | null;
   readonly previousEffective: Record<string, unknown> | null;
+  /** Last campaign-ledger hmac. Null on an old layout that has no campaign chain. */
+  readonly campaignTip: string | null;
 }
 
 class ResumeTraceError extends Error {
@@ -797,15 +810,23 @@ interface CampaignLedger {
   readonly mac: string;
 }
 
-/** Write one link. `prev` is the hmac of pre-round1, or of the previous round's ledger. Returns this link's hmac. */
-function writeCampaignLedger(out: string, round: number, nonce: string, outRel: string, prev: string, key: Buffer): string {
-  const dir = join(out, `round${round}`);
-  mkdirSync(dir, { recursive: true });
-  const text = signedAttestationJson(key, { round, nonce, outRel, prev });
-  writeText(join(dir, CAMPAIGN_LEDGER), text);
+/** One ledger link. `prev` is the hmac of pre-round1, or of the previous round's ledger. */
+function signCampaignLedger(round: number, nonce: string, outRel: string, prev: string, key: Buffer, link?: string): { readonly text: string; readonly mac: string } {
+  const body: Record<string, unknown> = { round, nonce, outRel, prev };
+  if (link !== undefined) body.link = link;
+  const text = signedAttestationJson(key, body);
   const mac = (JSON.parse(text) as { hmacSha256?: unknown }).hmacSha256;
   if (typeof mac !== "string" || mac === "") throw new Error("resume campaign binding rejected");
-  return mac;
+  return { text, mac };
+}
+
+/** Write one link. `prev` is the hmac of pre-round1, or of the previous round's ledger. Returns this link's hmac. */
+function writeCampaignLedger(out: string, round: number, nonce: string, outRel: string, prev: string, key: Buffer, link?: string): string {
+  const signed = signCampaignLedger(round, nonce, outRel, prev, key, link);
+  const dir = join(out, `round${round}`);
+  mkdirSync(dir, { recursive: true });
+  writeText(join(dir, CAMPAIGN_LEDGER), signed.text);
+  return signed.mac;
 }
 
 function readCampaignLedger(out: string, round: number, key: Buffer): CampaignLedger | null {
@@ -857,6 +878,170 @@ function rewriteCampaignChain(dest: string, throughRound: number, nonce: string,
     prev = writeCampaignLedger(dest, round, nonce, outRel, prev, key);
   }
   return prev;
+}
+
+/**
+ * Ledgers for a resume, held in memory. The last link includes `link` (the registry line mac
+ * that currently authorizes this tip) so the new tip differs from a byte-for-byte copy.
+ */
+function planCampaignChain(throughRound: number, nonce: string, outRel: string, preMac: string, key: Buffer, link: string): { readonly mac: string; readonly writes: { readonly round: number; readonly text: string }[] } {
+  let prev = preMac;
+  const writes: { round: number; text: string }[] = [];
+  for (let round = 1; round <= throughRound; round += 1) {
+    const signed = signCampaignLedger(round, nonce, outRel, prev, key, round === throughRound ? link : undefined);
+    writes.push({ round, text: signed.text });
+    prev = signed.mac;
+  }
+  return { mac: prev, writes };
+}
+
+function writePlannedLedgers(out: string, writes: readonly { readonly round: number; readonly text: string }[]): void {
+  for (const write of writes) {
+    const dir = join(out, `round${write.round}`);
+    mkdirSync(dir, { recursive: true });
+    writeText(join(dir, CAMPAIGN_LEDGER), write.text);
+  }
+}
+
+interface RegistryLine {
+  readonly nonce: string;
+  readonly head: string;
+  readonly prev: string;
+  readonly mac: string;
+}
+
+function assertRegistryOutside(file: string, dirs: readonly string[]): void {
+  const registry = resolve(file);
+  for (const dir of dirs) {
+    if (dir.trim() === "") continue;
+    if (insideOrEqual(registry, dir)) throw new Error("campaign registry must be outside the loop output directory");
+  }
+}
+
+function readRegistryText(file: string): string | null {
+  if (!existsSync(file)) return null;
+  if (!isRegularFile(file)) throw new Error("resume campaign registry rejected");
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    throw new Error("resume campaign registry rejected");
+  }
+}
+
+/** Verify the append-only chain. A bad mac or a broken prev link is rejected. */
+function parseRegistry(text: string, key: Buffer): RegistryLine[] {
+  const rows: RegistryLine[] = [];
+  let prevMac = "";
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    if (!attestationJsonMacOk(key, line)) throw new Error("resume campaign registry rejected");
+    let parsed: { nonce?: unknown; head?: unknown; prev?: unknown; hmacSha256?: unknown };
+    try {
+      parsed = JSON.parse(line) as { nonce?: unknown; head?: unknown; prev?: unknown; hmacSha256?: unknown };
+    } catch {
+      throw new Error("resume campaign registry rejected");
+    }
+    if (typeof parsed.nonce !== "string" || !/^[0-9a-f]{32}$/.test(parsed.nonce)) throw new Error("resume campaign registry rejected");
+    if (typeof parsed.head !== "string" || !/^[0-9a-f]{64}$/.test(parsed.head)) throw new Error("resume campaign registry rejected");
+    if (typeof parsed.prev !== "string" || parsed.prev !== prevMac) throw new Error("resume campaign registry rejected");
+    if (typeof parsed.hmacSha256 !== "string" || !/^[0-9a-f]{64}$/.test(parsed.hmacSha256)) throw new Error("resume campaign registry rejected");
+    rows.push({ nonce: parsed.nonce, head: parsed.head, prev: parsed.prev, mac: parsed.hmacSha256 });
+    prevMac = parsed.hmacSha256;
+  }
+  return rows;
+}
+
+/** Mac of the registry line that currently authorizes `expectedHead` for this nonce. */
+function registryAuthorizingMac(file: string, nonce: string, expectedHead: string, key: Buffer): string {
+  const text = readRegistryText(file);
+  if (text === null) throw new Error("resume campaign registry is missing");
+  const current = [...parseRegistry(text, key)].reverse().find((row) => row.nonce === nonce);
+  if (!current) throw new Error("resume campaign registry is missing");
+  if (current.head !== expectedHead) throw new Error("resume campaign already advanced");
+  return current.mac;
+}
+
+const REGISTRY_CAS_PY = [
+  "import hashlib, json, os, sys, fcntl",
+  "req = json.load(sys.stdin)",
+  "path = req['path']",
+  "expected = req['sha256']",
+  "line = req['line'].encode()",
+  "flags = os.O_RDWR | os.O_CREAT",
+  "if hasattr(os, 'O_NOFOLLOW'):",
+  "    flags |= os.O_NOFOLLOW",
+  "fd = os.open(path, flags, 0o644)",
+  "try:",
+  "    fcntl.flock(fd, fcntl.LOCK_EX)",
+  "    os.lseek(fd, 0, os.SEEK_SET)",
+  "    chunks = []",
+  "    while True:",
+  "        block = os.read(fd, 1048576)",
+  "        if not block:",
+  "            break",
+  "        chunks.append(block)",
+  "    current = b''.join(chunks)",
+  "    if hashlib.sha256(current).hexdigest() != expected:",
+  "        sys.stdout.write('mismatch\\n')",
+  "    else:",
+  "        os.lseek(fd, 0, os.SEEK_END)",
+  "        written = os.write(fd, line)",
+  "        os.fsync(fd)",
+  "        sys.stdout.write('ok\\n' if written == len(line) else 'mismatch\\n')",
+  "finally:",
+  "    try:",
+  "        fcntl.flock(fd, fcntl.LOCK_UN)",
+  "    except OSError:",
+  "        pass",
+  "    os.close(fd)",
+].join("\n");
+
+/** Append `line` only while the file bytes are still `expected` sha. The lock is held across the compare and the write. */
+function casAppendLine(file: string, line: string): boolean {
+  mkdirSync(dirname(file), { recursive: true });
+  const current = existsSync(file) && isRegularFile(file) ? readFileSync(file) : Buffer.alloc(0);
+  const proc = spawnSync("python3", ["-c", REGISTRY_CAS_PY], {
+    input: JSON.stringify({ path: resolve(file), sha256: sha256(current), line }),
+    encoding: "utf8",
+  });
+  if (proc.status !== 0) throw new Error("resume campaign registry rejected");
+  return proc.stdout.trim() === "ok";
+}
+
+function mirrorCampaignRegistry(canonical: string, attestRoot: string): void {
+  const dest = join(attestRoot, CAMPAIGN_REGISTRY);
+  if (resolve(canonical) === resolve(dest)) return;
+  mkdirSync(attestRoot, { recursive: true });
+  const tmp = join(attestRoot, `.${CAMPAIGN_REGISTRY}.${randomBytes(4).toString("hex")}`);
+  copyFileSync(canonical, tmp);
+  renameSync(tmp, dest);
+}
+
+/**
+ * Compare-and-swap the nonce's head.
+ * `expectedHead` null opens a new nonce. A present nonce whose head differs is `resume campaign already advanced`.
+ */
+function appendRegistryRecord(file: string, nonce: string, expectedHead: string | null, newHead: string, key: Buffer, mirrorDir: string | null): void {
+  if (expectedHead !== null && newHead === expectedHead) throw new Error("resume campaign binding rejected");
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const text = readRegistryText(file);
+    if (text === null && expectedHead !== null) throw new Error("resume campaign registry is missing");
+    const lines = text === null ? [] : parseRegistry(text, key);
+    const current = [...lines].reverse().find((row) => row.nonce === nonce) ?? null;
+    if (expectedHead === null) {
+      if (current) throw new Error("nonce already used");
+    } else if (!current) {
+      throw new Error("resume campaign registry is missing");
+    } else if (current.head !== expectedHead) {
+      throw new Error("resume campaign already advanced");
+    }
+    const prev = lines.at(-1)?.mac ?? "";
+    const line = `${JSON.stringify(JSON.parse(signedAttestationJson(key, { nonce, head: newHead, prev })))}\n`;
+    if (!casAppendLine(file, line)) continue;
+    if (mirrorDir) mirrorCampaignRegistry(file, mirrorDir);
+    return;
+  }
+  throw new Error("resume campaign already advanced");
 }
 
 function walkNamed(root: string, fileName: string, found: string[]): void {
@@ -934,7 +1119,7 @@ function signedCampaignMentioned(source: string, attestSource: string, key: Buff
  * by prev mac, scored or not. A scored attestation in this attest root has to carry the same nonce.
  * Copying campaign.json and the ledgers without this dir's pre-round1 does not verify.
  */
-function assertCampaignBound(source: string, disk: CampaignDisk, key: Buffer, attestSource: string, taskId: string): void {
+function assertCampaignBound(source: string, disk: CampaignDisk, key: Buffer, attestSource: string, taskId: string): string {
   const latest = roundNumbers(source).at(-1);
   if (disk.outRel !== campaignOutRel(source) || disk.round !== latest) throw new Error("resume campaign binding rejected");
   const preFile = join(source, "pre-round1.json");
@@ -955,6 +1140,7 @@ function assertCampaignBound(source: string, disk: CampaignDisk, key: Buffer, at
     if (!signed.parsed || !attestationJsonMacOk(key, signed.text)) throw new Error("resume campaign binding rejected");
     if (signed.parsed.campaignNonce !== disk.nonce) throw new Error("resume campaign binding rejected");
   }
+  return prev;
 }
 
 function priorRoundSummaries(out: string, nextRound: number): OptLoopResult["rounds"][number][] {
@@ -1258,7 +1444,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
     throw new Error("resume campaign.json is missing");
   }
   const disk = isRegularFile(campaignPath) ? readCampaign(source, key) : null;
-  if (disk) assertCampaignBound(source, disk, key, sourceAttest, task.id);
+  const campaignTip = disk ? assertCampaignBound(source, disk, key, sourceAttest, task.id) : null;
   const completedRounds = disk?.completedRounds ?? rounds[rounds.length - 1] ?? 0;
   if (completedRounds < 1) throw new Error("resume found no completed round");
   const gapRound = disk?.gapRound ?? latestRunRound(source, task.id, rounds);
@@ -1313,6 +1499,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
       ? disk.baselineEffective ?? null
       : readRunEdges(gap.path).effective,
     previousEffective: readRunEdges(gap.path).effective,
+    campaignTip,
   };
 }
 
@@ -1366,25 +1553,44 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let campaignNonce = "";
   let chainPrev = "";
   const outRel = campaignOutRel(options.out);
+  const explicitRegistry = options.campaignRegistry?.trim() ?? "";
+  let registryFile = explicitRegistry !== "" ? explicitRegistry : join(options.attestRoot, CAMPAIGN_REGISTRY);
+  let registryMirror: string | null = null;
   if (resume) {
     const signed = join(resume.source, "pre-round1.json");
     if (!existsSync(signed)) throw new Error("resume needs pre-round1.json");
     const signedBytes = readFileSync(signed);
     preRound1 = JSON.parse(signedBytes.toString("utf8")) as Record<string, unknown>;
-    writeFileSync(join(options.out, "pre-round1.json"), signedBytes);
     const carriedNonce = campaignNonceOf(preRound1);
     const carriedMac = typeof preRound1.hmacSha256 === "string" ? preRound1.hmacSha256 : "";
     // The signed chain follows the round directories, not a spiked completedRounds counter.
     const chainThrough = roundNumbers(resume.source).at(-1) ?? 0;
     if (carriedNonce && carriedMac !== "") {
+      if (resume.campaignTip === null) throw new Error("resume campaign binding rejected");
       campaignNonce = carriedNonce;
-      chainPrev = rewriteCampaignChain(options.out, chainThrough, campaignNonce, outRel, carriedMac, attestKey);
+      const sourceAttest = options.attestSource;
+      if (!sourceAttest || sourceAttest.trim() === "") throw new Error("resume needs a source attest directory");
+      if (explicitRegistry === "") {
+        registryFile = join(sourceAttest, CAMPAIGN_REGISTRY);
+        registryMirror = options.attestRoot;
+      }
+      assertRegistryOutside(registryFile, [options.out, resume.source]);
+      const link = registryAuthorizingMac(registryFile, campaignNonce, resume.campaignTip, attestKey);
+      const planned = planCampaignChain(chainThrough, campaignNonce, outRel, carriedMac, attestKey, link);
+      appendRegistryRecord(registryFile, campaignNonce, resume.campaignTip, planned.mac, attestKey, registryMirror);
+      writeFileSync(join(options.out, "pre-round1.json"), signedBytes);
+      writePlannedLedgers(options.out, planned.writes);
+      chainPrev = planned.mac;
     } else {
       campaignNonce = claimNonce(options.attestRoot);
       const resigned = resignPreRound1(preRound1, campaignNonce, attestKey);
       preRound1 = resigned.signed;
       writeFileSync(join(options.out, "pre-round1.json"), resigned.text);
       chainPrev = rewriteCampaignChain(options.out, chainThrough, campaignNonce, outRel, macOf(preRound1), attestKey);
+      registryFile = explicitRegistry !== "" ? explicitRegistry : join(options.attestRoot, CAMPAIGN_REGISTRY);
+      registryMirror = null;
+      assertRegistryOutside(registryFile, [options.out, resume.source]);
+      appendRegistryRecord(registryFile, campaignNonce, null, chainPrev, attestKey, null);
     }
   } else if (round0Pin) {
     const round0Copy = {
@@ -1398,6 +1604,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     preRound1 = signPreRound1(options.attestKeyFile, { tools: ["read"] }, { tools: ["read"] }, round0Copy, campaignNonce);
     writeJson(join(options.out, "pre-round1.json"), preRound1);
     chainPrev = macOf(preRound1);
+    assertRegistryOutside(registryFile, [options.out]);
+    appendRegistryRecord(registryFile, campaignNonce, null, chainPrev, attestKey, null);
     const signedRound0 = preRound1.round0Record as { srcPath?: string; srcSha256?: string; hostCopyPath?: string } | undefined;
     if (signedRound0 && typeof signedRound0.hostCopyPath === "string" && signedRound0.hostCopyPath !== "" && typeof signedRound0.srcSha256 === "string") {
       round0 = { hostCopyPath: signedRound0.hostCopyPath, srcSha256: signedRound0.srcSha256 };
@@ -2543,7 +2751,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       stopLoop("internal_error", { role: "round", exitCode: null, stderrTail: stderrTail(message) }, pendingReview);
       break;
     } finally {
-      chainPrev = writeCampaignLedger(options.out, round, campaignNonce, outRel, chainPrev, attestKey);
+      const signed = signCampaignLedger(round, campaignNonce, outRel, chainPrev, attestKey);
+      appendRegistryRecord(registryFile, campaignNonce, chainPrev, signed.mac, attestKey, registryMirror);
+      const dir = join(options.out, `round${round}`);
+      mkdirSync(dir, { recursive: true });
+      writeText(join(dir, CAMPAIGN_LEDGER), signed.text);
+      chainPrev = signed.mac;
     }
   }
 

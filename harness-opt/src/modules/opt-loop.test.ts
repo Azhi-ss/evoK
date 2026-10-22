@@ -122,6 +122,19 @@ function attestWrite(fx: Fixture, name: string): string {
   return dir;
 }
 
+async function runScoredRound(fx: Fixture, extra: Partial<OptLoopOptions> = {}): Promise<void> {
+  const citing = citingRoles(fx.key, fx.attestRoot);
+  await runOptLoop({
+    ...hostOpts(fx),
+    mode: "dry-run",
+    rounds: 1,
+    executor: fakeExecutor(fx).executor,
+    roles: citing,
+    ...extra,
+  });
+  mirrorTaskCopy(join(extra.out ?? fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+}
+
 function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "harnessPin" | "controlAttests" | "controlConfigPath" | "env" | "task" | "round0TracePath" | "round0TraceSha"> {
   return {
     out: fx.out,
@@ -5226,6 +5239,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(campaign.readOnlyTokens).toBe(1_000);
     expect(campaign.gapRound).toBe(1);
 
+    const registryPath = join(fx.attestRoot, "campaign-registry.jsonl");
+    const registrySaved = readFileSync(registryPath);
     const spike = async (patch: Record<string, number>, reason: string): Promise<void> => {
       const body = JSON.parse(saved) as Record<string, unknown>;
       delete body.hmacSha256;
@@ -5246,6 +5261,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       expect(existsSync(join(fx.out, "round2"))).toBe(false);
       expect(existsSync(join(spikeOut, "round2"))).toBe(false);
       writeFileSync(join(fx.out, "campaign.json"), saved);
+      // Each spike is a separate cap check of the same head. Rewind the host registry between them.
+      writeFileSync(registryPath, registrySaved);
     };
     await spike({ realRunWallS: 103 * 3600 }, "realRunWallCap");
     await spike({ readOnlyWallS: 48 * 3600 }, "readOnlyWallCap");
@@ -5535,6 +5552,129 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     await expect(resume("out-pure", fresh, attestWrite(fx, "attest-pure"))).rejects.toThrow("resume campaign binding rejected");
     expect(existsSync(join(fx.root, "out-pure", "round2"))).toBe(false);
     expect(existsSync(join(victim, "round2"))).toBe(false);
+  });
+
+  test("a pure same-basename copy is rejected after the original advances", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runScoredRound(fx);
+    const copied = join(fx.root, "fork", "out");
+    cpSync(fx.out, copied, { recursive: true });
+    const advanced = await runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-advanced"),
+      attestRoot: attestWrite(fx, "attest-advanced"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(advanced.rounds.map((round) => round.round)).toEqual([1, 2]);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-copy"),
+      attestRoot: attestWrite(fx, "attest-copy"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: copied,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume campaign already advanced");
+    expect(existsSync(join(fx.root, "out-copy", "round2"))).toBe(false);
+    expect(existsSync(join(copied, "round2"))).toBe(false);
+  });
+
+  test("a double resume from the same head is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    const registry = join(fx.root, "host-campaign-registry.jsonl");
+    await runScoredRound(fx, { campaignRegistry: registry });
+    expect(existsSync(registry)).toBe(true);
+    expect(existsSync(join(fx.attestRoot, "campaign-registry.jsonl"))).toBe(false);
+    const resume = (name: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, name),
+      attestRoot: attestWrite(fx, `attest-${name}`),
+      attestSource: fx.attestRoot,
+      campaignRegistry: registry,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const first = await resume("out-first");
+    expect(first.rounds.map((round) => round.round)).toEqual([1, 2]);
+    await expect(resume("out-second")).rejects.toThrow("resume campaign already advanced");
+    expect(existsSync(join(fx.root, "out-second", "round2"))).toBe(false);
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("a tampered registry is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runScoredRound(fx);
+    const registry = join(fx.attestRoot, "campaign-registry.jsonl");
+    const saved = readFileSync(registry);
+    const resume = () => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-registry"),
+      attestRoot: attestWrite(fx, "attest-registry"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    unlinkSync(registry);
+    await expect(resume()).rejects.toThrow("resume campaign registry is missing");
+    writeFileSync(registry, saved);
+    const flipped = Buffer.from(saved);
+    flipped[flipped.length - 2] = flipped[flipped.length - 2] === 0x30 ? 0x31 : 0x30;
+    writeFileSync(registry, flipped);
+    await expect(resume()).rejects.toThrow("resume campaign registry rejected");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+  });
+
+  test("the original still resumes", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runScoredRound(fx);
+    const copied = join(fx.root, "fork", "out");
+    cpSync(fx.out, copied, { recursive: true });
+    const continuedAttest = attestWrite(fx, "attest-original");
+    const continued = await runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-original"),
+      attestRoot: continuedAttest,
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(continued.rounds.map((round) => round.round)).toEqual([1, 2]);
+    const again = await runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-original-2"),
+      attestRoot: attestWrite(fx, "attest-original-2"),
+      attestSource: continuedAttest,
+      mode: "dry-run",
+      resumeFrom: join(fx.root, "out-original"),
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(again.rounds.map((round) => round.round)).toEqual([1, 2, 3]);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-fork"),
+      attestRoot: attestWrite(fx, "attest-fork"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: copied,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume campaign already advanced");
   });
 
   test("a fresh loop carries round-2 signed tokens without resume", async () => {
@@ -6637,6 +6777,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
   });
 });
 
+/** Source proofs and relay logs. The campaign registry is the host append log resume is allowed to extend. */
 function stampTree(root: string): string[] {
   const rows: string[] = [];
   const stack = [root];
@@ -6644,6 +6785,7 @@ function stampTree(root: string): string[] {
     const dir = stack.pop();
     if (!dir) continue;
     for (const name of readdirSync(dir)) {
+      if (name === "campaign-registry.jsonl") continue;
       const path = join(dir, name);
       const linked = lstatSync(path, { bigint: true });
       if (linked.isSymbolicLink()) continue;
