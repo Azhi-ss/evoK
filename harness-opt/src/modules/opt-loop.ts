@@ -280,6 +280,7 @@ export interface OptLoopOptions {
    * on the signed campaign. Repeatable. A directory already in this carry chain is rejected,
    * including the source relay-log root and a byte-identical copy of a counted log.
    * Each counted usage field has to be a finite integer >= 0, and so does every VOID total.
+   * A line counts only when prompt, completion, and cache are finite, >= 0, and cache <= prompt.
    */
   readonly voidSpend?: readonly string[];
   /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
@@ -1430,6 +1431,7 @@ function carriedVoidEntries(options: OptLoopOptions, key: Buffer): readonly Void
  * That includes the carry source's relay-log root, earlier relay-log dirs on the chain, and a
  * byte-identical copy of a VOID entry or of those logs. Comparison is realpath and log sha.
  * A 2xx `done` is not required. A truncated line still counts when its usage object is complete.
+ * A line counts only when prompt, completion, and cache are finite, >= 0, and cache <= prompt.
  * A row with no weighable usage adds nothing.
  */
 function collectVoidSpend(dirs: readonly string[], prior: readonly VoidLedgerEntry[], chainLogs: readonly CountedRelayLog[]): VoidLedgerEntry[] {
@@ -1594,6 +1596,7 @@ function relayLogsUnder(dir: string): { readonly rel: string; readonly abs: stri
 /**
  * Usage objects the text actually contains. Missing fields are not treated as zero.
  * A counted field that is not a finite integer >= 0 rejects the directory.
+ * A line counts only when prompt, completion, and cache are finite, >= 0, and cache <= prompt.
  */
 function shownLogTokens(text: string): number {
   let total = 0;
@@ -1603,13 +1606,29 @@ function shownLogTokens(text: string): number {
     const usage = usageOnLine(trimmed);
     if (usage === undefined) continue;
     assertCountedUsage(usage);
-    const weighed = weightUsage(usage);
-    if (weighed === null) continue;
+    const counted = countedUsageNumbers(usage);
+    if (!counted) continue;
+    const weighed = (counted.prompt - counted.cache) + counted.completion + counted.cache;
     if (!Number.isSafeInteger(weighed) || weighed < 0) throw new Error("void-spend tokens");
     total += weighed;
   }
   if (!Number.isSafeInteger(total) || total < 0) throw new Error("void-spend tokens");
   return total;
+}
+
+/** Prompt, completion, and cache are finite, >= 0, and cache does not exceed prompt. */
+function countedUsageNumbers(usage: unknown): { readonly prompt: number; readonly completion: number; readonly cache: number } | null {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+  const row = usage as { prompt_tokens?: unknown; completion_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown }; prompt_cache_hit_tokens?: unknown };
+  const cache = row.prompt_tokens_details && typeof row.prompt_tokens_details === "object" && "cached_tokens" in row.prompt_tokens_details
+    ? row.prompt_tokens_details.cached_tokens
+    : row.prompt_cache_hit_tokens;
+  const prompt = row.prompt_tokens;
+  const completion = row.completion_tokens;
+  if (typeof cache !== "number" || typeof prompt !== "number" || typeof completion !== "number") return null;
+  if (!Number.isFinite(cache) || !Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+  if (cache < 0 || prompt < 0 || completion < 0 || cache > prompt) return null;
+  return { prompt, completion, cache };
 }
 
 /** The line's usage object. `undefined` means the line has no weighable usage. A `NaN` token rejects. */
@@ -4956,16 +4975,9 @@ function preserveAttemptSession(canonical: string, attempt: number): string {
 }
 
 function weightUsage(usage: unknown): number | null {
-  if (!usage || typeof usage !== "object") return null;
-  const row = usage as { prompt_tokens?: unknown; completion_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown }; prompt_cache_hit_tokens?: unknown };
-  const cache = row.prompt_tokens_details && typeof row.prompt_tokens_details === "object" && "cached_tokens" in row.prompt_tokens_details
-    ? row.prompt_tokens_details.cached_tokens
-    : row.prompt_cache_hit_tokens;
-  const prompt = row.prompt_tokens;
-  const completion = row.completion_tokens;
-  if (typeof cache !== "number" || typeof prompt !== "number" || typeof completion !== "number") return null;
-  if (!Number.isFinite(cache) || !Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
-  return (prompt - cache) + completion + cache;
+  const counted = countedUsageNumbers(usage);
+  if (!counted) return null;
+  return (counted.prompt - counted.cache) + counted.completion + counted.cache;
 }
 
 /** 2xx done usage of this process's role logs. Executor logs stay out of the 30M ledger. */

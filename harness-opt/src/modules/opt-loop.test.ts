@@ -6229,6 +6229,49 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(out)).toBe(false);
   });
 
+  test("a usage line with cache above prompt is not counted", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const sourceTokens = (JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { readOnlyTokens: number }).readOnlyTokens;
+    const voidDir = join(fx.root, "void-over-cache");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    const logPath = join(voidDir, "run", "relay.jsonl");
+    // cache 5 is above prompt 2. Counting it would add 6 on top of the 7 from the first line.
+    writeFileSync(logPath, [
+      JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 6, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } }),
+      JSON.stringify({ type: "done", status: 500, usage: { prompt_tokens: 2, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 5 } } }),
+    ].join("\n") + "\n");
+    const freshOut = join(fx.root, "void-over-cache-out");
+    const freshAttest = attestWrite(fx, "attest-void-over-cache");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: freshOut,
+      attestRoot: freshAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, freshAttest),
+    });
+    const fresh = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as { readOnlyTokens: number; voids: { kind: string; tokens: number }[] };
+    expect(fresh.voids).toEqual([
+      { kind: "VOID", dir: realpathSync(voidDir), tokens: 7, sha: shaOfLogs([{ rel: "run/relay.jsonl", abs: logPath }]) },
+    ]);
+    const logs = join(freshAttest, "relay-logs");
+    const preflight = weighRoleLogs(logs);
+    expect(preflight).toBeGreaterThan(0);
+    expect(fresh.readOnlyTokens).toBe(sourceTokens + 7 + preflight);
+  });
+
   test("a negative VOID entry in campaign.json is rejected", async () => {
     const fx = fixture();
     await runOptLoop({
