@@ -243,9 +243,15 @@ export interface OptLoopOptions {
   readonly attestRoot: string;
   /**
    * Resume only. Read-only attest root of the source loop.
-   * Previous attestations and relay logs are read from here and never written.
+   * Previous attestations are read from here and never written.
    */
   readonly attestSource?: string;
+  /**
+   * Resume only. Directory of the source loop's role relay logs (`<runId>/relay.jsonl`).
+   * Overrides a `relayLogRoot` recorded on the source. Absent uses that record, then
+   * `<attestSource>/relay-logs`.
+   */
+  readonly sourceRelayLogs?: string;
   /** Host key file. Also read by the wrapper from `HARNESS_ATTEST_KEY_FILE`. Never placed on argv. */
   readonly attestKeyFile: string;
   /** Harness file the wrapper mounts. Its sha is checked against `mountedHarnessSha` when set. */
@@ -827,11 +833,12 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
  * Token spend already signed into previous rounds, plus the role spend recorded
  * for those rounds (gap-finder, innovator, critic, ranker, reviewer-gate).
  * An old layout has no campaign.json, so this sum is the 30M carry.
- * Role totals come from the source attest root's relay logs named by that round's
- * spawn files. The current relay log directory is not recounted, and an executor
- * log that no spawn file names is left out.
+ * Role totals come from `relayLogs/<runId>/relay.jsonl` for run ids named by that
+ * round's spawn files. The current relay log directory is not recounted, and an
+ * executor log that no spawn file names is left out. A named log that is missing
+ * or unreadable is an error.
  */
-function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string): number {
+function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string, relayLogs: string): number {
   let sum = 0;
   for (const round of roundNumbers(out)) {
     const attestDir = join(attestRoot, `round${round}`, taskId, "seed0", "candidate");
@@ -846,7 +853,7 @@ function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harn
       outDir: out,
     });
     if (!verified.ok) throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
-    sum += verified.tokens + recordedRoleTokens(out, round, attestRoot);
+    sum += verified.tokens + recordedRoleTokens(out, round, relayLogs);
   }
   return sum;
 }
@@ -856,10 +863,10 @@ const ROLE_SPEND_ROLES = new Set(["gap-finder", "innovator", "critic", "ranker",
 /**
  * Recorded token spend of one round's roles.
  * Run ids come from `sessions/*.spawn.json` (`attempts[].runId` and `baseUrl`).
- * Each id's `relay-logs/<id>/relay.jsonl` under the source attest root contributes
- * its 2xx done usage. The same id is counted once.
+ * Each id's `<relayLogs>/<id>/relay.jsonl` contributes its 2xx done usage.
+ * The same id is counted once. A missing or unreadable log throws.
  */
-export function recordedRoleTokens(out: string, round: number, attestRoot: string): number {
+export function recordedRoleTokens(out: string, round: number, relayLogs: string): number {
   const sessions = join(out, `round${round}`, "sessions");
   if (!existsSync(sessions)) return 0;
   const ids = new Set<string>();
@@ -885,8 +892,25 @@ export function recordedRoleTokens(out: string, round: number, attestRoot: strin
     }
   }
   let sum = 0;
-  for (const id of ids) sum += weighedLogTokens(join(attestRoot, "relay-logs", id, "relay.jsonl"));
+  for (const id of ids) sum += requireRoleLogTokens(join(relayLogs, id, "relay.jsonl"));
   return sum;
+}
+
+/** 2xx done usage of one source role log. Missing and unreadable are errors, not zero. */
+function requireRoleLogTokens(logPath: string): number {
+  try {
+    const linked = lstatSync(logPath);
+    if (!linked.isFile() && !linked.isSymbolicLink()) {
+      throw new Error(`resume source role log is unreadable: ${logPath}`);
+    }
+    readFileSync(logPath);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("resume source role log is unreadable:")) throw error;
+    const code = (error as { code?: unknown }).code;
+    if (code === "ENOENT") throw new Error(`resume source role log is missing: ${logPath}`);
+    throw new Error(`resume source role log is unreadable: ${logPath}`);
+  }
+  return weighedLogTokens(logPath);
 }
 
 function recordedRunId(baseUrl: string): string | null {
@@ -894,24 +918,86 @@ function recordedRunId(baseUrl: string): string | null {
   return /^[0-9a-f]{32}$/.test(runId) ? runId : null;
 }
 
-/** The source attest root and the source run stay read-only. Writes go to a new attest dir. */
-function assertResumeAttest(sourceRun: string, sourceAttest: string, writeAttest: string): void {
-  const write = resolve(writeAttest);
-  const source = resolve(sourceAttest);
-  const run = resolve(sourceRun);
-  if (write === source || write.startsWith(source + sep) || write === run || write.startsWith(run + sep)) {
+function insideOrEqual(child: string, parent: string): boolean {
+  const left = resolve(child);
+  const right = resolve(parent);
+  return left === right || left.startsWith(`${right}${sep}`);
+}
+
+/**
+ * `--out` and `--attest-out` must be new directories.
+ * Equal to, or nested inside, the source run or the source attest root is refused.
+ */
+function assertResumeDestination(sourceRun: string, sourceAttest: string, out: string, writeAttest: string): void {
+  if (insideOrEqual(out, sourceRun)) throw new Error("resume refuses to write into the source loop directory");
+  if (insideOrEqual(out, sourceAttest)) throw new Error("resume refuses to write into the source attest directory");
+  if (insideOrEqual(writeAttest, sourceAttest) || insideOrEqual(writeAttest, sourceRun)) {
     throw new Error("resume refuses to write into the source attest directory");
   }
+}
+
+const RELAY_LOG_ROOT_FILE = "relay-log-root.json";
+
+/** Relay log directory recorded on the source: `relay-log-root.json`, or `result.json` `relayLogRoot`. */
+function recordedRelayLogRoots(out: string): string[] {
+  const found = new Set<string>();
+  const noted = join(out, RELAY_LOG_ROOT_FILE);
+  if (isRegularFile(noted)) {
+    try {
+      const parsed = JSON.parse(readFileSync(noted, "utf8")) as { relayLogRoot?: unknown };
+      if (typeof parsed.relayLogRoot === "string" && parsed.relayLogRoot.trim() !== "") found.add(resolve(parsed.relayLogRoot));
+    } catch {
+      // A malformed note falls through to result.json or the attest relay-logs directory.
+    }
+  }
+  for (const round of roundNumbers(out)) {
+    const runs = join(out, `round${round}`, "runs");
+    if (!existsSync(runs)) continue;
+    const stack = [runs];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      if (!dir) continue;
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        let linked;
+        try {
+          linked = lstatSync(path);
+        } catch {
+          continue;
+        }
+        if (linked.isSymbolicLink()) continue;
+        if (linked.isDirectory()) {
+          stack.push(path);
+          continue;
+        }
+        if (name !== "result.json" || !linked.isFile()) continue;
+        try {
+          const parsed = JSON.parse(readFileSync(path, "utf8")) as { relayLogRoot?: unknown };
+          if (typeof parsed.relayLogRoot === "string" && parsed.relayLogRoot.trim() !== "") found.add(resolve(parsed.relayLogRoot));
+        } catch {
+          // Not the recorded relay root.
+        }
+      }
+    }
+  }
+  return [...found];
+}
+
+function resolveSourceRelayLogs(sourceOut: string, sourceAttest: string, explicit: string | undefined): string {
+  if (explicit && explicit.trim() !== "") return explicit;
+  const recorded = recordedRelayLogRoots(sourceOut);
+  if (recorded.length > 1) throw new Error("resume source relay logs disagree; pass --source-relay-logs");
+  if (recorded.length === 1 && recorded[0]) return recorded[0];
+  return join(sourceAttest, "relay-logs");
 }
 
 function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   const from = options.resumeFrom;
   if (!from) throw new Error("resume directory is missing");
-  if (resolve(from) === resolve(options.out)) throw new Error("resume writes into a new directory");
   const sourceAttest = options.attestSource;
   if (!sourceAttest || sourceAttest.trim() === "") throw new Error("resume needs a source attest directory");
   const source = resolve(from);
-  assertResumeAttest(source, sourceAttest, options.attestRoot);
+  assertResumeDestination(source, sourceAttest, options.out, options.attestRoot);
   const task = requireLoopTask(options.task);
   const rounds = roundNumbers(source);
   if (rounds.length === 0) throw new Error("resume found no completed round");
@@ -948,7 +1034,9 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
       baselineText = readFileSync(controlPath, "utf8");
     }
   }
-  const readOnlyTokens = disk ? disk.readOnlyTokens : signedReadOnlyTokens(source, sourceAttest, key, options.harnessPath, task.id);
+  const readOnlyTokens = disk
+    ? disk.readOnlyTokens
+    : signedReadOnlyTokens(source, sourceAttest, key, options.harnessPath, task.id, resolveSourceRelayLogs(source, sourceAttest, options.sourceRelayLogs));
   return {
     source,
     nextRound: completedRounds + 1,
@@ -985,6 +1073,11 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const officialTimeoutSec = officialTask.timeoutSec;
   const roles = options.roles ?? (options.mode === "dry-run" ? stubOptRoles(attestKey) : options.piBin ? piSubagentRoles(options.piBin) : undefined);
   if (!roles) throw new Error("execute mode needs roles");
+  if (resumeRequested) {
+    const sourceAttest = options.attestSource;
+    if (!sourceAttest || sourceAttest.trim() === "") throw new Error("resume needs a source attest directory");
+    assertResumeDestination(options.resumeFrom ?? "", sourceAttest, options.out, options.attestRoot);
+  }
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
   const executor = options.executor ?? executorFor(options, env, attestKey);
@@ -995,6 +1088,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   };
   mkdirSync(options.out, { recursive: true });
   const relayRoot = loopRelayRoot(options, env);
+  writeJson(join(options.out, RELAY_LOG_ROOT_FILE), { relayLogRoot: resolve(relayRoot) });
   const resume = resumeRequested ? loadResume(options, attestKey) : null;
   const additional = Math.min(options.rounds ?? (resume ? 1 : LOOP_CAPS.maxRounds), LOOP_CAPS.maxRounds);
   if (!Number.isInteger(additional) || additional < 1) throw new Error("rounds must be a positive integer");
@@ -1091,8 +1185,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const carriedReadOnly = resume?.readOnlyTokens ?? 0;
   let readOnlyTotal = carriedReadOnly;
   let gapReadOnly = 0;
+  // harness_relay.py loopTokens counts innovator, critic, and ranker only.
+  // Gap and reviewer close after that counter is already current, so the host
+  // adds their own report.tokens. campaign.json is written after the reviewer.
+  let reviewerReadOnly = 0;
   const noteLoopTokens = (loopTokens: number): void => {
-    readOnlyTotal = carriedReadOnly + loopTokens + gapReadOnly;
+    readOnlyTotal = carriedReadOnly + loopTokens + gapReadOnly + reviewerReadOnly;
   };
   const readOnlyNow = (): number => (
     options.mode === "dry-run" && options.readOnlyTokens ? carriedReadOnly + options.readOnlyTokens() : readOnlyTotal
@@ -1257,6 +1355,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           attemptLogs.push(relay.relayLog);
           attemptTokens += report.tokens;
           if (spec.sessionName === "gap-finder") gapReadOnly += report.tokens;
+          if (spec.sessionName === "reviewer-gate") reviewerReadOnly += report.tokens;
         };
         const finishClose = async (): Promise<RelayReport | { readonly status: "stop"; readonly reason: "relay_close_failed"; readonly failure: RoleFailureInfo }> => {
           try {

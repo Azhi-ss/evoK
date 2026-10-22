@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5377,6 +5377,44 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         ...taskFlags(fx.root),
       ]);
       expect(missingAttest).toBe(1);
+      const nestedOut = join(fx.out, "inside");
+      const nestedAttestDir = join(fx.attestRoot, "inside");
+      const refused: string[] = [];
+      const writeStderr = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        refused.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        const nestedRun = await main([
+          "optimize", "--from-round", fx.out, "--out", nestedOut, "--dry-run", "--rounds", "1",
+          "--attest-root", fx.attestRoot,
+          "--attest-out", attestWrite(fx, "attest-nested-run"),
+          "--attest-key-file", fx.keyFile,
+          "--harness", fx.harnessPath,
+          "--control-config", fx.controlConfig,
+          "--control-attest", fx.controlAttest,
+          ...taskFlags(fx.root),
+        ]);
+        const nestedAttest = await main([
+          "optimize", "--from-round", fx.out, "--out", nestedAttestDir, "--dry-run", "--rounds", "1",
+          "--attest-root", fx.attestRoot,
+          "--attest-out", attestWrite(fx, "attest-nested-attest"),
+          "--attest-key-file", fx.keyFile,
+          "--harness", fx.harnessPath,
+          "--control-config", fx.controlConfig,
+          "--control-attest", fx.controlAttest,
+          ...taskFlags(fx.root),
+        ]);
+        expect(nestedRun).toBe(1);
+        expect(nestedAttest).toBe(1);
+      } finally {
+        process.stderr.write = writeStderr;
+      }
+      expect(refused.join("")).toContain("optimize --resume refuses to write into the source loop directory");
+      expect(refused.join("")).toContain("optimize --resume refuses to write into the source attest directory");
+      expect(existsSync(nestedOut)).toBe(false);
+      expect(existsSync(nestedAttestDir)).toBe(false);
       const code = await main([
         "optimize", "--from-round", fx.out, "--out", next, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
@@ -5845,13 +5883,97 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         at: "2026-10-21T00:00:00+09:00",
       },
     });
+    const external = join(fx.root, "box-relay");
+    renameSync(join(fx.attestRoot, "relay-logs"), external);
+    unlinkSync(join(fx.out, "relay-log-root.json"));
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-missing-logs"),
+      attestRoot: attestWrite(fx, "attest-missing-logs"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: cited,
+    })).rejects.toThrow("resume source role log is missing");
+    const sample = readdirSync(external)[0];
+    if (!sample) throw new Error("external role logs are empty");
+    const sampleLog = join(external, sample, "relay.jsonl");
+    renameSync(sampleLog, `${sampleLog}.bak`);
+    writeFileSync(join(fx.out, "relay-log-root.json"), `${JSON.stringify({ relayLogRoot: external }, null, 2)}\n`);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-one-missing"),
+      attestRoot: attestWrite(fx, "attest-one-missing"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: cited,
+    })).rejects.toThrow("resume source role log is missing");
+    mkdirSync(sampleLog);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-unreadable"),
+      attestRoot: attestWrite(fx, "attest-unreadable"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: cited,
+    })).rejects.toThrow("resume source role log is unreadable");
+    rmSync(sampleLog, { recursive: true });
+    renameSync(`${sampleLog}.bak`, sampleLog);
+    const roleSpend = recordedRoleTokens(fx.out, 1, external);
+    const wrongRelay = join(fx.root, "wrong-relay");
+    mkdirSync(wrongRelay);
+    writeFileSync(join(fx.out, "relay-log-root.json"), `${JSON.stringify({ relayLogRoot: wrongRelay }, null, 2)}\n`);
+    const flagged = await runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, "out-flag"),
+      attestRoot: attestWrite(fx, "attest-flag"),
+      attestSource: fx.attestRoot,
+      sourceRelayLogs: external,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      readOnlyTokens: () => 1_000_000,
+      executor: fakeExecutor(fx).executor,
+      roles: cited,
+    });
+    expect(flagged.stopReport.reason).toBe("readOnlyTokenCap");
+    const flaggedCampaign = JSON.parse(readFileSync(join(fx.root, "out-flag", "campaign.json"), "utf8")) as { readOnlyTokens: number };
+    expect(flaggedCampaign.readOnlyTokens).toBe(29_000_000 + roleSpend + 1_000_000);
+    const resultPath = join(candidate, "result.json");
+    const resultBody = JSON.parse(readFileSync(resultPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(resultPath, `${JSON.stringify({ ...resultBody, relayLogRoot: external }, null, 2)}\n`);
+    writeHostAttestation({
+      attestDir: join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate"),
+      outDir: fx.out,
+      runDir: candidate,
+      key: fx.key,
+      harnessPath: fx.harnessPath,
+      configPath: join(fx.out, "round1", "candidate", "config.json"),
+      reward: 1,
+      meta: {
+        task: LOOP_TASK.path,
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: 29_000_000,
+        exit: 0,
+        runDir: candidate,
+        runId: signedRun.runId,
+        runPath: candidate,
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    unlinkSync(join(fx.out, "relay-log-root.json"));
     const next = join(fx.root, "out-old");
     const before = stampTree(fx.out);
     const beforeAttest = stampTree(fx.attestRoot);
-    const roleSpend = recordedRoleTokens(fx.out, 1, fx.attestRoot);
     expect(roleSpend).toBeGreaterThan(0);
     let everyLog = 0;
-    const logRoot = join(fx.attestRoot, "relay-logs");
+    const logRoot = external;
     for (const id of readdirSync(logRoot)) {
       const file = join(logRoot, id, "relay.jsonl");
       if (!existsSync(file)) continue;
@@ -5887,6 +6009,86 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(join(next, "round2"))).toBe(false);
     const carried = JSON.parse(readFileSync(join(next, "campaign.json"), "utf8")) as { readOnlyTokens: number };
     expect(carried.readOnlyTokens).toBe(29_000_000 + roleSpend + 1_000_000);
+  });
+
+  test("resume refuses an out nested inside the source run or the source attest root", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const before = stampTree(fx.out);
+    const beforeAttest = stampTree(fx.attestRoot);
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.out, "nested"),
+      attestRoot: attestWrite(fx, "attest-nested-run"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume refuses to write into the source loop directory");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.attestRoot, "nested"),
+      attestRoot: attestWrite(fx, "attest-nested-attest"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume refuses to write into the source attest directory");
+    expect(existsSync(join(fx.out, "nested"))).toBe(false);
+    expect(existsSync(join(fx.attestRoot, "nested"))).toBe(false);
+    expect(stampTree(fx.out)).toEqual(before);
+    expect(stampTree(fx.attestRoot)).toEqual(beforeAttest);
+  });
+
+  test("a preflight campaign total includes reviewer-gate spend", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fake.executor,
+    });
+    expect(fake.calls).toHaveLength(0);
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/reviewer-gate.spawn.json"), "utf8")) as { baseUrl?: string };
+    const reviewId = spawn.baseUrl?.split("/r/")[1]?.split("/")[0] ?? "";
+    const weigh = (file: string): number => {
+      if (!existsSync(file)) return 0;
+      let total = 0;
+      for (const line of readFileSync(file, "utf8").split("\n")) {
+        if (line.trim() === "") continue;
+        const row = JSON.parse(line) as { type?: string; status?: number; usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } };
+        if (row.type !== "done") continue;
+        const status = row.status ?? 200;
+        if (status < 200 || status > 299) continue;
+        const prompt = row.usage?.prompt_tokens;
+        const completion = row.usage?.completion_tokens;
+        const cache = row.usage?.prompt_tokens_details?.cached_tokens;
+        if (typeof prompt !== "number" || typeof completion !== "number" || typeof cache !== "number") continue;
+        total += prompt - cache + completion + cache;
+      }
+      return total;
+    };
+    const review = weigh(join(fx.attestRoot, "relay-logs", reviewId, "relay.jsonl"));
+    expect(review).toBeGreaterThan(0);
+    let all = 0;
+    for (const id of readdirSync(join(fx.attestRoot, "relay-logs"))) {
+      const file = join(fx.attestRoot, "relay-logs", id, "relay.jsonl");
+      if (existsSync(file)) all += weigh(file);
+    }
+    const campaign = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { readOnlyTokens: number };
+    expect(campaign.readOnlyTokens).toBe(all);
+    expect(all - review).toBeGreaterThan(0);
   });
 });
 

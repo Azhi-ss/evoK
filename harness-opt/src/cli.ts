@@ -18,8 +18,8 @@ const USAGE = [
   "  demo                  one closed loop on the sample trace; prints per-stage status",
   "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        one loop; task and round-0 path/sha are required and have no default",
-  "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> --attest-out <newAttest> [--rounds <n>]",
-  "                        read that loop and its --attest-root read-only; write round N+1 into --out and new attestations and relay logs into --attest-out; gap input is the previous real-run trace, sha-checked; --rounds is how many further rounds (default 1)",
+  "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> --attest-out <newAttest> [--source-relay-logs <dir>] [--rounds <n>]",
+  "                        read that loop and its --attest-root read-only; write round N+1 into --out and new attestations and relay logs into --attest-out; --out and --attest-out must not sit inside the source run or the source attest root; gap input is the previous real-run trace, sha-checked; --source-relay-logs is the source role relay directory when it is not the recorded relayLogRoot; --rounds is how many further rounds (default 1)",
   "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails; --stop-before-run writes the closure and stops before once/docker",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
@@ -100,16 +100,28 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
   }
   const resumeFrom = flag(argv, "--resume") ?? flag(argv, "--from-round");
   const requestedOut = flag(argv, "--out");
+  const attestRoot = flag(argv, "--attest-root");
   if (resumeFrom && !requestedOut) {
     process.stderr.write("optimize --resume needs a new --out directory\n");
     return 1;
   }
-  if (resumeFrom && requestedOut && resolve(requestedOut) === resolve(resumeFrom)) {
-    process.stderr.write("optimize --resume refuses to write into the source loop directory\n");
-    return 1;
+  if (resumeFrom && requestedOut) {
+    const outPath = resolve(requestedOut);
+    const run = resolve(resumeFrom);
+    if (outPath === run || outPath.startsWith(run + sep)) {
+      process.stderr.write("optimize --resume refuses to write into the source loop directory\n");
+      return 1;
+    }
+    if (attestRoot) {
+      const sourceAttest = resolve(attestRoot);
+      if (outPath === sourceAttest || outPath.startsWith(sourceAttest + sep)) {
+        process.stderr.write("optimize --resume refuses to write into the source attest directory\n");
+        return 1;
+      }
+    }
   }
-  const attestRoot = flag(argv, "--attest-root");
   const attestOut = flag(argv, "--attest-out");
+  const sourceRelayLogs = flag(argv, "--source-relay-logs");
   if (resumeFrom && !attestOut) {
     process.stderr.write("optimize --resume needs a new --attest-out directory\n");
     return 1;
@@ -176,7 +188,7 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       controlAttests,
       task,
       ...(round0 ? { round0TracePath: round0.path, round0TraceSha: round0.sha } : {}),
-      ...(resumeFrom ? { resumeFrom, attestSource: attestRoot } : {}),
+      ...(resumeFrom ? { resumeFrom, attestSource: attestRoot, ...(sourceRelayLogs ? { sourceRelayLogs } : {}) } : {}),
       ...(controlConfigPath ? { controlConfigPath } : {}),
       ...(rounds !== undefined ? { rounds } : {}),
       ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),
