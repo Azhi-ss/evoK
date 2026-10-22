@@ -1269,8 +1269,12 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
 function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string | undefined, taskId: string, relayLogs: string, label: "resume" | "carry" = "resume"): number {
   let sum = 0;
   for (const round of roundNumbers(out)) {
+    const roles = recordedRoleTokens(out, round, relayLogs);
     const attestDir = join(attestRoot, `round${round}`, taskId, "seed0", "candidate");
-    if (!isRegularFile(join(attestDir, "attestation.json"))) continue;
+    if (!isRegularFile(join(attestDir, "attestation.json"))) {
+      sum += roles;
+      continue;
+    }
     const configPath = join(out, `round${round}`, "candidate", "config.json");
     const verified = verifyHostAttestation({
       attestDir,
@@ -1281,19 +1285,26 @@ function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harn
       outDir: out,
     });
     if (!verified.ok) throw new Error(`${label} attestation rejected: ${verified.reasons.join(",")}`);
-    sum += verified.tokens + recordedRoleTokens(out, round, relayLogs);
+    sum += verified.tokens + roles;
   }
   return sum;
 }
 
-/** Fresh-loop carry. Signed records only. The mounted harness is not compared. */
+/**
+ * Fresh-loop carry. Signed records only. The mounted harness is not compared.
+ * A signed campaign.json is the cumulative ledger, so a preflight that never
+ * wrote a scored attestation still carries its role spend forward.
+ */
 function carrySignedTokens(options: OptLoopOptions, key: Buffer, taskId: string): number {
   const from = options.carryFrom?.trim() ?? "";
   if (from === "") return 0;
   const attest = options.carryAttest?.trim() ?? "";
   if (attest === "") throw new Error("carry-from needs a source attest directory");
   const logs = options.carryRelayLogs && options.carryRelayLogs.trim() !== "" ? options.carryRelayLogs : join(attest, "relay-logs");
-  return signedReadOnlyTokens(from, attest, key, undefined, taskId, logs, "carry");
+  const recomputed = signedReadOnlyTokens(from, attest, key, undefined, taskId, logs, "carry");
+  if (!isRegularFile(join(from, CAMPAIGN_FILE))) return recomputed;
+  const disk = readCampaign(from, key);
+  return Math.max(disk?.readOnlyTokens ?? 0, recomputed);
 }
 
 const ROLE_SPEND_ROLES = new Set(["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"]);
@@ -2761,6 +2772,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   }
 
   if (options.stopBeforeRun) assertRankerWinnerReviewed(options.out, relayRoot);
+
+  const loggedRoles = roleLogTokens(relayRoot);
+  if (loggedRoles > readOnlyTotal - carriedReadOnly) readOnlyTotal = carriedReadOnly + loggedRoles;
 
   const result: OptLoopResult = {
     model,
@@ -4555,6 +4569,27 @@ function weightUsage(usage: unknown): number | null {
   if (typeof cache !== "number" || typeof prompt !== "number" || typeof completion !== "number") return null;
   if (!Number.isFinite(cache) || !Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
   return (prompt - cache) + completion + cache;
+}
+
+/** 2xx done usage of this process's role logs. Executor logs stay out of the 30M ledger. */
+function roleLogTokens(relayRoot: string): number {
+  if (!existsSync(relayRoot)) return 0;
+  let sum = 0;
+  for (const name of readdirSync(relayRoot)) {
+    const logPath = join(relayRoot, name, "relay.jsonl");
+    if (!isRegularFile(logPath)) continue;
+    let role = false;
+    for (const event of readJsonl(logPath)) {
+      if (!event || typeof event !== "object") continue;
+      const row = event as { type?: unknown; kind?: unknown };
+      if (row.type === "open" && typeof row.kind === "string" && row.kind.startsWith("role:")) {
+        role = true;
+        break;
+      }
+    }
+    if (role) sum += weighedLogTokens(logPath);
+  }
+  return sum;
 }
 
 /** Sum of 2xx done usage in an open relay log. Missing usage is not a number, so it does not trip the cap. */

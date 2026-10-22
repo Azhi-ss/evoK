@@ -5783,6 +5783,96 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     }
   });
 
+  test("carry-from adds the fresh loop preflight spend to the cumulative ledger", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const weigh = (file: string): number => {
+      if (!existsSync(file)) return 0;
+      let total = 0;
+      for (const line of readFileSync(file, "utf8").split("\n")) {
+        if (line.trim() === "") continue;
+        const row = JSON.parse(line) as { type?: string; status?: number; kind?: string; usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } };
+        if (row.type === "open" && typeof row.kind === "string" && !row.kind.startsWith("role:")) return 0;
+        if (row.type !== "done") continue;
+        const status = row.status ?? 200;
+        if (status < 200 || status > 299) continue;
+        const prompt = row.usage?.prompt_tokens;
+        const completion = row.usage?.completion_tokens;
+        const cache = row.usage?.prompt_tokens_details?.cached_tokens;
+        if (typeof prompt !== "number" || typeof completion !== "number" || typeof cache !== "number") continue;
+        total += prompt - cache + completion + cache;
+      }
+      return total;
+    };
+    const roleSum = (root: string): number => {
+      if (!existsSync(root)) return 0;
+      let sum = 0;
+      for (const name of readdirSync(root)) {
+        const file = join(root, name, "relay.jsonl");
+        if (!existsSync(file)) continue;
+        const text = readFileSync(file, "utf8");
+        if (!text.includes('"kind":"role:')) continue;
+        sum += weigh(file);
+      }
+      return sum;
+    };
+    const carriedOf = (root: string): number => {
+      for (const name of readdirSync(root)) {
+        const sigPath = join(root, name, "relay.jsonl.sig");
+        if (!existsSync(sigPath)) continue;
+        const sig = JSON.parse(readFileSync(sigPath, "utf8")) as { carriedTokens?: number };
+        if (typeof sig.carriedTokens === "number") return sig.carriedTokens;
+      }
+      throw new Error("missing carriedTokens");
+    };
+    const freshOut = join(fx.root, "fresh-preflight");
+    const freshAttest = attestWrite(fx, "attest-preflight");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: freshOut,
+      attestRoot: freshAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, freshAttest),
+    });
+    const freshLogs = join(freshAttest, "relay-logs");
+    const preflight = roleSum(freshLogs);
+    const carried = carriedOf(freshLogs);
+    expect(preflight).toBeGreaterThan(0);
+    expect(carried).toBeGreaterThan(0);
+    const fresh = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as { readOnlyTokens: number };
+    expect(fresh.readOnlyTokens).toBe(carried + preflight);
+    const againOut = join(fx.root, "fresh-preflight-2");
+    const againAttest = attestWrite(fx, "attest-preflight-2");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: againOut,
+      attestRoot: againAttest,
+      carryFrom: freshOut,
+      carryAttest: freshAttest,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, againAttest),
+    });
+    const againLogs = join(againAttest, "relay-logs");
+    const againPreflight = roleSum(againLogs);
+    expect(againPreflight).toBeGreaterThan(0);
+    expect(carriedOf(againLogs)).toBe(fresh.readOnlyTokens);
+    const again = JSON.parse(readFileSync(join(againOut, "campaign.json"), "utf8")) as { readOnlyTokens: number };
+    expect(again.readOnlyTokens).toBe(fresh.readOnlyTokens + againPreflight);
+  });
+
   test("a carried total near 30M makes the relay stop at the cap", async () => {
     const fx = fixture();
     const citing = citingRoles(fx.key, fx.attestRoot);

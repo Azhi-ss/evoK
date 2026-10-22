@@ -51,10 +51,29 @@ export interface PreflightGateReport {
   readonly gates: readonly GateRow[];
 }
 
+/** Default for `agent-loop.maxContinuationTurns` when the run did not set one. */
+const DEFAULT_CONTINUATION_CAP = 25;
+const CONTINUATION_KEY = "agent-loop.maxContinuationTurns";
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Cap for `run_end.goalContinuationTurns`.
+ * The configured effective value wins. A changed leaf is next. Otherwise 25.
+ */
+function continuationCap(effective: Readonly<Record<string, unknown>> | null, changed: readonly ChangedLeaf[]): number {
+  const fromEffective = finiteNumber(effective?.[CONTINUATION_KEY]);
+  if (fromEffective !== null) return fromEffective;
+  const leaf = changed.find((item) => item.path === CONTINUATION_KEY);
+  return (leaf ? finiteNumber(leaf.value) : null) ?? DEFAULT_CONTINUATION_CAP;
+}
+
 /** run_end fields the harness writes for a knob. The observed value must stay within the new setting. */
 const RUN_END_BOUNDS: Readonly<Record<string, (value: unknown, runEnd: Readonly<Record<string, unknown>>) => boolean>> = {
-  "goal.maxContinuationTurns": (value, runEnd) => {
-    const cap = typeof value === "number" && Number.isFinite(value) ? value : Number.NaN;
+  [CONTINUATION_KEY]: (value, runEnd) => {
+    const cap = finiteNumber(value) ?? DEFAULT_CONTINUATION_CAP;
     const seen = runEnd.goalContinuationTurns;
     return typeof seen === "number" && Number.isFinite(seen) && seen <= cap;
   },
@@ -116,6 +135,10 @@ export function patchTookEffect(input: {
     if (!input.effective || !sameValue(input.effective[leaf.path], leaf.value)) return false;
     const bound = RUN_END_BOUNDS[leaf.path];
     if (bound && (!input.runEnd || !bound(leaf.value, input.runEnd))) return false;
+  }
+  if (input.runEnd && Object.prototype.hasOwnProperty.call(input.runEnd, "goalContinuationTurns")) {
+    const seen = input.runEnd.goalContinuationTurns;
+    if (typeof seen !== "number" || !Number.isFinite(seen) || seen > continuationCap(input.effective, input.changed)) return false;
   }
   return true;
 }

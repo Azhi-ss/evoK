@@ -63,12 +63,40 @@ describe("reviewer gates", () => {
     expect(missing.verdict).toBe("reject");
     expect(missing.rejectCode).toBe("inactive_key");
     const over = evaluateReviewerGates(input({
-      changed: [{ path: "goal.maxContinuationTurns", value: 2 }],
-      effective: { "goal.maxContinuationTurns": 2 },
+      changed: [{ path: "agent-loop.maxContinuationTurns", value: 2 }],
+      effective: { "agent-loop.maxContinuationTurns": 2 },
+      knobPaths: ["agent-loop.maxContinuationTurns"],
+      patchPaths: ["agent-loop.maxContinuationTurns"],
       runEnd: { goalContinuationTurns: 8 },
     }));
     expect(over.verdict).toBe("reject");
     expect(over.rejectCode).toBe("inactive_key");
+  });
+
+  test("G2 rejects 44 continuations when the cap is 10 and uses 25 when the run sets none", () => {
+    const over = evaluateReviewerGates(input({
+      changed: [{ path: "agent-loop.maxContinuationTurns", value: 10 }],
+      effective: { "agent-loop.maxContinuationTurns": 10 },
+      knobPaths: ["agent-loop.maxContinuationTurns"],
+      patchPaths: ["agent-loop.maxContinuationTurns"],
+      runEnd: { goalContinuationTurns: 44 },
+    }));
+    expect(over.verdict).toBe("reject");
+    expect(over.rejectCode).toBe("inactive_key");
+    expect(over.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    const atCap = evaluateReviewerGates(input({
+      changed: [{ path: "agent-loop.maxContinuationTurns", value: 10 }],
+      effective: { "agent-loop.maxContinuationTurns": 10 },
+      knobPaths: ["agent-loop.maxContinuationTurns"],
+      patchPaths: ["agent-loop.maxContinuationTurns"],
+      runEnd: { goalContinuationTurns: 10 },
+    }));
+    expect(atCap.verdict).toBe("accept");
+    const unset = evaluateReviewerGates(input({ runEnd: { goalContinuationTurns: 44 } }));
+    expect(unset.verdict).toBe("reject");
+    expect(unset.rejectCode).toBe("inactive_key");
+    const withinDefault = evaluateReviewerGates(input({ runEnd: { goalContinuationTurns: 25 } }));
+    expect(withinDefault.verdict).toBe("accept");
   });
 
   test("G3 rejects a timeout flag, a wall time at the official limit, or a reward under the signed baseline", () => {

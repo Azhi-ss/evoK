@@ -39,15 +39,16 @@ export const bus = {
       for (let i = 0; i < calls; i++) sessionListener({ type: "message_end", message: { role: "assistant", content: "relay", stopReason: "stop" } });
     }
     const turns = Number(process.env.HARNESS_STUB_TURNS || "3");
+    const keepAfterCancel = process.env.HARNESS_STUB_KEEP_AFTER_CANCEL === "1";
     let sent = 0;
     const ev = "pi-goal:event:" + data.runId;
     const official = process.env.HARNESS_STUB_OFFICIAL !== "0";
     for (let i = 0; i < turns; i++) {
-      if (stopGoal) break;
+      if (stopGoal && !keepAfterCancel) break;
       sent += 1;
       sessionListener({ type: "turn_end" });
       if (official) bus.emit(ev, { type: "state", status: "active", automaticModelTurns: sent });
-      if (stopGoal) break;
+      if (stopGoal && !keepAfterCancel) break;
     }
     if (process.env.HARNESS_STUB_SENT) writeFileSync(process.env.HARNESS_STUB_SENT, String(sent));
     bus.emit(ev, { type: "state", status: "active" });
@@ -89,7 +90,9 @@ export async function createAgentSession() {
     session: {
       subscribe(fn) { sessionListener = fn; return () => {}; },
       async prompt() {},
-      async abort() {},
+      async abort() {
+        if (process.env.HARNESS_STUB_ABORT) writeFileSync(process.env.HARNESS_STUB_ABORT, "abort\\n", { flag: "a" });
+      },
       dispose() {},
       async compact() {},
       async bindExtensions() {},
@@ -322,5 +325,40 @@ describe("patched harness smoke", () => {
     expect(goal.continuationLimits.maxContinuationTurns).toBe(2);
     const result = JSON.parse(readFileSync(join(run.env.RUN_DIR, "result.json"), "utf8")) as { stats: { turns: number } };
     expect(result.stats.turns).toBe(7);
+  });
+
+  test("continuation turns that keep arriving after the cap cancel abort the session", () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-abort-"));
+    const home = prepareHome(root);
+    const patched = join(home, "src/harness.mjs");
+    const applied = spawnSync("node", [applyScript, upstream, patched], { encoding: "utf8" });
+    expect(applied.status).toBe(0);
+    const config = {
+      parts: {
+        "agent-loop": { maxSteps: 20, maxContinuationTurns: 10, noProgressTurns: 3, maxNudges: 2, requireWrite: false },
+        toolchain: { checker: "none", subagents: false, bashTimeoutSec: 300, tools: { enabled: ["read", "write"] } },
+      },
+    };
+    const configPath = join(root, "goal.json");
+    const abortPath = join(root, "abort.txt");
+    const cancelPath = join(root, "cancel.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    const run = runHarness(home, patched, join(root, "run"), {
+      HARNESS_CANDIDATE_CONFIG: configPath,
+      HARNESS_STUB_TURNS: "44",
+      HARNESS_STUB_KEEP_AFTER_CANCEL: "1",
+      HARNESS_STUB_ABORT: abortPath,
+      HARNESS_STUB_CANCEL: cancelPath,
+    });
+    expect(run.result.status).toBe(0);
+    const end = run.trace.find((event) => event.type === "run_end") as unknown as {
+      goalContinuationTurns: number;
+      maxContinuationTurns: number;
+    };
+    expect(end.goalContinuationTurns).toBe(44);
+    expect(end.maxContinuationTurns).toBe(10);
+    const cancel = JSON.parse(readFileSync(cancelPath, "utf8")) as { reason?: string };
+    expect(cancel.reason).toBe("maxContinuationTurns");
+    expect(readFileSync(abortPath, "utf8").trim().length).toBeGreaterThan(0);
   });
 });
