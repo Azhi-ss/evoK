@@ -279,6 +279,7 @@ export interface OptLoopOptions {
    * Usage already in those logs, including a non-2xx or unfinished line, is summed and recorded
    * on the signed campaign. Repeatable. A directory already in this carry chain is rejected,
    * including the source relay-log root and a byte-identical copy of a counted log.
+   * Each counted usage field has to be a finite integer >= 0, and so does every VOID total.
    */
   readonly voidSpend?: readonly string[];
   /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
@@ -841,6 +842,18 @@ function verifiedVoidEntries(value: unknown): VoidLedgerEntry[] {
   return entries;
 }
 
+/** Each VOID `tokens` and their sum are safe integers >= 0. */
+function assertVoidLedger(entries: readonly { readonly tokens: number }[]): void {
+  let total = 0;
+  for (const entry of entries) {
+    if (typeof entry.tokens !== "number" || !Number.isSafeInteger(entry.tokens) || entry.tokens < 0) {
+      throw new Error("void-spend tokens");
+    }
+    total += entry.tokens;
+  }
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("void-spend tokens");
+}
+
 function assertStoredVoidSha(entry: VoidLedgerEntry): void {
   let actual = "";
   try {
@@ -857,6 +870,7 @@ function assertStoredVoidSha(entry: VoidLedgerEntry): void {
 function requireVoidEntries(value: unknown): VoidLedgerEntry[] {
   const entries = parseVoidEntries(value);
   if (!entries) throw new Error("resume campaign signature rejected");
+  assertVoidLedger(entries);
   return entries;
 }
 
@@ -868,7 +882,7 @@ function parseVoidEntries(value: unknown): VoidLedgerEntry[] | null {
     const row = item as { kind?: unknown; dir?: unknown; tokens?: unknown; sha?: unknown };
     if (row.kind !== "VOID") return null;
     if (typeof row.dir !== "string" || row.dir.trim() === "") return null;
-    if (typeof row.tokens !== "number" || !Number.isSafeInteger(row.tokens) || row.tokens < 0) return null;
+    if (typeof row.tokens !== "number") return null;
     if (typeof row.sha !== "string" || !/^[0-9a-f]{64}$/.test(row.sha)) return null;
     entries.push({ kind: "VOID", dir: row.dir, tokens: row.tokens, sha: row.sha });
   }
@@ -1472,7 +1486,7 @@ function measureVoidSpend(raw: string): { readonly dir: string; readonly tokens:
   const files = relayLogsUnder(dir);
   let tokens = 0;
   for (const file of files) tokens += shownLogTokens(readFileSync(file.abs).toString("utf8"));
-  if (!Number.isSafeInteger(tokens)) throw new Error("void-spend tokens");
+  if (!Number.isSafeInteger(tokens) || tokens < 0) throw new Error("void-spend tokens");
   return { dir, tokens, sha: hashRelayLogs(dir) };
 }
 
@@ -1577,27 +1591,74 @@ function relayLogsUnder(dir: string): { readonly rel: string; readonly abs: stri
   return found;
 }
 
-/** Usage objects the text actually contains. Missing fields are not treated as zero. */
+/**
+ * Usage objects the text actually contains. Missing fields are not treated as zero.
+ * A counted field that is not a finite integer >= 0 rejects the directory.
+ */
 function shownLogTokens(text: string): number {
   let total = 0;
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (trimmed === "") continue;
-    let usage: unknown;
-    try {
-      const parsed = JSON.parse(trimmed) as { usage?: unknown };
-      usage = parsed && typeof parsed === "object" ? parsed.usage : null;
-    } catch {
-      usage = usageObjectIn(trimmed);
-    }
+    const usage = usageOnLine(trimmed);
+    if (usage === undefined) continue;
+    assertCountedUsage(usage);
     const weighed = weightUsage(usage);
-    if (weighed !== null) total += weighed;
+    if (weighed === null) continue;
+    if (!Number.isSafeInteger(weighed) || weighed < 0) throw new Error("void-spend tokens");
+    total += weighed;
   }
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error("void-spend tokens");
   return total;
 }
 
-/** First complete `"usage"` object on a line that is not itself JSON. */
-function usageObjectIn(text: string): unknown {
+/** The line's usage object. `undefined` means the line has no weighable usage. A `NaN` token rejects. */
+function usageOnLine(line: string): unknown {
+  try {
+    const parsed = JSON.parse(line) as { usage?: unknown };
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed.usage ?? undefined;
+  } catch {
+    const usageText = usageObjectText(line);
+    if (usageText === null) return undefined;
+    try {
+      return JSON.parse(usageText);
+    } catch {
+      if (/\bNaN\b|\bInfinity\b/.test(usageText)) throw new Error("void-spend tokens");
+      return undefined;
+    }
+  }
+}
+
+/** Counted usage fields have to be safe integers >= 0. An absent field is not counted. */
+function assertCountedUsage(usage: unknown): void {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return;
+  const row = usage as {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    prompt_tokens_details?: unknown;
+    prompt_cache_hit_tokens?: unknown;
+  };
+  const fields: { readonly present: boolean; readonly value: unknown }[] = [
+    { present: "prompt_tokens" in row, value: row.prompt_tokens },
+    { present: "completion_tokens" in row, value: row.completion_tokens },
+  ];
+  const details = row.prompt_tokens_details;
+  if (details && typeof details === "object" && !Array.isArray(details) && "cached_tokens" in (details as object)) {
+    fields.push({ present: true, value: (details as { cached_tokens?: unknown }).cached_tokens });
+  } else if ("prompt_cache_hit_tokens" in row) {
+    fields.push({ present: true, value: row.prompt_cache_hit_tokens });
+  }
+  for (const field of fields) {
+    if (!field.present) continue;
+    if (typeof field.value !== "number" || !Number.isSafeInteger(field.value) || field.value < 0) {
+      throw new Error("void-spend tokens");
+    }
+  }
+}
+
+/** First complete `"usage"` object text on a line, including a line that is not itself JSON. */
+function usageObjectText(text: string): string | null {
   const match = /"usage"\s*:/.exec(text);
   if (!match) return null;
   const start = text.indexOf("{", match.index + match[0].length);
@@ -1620,13 +1681,7 @@ function usageObjectIn(text: string): unknown {
     if (ch === "{") depth += 1;
     else if (ch === "}") {
       depth -= 1;
-      if (depth === 0) {
-        try {
-          return JSON.parse(text.slice(start, index + 1));
-        } catch {
-          return null;
-        }
-      }
+      if (depth === 0) return text.slice(start, index + 1);
     }
   }
   return null;
@@ -2012,9 +2067,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
   const priorVoids = resume?.voids ?? carriedVoidEntries(options, attestKey);
+  const campaignVoids = [...priorVoids, ...addedVoids];
+  assertVoidLedger(campaignVoids);
   const voidTokens = addedVoids.reduce((sum, entry) => sum + entry.tokens, 0);
   const carriedReadOnly = (resume?.readOnlyTokens ?? carrySignedTokens(options, attestKey, task.id)) + voidTokens;
-  const campaignVoids = [...priorVoids, ...addedVoids];
   const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode, carriedReadOnly);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
@@ -3134,6 +3190,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   };
   const boundRound = completedRounds;
   const campaignRelayLogs = mergeCountedRelayLogs(resume?.relayLogs ?? carriedRelayLogs(options, attestKey), measureCountedRelayLog(relayRoot));
+  assertVoidLedger(campaignVoids);
   writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),

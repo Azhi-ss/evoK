@@ -6196,6 +6196,155 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(plainOut)).toBe(false);
   });
 
+  test("a negative usage line is rejected", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const voidDir = join(fx.root, "void-negative");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    // prompt -4 and completion 9 would weigh as 5 if a negative field were accepted.
+    writeFileSync(join(voidDir, "run", "relay.jsonl"), [
+      JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 6, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } }),
+      JSON.stringify({ type: "done", status: 500, usage: { prompt_tokens: -4, completion_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } } }),
+    ].join("\n") + "\n");
+    const out = join(fx.root, "void-negative-out");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out,
+      attestRoot: attestWrite(fx, "attest-void-negative"),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-void-negative")),
+    })).rejects.toThrow("void-spend tokens");
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test("a negative VOID entry in campaign.json is rejected", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const voidDir = join(fx.root, "void-signed-negative");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    writeFileSync(join(voidDir, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 4, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const recordedOut = join(fx.root, "void-signed-recorded");
+    const recordedAttest = attestWrite(fx, "attest-void-signed");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: recordedOut,
+      attestRoot: recordedAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, recordedAttest),
+    });
+    const body = JSON.parse(readFileSync(join(recordedOut, "campaign.json"), "utf8")) as { voids: { tokens: number }[]; hmacSha256?: unknown };
+    expect(body.voids[0]?.tokens).toBe(5);
+    body.voids[0].tokens = -1;
+    delete body.hmacSha256;
+    writeFileSync(join(recordedOut, "campaign.json"), signedAttestationJson(fx.key, body));
+    const out = join(fx.root, "void-signed-negative-out");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out,
+      attestRoot: attestWrite(fx, "attest-void-signed-negative"),
+      carryFrom: recordedOut,
+      carryAttest: recordedAttest,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-void-signed-negative")),
+    })).rejects.toThrow("void-spend tokens");
+    expect(existsSync(out)).toBe(false);
+  });
+
+  test("a non-integer or NaN void usage value is rejected", async () => {
+    const fx = fixture();
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, fx.attestRoot),
+    });
+    const spend = (dir: string, outName: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, outName),
+      attestRoot: attestWrite(fx, `attest-${outName}`),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [dir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, `attest-${outName}`)),
+    });
+    const fraction = join(fx.root, "void-fraction");
+    mkdirSync(join(fraction, "run"), { recursive: true });
+    // 1.5 and 0.5 would weigh as the integer 2 if a non-integer field were accepted.
+    writeFileSync(join(fraction, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 1.5, completion_tokens: 0.5, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    await expect(spend(fraction, "void-fraction-out")).rejects.toThrow("void-spend tokens");
+    expect(existsSync(join(fx.root, "void-fraction-out"))).toBe(false);
+    const nanDir = join(fx.root, "void-nan");
+    mkdirSync(join(nanDir, "run"), { recursive: true });
+    writeFileSync(join(nanDir, "run", "relay.jsonl"), "{\"type\":\"done\",\"status\":200,\"usage\":{\"prompt_tokens\":NaN,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n");
+    await expect(spend(nanDir, "void-nan-out")).rejects.toThrow("void-spend tokens");
+    expect(existsSync(join(fx.root, "void-nan-out"))).toBe(false);
+    const whole = join(fx.root, "void-whole");
+    mkdirSync(join(whole, "run"), { recursive: true });
+    writeFileSync(join(whole, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 2, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const recordedOut = join(fx.root, "void-fraction-recorded");
+    const recordedAttest = attestWrite(fx, "attest-void-fraction-recorded");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: recordedOut,
+      attestRoot: recordedAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [whole],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, recordedAttest),
+    });
+    const body = JSON.parse(readFileSync(join(recordedOut, "campaign.json"), "utf8")) as { voids: { tokens: number }[]; hmacSha256?: unknown };
+    body.voids[0].tokens = 1.5;
+    delete body.hmacSha256;
+    writeFileSync(join(recordedOut, "campaign.json"), signedAttestationJson(fx.key, body));
+    const fractionalOut = join(fx.root, "void-fractional-entry");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: fractionalOut,
+      attestRoot: attestWrite(fx, "attest-void-fractional-entry"),
+      carryFrom: recordedOut,
+      carryAttest: recordedAttest,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-void-fractional-entry")),
+    })).rejects.toThrow("void-spend tokens");
+    expect(existsSync(fractionalOut)).toBe(false);
+  });
+
   test("void-spend counts toward the 30M cap", async () => {
     const fx = fixture();
     await runOptLoop({
