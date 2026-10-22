@@ -2714,6 +2714,8 @@ export function trimLongString(text: string): string {
 /**
  * OpenEvolve `max_artifact_bytes`: each artifact is capped on its own at 20480 chars.
  * The suffix is `\n... (truncated)`. There is no combined cap across artifacts.
+ * On the string path this cap is only a backstop for a single non-string artifact:
+ * a string over 5100 is head/tail trimmed first, and that result stays under 20480.
  * Borrow map section 1: literature/2026-10-22-autoresearch-borrow-map.md (sha 20c93bae).
  */
 export function capArtifact(text: string): string {
@@ -2723,15 +2725,16 @@ export function capArtifact(text: string): string {
 }
 
 /**
- * Per-artifact cap, then the head/tail trim, then the full trace path (PRD 5.2).
- * OpenEvolve `max_artifact_bytes` (20480) runs first, so an artifact longer than that hits the cap.
- * AI Scientist-v2 `trim_long_string` then keeps the first 2500 and last 2500 of that capped text.
- * The capped text is still over 5100, so the head/tail marker is present too.
+ * Head/tail trim first, then the per-artifact cap, then the full trace path (PRD 5.2).
+ * AI Scientist-v2 `trim_long_string` runs first on strings over 5100 and keeps the real
+ * first 2500 and last 2500 characters, so the true end of the trace stays in the prompt.
+ * OpenEvolve `max_artifact_bytes` (20480) runs after that trim. It is only a backstop
+ * for a single non-string artifact.
  * Borrow map section 1: literature/2026-10-22-autoresearch-borrow-map.md (sha 20c93bae).
  * No other cap.
  */
 export function gapArtifactText(text: string, tracePath: string): string {
-  return `${trimLongString(capArtifact(text))}\n${tracePath}`;
+  return `${capArtifact(trimLongString(text))}\n${tracePath}`;
 }
 
 function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown }): string {

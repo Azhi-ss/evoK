@@ -5714,11 +5714,42 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(shown.endsWith(`\n${path}`)).toBe(true);
     expect(shown).toContain("[101 characters truncated]");
     expect(shown).not.toContain("\n... (truncated)");
-    const huge = gapArtifactText("h".repeat(20481), path);
+    const raw = "h".repeat(20481);
+    const huge = gapArtifactText(raw, path);
     expect(huge.endsWith(`\n${path}`)).toBe(true);
-    expect(huge).toContain("\n... (truncated)");
-    expect(huge).toContain("characters truncated");
+    expect(huge).toContain("[15481 characters truncated]");
+    expect(huge).not.toContain("\n... (truncated)");
     expect(huge.startsWith("h".repeat(2500))).toBe(true);
+    expect(huge.slice(0, -(path.length + 1)).endsWith("h".repeat(2500))).toBe(true);
+    expect(huge.slice(0, -(path.length + 1))).toBe(trimLongString(raw));
+  });
+
+  test("the true last characters of a long trace reach the gap-finder prompt", async () => {
+    const fx = fixture();
+    const trace = join(fx.root, "round0.jsonl");
+    const ending = "TRUE-TRACE-END-9f3c\n";
+    const body = `${"q".repeat(30000)}${ending}`;
+    writeFileSync(trace, body);
+    const fake = fakeExecutor(fx);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: stubOptRoles(fx.key),
+      executor: fake.executor,
+      round0TracePath: trace,
+      round0TraceSha: createHash("sha256").update(body).digest("hex"),
+    });
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
+    const record = JSON.parse(readFileSync(join(fx.out, "round1/gap-traces.json"), "utf8")) as {
+      traces: { file: string }[];
+    };
+    const round0Copy = record.traces.find((hint) => hint.file.endsWith("/traces/round0-trace.jsonl"));
+    const removed = body.length - 5000;
+    expect(round0Copy?.file).toBeTruthy();
+    expect(prompt).toContain(`${"q".repeat(2500)}\n ... [${removed} characters truncated] ... \n`);
+    expect(prompt).toContain(`${ending}\n${round0Copy?.file}`);
+    expect(prompt.includes("q".repeat(20480))).toBe(false);
   });
 
   test("a missing relay log is an integrity fault and not an active patch", async () => {
