@@ -46,7 +46,7 @@ import {
   attachChild,
   ensureRoot,
   importIdPrefix,
-  importLoopHistory,
+  importLoopHistories,
   noteReview,
   openLineage,
   parentTried,
@@ -2497,14 +2497,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     const treeChildIds = new Map<string, string>();
     if (lineage && searchFrom !== undefined && round >= searchFrom) {
       if (!treeImported) {
-        let parent = ensureRoot(lineage, baselineReward);
-        for (const dir of options.searchTreeImports ?? []) {
-          parent = importLoopHistory(lineage, dir, parent, importIdPrefix(dir));
-        }
-        if (resume) parent = importLoopHistory(lineage, resume.source, parent, "src");
+        const rootId = ensureRoot(lineage, baselineReward);
         const carry = options.carryFrom?.trim() ?? "";
-        if (carry !== "") parent = importLoopHistory(lineage, carry, parent, "carry");
-        importLoopHistory(lineage, options.out, parent, "self", searchFrom);
+        importLoopHistories(lineage, [
+          ...(options.searchTreeImports ?? []).map((dir) => ({ dir, prefix: importIdPrefix(dir) })),
+          ...(resume ? [{ dir: resume.source, prefix: "src" }] : []),
+          ...(carry !== "" ? [{ dir: carry, prefix: "carry" }] : []),
+          { dir: options.out, prefix: "self", beforeRound: searchFrom },
+        ], new Map<string, string>(), rootId);
         treeImported = true;
       }
       try {
@@ -3829,16 +3829,79 @@ export function gapArtifactText(text: string, tracePath: string): string {
   return `${capArtifact(trimLongString(text))}\n${tracePath}`;
 }
 
+const SEARCH_HISTORY_CAP = 12_000;
+const SEARCH_HISTORY_RULE = "截断：历史块最多 12000 字。超出时从最老的一轮压成一行（knob、reward、accept/reject、一句 reason）。最近两轮保留全文。这段在角色 prompt 里，计入只读 token 上限。";
+
 /**
- * Role view of the lineage, bounded the same way as a gap trace artifact.
- * `trimLongString` first: over 5100 characters, keep the first 2500 and the last 2500.
- * `capArtifact` second: 20480 characters, suffix `\n... (truncated)`.
- * Gate scores are not in this text. `roleView` drops them.
+ * Role view of the lineage. The history block is at most 12,000 characters.
+ * Over that, the oldest round becomes one line (knob, reward, accept/reject,
+ * one sentence of the reviewer commentary) and the most recent two rounds stay
+ * full. This replaces the trace head/tail trim for this block only.
+ * The block is part of the gap-finder and innovator prompt, so its tokens sit
+ * inside the innovator cap and the read-only cap.
+ * Gate pass/fail rows are on the round and review events.
  */
 export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
-  const body = JSON.stringify({ events: view.events(), nodes: view.nodeSummaries() });
-  const bounded = capArtifact(trimLongString(body));
-  return `搜索树：${bounded}\n截断：超过 5100 字先留头 2500 和尾 2500，再以 20480 字为上限。`;
+  const groups = groupHistory(view.events());
+  const lines = groups.map((group) => historyLine(group.events));
+  const keep = groups.map(() => true);
+  const dropped = new Set<number>();
+  const render = () => JSON.stringify({
+    nodes: view.nodeSummaries(),
+    rounds: groups.flatMap((group, index) => {
+      if (dropped.has(index)) return [];
+      return [keep[index] ? { full: group.events } : { line: lines[index] }];
+    }),
+  });
+  let guard = 0;
+  while (render().length > SEARCH_HISTORY_CAP && guard < groups.length) {
+    const oldestFull = keep.findIndex((full, index) => full && index < Math.max(0, groups.length - 2));
+    if (oldestFull < 0) break;
+    keep[oldestFull] = false;
+    guard += 1;
+  }
+  let body = render();
+  while (body.length > SEARCH_HISTORY_CAP) {
+    const oldestLine = groups.findIndex((_, index) => !keep[index] && !dropped.has(index) && index < Math.max(0, groups.length - 2));
+    if (oldestLine < 0) break;
+    dropped.add(oldestLine);
+    body = render();
+  }
+  if (body.length > SEARCH_HISTORY_CAP) body = body.slice(body.length - SEARCH_HISTORY_CAP);
+  return `搜索树：${body}\n${SEARCH_HISTORY_RULE}`;
+}
+
+function groupHistory(events: readonly Record<string, unknown>[]): { readonly seq: number; readonly events: Record<string, unknown>[] }[] {
+  const groups = new Map<string, { seq: number; events: Record<string, unknown>[] }>();
+  for (const event of events) {
+    if (event.kind !== "round" && event.kind !== "review") continue;
+    const key = typeof event.group === "string" ? event.group : `${String(event.kind)}:${String(event.seq ?? event.node ?? "")}`;
+    const seq = typeof event.seq === "number" ? event.seq : Number.MAX_SAFE_INTEGER;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.events.push(event);
+      existing.seq = Math.min(existing.seq, seq);
+    } else {
+      groups.set(key, { seq, events: [event] });
+    }
+  }
+  return [...groups.values()].sort((left, right) => left.seq - right.seq);
+}
+
+function historyLine(events: readonly Record<string, unknown>[]): string {
+  const event = events.find((item) => item.kind === "round" || item.kind === "review") ?? {};
+  const knob = typeof event.knob === "string" && event.knob !== "" ? event.knob : "absent in source";
+  const reward = event.reward === undefined || event.reward === null ? "absent in source" : String(event.reward);
+  const accept = event.accept === true ? "accept" : event.accept === false ? "reject" : typeof event.accept === "string" ? event.accept : "absent in source";
+  const reason = typeof event.reason === "string" ? firstSentence(event.reason) : "absent in source";
+  return `${knob} reward=${reward} ${accept} ${reason}`;
+}
+
+function firstSentence(text: string): string {
+  const trimmed = text.trim();
+  const mark = trimmed.search(/[。.!？?]/);
+  const sentence = mark >= 0 ? trimmed.slice(0, mark + 1) : trimmed;
+  return sentence.length <= 180 ? sentence : sentence.slice(0, 180);
 }
 
 function gapTaskPrompt(input: { readonly round: number; readonly traces: readonly TraceHint[]; readonly previousReview: ReviewNote | null; readonly control: unknown; readonly searchHistory?: string }): string {
