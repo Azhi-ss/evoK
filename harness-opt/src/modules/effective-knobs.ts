@@ -1,7 +1,7 @@
 /**
  * Knobs the patched harness reads as `effective["..."]`.
- * The signed file on the box is still sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
- * That file will be reapplied on the box after this head. The new sha is `<pending>`.
+ * The default pin is still sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * The box file harness.pr202-70f18392.mjs is sha fa9e815714780b2dc7fa2a790d8de0ddae9dee4ca967eb85459cf8d1eb40c598 and is not the default.
  * One list: the innovator prompt, candidate validation, and the startup check
  * all use this array. `goal.maxContinuationTurns` stays off this list.
  * `agent-loop.maxSteps` caps agent_end steps (`stats.turns`, `run_end.steps`) and does not set automaticTurns.
@@ -101,8 +101,8 @@ export interface KnobFact {
 /**
  * Current effective value of every whitelist key.
  * That value is the patched-harness default after coercion of the control leaf.
- * The signed baseline sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c
- * will be reapplied on the box after this head. The new sha is `<pending>`.
+ * The default pin stays sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * The box file harness.pr202-70f18392.mjs is sha fa9e815714780b2dc7fa2a790d8de0ddae9dee4ca967eb85459cf8d1eb40c598 and is not the default.
  */
 export function knobCatalog(control: unknown): readonly KnobFact[] {
   const parts = controlParts(control);
@@ -131,8 +131,8 @@ export function formatKnobLine(fact: KnobFact): string {
 /**
  * Changed leaves whose harness-effective value already equals the current effective value.
  * The written leaf is run through the same coercion the patched harness uses.
- * The signed baseline sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c
- * will be reapplied on the box after this head. The new sha is `<pending>`.
+ * The default pin stays sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * The box file harness.pr202-70f18392.mjs is sha fa9e815714780b2dc7fa2a790d8de0ddae9dee4ca967eb85459cf8d1eb40c598 and is not the default.
  * out-of-range and non-numbers, including the string `"25"`, fall back to the default.
  * That fallback is what the harness runs. It is not a parse of the string.
  * One such leaf invalidates the whole candidate, including a candidate whose every

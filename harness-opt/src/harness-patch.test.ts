@@ -24,7 +24,10 @@ export const bus = {
   },
   emit(channel, data) {
     for (const fn of [...(handlers.get(channel) ?? [])]) fn(data);
-    if (channel === "pi-goal:cancel") stopGoal = true;
+    if (channel === "pi-goal:cancel") {
+      stopGoal = true;
+      if (process.env.HARNESS_STUB_CANCEL) writeFileSync(process.env.HARNESS_STUB_CANCEL, JSON.stringify(data));
+    }
     if (channel !== "pi-goal:start") return;
     stopGoal = false;
     if (process.env.HARNESS_STUB_STEPS) {
@@ -283,6 +286,7 @@ describe("patched harness smoke", () => {
     };
     const configPath = join(root, "goal.json");
     const sentPath = join(root, "sent.txt");
+    const cancelPath = join(root, "cancel.json");
     writeFileSync(configPath, JSON.stringify(config));
     const run = runHarness(home, patched, join(root, "run"), {
       HARNESS_CANDIDATE_CONFIG: configPath,
@@ -290,6 +294,7 @@ describe("patched harness smoke", () => {
       HARNESS_STUB_STEPS: "7",
       HARNESS_STUB_RELAY: "11",
       HARNESS_STUB_SENT: sentPath,
+      HARNESS_STUB_CANCEL: cancelPath,
     });
     expect(run.result.status).toBe(0);
     const start = run.trace.find((event) => event.type === "run_start") as unknown as { effective: Record<string, unknown> };
@@ -305,6 +310,11 @@ describe("patched harness smoke", () => {
     expect(end.steps).toBe(7);
     expect(run.trace.filter((event) => event.type === "assistant_message")).toHaveLength(11);
     expect(readFileSync(sentPath, "utf8")).toBe("2");
+    const cancel = JSON.parse(readFileSync(cancelPath, "utf8")) as { runId?: string; reason?: string };
+    const goalStart = run.trace.find((event) => event.type === "goal_start") as { runId?: string } | undefined;
+    expect(cancel.reason).toBe("maxContinuationTurns");
+    expect(cancel.runId).toBe(goalStart?.runId);
+    expect(cancel.runId?.startsWith("task-run-")).toBe(true);
     const goal = JSON.parse(readFileSync(join(run.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as {
       continuationLimits: { automaticTurns: number; maxContinuationTurns: number };
     };

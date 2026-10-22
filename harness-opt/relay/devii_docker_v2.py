@@ -17,8 +17,10 @@ The relay replaces Authorization with the key from RELAY_UPSTREAM_KEY_FILE. The 
 Agent argv comes from hooks.container_argv: network devii-004-int, --cap-drop NET_RAW, relay BASE_URL.
 The checker uses the same builder with expose_relay=False, so it has no model access.
 Before the agent starts, the task network must exist and the relay must be listening on 10.204.0.1.
-`once` mounts harness sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c and refuses any other file.
-The signed baseline will be reapplied on the box after this head. The new sha is `<pending>`. Until that sha is recorded, this pin stays."""
+`once` mounts the harness and refuses a file whose sha256 is not the pin.
+The default pin is 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+`--harness-sha` or the env var HARNESS_PIN_SHA selects another explicit sha. A mismatch is still refused.
+The box file harness.pr202-70f18392.mjs is sha fa9e815714780b2dc7fa2a790d8de0ddae9dee4ca967eb85459cf8d1eb40c598. That sha is not the default pin."""
 import fcntl, json, os, secrets, shutil, socket, subprocess, sys, time, hashlib, tomllib
 from pathlib import Path
 import hooks
@@ -26,8 +28,8 @@ IMAGE="registry.bohrium.dp.tech/dptech/dp/native/prod-4721445/4644300/pi-bio-har
 DATA=Path("/workspace/contest-data/devii"); LAKE=DATA/"shared/data_lake"
 HOME=Path("/workspace/harness-opt-runs"); CFG=HOME/"config"
 PATCHED=CFG/"harness.patched.mjs"; PATCHED_SHA="3f4a45ea484a8d645edb8f10e6b57aefeff5a4a7d2938fc95d1870bfa125efd1"
-# Box prereq harness. Once refuses any other bytes. There is no allow-override.
-# The signed baseline will be reapplied on the box after this head. The new sha is `<pending>`.
+# Default pin. `--harness-sha` or HARNESS_PIN_SHA overrides it with an explicit sha.
+# Box file harness.pr202-70f18392.mjs is fa9e815714780b2dc7fa2a790d8de0ddae9dee4ca967eb85459cf8d1eb40c598 and is not this default.
 HARNESS_SHA="4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c"
 MODEL="deepseek-v4-1-flash-261017"
 TASKS=["tasks1/003-tsa-seq-robust-domain-discovery","tasks2/i006","tasks3/hb008","tasks1/004-dims-pqn-batch-qc","tasks2/i028"]  # prereg tasks.selected order
@@ -298,13 +300,24 @@ def resolve_task(task):
         raise OnceError(f"unknown task {task}")
     return matches[0]
 
-def assert_harness(path):
-    """Refuse before docker unless the file is exactly HARNESS_SHA."""
+def harness_pin(explicit=None):
+    """Explicit sha, else HARNESS_PIN_SHA, else the HARNESS_SHA default. Anything else is refused."""
+    if explicit is not None and str(explicit).strip()!="":
+        pin=str(explicit).strip()
+    else:
+        env=os.environ.get("HARNESS_PIN_SHA", "").strip()
+        pin=env if env else HARNESS_SHA
+    if not isinstance(pin, str) or len(pin)!=64 or any(ch not in "0123456789abcdef" for ch in pin):
+        raise OnceError("harness sha")
+    return pin
+
+def assert_harness(path, pin=None):
+    """Refuse before docker unless the file matches the pin."""
     file=Path(path)
     if file.is_symlink() or not file.is_file():
         raise OnceError("harness sha")
     digest=hashlib.sha256(file.read_bytes()).hexdigest()
-    if digest!=HARNESS_SHA:
+    if digest!=harness_pin(pin):
         raise OnceError("harness sha")
     return digest
 
@@ -477,11 +490,13 @@ def write_run_attestation(attest_dir, run, *, key, harness, config, reward, meta
     (attest/"attestation.json").write_text(json.dumps(signed, indent=2, ensure_ascii=False)+"\n")
     return signed
 
-def attest_from_run(run, harness, config, attest_dir, out_dir):
+def attest_from_run(run, harness, config, attest_dir, out_dir, pin=None):
     """Host attestation for a finished once run. Same writer as once --attest-dir. Does not start docker.
 
     `runDir` and `runPath` are relative to `out_dir`, so a copied tree still verifies.
+    The harness file has to match the pin before it is hashed into the attestation.
     """
+    assert_harness(harness, pin)
     from datetime import datetime, timezone
     run_dir=Path(run)
     if run_dir.is_symlink() or not run_dir.is_dir():
@@ -577,7 +592,7 @@ def _clear_orphan_container(name, docker, log):
     log.flush()
     return cid
 
-def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, out_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None):
+def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=None, external=False, model=None, token_cap_override=None, attest_dir=None, out_dir=None, nonce=None, port=None, listen=None, popen=subprocess.Popen, call=subprocess.run, preflight=None, stage=None, limits_of=None, relay=None, lock_path=None, reconcile=False, expected_task=None, docker=None, harness_pin=None):
     """One task, one seed, one arm. The host owns the run id and the relay open/close.
 
     `external` means a relay is already listening and has this run open. This process
@@ -595,7 +610,7 @@ def run_once(task, seed, arm, config, run, harness, *, run_id=None, relay_root=N
         raise OnceError("model")
     chosen=model or MODEL
     resolved=resolve_task(task)
-    harness_sha=assert_harness(harness)
+    harness_sha=assert_harness(harness, harness_pin)
     config_path=Path(config)
     if config_path.is_symlink() or not config_path.is_file():
         raise OnceError("config")
@@ -859,7 +874,8 @@ def once_from_flags(argv, **deps):
         run_id=run_id, relay_root=relay_root, external=bool(flags.get("relay-external")),
         model=flags.get("model"), token_cap_override=None if cap is None else int(cap),
         attest_dir=flags.get("attest-dir"), out_dir=flags.get("out"), nonce=flags.get("nonce"),
-        reconcile=bool(flags.get("reconcile")), expected_task=flags.get("expected-task"), **deps,
+        reconcile=bool(flags.get("reconcile")), expected_task=flags.get("expected-task"),
+        harness_pin=flags.get("harness-sha"), **deps,
     )
 
 def main():
@@ -968,7 +984,7 @@ def main():
             missing=[name for name in ("run-dir","harness","config","attest-dir","out") if name not in flags]
             if missing:
                 raise OnceError("attest needs "+", ".join("--"+name for name in missing))
-            attest_from_run(flags["run-dir"], flags["harness"], flags["config"], flags["attest-dir"], flags["out"])
+            attest_from_run(flags["run-dir"], flags["harness"], flags["config"], flags["attest-dir"], flags["out"], flags.get("harness-sha"))
             print(json.dumps({"attestation": str(Path(flags["attest-dir"])/"attestation.json")}), flush=True)
         except OnceError as exc:
             print(str(exc), file=sys.stderr)

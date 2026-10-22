@@ -258,6 +258,22 @@ export interface OptLoopOptions {
   readonly attestKeyFile: string;
   /** Harness file the wrapper mounts. Its sha is checked against `mountedHarnessSha` when set. */
   readonly harnessPath: string;
+  /**
+   * Explicit harness pin. When omitted, `HARNESS_PIN_SHA` in `env` is used, then the default
+   * pin `4d4e12e5…`. The mounted file has to match. The box file
+   * `harness.pr202-70f18392.mjs` (`fa9e8157…`) is not the default.
+   */
+  readonly harnessPin?: string;
+  /**
+   * Fresh loop only. Sum `run.tokens` and role spend from this loop's signed records
+   * and pass that total to the relay. This is not `--resume` and does not require the
+   * mounted harness to match those attestations.
+   */
+  readonly carryFrom?: string;
+  /** Attest root of `carryFrom`. Required when `carryFrom` is set. */
+  readonly carryAttest?: string;
+  /** Role relay logs for `carryFrom`. Absent uses `<carryAttest>/relay-logs`. */
+  readonly carryRelayLogs?: string;
   /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
   readonly controlConfigPath?: string;
   /** Host attestation directories for the round-1 control runs. Not trace paths and not stdout. */
@@ -519,6 +535,29 @@ function onceAssignedPath(name: "DATA" | "TOML_MIRROR"): string {
   return value;
 }
 
+/** Default harness pin. Override with `harnessPin` or `HARNESS_PIN_SHA`. */
+export const DEFAULT_HARNESS_PIN = "4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c";
+
+/** Explicit option, else `HARNESS_PIN_SHA`, else `DEFAULT_HARNESS_PIN`. */
+export function resolveHarnessPin(options: { readonly harnessPin?: string; readonly env?: NodeJS.ProcessEnv }): string {
+  const explicit = options.harnessPin?.trim() ?? "";
+  const fromEnv = (options.env ?? process.env).HARNESS_PIN_SHA?.trim() ?? "";
+  const pin = explicit !== "" ? explicit : fromEnv !== "" ? fromEnv : DEFAULT_HARNESS_PIN;
+  if (!/^[0-9a-f]{64}$/.test(pin)) throw new Error("harness pin mismatch");
+  return pin;
+}
+
+/** Refuse to start when the mounted harness file is not the pin. */
+function assertHarnessPin(harnessPath: string, pin: string): void {
+  let digest = "";
+  try {
+    digest = sha256File(harnessPath);
+  } catch {
+    digest = "";
+  }
+  if (digest !== pin) throw new Error("harness pin mismatch");
+}
+
 /** Refuse to start when a whitelisted knob has no `effective["..."]` read in the harness file. */
 function assertHarnessCoversKnobs(harnessPath: string): void {
   let text = "";
@@ -620,6 +659,8 @@ function round0IsFile(path: string): boolean {
 }
 
 const CAMPAIGN_FILE = "campaign.json";
+/** Signed `{round, nonce, outRel}` next to the round the campaign closes. */
+const CAMPAIGN_LEDGER = "campaign-ledger.json";
 
 interface CampaignDisk {
   completedRounds: number;
@@ -631,10 +672,23 @@ interface CampaignDisk {
   previousReview: ReviewNote | null;
   accepted: AcceptedCandidate | null;
   gapRound: number | null;
+  /** Basename of the out directory this campaign was written in. Not an absolute path. */
+  outRel: string;
+  /** Round number this campaign closes. It has to match the latest round directory. */
+  round: number;
+  /** Nonce also stored in that round's signed attestation, when one exists, and in the campaign ledger. */
+  nonce: string;
   /** Absent on a campaign written before this field existed. */
   baselineEffective?: Record<string, unknown> | null;
   /** Absent on a campaign written before this field existed. */
   previousEffective?: Record<string, unknown> | null;
+}
+
+/** Relative out-dir identity: the directory's basename, so a copied tree keeps it only when the name matches. */
+function campaignOutRel(out: string): string {
+  const name = basename(resolve(out));
+  if (name === "" || name === "." || name === "..") throw new Error("campaign out dir");
+  return name;
 }
 
 interface ResumeState {
@@ -703,6 +757,9 @@ function readCampaign(out: string, key: Buffer): CampaignDisk | null {
     throw new Error("resume campaign signature rejected");
   }
   if (typeof parsed.completedRounds !== "number") throw new Error("resume campaign signature rejected");
+  if (typeof parsed.outRel !== "string" || parsed.outRel === "" || typeof parsed.round !== "number" || typeof parsed.nonce !== "string" || parsed.nonce === "") {
+    throw new Error("resume campaign binding rejected");
+  }
   return {
     completedRounds: parsed.completedRounds,
     readOnlyTokens: typeof parsed.readOnlyTokens === "number" ? parsed.readOnlyTokens : 0,
@@ -715,6 +772,9 @@ function readCampaign(out: string, key: Buffer): CampaignDisk | null {
       : null,
     accepted: parsed.accepted && typeof parsed.accepted.round === "number" ? parsed.accepted : null,
     gapRound: typeof parsed.gapRound === "number" ? parsed.gapRound : null,
+    outRel: parsed.outRel,
+    round: parsed.round,
+    nonce: parsed.nonce,
     ...("baselineEffective" in parsed
       ? { baselineEffective: plainRecord(parsed.baselineEffective) }
       : {}),
@@ -727,6 +787,76 @@ function readCampaign(out: string, key: Buffer): CampaignDisk | null {
 function plainRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+function writeCampaignLedger(out: string, round: number, nonce: string, outRel: string, key: Buffer): void {
+  const dir = join(out, `round${round}`);
+  mkdirSync(dir, { recursive: true });
+  writeText(join(dir, CAMPAIGN_LEDGER), signedAttestationJson(key, { round, nonce, outRel }));
+}
+
+function readCampaignLedger(out: string, round: number, key: Buffer): { readonly round: number; readonly nonce: string; readonly outRel: string } | null {
+  const file = join(out, `round${round}`, CAMPAIGN_LEDGER);
+  if (!isRegularFile(file)) return null;
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  if (!attestationJsonMacOk(key, text)) return null;
+  try {
+    const parsed = JSON.parse(text) as { round?: unknown; nonce?: unknown; outRel?: unknown };
+    if (parsed.round !== round || typeof parsed.nonce !== "string" || typeof parsed.outRel !== "string") return null;
+    return { round, nonce: parsed.nonce, outRel: parsed.outRel };
+  } catch {
+    return null;
+  }
+}
+
+/** `run.nonce` from a signed attestation. A missing file is null. A bad mac is a binding failure. */
+function attestationNonce(attestDir: string, key: Buffer): string | null {
+  const file = join(attestDir, "attestation.json");
+  if (!isRegularFile(file)) return null;
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    throw new Error("resume campaign binding rejected");
+  }
+  if (!attestationJsonMacOk(key, text)) throw new Error("resume campaign binding rejected");
+  try {
+    const parsed = JSON.parse(text) as { run?: { nonce?: unknown } };
+    const nonce = parsed.run?.nonce;
+    return typeof nonce === "string" && nonce !== "" ? nonce : null;
+  } catch {
+    throw new Error("resume campaign binding rejected");
+  }
+}
+
+/**
+ * The campaign nonce is the scored run's attestation nonce when that file exists.
+ * Otherwise the host issues one and the campaign ledger is the signed record.
+ */
+function issuedCampaignNonce(attestRoot: string, round: number, taskId: string, key: Buffer): string {
+  const fromAttest = attestationNonce(join(attestRoot, `round${round}`, taskId, "seed0", "candidate"), key);
+  if (fromAttest) return fromAttest;
+  return claimNonce(attestRoot);
+}
+
+/**
+ * Same key is not enough. The signed out-dir basename, round, and nonce have to match
+ * this directory's latest round and the nonce in its attestation or campaign ledger.
+ */
+function assertCampaignBound(source: string, disk: CampaignDisk, key: Buffer, attestSource: string, taskId: string): void {
+  const latest = roundNumbers(source).at(-1);
+  if (disk.outRel !== campaignOutRel(source) || disk.round !== latest) throw new Error("resume campaign binding rejected");
+  const ledger = readCampaignLedger(source, disk.round, key);
+  if (!ledger || ledger.nonce !== disk.nonce || ledger.outRel !== disk.outRel || ledger.round !== disk.round) {
+    throw new Error("resume campaign binding rejected");
+  }
+  const signedNonce = attestationNonce(join(attestSource, `round${disk.round}`, taskId, "seed0", "candidate"), key);
+  if (signedNonce !== null && signedNonce !== disk.nonce) throw new Error("resume campaign binding rejected");
 }
 
 function priorRoundSummaries(out: string, nextRound: number): OptLoopResult["rounds"][number][] {
@@ -852,7 +982,7 @@ function attestedGapTrace(out: string, attestRoot: string, key: Buffer, harnessP
  * executor log that no spawn file names is left out. A named log that is missing
  * or unreadable is an error.
  */
-function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string, taskId: string, relayLogs: string): number {
+function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harnessPath: string | undefined, taskId: string, relayLogs: string, label: "resume" | "carry" = "resume"): number {
   let sum = 0;
   for (const round of roundNumbers(out)) {
     const attestDir = join(attestRoot, `round${round}`, taskId, "seed0", "candidate");
@@ -862,14 +992,24 @@ function signedReadOnlyTokens(out: string, attestRoot: string, key: Buffer, harn
       attestDir,
       key,
       configPath,
-      harnessPath,
+      ...(harnessPath ? { harnessPath } : {}),
       runDir: candidateRunDir(out, round, taskId),
       outDir: out,
     });
-    if (!verified.ok) throw new Error(`resume attestation rejected: ${verified.reasons.join(",")}`);
+    if (!verified.ok) throw new Error(`${label} attestation rejected: ${verified.reasons.join(",")}`);
     sum += verified.tokens + recordedRoleTokens(out, round, relayLogs);
   }
   return sum;
+}
+
+/** Fresh-loop carry. Signed records only. The mounted harness is not compared. */
+function carrySignedTokens(options: OptLoopOptions, key: Buffer, taskId: string): number {
+  const from = options.carryFrom?.trim() ?? "";
+  if (from === "") return 0;
+  const attest = options.carryAttest?.trim() ?? "";
+  if (attest === "") throw new Error("carry-from needs a source attest directory");
+  const logs = options.carryRelayLogs && options.carryRelayLogs.trim() !== "" ? options.carryRelayLogs : join(attest, "relay-logs");
+  return signedReadOnlyTokens(from, attest, key, undefined, taskId, logs, "carry");
 }
 
 const ROLE_SPEND_ROLES = new Set(["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"]);
@@ -1015,7 +1155,12 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   const task = requireLoopTask(options.task);
   const rounds = roundNumbers(source);
   if (rounds.length === 0) throw new Error("resume found no completed round");
-  const disk = readCampaign(source, key);
+  const campaignPath = join(source, CAMPAIGN_FILE);
+  if (!isRegularFile(campaignPath) && isRegularFile(join(source, RELAY_LOG_ROOT_FILE))) {
+    throw new Error("resume campaign.json is missing");
+  }
+  const disk = isRegularFile(campaignPath) ? readCampaign(source, key) : null;
+  if (disk) assertCampaignBound(source, disk, key, sourceAttest, task.id);
   const completedRounds = disk?.completedRounds ?? rounds[rounds.length - 1] ?? 0;
   if (completedRounds < 1) throw new Error("resume found no completed round");
   const gapRound = disk?.gapRound ?? latestRunRound(source, task.id, rounds);
@@ -1077,9 +1222,12 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
 export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult> {
   const threshold = options.ewiThresholdSec ?? DEFAULT_EWI_THRESHOLD_SEC;
   const model = options.model ?? OPT_MODEL;
+  const harnessPin = resolveHarnessPin(options);
+  assertHarnessPin(options.harnessPath, harnessPin);
   assertHarnessCoversKnobs(options.harnessPath);
   const task = requireLoopTask(options.task);
   const resumeRequested = options.resumeFrom !== undefined && options.resumeFrom.trim() !== "";
+  if (resumeRequested && (options.carryFrom?.trim() ?? "") !== "") throw new Error("carry-from is a fresh loop and does not resume");
   const env = options.env ?? process.env;
   if (options.mode === "execute" && !env.BASE_URL) throw new Error("execute mode needs BASE_URL");
   const attestKey = loadAttestKey(options.attestKeyFile);
@@ -1094,7 +1242,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   }
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
-  const executor = options.executor ?? executorFor(options, env, attestKey);
+  const executor = options.executor ?? executorFor(options, env, attestKey, harnessPin);
   const now = options.now ?? (() => new Date());
   const scoreHost = {
     now: () => now().getTime() / 1000,
@@ -1193,7 +1341,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const carriedReadOnly = resume?.readOnlyTokens ?? 0;
+  const carriedReadOnly = resume?.readOnlyTokens ?? carrySignedTokens(options, attestKey, task.id);
   const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode, carriedReadOnly);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
@@ -2300,6 +2448,12 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
+  const outRel = campaignOutRel(options.out);
+  const boundRound = completedRounds;
+  const campaignNonce = boundRound >= 1
+    ? issuedCampaignNonce(options.attestRoot, boundRound, task.id, attestKey)
+    : claimNonce(options.attestRoot);
+  if (boundRound >= 1) writeCampaignLedger(options.out, boundRound, campaignNonce, outRel, attestKey);
   writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),
@@ -2312,6 +2466,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     gapRound: latestGapRound,
     baselineEffective,
     previousEffective,
+    outRel,
+    round: boundRound,
+    nonce: campaignNonce,
   }));
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
@@ -3073,7 +3230,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
 }
 
 /** Real-run argv. The loop opens the relay run; this process uses `--relay-external` and does not bind. */
-export function realRunCommand(): readonly string[] {
+export function realRunCommand(harnessPin: string = DEFAULT_HARNESS_PIN): readonly string[] {
   const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
   return [
     "python3", script, "once",
@@ -3083,6 +3240,7 @@ export function realRunCommand(): readonly string[] {
     "--config", "{config}",
     "--run-dir", "{runDir}",
     "--harness", "{harness}",
+    "--harness-sha", harnessPin,
     "--run-id", "{runId}",
     "--relay-log", "{relayLog}",
     "--relay-external",
@@ -3095,11 +3253,11 @@ export function realRunCommand(): readonly string[] {
   ];
 }
 
-function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv, key: Buffer): OptExecutor {
+function executorFor(options: OptLoopOptions, env: NodeJS.ProcessEnv, key: Buffer, harnessPin: string): OptExecutor {
   if (options.mode === "dry-run") return createDryRunExecutor({ key, harnessPath: options.harnessPath });
   const supplied = options.executorCommand !== undefined && options.executorCommand.length > 0;
   return new CommandOptExecutor({
-    command: supplied ? options.executorCommand ?? [] : realRunCommand(),
+    command: supplied ? options.executorCommand ?? [] : realRunCommand(harnessPin),
     ...(supplied ? {} : { name: "once" }),
     ...(options.driver ? { driver: options.driver } : {}),
     env,

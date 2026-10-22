@@ -308,7 +308,7 @@
 +// agent-loop.maxContinuationTurns is written as continuationLimits.automaticTurns
 +// and continuationLimits.maxContinuationTurns. The host cancels when the count reaches it.
 +// relay calls (assistant_message, auto_retry_start) are not capped by either knob.
-+let goalRunActive = false;
++let goalRunActive = false, goalRunId = "";
 +let continuationTurns = 0;
 +let continuationFromGoal = false;
 +let continuationCapped = false;
@@ -318,7 +318,7 @@
 +	continuationTurns = n;
 +	if (continuationTurns >= effective["agent-loop.maxContinuationTurns"]) {
 +		continuationCapped = true;
-+		leadLoader.eventBus.emit("pi-goal:cancel", { reason: "maxContinuationTurns" });
++		leadLoader.eventBus.emit("pi-goal:cancel", { runId: goalRunId, reason: "maxContinuationTurns" });
 +	}
 +}
 +function noteGoalContinuation(ev) {
@@ -400,7 +400,7 @@
  		: null;
  
  	try {
-+		goalRunActive = true;
++		goalRunActive = true; goalRunId = runId;
  		if (deadline > 0 && remainingMs <= 0) return { ok: false, error: "deadline already exceeded" };
  
  		const terminalPromise = new Promise((resolve) => {

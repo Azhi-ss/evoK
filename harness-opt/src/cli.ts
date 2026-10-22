@@ -16,8 +16,10 @@ const USAGE = [
   "  start                 required unless files exist: --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score",
   "  step|status|gate|stop  continue the run in --out (default <cwd>/.harness-opt)",
   "  demo                  one closed loop on the sample trace; prints per-stage status",
-  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
-  "                        one loop; task and round-0 path/sha are required and have no default",
+  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> [--harness-sha <sha>] --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        one loop; task and round-0 path/sha are required and have no default; --harness-sha or HARNESS_PIN_SHA overrides the default harness pin",
+  "  optimize --carry-from <loopOut> --carry-attest <attestRoot> [--carry-relay-logs <dir>]",
+  "                        fresh loop, not --resume; carry run.tokens plus role spend from that loop's signed records into the 30M cap",
   "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> --attest-out <newAttest> [--source-relay-logs <dir>] [--rounds <n>]",
   "                        read that loop and its --attest-root read-only; write round N+1 into --out and new attestations and relay logs into --attest-out; --out and --attest-out must not sit inside the source run or the source attest root; gap input is the previous real-run trace, sha-checked; --source-relay-logs is the source role relay directory when it is not the recorded relayLogRoot; --rounds is how many further rounds (default 1)",
   "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
@@ -163,6 +165,18 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
   const piBin = flag(argv, "--pi-bin");
   const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
   const harnessPath = flag(argv, "--harness");
+  const harnessPin = flag(argv, "--harness-sha") ?? process.env.HARNESS_PIN_SHA;
+  const carryFrom = flag(argv, "--carry-from");
+  const carryAttest = flag(argv, "--carry-attest");
+  const carryRelayLogs = flag(argv, "--carry-relay-logs");
+  if (carryFrom && resumeFrom) {
+    process.stderr.write("optimize --carry-from is a fresh loop and does not resume\n");
+    return 1;
+  }
+  if (carryFrom && !carryAttest) {
+    process.stderr.write("optimize --carry-from needs --carry-attest\n");
+    return 1;
+  }
   const controlConfigPath = flag(argv, "--control-config");
   const controlAttests = repeatFlag(argv, "--control-attest");
   if (!attestRoot || !attestKeyFile || !harnessPath) {
@@ -185,6 +199,8 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
       attestRoot: resumeFrom ? attestOut ?? "" : attestRoot ?? "",
       attestKeyFile,
       harnessPath,
+      ...(harnessPin ? { harnessPin } : {}),
+      ...(carryFrom ? { carryFrom, carryAttest: carryAttest ?? "", ...(carryRelayLogs ? { carryRelayLogs } : {}) } : {}),
       controlAttests,
       task,
       ...(round0 ? { round0TracePath: round0.path, round0TraceSha: round0.sha } : {}),

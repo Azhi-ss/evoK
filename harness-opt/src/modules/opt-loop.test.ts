@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ import {
   CONTROL_CONFIG_SHA,
   CONTROL_CONFIG_TEXT,
   OPT_MODEL,
+  DEFAULT_HARNESS_PIN,
   realRunCommand,
   reconcilePrereg,
   assertLiveRoleCall,
@@ -121,12 +122,13 @@ function attestWrite(fx: Fixture, name: string): string {
   return dir;
 }
 
-function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "controlAttests" | "controlConfigPath" | "env" | "task" | "round0TracePath" | "round0TraceSha"> {
+function hostOpts(fx: Fixture): Pick<OptLoopOptions, "out" | "attestRoot" | "attestKeyFile" | "harnessPath" | "harnessPin" | "controlAttests" | "controlConfigPath" | "env" | "task" | "round0TracePath" | "round0TraceSha"> {
   return {
     out: fx.out,
     attestRoot: fx.attestRoot,
     attestKeyFile: fx.keyFile,
     harnessPath: fx.harnessPath,
+    harnessPin: createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
     controlAttests: [fx.controlAttest],
     controlConfigPath: fx.controlConfig,
     env: { HARNESS_RELAY_BIND: "127.0.0.1" },
@@ -1632,7 +1634,7 @@ function onceStyleAttest(fx: Fixture, candidateConfigHash: string): string {
   const proc = spawnSync("python3", [
     script, "attest",
     "--run-dir", run,
-    "--harness", fx.harnessPath,
+    "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
     "--config", fx.controlConfig,
     "--attest-dir", attest,
     "--out", fx.root,
@@ -1682,7 +1684,7 @@ function taskStyleAttest(fx: Fixture, candidateConfigHash: string): {
   const proc = spawnSync("python3", [
     script, "attest",
     "--run-dir", run,
-    "--harness", fx.harnessPath,
+    "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
     "--config", fx.controlConfig,
     "--attest-dir", attest,
     "--out", fx.root,
@@ -1839,7 +1841,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -1865,7 +1867,7 @@ describe("optimize command", () => {
       "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
       "--attest-root", fx.attestRoot,
       "--attest-key-file", fx.keyFile,
-      "--harness", fx.harnessPath,
+      "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
       ...taskFlags(fx.root),
       ...round0Flags(),
     ]);
@@ -1886,7 +1888,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--dry-run",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         ...round0Flags(),
       ]);
       expect(bare).toBe(1);
@@ -1896,7 +1898,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--dry-run",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         ...taskFlags(fx.root),
         "--round0-trace", ROUND0_TRACE,
       ]);
@@ -1928,7 +1930,7 @@ describe("optimize command", () => {
         "--pi-bin", bin,
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -1978,7 +1980,7 @@ describe("optimize command", () => {
       "optimize", "--out", fx.out, "--dry-run", "--stop-before-run",
       "--attest-root", fx.attestRoot,
       "--attest-key-file", fx.keyFile,
-      "--harness", fx.harnessPath,
+      "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
       ...taskFlags(fx.root),
       ...round0Flags(),
     ]));
@@ -1988,7 +1990,7 @@ describe("optimize command", () => {
       "optimize", "--out", fx.out, "--execute", "--role-max-tokens", "nope=10",
       "--attest-root", fx.attestRoot,
       "--attest-key-file", fx.keyFile,
-      "--harness", fx.harnessPath,
+      "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
       ...taskFlags(fx.root),
       ...round0Flags(),
     ]));
@@ -2015,7 +2017,7 @@ describe("optimize command", () => {
         "--pi-bin", bin,
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -2057,7 +2059,7 @@ describe("optimize command", () => {
         "--pi-bin", bin,
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -2556,7 +2558,7 @@ describe("optimize command", () => {
         "--role-max-tokens", "ranker=4096",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -2617,7 +2619,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--execute", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -2645,7 +2647,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", attest,
         ...taskFlags(fx.root),
@@ -2667,7 +2669,7 @@ describe("optimize command", () => {
       "optimize", "--out", tamperedFx.out, "--dry-run", "--rounds", "1",
       "--attest-root", tamperedFx.attestRoot,
       "--attest-key-file", tamperedFx.keyFile,
-      "--harness", tamperedFx.harnessPath,
+      "--harness", tamperedFx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(tamperedFx.harnessPath)).digest("hex"),
       "--control-config", tamperedFx.controlConfig,
       "--control-attest", tampered,
       ...taskFlags(tamperedFx.root),
@@ -2683,7 +2685,7 @@ describe("optimize command", () => {
       "optimize", "--out", mismatchedFx.out, "--dry-run", "--rounds", "1",
       "--attest-root", mismatchedFx.attestRoot,
       "--attest-key-file", mismatchedFx.keyFile,
-      "--harness", mismatchedFx.harnessPath,
+      "--harness", mismatchedFx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(mismatchedFx.harnessPath)).digest("hex"),
       "--control-config", mismatchedFx.controlConfig,
       "--control-attest", mismatched,
       ...taskFlags(mismatchedFx.root),
@@ -2715,7 +2717,7 @@ describe("optimize command", () => {
         "optimize", "--out", fx.out, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", laid.attest,
         ...taskFlags(fx.root),
@@ -2734,7 +2736,7 @@ describe("optimize command", () => {
       "optimize", "--out", mismatchedFx.out, "--dry-run", "--rounds", "1",
       "--attest-root", mismatchedFx.attestRoot,
       "--attest-key-file", mismatchedFx.keyFile,
-      "--harness", mismatchedFx.harnessPath,
+      "--harness", mismatchedFx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(mismatchedFx.harnessPath)).digest("hex"),
       "--control-config", mismatchedFx.controlConfig,
       "--control-attest", mismatched.attest,
       ...taskFlags(mismatchedFx.root),
@@ -2902,7 +2904,7 @@ console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
         "--out", fx.out,
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--config", candidate,
         "--control-config", fx.controlConfig,
         "--knob", "agent-loop.maxSteps",
@@ -2964,7 +2966,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         "--out", echoFx.out,
         "--attest-root", echoFx.attestRoot,
         "--attest-key-file", echoFx.keyFile,
-        "--harness", echoFx.harnessPath,
+        "--harness", echoFx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(echoFx.harnessPath)).digest("hex"),
         "--config", join(echoFx.root, "candidate.json"),
         "--control-config", echoFx.controlConfig,
         "--knob", "agent-loop.maxSteps",
@@ -5342,6 +5344,221 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(existsSync(join(fx.root, "out-unsigned", "round2"))).toBe(false);
   });
 
+  test("the harness pin defaults to 4d4e12e5 and an explicit sha must match the file", async () => {
+    const fx = fixture();
+    const opts = hostOpts(fx);
+    const { harnessPin, ...rest } = opts;
+    expect(harnessPin).not.toBe(DEFAULT_HARNESS_PIN);
+    await expect(runOptLoop({
+      ...rest,
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow("harness pin mismatch");
+    await expect(runOptLoop({
+      ...opts,
+      harnessPin: "ab".repeat(32),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+    })).rejects.toThrow("harness pin mismatch");
+    const pin = createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex");
+    const ran = await runOptLoop({
+      ...rest,
+      env: { ...rest.env, HARNESS_PIN_SHA: pin },
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+    });
+    expect(existsSync(join(fx.out, "campaign.json"))).toBe(true);
+    expect(ran.stopReport.reason).toBeNull();
+    expect(realRunCommand().join(" ")).toContain(`--harness-sha ${DEFAULT_HARNESS_PIN}`);
+    expect(realRunCommand(pin).join(" ")).toContain(`--harness-sha ${pin}`);
+  });
+
+  test("deleting campaign.json on a new-layout run is a hard error", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    expect(existsSync(join(fx.out, "relay-log-root.json"))).toBe(true);
+    const saved = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as Record<string, unknown>;
+    delete saved.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...saved, readOnlyWallS: 12345, consecutiveNoAccept: 2 }));
+    unlinkSync(join(fx.out, "campaign.json"));
+    const dest = join(fx.root, "out-deleted");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: dest,
+      attestRoot: attestWrite(fx, "attest-deleted"),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    })).rejects.toThrow("resume campaign.json is missing");
+    expect(existsSync(join(dest, "campaign.json"))).toBe(false);
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(dest, "round2"))).toBe(false);
+  });
+
+  test("an older or foreign campaign.json signed with the same key is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const saved = readFileSync(join(fx.out, "campaign.json"), "utf8");
+    const parsed = JSON.parse(saved) as { outRel: string; round: number; nonce: string };
+    expect(parsed.outRel).toBe("out");
+    expect(parsed.round).toBe(1);
+    const ledger = JSON.parse(readFileSync(join(fx.out, "round1", "campaign-ledger.json"), "utf8")) as { nonce: string; outRel: string; round: number };
+    expect(ledger.nonce).toBe(parsed.nonce);
+    expect(ledger.outRel).toBe(parsed.outRel);
+    expect(ledger.round).toBe(parsed.round);
+    const attest = JSON.parse(readFileSync(join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate", "attestation.json"), "utf8")) as { run?: { nonce?: string } };
+    expect(attest.run?.nonce).toBe(parsed.nonce);
+    const resume = (name: string, from: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, name),
+      attestRoot: attestWrite(fx, `attest-${name}`),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: from,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const foreign = join(fx.root, "foreign");
+    cpSync(fx.out, foreign, { recursive: true });
+    await expect(resume("out-foreign", foreign)).rejects.toThrow("resume campaign binding rejected");
+    mkdirSync(join(fx.out, "round2"));
+    await expect(resume("out-older", fx.out)).rejects.toThrow("resume campaign binding rejected");
+    rmSync(join(fx.out, "round2"), { recursive: true });
+    const body = JSON.parse(saved) as Record<string, unknown>;
+    delete body.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, nonce: "ab".repeat(16) }));
+    await expect(resume("out-nonce", fx.out)).rejects.toThrow("resume campaign binding rejected");
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, outRel: "elsewhere" }));
+    await expect(resume("out-rel", fx.out)).rejects.toThrow("resume campaign binding rejected");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    writeFileSync(join(fx.out, "campaign.json"), saved);
+  });
+
+  test("a fresh loop carries round-2 signed tokens without resume", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const body = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as Record<string, unknown>;
+    delete body.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, readOnlyWallS: 99999, consecutiveNoAccept: 2 }));
+    const candidate = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
+    const relayLogs = join(fx.attestRoot, "relay-logs");
+    const roleSpend = recordedRoleTokens(fx.out, 1, relayLogs);
+    const carried = 29_999_990;
+    expect(roleSpend).toBeGreaterThan(0);
+    expect(roleSpend).toBeLessThan(carried);
+    const recorded = JSON.parse(readFileSync(join(candidate, "result.json"), "utf8")) as { runId: string };
+    writeHostAttestation({
+      attestDir: join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate"),
+      outDir: fx.out,
+      runDir: candidate,
+      key: fx.key,
+      harnessPath: fx.harnessPath,
+      configPath: join(fx.out, "round1", "candidate", "config.json"),
+      reward: 1,
+      meta: {
+        task: LOOP_TASK.path,
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: carried - roleSpend,
+        exit: 0,
+        runDir: candidate,
+        runId: recorded.runId,
+        runPath: candidate,
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const freshHarness = join(fx.root, "harness-fresh.mjs");
+    writeFileSync(freshHarness, `${readFileSync(fx.harnessPath, "utf8")}\n// fresh baseline\n`);
+    const freshPin = createHash("sha256").update(readFileSync(freshHarness)).digest("hex");
+    expect(freshPin).not.toBe(createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"));
+    const resigned = attestControl(join(fx.root, "re-sign"), fx.key, freshHarness, fx.controlConfig);
+    const upstream = await listenUpstream();
+    const freshOut = join(fx.root, "fresh-out");
+    const freshAttest = attestWrite(fx, "attest-fresh");
+    try {
+      const stopped = await runOptLoop({
+        ...hostOpts(fx),
+        out: freshOut,
+        attestRoot: freshAttest,
+        harnessPath: freshHarness,
+        harnessPin: freshPin,
+        controlAttests: [resigned.attestDir],
+        carryFrom: fx.out,
+        carryAttest: fx.attestRoot,
+        carryRelayLogs: relayLogs,
+        mode: "dry-run",
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          ...citing,
+          async innovate(input) {
+            await postRole(input.baseUrl);
+            return citing.innovate(input);
+          },
+        },
+      });
+      expect(stopped.stopReport.reason).toBe("readOnlyTokenCap");
+      expect(stopped.rounds.every((round) => round.round === 1)).toBe(true);
+      expect(existsSync(join(freshOut, "round2"))).toBe(false);
+      const fresh = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as {
+        completedRounds: number;
+        round: number;
+        readOnlyWallS: number;
+        consecutiveNoAccept: number;
+        outRel: string;
+        nonce: string;
+      };
+      expect(fresh.completedRounds).toBe(1);
+      expect(fresh.round).toBe(1);
+      expect(fresh.readOnlyWallS).toBeLessThan(60);
+      expect(fresh.consecutiveNoAccept).toBe(0);
+      expect(fresh.outRel).toBe("fresh-out");
+      expect(fresh.nonce.length).toBeGreaterThan(0);
+      const innovators = readdirSync(join(freshAttest, "relay-logs")).flatMap((name) => {
+        const text = readFileSync(join(freshAttest, "relay-logs", name, "relay.jsonl"), "utf8");
+        if (!text.includes('"kind":"role:innovator"')) return [];
+        const sig = JSON.parse(readFileSync(join(freshAttest, "relay-logs", name, "relay.jsonl.sig"), "utf8")) as { type?: string; carriedTokens?: number };
+        return [{ text, sig }];
+      });
+      expect(innovators).toHaveLength(1);
+      const innovator = innovators[0];
+      if (!innovator) throw new Error("innovator relay log");
+      expect(innovator.sig.carriedTokens).toBe(carried);
+      const rows = innovator.text.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as { type?: string; tokens?: number; errClass?: string });
+      expect(rows.find((row) => row.type === "carried")?.tokens).toBe(carried);
+      expect(rows.some((row) => row.type === "done" && row.errClass === "readOnlyTokenCap")).toBe(true);
+    } finally {
+      await upstream.close();
+    }
+  });
+
   test("a carried total near 30M makes the relay stop at the cap", async () => {
     const fx = fixture();
     const citing = citingRoles(fx.key, fx.attestRoot);
@@ -5516,7 +5733,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         "optimize", "--from-round", fx.out, "--out", next, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -5536,7 +5753,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           "--attest-root", fx.attestRoot,
           "--attest-out", attestWrite(fx, "attest-nested-run"),
           "--attest-key-file", fx.keyFile,
-          "--harness", fx.harnessPath,
+          "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
           "--control-config", fx.controlConfig,
           "--control-attest", fx.controlAttest,
           ...taskFlags(fx.root),
@@ -5546,7 +5763,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
           "--attest-root", fx.attestRoot,
           "--attest-out", attestWrite(fx, "attest-nested-attest"),
           "--attest-key-file", fx.keyFile,
-          "--harness", fx.harnessPath,
+          "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
           "--control-config", fx.controlConfig,
           "--control-attest", fx.controlAttest,
           ...taskFlags(fx.root),
@@ -5565,7 +5782,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         "--attest-root", fx.attestRoot,
         "--attest-out", attestOut,
         "--attest-key-file", fx.keyFile,
-        "--harness", fx.harnessPath,
+        "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
         "--control-config", fx.controlConfig,
         "--control-attest", fx.controlAttest,
         ...taskFlags(fx.root),
@@ -6141,12 +6358,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     if (!sample) throw new Error("gap-finder relay log is not named");
     const sampleLog = join(external, sample, "relay.jsonl");
     renameSync(sampleLog, `${sampleLog}.bak`);
-    writeFileSync(join(fx.out, "relay-log-root.json"), `${JSON.stringify({ relayLogRoot: external }, null, 2)}\n`);
     await expect(runOptLoop({
       ...hostOpts(fx),
       out: join(fx.root, "out-one-missing"),
       attestRoot: attestWrite(fx, "attest-one-missing"),
       attestSource: fx.attestRoot,
+      sourceRelayLogs: external,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: fakeExecutor(fx).executor,
@@ -6158,6 +6375,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       out: join(fx.root, "out-unreadable"),
       attestRoot: attestWrite(fx, "attest-unreadable"),
       attestSource: fx.attestRoot,
+      sourceRelayLogs: external,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: fakeExecutor(fx).executor,
@@ -6166,9 +6384,6 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     rmSync(sampleLog, { recursive: true });
     renameSync(`${sampleLog}.bak`, sampleLog);
     const roleSpend = recordedRoleTokens(fx.out, 1, external);
-    const wrongRelay = join(fx.root, "wrong-relay");
-    mkdirSync(wrongRelay);
-    writeFileSync(join(fx.out, "relay-log-root.json"), `${JSON.stringify({ relayLogRoot: wrongRelay }, null, 2)}\n`);
     const flagged = await runOptLoop({
       ...hostOpts(fx),
       out: join(fx.root, "out-flag"),
@@ -6208,7 +6423,6 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         at: "2026-10-21T00:00:00+09:00",
       },
     });
-    unlinkSync(join(fx.out, "relay-log-root.json"));
     const next = join(fx.root, "out-old");
     const before = stampTree(fx.out);
     const beforeAttest = stampTree(fx.attestRoot);

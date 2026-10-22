@@ -2490,9 +2490,54 @@ class OnceCase(unittest.TestCase):
         self.assertTrue(all("/task-copy/.pi-sessions/" in item for item in verified["sessionFiles"]))
         self.assertNotIn("decoy.jsonl", verified["piSessionShas"])
 
+    def test_harness_pin_flag_and_env_override_the_default(self):
+        digest = hashlib.sha256(self.harness.read_bytes()).hexdigest()
+        self.assertNotEqual(digest, self.box.HARNESS_SHA)
+        with self.assertRaises(self.box.OnceError) as default:
+            self.box.assert_harness(self.harness)
+        self.assertIn("harness", str(default.exception))
+        self.assertEqual(self.box.assert_harness(self.harness, digest), digest)
+        os.environ["HARNESS_PIN_SHA"] = "cd" * 32
+        try:
+            with self.assertRaises(self.box.OnceError):
+                self.box.assert_harness(self.harness)
+            self.assertEqual(self.box.assert_harness(self.harness, digest), digest)
+            os.environ["HARNESS_PIN_SHA"] = digest
+            self.assertEqual(self.box.assert_harness(self.harness), digest)
+        finally:
+            os.environ.pop("HARNESS_PIN_SHA", None)
+        seen = []
+
+        def popen(*args, **kwargs):
+            seen.append(args)
+
+        flags = [
+            "--task", "hb003", "--seed", "9", "--arm", "control",
+            "--config", str(self.config), "--run-dir", str(self.root / "pin-run"),
+            "--harness", str(self.harness),
+            "--relay-external", "--run-id", "ab" * 16,
+            "--relay-log", str(self.root / "pin-logs" / ("ab" * 16) / "relay.jsonl"),
+            "--out", str(self.root),
+        ]
+        deps = dict(popen=popen, preflight=lambda **_kwargs: None, stage=lambda *_args: None, limits_of=lambda _task: {"agent_timeout_sec": 30, "verifier_timeout_sec": 30})
+        with self.assertRaises(self.box.OnceError) as mismatch:
+            self.box.once_from_flags([*flags, "--harness-sha", "ab" * 32], **deps)
+        self.assertIn("harness", str(mismatch.exception))
+        self.assertEqual(seen, [])
+        recorded = self.box.once_from_flags([*flags, "--harness-sha", digest], **deps)
+        self.assertEqual(recorded["mountedHarnessSha"], digest)
+        self.assertEqual(recorded["unscored_reason"], "usage_missing")
+        os.environ["HARNESS_PIN_SHA"] = digest
+        try:
+            via_env = self.box.once_from_flags(flags, **deps)
+        finally:
+            os.environ.pop("HARNESS_PIN_SHA", None)
+        self.assertEqual(via_env["mountedHarnessSha"], digest)
+
     def test_attest_unreadable_dir_fails_closed(self):
         import contextlib
         import io
+        self.box.HARNESS_SHA = hashlib.sha256(self.harness.read_bytes()).hexdigest()
         run = self.root / "locked"
         run.mkdir()
         (run / ".pi-sessions").mkdir()
