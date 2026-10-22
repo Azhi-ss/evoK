@@ -14,6 +14,7 @@ type ShapeNode = true | { readonly [key: string]: ShapeNode };
 export const PART_CONFIG_SHAPE: Record<HarnessPart, ShapeNode> = {
   "agent-loop": {
     maxSteps: true,
+    maxContinuationTurns: true,
     noProgressTurns: true,
     maxNudges: true,
     requireWrite: true,
@@ -43,6 +44,7 @@ export const PART_CONFIG_SHAPE: Record<HarnessPart, ShapeNode> = {
  */
 export const HARNESS_LEAF_CONSUMPTION: Readonly<Record<string, string>> = {
   "agent-loop.maxSteps": "session agent_end step cap (stats.turns)",
+  "agent-loop.maxContinuationTurns": "pi-goal.json continuationLimits.automaticTurns and maxContinuationTurns; host cancel when goalContinuationTurns reaches it",
   "agent-loop.noProgressTurns": "pi-goal.json continuationLimits.noProgressTurns",
   "agent-loop.maxNudges": "missing-output nudge loop bound",
   "agent-loop.requireWrite": "missing-output nudge loop gate",

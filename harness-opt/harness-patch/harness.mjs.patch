@@ -87,6 +87,7 @@
 +const envContextWindow = Number.parseInt(process.env.HARNESS_CONTEXT_WINDOW || "131072", 10);
 +const effective = {
 +	"agent-loop.maxSteps": positiveInt(candidateValue("agent-loop", "maxSteps"), 25),
++	"agent-loop.maxContinuationTurns": positiveInt(candidateValue("agent-loop", "maxContinuationTurns"), 25),
 +	"agent-loop.noProgressTurns": positiveInt(candidateValue("agent-loop", "noProgressTurns"), 3),
 +	"agent-loop.maxNudges": nonNegativeInt(candidateValue("agent-loop", "maxNudges"), 2),
 +	"agent-loop.requireWrite": typeof candidateValue("agent-loop", "requireWrite") === "boolean" ? candidateValue("agent-loop", "requireWrite") : true,
@@ -107,7 +108,6 @@
 +	"memory.scope": textOr(candidateValue("memory", "scope"), "all"),
 +	"memory.recall": textOr(candidateValue("memory", "recall"), "recent"),
 +	"memory.maxItems": nonNegativeInt(candidateValue("memory", "maxItems"), 8),
-+	"goal.maxContinuationTurns": positiveInt(candidateValue("goal", "maxContinuationTurns"), 25),
 +};
 +const maxTokens = effective["context.maxTokens"];
 +const contextWindow = effective["context.window"];
@@ -121,9 +121,9 @@
  		continuationLimits: {
 -			automaticTurns: 25,
 -			noProgressTurns: 3,
-+			automaticTurns: effective["goal.maxContinuationTurns"],
++			automaticTurns: effective["agent-loop.maxContinuationTurns"],
 +			noProgressTurns: effective["agent-loop.noProgressTurns"],
-+			maxContinuationTurns: effective["goal.maxContinuationTurns"],
++			maxContinuationTurns: effective["agent-loop.maxContinuationTurns"],
  		},
  		rpc: {
  			enabled: true,
@@ -302,12 +302,12 @@
  const deadline = timeoutSec > 0 ? startedAt + timeoutSec * 1000 : 0;
  const stats = { assistant_text: 0, tool_calls: 0, tool_errors: 0, turns: 0, retries: 0, usage: null };
 +// steps: stats.turns, one session agent_end, capped by agent-loop.maxSteps.
-+// continuation turns: pi-goal automatic model responses. An official
-+// automaticModelTurns value, or "N of M automatic model responses", replaces
-+// this count; until one arrives, each goal-run turn_end increments it.
-+// goal.maxContinuationTurns caps this same number, pi-goal enforces it as
-+// continuationLimits.automaticTurns, and run_end.goalContinuationTurns reports it.
-+// relay calls: trace assistant_message and auto_retry_start. Neither cap applies.
++// maxSteps does not set continuationLimits.automaticTurns.
++// continuation turns: official automaticModelTurns, or "N of M automatic model responses",
++// replaces the count; until one arrives, each goal-run turn_end increments it.
++// agent-loop.maxContinuationTurns is written as continuationLimits.automaticTurns
++// and continuationLimits.maxContinuationTurns. The host cancels when the count reaches it.
++// relay calls (assistant_message, auto_retry_start) are not capped by either knob.
 +let goalRunActive = false;
 +let continuationTurns = 0;
 +let continuationFromGoal = false;
@@ -316,7 +316,7 @@
 +	if (continuationCapped) return;
 +	if (typeof n !== "number" || !Number.isFinite(n)) return;
 +	continuationTurns = n;
-+	if (continuationTurns >= effective["goal.maxContinuationTurns"]) {
++	if (continuationTurns >= effective["agent-loop.maxContinuationTurns"]) {
 +		continuationCapped = true;
 +		leadLoader.eventBus.emit("pi-goal:cancel", { reason: "maxContinuationTurns" });
 +	}
@@ -479,7 +479,7 @@
 +};
 +if (candidateActive) {
 +	runEnd.goalContinuationTurns = continuationTurns;
-+	runEnd.maxContinuationTurns = effective["goal.maxContinuationTurns"];
++	runEnd.maxContinuationTurns = effective["agent-loop.maxContinuationTurns"];
 +	runEnd.steps = stats.turns;
 +}
 +trace(runEnd);

@@ -235,6 +235,8 @@ describe("patched harness smoke", () => {
     expect(readFileSync(join(plainPatched.env.RUN_DIR, "prompt.txt"), "utf8")).not.toContain("candidateConfigHash:");
     expect(controlStart.candidateConfigHash).not.toBe(treatmentStart.candidateConfigHash);
     expect(controlStart.effective["agent-loop.maxSteps"]).toBe(20);
+    expect(controlStart.effective["agent-loop.maxContinuationTurns"]).toBe(25);
+    expect(treatmentStart.effective["agent-loop.maxContinuationTurns"]).toBe(25);
     expect(treatmentStart.effective["agent-loop.maxSteps"]).toBe(3);
     expect(controlStart.effective["toolchain.checker"]).toBe("none");
     expect(controlStart.effective["toolchain.tools.enabled"]).toEqual(["read", "write"]);
@@ -246,10 +248,16 @@ describe("patched harness smoke", () => {
     const treatmentEnd = treatmentRun.trace.find((event) => event.type === "run_end") as unknown as { goalContinuationTurns: number };
     expect(controlEnd.goalContinuationTurns).toBe(3);
     expect(treatmentEnd.goalContinuationTurns).toBe(2);
-    const controlGoal = JSON.parse(readFileSync(join(controlRun.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as { continuationLimits: { automaticTurns: number } };
-    const treatmentGoal = JSON.parse(readFileSync(join(treatmentRun.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as { continuationLimits: { automaticTurns: number } };
+    const controlGoal = JSON.parse(readFileSync(join(controlRun.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as {
+      continuationLimits: { automaticTurns: number; maxContinuationTurns: number };
+    };
+    const treatmentGoal = JSON.parse(readFileSync(join(treatmentRun.env.HARNESS_AGENT_DIR, "pi-goal.json"), "utf8")) as {
+      continuationLimits: { automaticTurns: number; maxContinuationTurns: number };
+    };
     expect(controlGoal.continuationLimits.automaticTurns).toBe(25);
+    expect(controlGoal.continuationLimits.maxContinuationTurns).toBe(25);
     expect(treatmentGoal.continuationLimits.automaticTurns).toBe(25);
+    expect(treatmentGoal.continuationLimits.maxContinuationTurns).toBe(25);
     const controlSettings = JSON.parse(readFileSync(controlRun.env.HARNESS_STUB_SETTINGS, "utf8")) as { defaultTools: string[]; compaction: { keepRecentTokens: number } };
     expect(controlSettings.defaultTools).toEqual(["read", "write"]);
     expect(controlSettings.compaction.keepRecentTokens).toBe(100);
@@ -261,7 +269,7 @@ describe("patched harness smoke", () => {
     expect(controlRun.result.stdout).not.toContain("smoke-test-key");
   }, 30000);
 
-  test("goal.maxContinuationTurns stops the continuation loop at N", () => {
+  test("agent-loop.maxContinuationTurns stops continuations at N and maxSteps does not set automaticTurns", () => {
     const root = mkdtempSync(join(tmpdir(), "harness-cap-"));
     const home = prepareHome(root);
     const patched = join(home, "src/harness.mjs");
@@ -269,9 +277,8 @@ describe("patched harness smoke", () => {
     expect(applied.status).toBe(0);
     const config = {
       parts: {
-        "agent-loop": { maxSteps: 20, noProgressTurns: 3, maxNudges: 2, requireWrite: false },
+        "agent-loop": { maxSteps: 20, maxContinuationTurns: 2, noProgressTurns: 3, maxNudges: 2, requireWrite: false },
         toolchain: { checker: "none", subagents: false, bashTimeoutSec: 300, tools: { enabled: ["read", "write"] } },
-        goal: { maxContinuationTurns: 2 },
       },
     };
     const configPath = join(root, "goal.json");
@@ -292,7 +299,7 @@ describe("patched harness smoke", () => {
       steps: number;
     };
     expect(start.effective["agent-loop.maxSteps"]).toBe(20);
-    expect(start.effective["goal.maxContinuationTurns"]).toBe(2);
+    expect(start.effective["agent-loop.maxContinuationTurns"]).toBe(2);
     expect(end.goalContinuationTurns).toBe(2);
     expect(end.maxContinuationTurns).toBe(2);
     expect(end.steps).toBe(7);

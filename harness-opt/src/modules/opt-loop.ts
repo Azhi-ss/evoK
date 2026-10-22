@@ -2788,7 +2788,7 @@ function innovatorTaskPrompt(input: { readonly round: number; readonly knob: str
     "只能改下面这些有效旋钮。碰了名单以外的键，这一条候选无效，原因是 invalid: non_effective_key。",
     "对象的键本身带点，例如 skills 下面写 \"selector.weight\"，harness 不会读。那也是 invalid: non_effective_key。",
     "空改比的是 harness 实际会用的值，不是写下的原文。0、超出范围、以及类型不对落到默认的值，都按用过之后的值来比。和签名 control 的当前有效值相同就是空改。上一轮跑出来的有效值也算，上一轮没被接受、control 没改时同样算。空改的键记 invalid: no_op_change。同一条候选里只要有一个空改，整条候选无效，不把空改的键删掉后留下其余改动。",
-    "agent-loop.maxSteps 是 agent_end 步数。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这个上限截断。",
+    "agent-loop.maxSteps 是 agent_end 步数，只记在 stats.turns 和 run_end.steps，不写 continuationLimits.automaticTurns。agent-loop.maxContinuationTurns 是 continuation turn，写进 continuationLimits.automaticTurns 和 continuationLimits.maxContinuationTurns。relay 调用是 trace 里的 assistant_message 和 auto_retry_start，不由这两个上限截断。",
     ...knobCatalog(input.control).map(formatKnobLine),
   ].join("\n");
 }

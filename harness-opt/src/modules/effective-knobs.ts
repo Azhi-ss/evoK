@@ -1,15 +1,17 @@
 /**
- * Knobs the signed baseline harness reads as `effective["..."]`.
- * That file is sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * Knobs the patched harness reads as `effective["..."]`.
+ * The signed file on the box is still sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c.
+ * That file will be reapplied on the box after this head. The new sha is `<pending>`.
  * One list: the innovator prompt, candidate validation, and the startup check
- * all use this array. The branch harness source may wire more keys. Those stay
- * off this list while the signed baseline does not read them.
- * `agent-loop.maxSteps` caps agent_end steps (`stats.turns`, `run_end.steps`).
+ * all use this array. `goal.maxContinuationTurns` stays off this list.
+ * `agent-loop.maxSteps` caps agent_end steps (`stats.turns`, `run_end.steps`) and does not set automaticTurns.
+ * `agent-loop.maxContinuationTurns` caps continuation turns (default 25).
  * A relay call is an `assistant_message` or `auto_retry_start` trace line.
- * It is not a knob and this cap does not apply to it.
+ * It is not a knob and neither cap applies to it.
  */
 export const EFFECTIVE_KNOBS = [
   "agent-loop.maxSteps",
+  "agent-loop.maxContinuationTurns",
   "agent-loop.noProgressTurns",
   "agent-loop.maxNudges",
   "agent-loop.requireWrite",
@@ -98,7 +100,9 @@ export interface KnobFact {
 
 /**
  * Current effective value of every whitelist key.
- * That value is the 4d4e12e5 default after the harness coercion of the control leaf.
+ * That value is the patched-harness default after coercion of the control leaf.
+ * The signed baseline sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c
+ * will be reapplied on the box after this head. The new sha is `<pending>`.
  */
 export function knobCatalog(control: unknown): readonly KnobFact[] {
   const parts = controlParts(control);
@@ -126,7 +130,9 @@ export function formatKnobLine(fact: KnobFact): string {
 
 /**
  * Changed leaves whose harness-effective value already equals the current effective value.
- * The written leaf is run through the same coercion the 4d4e12e5 harness uses:
+ * The written leaf is run through the same coercion the patched harness uses.
+ * The signed baseline sha 4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c
+ * will be reapplied on the box after this head. The new sha is `<pending>`.
  * out-of-range and non-numbers, including the string `"25"`, fall back to the default.
  * That fallback is what the harness runs. It is not a parse of the string.
  * One such leaf invalidates the whole candidate, including a candidate whose every
@@ -223,6 +229,7 @@ interface KnobSpec {
 
 const SPECS: readonly KnobSpec[] = [
   { key: "agent-loop.maxSteps", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 25) },
+  { key: "agent-loop.maxContinuationTurns", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 25) },
   { key: "agent-loop.noProgressTurns", type: "positiveInt", min: 1, max: SAFE_INT, coerce: (value) => positiveInt(value, 3) },
   { key: "agent-loop.maxNudges", type: "nonNegativeInt", min: 0, max: SAFE_INT, coerce: (value) => nonNegativeInt(value, 2) },
   { key: "agent-loop.requireWrite", type: "boolean", coerce: (value) => boolOr(value, true) },

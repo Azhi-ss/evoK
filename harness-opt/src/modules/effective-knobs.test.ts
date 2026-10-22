@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EFFECTIVE_KNOBS, flatDottedKeys, formatKnobLine, harnessEffectiveKeys, knobCatalog, noopKeys } from "./effective-knobs";
 
@@ -34,13 +37,29 @@ const DEPLOYED_KEYS = [
 ] as const;
 
 describe("effective knobs", () => {
-  test("the whitelist is exactly the keys the deployed 4d4e12e5 harness reads", () => {
+  test("the whitelist is the keys the patched harness reads; the signed 4d4e12e5 file is the old baseline", () => {
     const bytes = readFileSync(DEPLOYED_HARNESS);
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(DEPLOYED_HARNESS_SHA);
-    const text = bytes.toString("utf8");
-    expect([...new Set(harnessEffectiveKeys(text))]).toEqual([...DEPLOYED_KEYS]);
-    expect([...EFFECTIVE_KNOBS].sort()).toEqual([...DEPLOYED_KEYS].sort());
+    const deployed = [...new Set(harnessEffectiveKeys(bytes.toString("utf8")))];
+    expect(deployed).toEqual([...DEPLOYED_KEYS]);
+    expect(deployed).not.toContain("agent-loop.maxContinuationTurns");
+    expect(deployed).not.toContain("goal.maxContinuationTurns");
+    expect(EFFECTIVE_KNOBS).toContain("agent-loop.maxContinuationTurns");
     expect(EFFECTIVE_KNOBS).not.toContain("goal.maxContinuationTurns");
+    const root = mkdtempSync(join(tmpdir(), "knobs-"));
+    const here = dirname(fileURLToPath(import.meta.url));
+    const dest = join(root, "harness.mjs");
+    const applied = spawnSync("node", [
+      join(here, "../../harness-patch/apply.mjs"),
+      join(here, "../../harness-patch/upstream/harness.mjs"),
+      dest,
+    ], { encoding: "utf8" });
+    expect(applied.status).toBe(0);
+    const patched = readFileSync(dest, "utf8");
+    expect([...new Set(harnessEffectiveKeys(patched))].sort()).toEqual([...EFFECTIVE_KNOBS].sort());
+    expect(patched).not.toContain("goal.maxContinuationTurns");
+    expect(patched).not.toContain('automaticTurns: effective["agent-loop.maxSteps"]');
+    expect(patched).toContain('automaticTurns: effective["agent-loop.maxContinuationTurns"]');
   });
 
   test("current effective values follow the 4d4e12e5 defaults merged with control", () => {
@@ -57,6 +76,16 @@ describe("effective knobs", () => {
     if (!idle) throw new Error("missing noProgressTurns");
     expect(formatKnobLine(idle)).toBe("agent-loop.noProgressTurns current=3 type=positiveInt min=1 max=9007199254740991");
     expect(facts.find((fact) => fact.key === "agent-loop.maxSteps")?.current).toBe(25);
+    const continuation = facts.find((fact) => fact.key === "agent-loop.maxContinuationTurns");
+    expect(continuation).toEqual({
+      key: "agent-loop.maxContinuationTurns",
+      current: 25,
+      type: "positiveInt",
+      min: 1,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+    if (!continuation) throw new Error("missing maxContinuationTurns");
+    expect(formatKnobLine(continuation)).toBe("agent-loop.maxContinuationTurns current=25 type=positiveInt min=1 max=9007199254740991");
     expect(facts.find((fact) => fact.key === "toolchain.bashTimeoutSec")).toEqual({
       key: "toolchain.bashTimeoutSec",
       current: 300,
@@ -115,6 +144,9 @@ describe("effective knobs", () => {
     expect(noopKeys({ "agent-loop": { noProgressTurns: 0 } }, control)).toEqual(["agent-loop.noProgressTurns"]);
     expect(noopKeys({ toolchain: { bashTimeoutSec: 5000 } }, control)).toEqual(["toolchain.bashTimeoutSec"]);
     expect(noopKeys({ "agent-loop": { maxSteps: "25" } }, control)).toEqual(["agent-loop.maxSteps"]);
+    expect(noopKeys({ "agent-loop": { maxContinuationTurns: 25 } }, control)).toEqual(["agent-loop.maxContinuationTurns"]);
+    expect(noopKeys({ "agent-loop": { maxContinuationTurns: "25" } }, control)).toEqual(["agent-loop.maxContinuationTurns"]);
+    expect(noopKeys({ "agent-loop": { maxContinuationTurns: 10 } }, control)).toEqual([]);
     expect(noopKeys({ "agent-loop": { maxSteps: 20 } }, control)).toEqual([]);
     expect(noopKeys({ toolchain: { bashTimeoutSec: 600 } }, control)).toEqual([]);
     expect(noopKeys({ "agent-loop": { maxSteps: 20 } }, control, { "agent-loop.maxSteps": 20 })).toEqual(["agent-loop.maxSteps"]);

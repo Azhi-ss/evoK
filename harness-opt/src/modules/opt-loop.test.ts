@@ -4333,19 +4333,19 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
 
-  test("the loop starts against the deployed harness 4d4e12e5", async () => {
+  test("the signed harness 4d4e12e5 refuses to start until the baseline is reapplied", async () => {
     const deployed = fileURLToPath(new URL("../../fixtures/harness.4d4e12e5.mjs", import.meta.url));
     const fx = fixture(readFileSync(deployed, "utf8"));
     expect(createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex")).toBe(
       "4d4e12e51958650b5ee6f4768f1bd809202ecec23a4db6ef910bfcc36222fd8c",
     );
-    const result = await runOptLoop({
+    await expect(runOptLoop({
       ...hostOpts(fx),
       mode: "dry-run",
       rounds: 1,
       executor: fakeExecutor(fx).executor,
-    });
-    expect(result.stopReport.reason).toBeNull();
+    })).rejects.toThrow(/harness is missing effective-config for agent-loop.maxContinuationTurns/);
+    expect(existsSync(join(fx.out, "pre-round1.json"))).toBe(false);
   });
 
   test("a harness missing a whitelisted effective key refuses to start", async () => {
@@ -4656,8 +4656,47 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(prompt).toContain("invalid: non_effective_key");
     expect(prompt).toContain("invalid: no_op_change");
     expect(prompt).not.toContain("goal.maxContinuationTurns");
+    expect(prompt).toContain("agent-loop.maxContinuationTurns current=25");
     expect(prompt).toContain("agent-loop.maxSteps 是 agent_end 步数");
     expect(readFileSync(fileURLToPath(new URL("../../agents/innovator.md", import.meta.url)), "utf8")).not.toContain("non_effective_key");
+  });
+
+  test("a patch of goal.maxContinuationTurns is invalid: non_effective_key", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        gap: (input) => stub.gap(input),
+        async innovate(input) {
+          const summary = `goal continuation ${input.sessionPath}`;
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary, parts: { goal: { maxContinuationTurns: 2 } } };
+        },
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(fake.calls).toEqual([]);
+    expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+    expect(existsSync(join(fx.out, "round1/candidate"))).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      noWinner?: string;
+      invalidCandidates?: { id: string; reason: string }[];
+    };
+    expect(closure.noWinner).toBe("no_winner");
+    expect(closure.invalidCandidates).toHaveLength(6);
+    for (const item of closure.invalidCandidates ?? []) expect(item.reason).toBe("invalid: non_effective_key");
+    expect(result.stopReport.reason).toBeNull();
+    const prompt = (JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.argv.json"), "utf8")) as { argv: string[] }).argv.at(-1) ?? "";
+    expect(prompt).not.toContain("goal.maxContinuationTurns");
+    expect(prompt).toContain("agent-loop.maxContinuationTurns current=25");
   });
 
   test("an innovator already at 200k is not launched again", async () => {
@@ -4972,6 +5011,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(innovatorPrompt).toContain("invalid: no_op_change");
     expect(innovatorPrompt).toContain("整条候选无效");
     expect(catalog.find((fact) => fact.key === "agent-loop.maxSteps")?.current).toBe(25);
+    expect(catalog.find((fact) => fact.key === "agent-loop.maxContinuationTurns")?.current).toBe(25);
     expect(catalog.find((fact) => fact.key === "agent-loop.noProgressTurns")?.current).toBe(3);
     expect(fake.calls).toHaveLength(1);
     const config = JSON.parse(readFileSync(join(fx.out, "round1/candidate/config.json"), "utf8")) as { parts: { "agent-loop": { maxSteps: number } } };
