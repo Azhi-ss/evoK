@@ -297,7 +297,7 @@
  });
  await session.bindExtensions({});
  
-@@ -948,6 +1116,46 @@
+@@ -948,6 +1116,59 @@
  const startedAt = Date.now();
  const deadline = timeoutSec > 0 ? startedAt + timeoutSec * 1000 : 0;
  const stats = { assistant_text: 0, tool_calls: 0, tool_errors: 0, turns: 0, retries: 0, usage: null };
@@ -307,18 +307,31 @@
 +// replaces the count; until one arrives, each goal-run turn_end increments it.
 +// agent-loop.maxContinuationTurns is written as continuationLimits.automaticTurns
 +// and continuationLimits.maxContinuationTurns. The host cancels when the count reaches it.
-+// If continuation turns keep arriving after that cancel, abort the session.
++// If continuation turns keep arriving after that cancel, abort the session once.
++// A successful abort writes one continuation_abort line and is not repeated.
++// A failed abort writes abort_error.
 +// relay calls (assistant_message, auto_retry_start) are not capped by either knob.
 +let goalRunActive = false, goalRunId = "";
 +let continuationTurns = 0;
 +let continuationFromGoal = false;
 +let continuationCapped = false;
++let continuationAbortSent = false;
 +function setContinuationTurns(n) {
 +	if (typeof n !== "number" || !Number.isFinite(n)) return;
 +	if (continuationCapped) {
 +		if (n > continuationTurns) {
 +			continuationTurns = n;
-+			session.abort().catch((err) => trace({ ts: Date.now(), type: "abort_error", error: String(err) }));
++			if (!continuationAbortSent) {
++				continuationAbortSent = true;
++				const runId = goalRunId;
++				const seen = continuationTurns;
++				const cap = effective["agent-loop.maxContinuationTurns"];
++				session.abort().then(() => {
++					trace({ type: "continuation_abort", runId, continuationTurns: seen, cap, ts: Date.now() });
++				}, (err) => {
++					trace({ ts: Date.now(), type: "abort_error", error: String(err) });
++				});
++			}
 +		}
 +		return;
 +	}

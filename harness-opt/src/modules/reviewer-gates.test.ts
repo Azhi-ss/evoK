@@ -99,6 +99,26 @@ describe("reviewer gates", () => {
     expect(withinDefault.verdict).toBe("accept");
   });
 
+  test("G2 rejects a run_end with no finite goalContinuationTurns even when that knob was not changed, and accepts 25 of 25", () => {
+    const unchanged = {
+      changed: [{ path: "agent-loop.maxSteps", value: 20 }],
+      effective: { "agent-loop.maxSteps": 20, "agent-loop.maxContinuationTurns": 25 },
+      knobPaths: ["agent-loop.maxSteps"],
+      patchPaths: ["agent-loop.maxSteps"],
+    };
+    const missing = evaluateReviewerGates(input({ ...unchanged, runEnd: { status: "ok" } }));
+    expect(missing.verdict).toBe("reject");
+    expect(missing.rejectCode).toBe("inactive_key");
+    expect(missing.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    const text = evaluateReviewerGates(input({ ...unchanged, runEnd: { goalContinuationTurns: "25" } }));
+    expect(text.verdict).toBe("reject");
+    expect(text.rejectCode).toBe("inactive_key");
+    expect(text.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    const exact = evaluateReviewerGates(input({ ...unchanged, runEnd: { goalContinuationTurns: 25 } }));
+    expect(exact.verdict).toBe("accept");
+    expect(exact.gates[2]).toEqual({ id: "G2", pass: true });
+  });
+
   test("G3 rejects a timeout flag, a wall time at the official limit, or a reward under the signed baseline", () => {
     expect(evaluateReviewerGates(input({ timedOut: true })).verdict).toBe("reject");
     expect(evaluateReviewerGates(input({ wallS: 90, officialTimeoutSec: 90, timedOut: false })).gates[3]?.pass).toBe(false);

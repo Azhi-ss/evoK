@@ -361,4 +361,49 @@ describe("patched harness smoke", () => {
     expect(cancel.reason).toBe("maxContinuationTurns");
     expect(readFileSync(abortPath, "utf8").trim().length).toBeGreaterThan(0);
   });
+
+  test("a successful abort after the cap cancel writes one continuation_abort and does not abort again", () => {
+    const root = mkdtempSync(join(tmpdir(), "harness-abort-once-"));
+    const home = prepareHome(root);
+    const patched = join(home, "src/harness.mjs");
+    const applied = spawnSync("node", [applyScript, upstream, patched], { encoding: "utf8" });
+    expect(applied.status).toBe(0);
+    const config = {
+      parts: {
+        "agent-loop": { maxSteps: 20, maxContinuationTurns: 10, noProgressTurns: 3, maxNudges: 2, requireWrite: false },
+        toolchain: { checker: "none", subagents: false, bashTimeoutSec: 300, tools: { enabled: ["read", "write"] } },
+      },
+    };
+    const configPath = join(root, "goal.json");
+    const abortPath = join(root, "abort.txt");
+    writeFileSync(configPath, JSON.stringify(config));
+    const run = runHarness(home, patched, join(root, "run"), {
+      HARNESS_CANDIDATE_CONFIG: configPath,
+      HARNESS_STUB_TURNS: "44",
+      HARNESS_STUB_KEEP_AFTER_CANCEL: "1",
+      HARNESS_STUB_ABORT: abortPath,
+    });
+    expect(run.result.status).toBe(0);
+    const aborts = run.trace.filter((event) => event.type === "continuation_abort") as {
+      type: string;
+      runId: string;
+      continuationTurns: number;
+      cap: number;
+      ts: number;
+    }[];
+    expect(aborts).toHaveLength(1);
+    const line = aborts[0];
+    expect(line?.type).toBe("continuation_abort");
+    const goalStart = run.trace.find((event) => event.type === "goal_start") as { runId?: string } | undefined;
+    expect(line?.runId).toBe(goalStart?.runId);
+    expect(line?.runId?.startsWith("task-run-")).toBe(true);
+    expect(line?.continuationTurns).toBe(11);
+    expect(line?.cap).toBe(10);
+    expect(Number.isFinite(line?.ts)).toBe(true);
+    expect(Object.keys(line ?? {}).sort()).toEqual(["cap", "continuationTurns", "runId", "ts", "type"]);
+    expect(readFileSync(abortPath, "utf8")).toBe("abort\n");
+    expect(run.trace.filter((event) => event.type === "abort_error")).toHaveLength(0);
+    const end = run.trace.find((event) => event.type === "run_end") as unknown as { goalContinuationTurns: number };
+    expect(end.goalContinuationTurns).toBe(44);
+  });
 });
