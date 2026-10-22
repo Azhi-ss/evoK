@@ -226,19 +226,15 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   const configBytes = readFileSync(request.configPath);
   const config = JSON.parse(configBytes.toString()) as { parts?: Record<string, unknown> };
   const hash = createHash("sha256").update(configBytes).digest("hex");
-  const effective = flatten(config.parts ?? {});
-  const configuredCap = effective["agent-loop.maxContinuationTurns"];
-  const goalContinuationTurns = typeof configuredCap === "number" && Number.isFinite(configuredCap) ? configuredCap : 25;
   const start = {
     type: "run_start",
     candidateConfigHash: hash,
-    effective,
+    effective: flatten(config.parts ?? {}),
   };
   const messages = timing.assistantTs.map((stamp) => ({ type: "assistant_message", ts: stamp * 1000 }));
-  const end = { type: "run_end", goalContinuationTurns };
   writeFileSync(
     join(request.runDir, "trace.jsonl"),
-    [start, ...messages, end].map((line) => JSON.stringify(line)).join("\n") + "\n",
+    [start, ...messages].map((line) => JSON.stringify(line)).join("\n") + "\n",
   );
   writeFileSync(join(request.runDir, "batch.log"), `${new Date(timing.tEnd * 1000).toISOString()} run 1 done\n`);
   mkdirSync(join(request.runDir, "verifier"), { recursive: true });
