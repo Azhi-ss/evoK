@@ -277,7 +277,8 @@ export interface OptLoopOptions {
   /**
    * Fresh `--carry-from` only. Each directory is one voided, unsigned preflight's relay logs.
    * Usage already in those logs, including a non-2xx or unfinished line, is summed and recorded
-   * on the signed campaign. Repeatable. A directory already in this carry chain is rejected.
+   * on the signed campaign. Repeatable. A directory already in this carry chain is rejected,
+   * including the source relay-log root and a byte-identical copy of a counted log.
    */
   readonly voidSpend?: readonly string[];
   /** Host control config bytes. Defaults to `CONTROL_CONFIG_TEXT`. */
@@ -705,6 +706,11 @@ interface CampaignDisk {
    * Each entry is a separate signed record, not a round link.
    */
   voids?: readonly VoidLedgerEntry[];
+  /**
+   * Relay-log directories whose spend is already inside readOnlyTokens.
+   * Copied forward so a later carry still sees earlier roots. Absent before this field existed.
+   */
+  relayLogs?: readonly CountedRelayLog[];
 }
 
 /** One voided relay-log directory counted on the signed campaign. `dir` is its realpath. `sha` covers the log bytes. */
@@ -712,6 +718,12 @@ interface VoidLedgerEntry {
   readonly kind: "VOID";
   readonly dir: string;
   readonly tokens: number;
+  readonly sha: string;
+}
+
+/** A relay-log directory already counted on the carry chain. `dir` is its realpath. `sha` covers the log bytes. */
+interface CountedRelayLog {
+  readonly dir: string;
   readonly sha: string;
 }
 
@@ -743,6 +755,8 @@ interface ResumeState {
   readonly campaignTip: string | null;
   /** VOID entries already counted. Empty when the source campaign has none. */
   readonly voids: readonly VoidLedgerEntry[];
+  /** Relay-log directories already counted. Empty when the source campaign has none. */
+  readonly relayLogs: readonly CountedRelayLog[];
 }
 
 class ResumeTraceError extends Error {
@@ -816,8 +830,28 @@ function readCampaign(out: string, key: Buffer): CampaignDisk | null {
     ...("previousEffective" in parsed
       ? { previousEffective: plainRecord(parsed.previousEffective) }
       : {}),
-    ...("voids" in parsed ? { voids: requireVoidEntries(parsed.voids) } : {}),
+    ...("voids" in parsed ? { voids: verifiedVoidEntries(parsed.voids) } : {}),
+    ...("relayLogs" in parsed ? { relayLogs: requireRelayLogs(parsed.relayLogs) } : {}),
   };
+}
+
+function verifiedVoidEntries(value: unknown): VoidLedgerEntry[] {
+  const entries = requireVoidEntries(value);
+  for (const entry of entries) assertStoredVoidSha(entry);
+  return entries;
+}
+
+function assertStoredVoidSha(entry: VoidLedgerEntry): void {
+  let actual = "";
+  try {
+    const dir = realpathSync(entry.dir);
+    if (!lstatSync(dir).isDirectory()) throw new Error("void-spend log sha mismatch");
+    actual = hashRelayLogs(dir);
+  } catch (error) {
+    if (error instanceof Error && error.message === "void-spend relay log is not a regular file") throw error;
+    throw new Error("void-spend log sha mismatch");
+  }
+  if (actual !== entry.sha) throw new Error("void-spend log sha mismatch");
 }
 
 function requireVoidEntries(value: unknown): VoidLedgerEntry[] {
@@ -837,6 +871,25 @@ function parseVoidEntries(value: unknown): VoidLedgerEntry[] | null {
     if (typeof row.tokens !== "number" || !Number.isSafeInteger(row.tokens) || row.tokens < 0) return null;
     if (typeof row.sha !== "string" || !/^[0-9a-f]{64}$/.test(row.sha)) return null;
     entries.push({ kind: "VOID", dir: row.dir, tokens: row.tokens, sha: row.sha });
+  }
+  return entries;
+}
+
+function requireRelayLogs(value: unknown): CountedRelayLog[] {
+  const entries = parseRelayLogs(value);
+  if (!entries) throw new Error("resume campaign signature rejected");
+  return entries;
+}
+
+function parseRelayLogs(value: unknown): CountedRelayLog[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: CountedRelayLog[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const row = item as { dir?: unknown; sha?: unknown };
+    if (typeof row.dir !== "string" || row.dir.trim() === "") return null;
+    if (typeof row.sha !== "string" || !/^[0-9a-f]{64}$/.test(row.sha)) return null;
+    entries.push({ dir: row.dir, sha: row.sha });
   }
   return entries;
 }
@@ -1360,16 +1413,30 @@ function carriedVoidEntries(options: OptLoopOptions, key: Buffer): readonly Void
 
 /**
  * Sum usage the relay logs actually contain and reject a directory this chain already counted.
+ * That includes the carry source's relay-log root, earlier relay-log dirs on the chain, and a
+ * byte-identical copy of a VOID entry or of those logs. Comparison is realpath and log sha.
  * A 2xx `done` is not required. A truncated line still counts when its usage object is complete.
  * A row with no weighable usage adds nothing.
  */
-function collectVoidSpend(dirs: readonly string[], prior: readonly VoidLedgerEntry[]): VoidLedgerEntry[] {
-  const seen = new Set(prior.map((entry) => countedVoidDir(entry.dir)));
+function collectVoidSpend(dirs: readonly string[], prior: readonly VoidLedgerEntry[], chainLogs: readonly CountedRelayLog[]): VoidLedgerEntry[] {
+  const seenDirs = new Set<string>();
+  const seenShas = new Set<string>();
+  const remember = (dir: string, sha: string): void => {
+    seenDirs.add(countedVoidDir(dir));
+    seenShas.add(sha);
+    const live = measureCountedRelayLog(dir);
+    if (!live) return;
+    seenDirs.add(live.dir);
+    seenShas.add(live.sha);
+  };
+  for (const entry of prior) remember(entry.dir, entry.sha);
+  for (const log of chainLogs) remember(log.dir, log.sha);
   const entries: VoidLedgerEntry[] = [];
   for (const raw of dirs) {
     const spent = measureVoidSpend(raw);
-    if (seen.has(spent.dir)) throw new Error("void-spend dir already counted");
-    seen.add(spent.dir);
+    if (seenDirs.has(spent.dir) || seenShas.has(spent.sha)) throw new Error("void-spend dir already counted");
+    seenDirs.add(spent.dir);
+    seenShas.add(spent.sha);
     entries.push({ kind: "VOID", dir: spent.dir, tokens: spent.tokens, sha: spent.sha });
   }
   return entries;
@@ -1403,18 +1470,85 @@ function measureVoidSpend(raw: string): { readonly dir: string; readonly tokens:
   }
   if (!linked.isDirectory()) throw new Error("void-spend relay log dir is missing");
   const files = relayLogsUnder(dir);
-  const hash = createHash("sha256");
   let tokens = 0;
-  for (const file of files) {
-    const bytes = readFileSync(file.abs);
+  for (const file of files) tokens += shownLogTokens(readFileSync(file.abs).toString("utf8"));
+  if (!Number.isSafeInteger(tokens)) throw new Error("void-spend tokens");
+  return { dir, tokens, sha: hashRelayLogs(dir) };
+}
+
+/** sha256 of the regular `relay.jsonl` bytes under `dir`, in relative-path order. */
+function hashRelayLogs(dir: string): string {
+  const hash = createHash("sha256");
+  for (const file of relayLogsUnder(dir)) {
     hash.update(file.rel);
     hash.update("\0");
-    hash.update(bytes);
+    hash.update(readFileSync(file.abs));
     hash.update("\0");
-    tokens += shownLogTokens(bytes.toString("utf8"));
   }
-  if (!Number.isSafeInteger(tokens)) throw new Error("void-spend tokens");
-  return { dir, tokens, sha: hash.digest("hex") };
+  return hash.digest("hex");
+}
+
+function measureCountedRelayLog(raw: string): CountedRelayLog | null {
+  try {
+    const dir = realpathSync(raw);
+    if (!lstatSync(dir).isDirectory()) return null;
+    return { dir, sha: hashRelayLogs(dir) };
+  } catch {
+    return null;
+  }
+}
+
+function relayLogsFromDisk(out: string, disk: CampaignDisk | null): CountedRelayLog[] {
+  if (disk?.relayLogs && disk.relayLogs.length > 0) return [...disk.relayLogs];
+  const seeded: CountedRelayLog[] = [];
+  for (const root of recordedRelayLogRoots(out)) {
+    const live = measureCountedRelayLog(root);
+    if (live && !seeded.some((entry) => entry.dir === live.dir)) seeded.push(live);
+  }
+  return seeded;
+}
+
+/** Relay-log directories already counted on the carry source, including earlier hops stored on its campaign. */
+function carriedRelayLogs(options: OptLoopOptions, key: Buffer): readonly CountedRelayLog[] {
+  const from = options.carryFrom?.trim() ?? "";
+  if (from === "") return [];
+  if (!isRegularFile(join(from, CAMPAIGN_FILE))) return relayLogsFromDisk(from, null);
+  return relayLogsFromDisk(from, readCampaign(from, key));
+}
+
+function sourceRelayDirs(from: string, attest: string, explicit: string | undefined): string[] {
+  const found: string[] = [];
+  const add = (dir: string): void => {
+    const trimmed = dir.trim();
+    if (trimmed !== "" && !found.includes(trimmed)) found.push(trimmed);
+  };
+  if (explicit) add(explicit);
+  for (const root of recordedRelayLogRoots(from)) add(root);
+  add(join(attest, "relay-logs"));
+  return found;
+}
+
+function carryChainRelayLogs(options: OptLoopOptions, key: Buffer): CountedRelayLog[] {
+  const from = options.carryFrom?.trim() ?? "";
+  if (from === "") return [];
+  const merged: CountedRelayLog[] = [...carriedRelayLogs(options, key)];
+  const attest = options.carryAttest?.trim() ?? "";
+  if (attest === "") return merged;
+  for (const raw of sourceRelayDirs(from, attest, options.carryRelayLogs)) {
+    const live = measureCountedRelayLog(raw);
+    if (!live) continue;
+    if (merged.some((entry) => countedVoidDir(entry.dir) === live.dir)) continue;
+    merged.push(live);
+  }
+  return merged;
+}
+
+function mergeCountedRelayLogs(existing: readonly CountedRelayLog[], extra: CountedRelayLog | null): CountedRelayLog[] {
+  const out = [...existing];
+  if (!extra) return out;
+  if (out.some((entry) => countedVoidDir(entry.dir) === extra.dir)) return out;
+  out.push(extra);
+  return out;
 }
 
 /** Regular `relay.jsonl` files under `dir`, in relative-path order. A symlink log is refused. */
@@ -1703,6 +1837,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
     previousEffective: readRunEdges(gap.path).effective,
     campaignTip,
     voids: disk?.voids ?? [],
+    relayLogs: relayLogsFromDisk(source, disk),
   };
 }
 
@@ -1722,8 +1857,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   if ((options.voidSpend?.length ?? 0) > 0 && (resumeRequested || (options.carryFrom?.trim() ?? "") === "")) {
     throw new Error("void-spend needs a fresh carry-from loop");
   }
+  if ((options.carryFrom?.trim() ?? "") !== "") carriedVoidEntries(options, attestKey);
   const addedVoids = (options.voidSpend?.length ?? 0) > 0
-    ? collectVoidSpend(options.voidSpend ?? [], carriedVoidEntries(options, attestKey))
+    ? collectVoidSpend(options.voidSpend ?? [], carriedVoidEntries(options, attestKey), carryChainRelayLogs(options, attestKey))
     : [];
   const officialTask = resolveOfficialTask(task.path, options.taskDataRoot ?? onceAssignedPath("DATA"), options.taskMirrorRoot ?? onceAssignedPath("TOML_MIRROR"));
   const officialTimeoutSec = officialTask.timeoutSec;
@@ -2997,6 +3133,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     },
   };
   const boundRound = completedRounds;
+  const campaignRelayLogs = mergeCountedRelayLogs(resume?.relayLogs ?? carriedRelayLogs(options, attestKey), measureCountedRelayLog(relayRoot));
   writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),
@@ -3013,6 +3150,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     round: boundRound,
     nonce: campaignNonce,
     ...(campaignVoids.length > 0 ? { voids: campaignVoids } : {}),
+    ...(campaignRelayLogs.length > 0 ? { relayLogs: campaignRelayLogs } : {}),
   }));
   writeJson(join(options.out, "loop-result.json"), result);
   return result;

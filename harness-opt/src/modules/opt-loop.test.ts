@@ -5964,7 +5964,6 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     const fresh = JSON.parse(readFileSync(join(freshOut, "campaign.json"), "utf8")) as { readOnlyTokens: number; voids: { kind: string; dir: string; tokens: number; sha: string }[] };
     expect(fresh.voids).toEqual([{ kind: "VOID", dir: realpathSync(voidDir), tokens: 7, sha: recordedSha }]);
-    appendFileSync(logPath, "{\"type\":\"done\"\n");
     const link = join(fx.root, "void-chain-link");
     symlinkSync(voidDir, link);
     const again = (dir: string, outName: string) => runOptLoop({
@@ -6003,6 +6002,198 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(kept.voids).toEqual(fresh.voids);
     expect(kept.voids[0]?.sha).toBe(recordedSha);
     expect(kept.readOnlyTokens).toBe(fresh.readOnlyTokens + keptPreflight);
+  });
+
+  test("a void-spend of the carry source relay-log root or an earlier chain relay dir is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const sourceLogs = join(fx.attestRoot, "relay-logs");
+    expect(readdirSync(sourceLogs).length).toBeGreaterThan(0);
+    const spend = (from: string, fromAttest: string, dir: string, outName: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, outName),
+      attestRoot: attestWrite(fx, `attest-${outName}`),
+      carryFrom: from,
+      carryAttest: fromAttest,
+      voidSpend: [dir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, `attest-${outName}`)),
+    });
+    await expect(spend(fx.out, fx.attestRoot, sourceLogs, "void-source-logs")).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(join(fx.root, "void-source-logs"))).toBe(false);
+    const link = join(fx.root, "source-logs-link");
+    symlinkSync(sourceLogs, link);
+    await expect(spend(fx.out, fx.attestRoot, link, "void-source-link")).rejects.toThrow("void-spend dir already counted");
+    const midOut = join(fx.root, "mid-chain");
+    const midAttest = attestWrite(fx, "attest-mid-chain");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: midOut,
+      attestRoot: midAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, midAttest),
+    });
+    await expect(spend(midOut, midAttest, sourceLogs, "void-ancestor-logs")).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(join(fx.root, "void-ancestor-logs"))).toBe(false);
+    await expect(spend(midOut, midAttest, join(midAttest, "relay-logs"), "void-mid-logs")).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(join(fx.root, "void-mid-logs"))).toBe(false);
+  });
+
+  test("a byte-identical copy of a counted void or relay log is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const sourceLogs = join(fx.attestRoot, "relay-logs");
+    const sourceCopy = join(fx.root, "source-logs-copy");
+    cpSync(sourceLogs, sourceCopy, { recursive: true });
+    const copiedOut = join(fx.root, "void-source-copy");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: copiedOut,
+      attestRoot: attestWrite(fx, "attest-source-copy"),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [sourceCopy],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-source-copy")),
+    })).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(copiedOut)).toBe(false);
+    const voidDir = join(fx.root, "void-bytes");
+    const twin = join(fx.root, "void-bytes-twin");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    mkdirSync(join(twin, "run"), { recursive: true });
+    const line = `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 3, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } })}\n`;
+    writeFileSync(join(voidDir, "run", "relay.jsonl"), line);
+    writeFileSync(join(twin, "run", "relay.jsonl"), line);
+    const sameCallOut = join(fx.root, "void-same-call");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: sameCallOut,
+      attestRoot: attestWrite(fx, "attest-same-call"),
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir, twin],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-same-call")),
+    })).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(sameCallOut)).toBe(false);
+    const recordedOut = join(fx.root, "void-recorded");
+    const recordedAttest = attestWrite(fx, "attest-void-recorded");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: recordedOut,
+      attestRoot: recordedAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, recordedAttest),
+    });
+    const laterCopy = join(fx.root, "void-bytes-later");
+    cpSync(voidDir, laterCopy, { recursive: true });
+    const laterOut = join(fx.root, "void-later-copy");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: laterOut,
+      attestRoot: attestWrite(fx, "attest-later-copy"),
+      carryFrom: recordedOut,
+      carryAttest: recordedAttest,
+      voidSpend: [laterCopy],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-later-copy")),
+    })).rejects.toThrow("void-spend dir already counted");
+    expect(existsSync(laterOut)).toBe(false);
+  });
+
+  test("a void entry whose recomputed log sha mismatches its dir is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    const voidDir = join(fx.root, "void-verify");
+    mkdirSync(join(voidDir, "run"), { recursive: true });
+    const logPath = join(voidDir, "run", "relay.jsonl");
+    writeFileSync(logPath, `${JSON.stringify({ type: "done", status: 200, usage: { prompt_tokens: 4, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const recordedOut = join(fx.root, "void-verify-recorded");
+    const recordedAttest = attestWrite(fx, "attest-void-verify");
+    await runOptLoop({
+      ...hostOpts(fx),
+      out: recordedOut,
+      attestRoot: recordedAttest,
+      carryFrom: fx.out,
+      carryAttest: fx.attestRoot,
+      voidSpend: [voidDir],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, recordedAttest),
+    });
+    appendFileSync(logPath, "{\"type\":\"done\"\n");
+    const other = join(fx.root, "void-verify-other");
+    mkdirSync(join(other, "run"), { recursive: true });
+    writeFileSync(join(other, "run", "relay.jsonl"), `${JSON.stringify({ type: "done", status: 500, usage: { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } } })}\n`);
+    const mismatchedOut = join(fx.root, "void-verify-next");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: mismatchedOut,
+      attestRoot: attestWrite(fx, "attest-void-verify-next"),
+      carryFrom: recordedOut,
+      carryAttest: recordedAttest,
+      voidSpend: [other],
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-void-verify-next")),
+    })).rejects.toThrow("void-spend log sha mismatch");
+    expect(existsSync(mismatchedOut)).toBe(false);
+    const plainOut = join(fx.root, "void-verify-plain");
+    await expect(runOptLoop({
+      ...hostOpts(fx),
+      out: plainOut,
+      attestRoot: attestWrite(fx, "attest-void-verify-plain"),
+      carryFrom: recordedOut,
+      carryAttest: recordedAttest,
+      mode: "dry-run",
+      stopBeforeRun: true,
+      executor: fakeExecutor(fx).executor,
+      roles: citingRoles(fx.key, attestWrite(fx, "attest-void-verify-plain")),
+    })).rejects.toThrow("void-spend log sha mismatch");
+    expect(existsSync(plainOut)).toBe(false);
   });
 
   test("void-spend counts toward the 30M cap", async () => {
