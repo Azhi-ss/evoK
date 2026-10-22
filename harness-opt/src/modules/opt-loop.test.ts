@@ -28,6 +28,9 @@ import {
   relayPlantRead,
   relayPlantRole,
   relayRecord,
+  trimLongString,
+  capArtifact,
+  gapArtifactText,
   reviewerSchemaDetail,
   ReviewerSchemaError,
   stubOptRoles,
@@ -140,6 +143,7 @@ function attestControl(root: string, key: Buffer, harnessPath: string, controlCo
     model: OPT_MODEL,
     tokenCap: tokenCap(LOOP_TASK),
     relayLogRoot: join(root, "control-relay"),
+    outDir: root,
   };
   const base = 1_700_000_000;
   writeRunArtifacts(request, {
@@ -1072,6 +1076,7 @@ describe("optimization loop", () => {
       model: OPT_MODEL,
       tokenCap: tokenCap(LOOP_TASK),
       relayLogRoot: join(fx.root, "pretty-relay"),
+      outDir: fx.root,
     }, { reward: 1, tokens: 10, wallS: 1, timedOut: false, tWrite: 1_700_000_000, tEnd: 1_700_000_001, assistantTs: [] }, { key: fx.key, harnessPath: fx.harnessPath });
     await expect(runOptLoop({
       ...hostOpts(fx),
@@ -1292,6 +1297,7 @@ describe("optimization loop", () => {
         writeFileSync(resultPath, `${JSON.stringify(result)}\n`);
         writeHostAttestation({
           attestDir: side,
+          outDir: fx.out,
           runDir: request.runDir,
           key: fx.key,
           harnessPath: fx.harnessPath,
@@ -1357,6 +1363,7 @@ describe("optimization loop", () => {
     const runDir = join(fx.root, "control-run");
     writeHostAttestation({
       attestDir: fx.controlAttest,
+      outDir: fx.root,
       runDir,
       key: fx.key,
       harnessPath: fx.harnessPath,
@@ -2813,7 +2820,7 @@ describe("optimize-one command", () => {
     writeFileSync(honest, `
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { writeHostAttestation } from ${JSON.stringify(attestModule)};
 const args = process.argv.slice(2);
 const get = (flag) => args[args.indexOf(flag) + 1];
@@ -2843,8 +2850,12 @@ writeFileSync(join(run, ".pi-sessions", "session.jsonl"), JSON.stringify({
   message: { role: "system", content: "", sections: { preamble }, timestamp: 0 },
 }) + "\\n");
 writeFileSync(join(run, "result.json"), JSON.stringify({ reward: 1, tokens: 4, wall_s: 1, timed_out: false, score_status: "scored", runId: get("--run-id") }) + "\\n");
+const relayLog = get("--relay-log");
+mkdirSync(dirname(relayLog), { recursive: true });
+writeFileSync(relayLog, JSON.stringify({ type: "req", systemConfigHashes: [hash] }) + "\\n");
 writeHostAttestation({
   attestDir: get("--attest-dir"),
+  outDir: get("--out"),
   runDir: run,
   key: readFileSync(process.env.HARNESS_ATTEST_KEY_FILE),
   harnessPath: get("--harness"),
@@ -2872,6 +2883,8 @@ console.log(JSON.stringify({ attestation: "/tmp/not-read/attestation.json" }));
       "--token-cap", "{tokenCap}",
       "--run-id", "{runId}",
       "--nonce", "{nonce}",
+      "--out", "{outDir}",
+      "--relay-log", "{relayLog}",
     ];
     try {
       const code = await main([
@@ -5163,8 +5176,10 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const spike = async (patch: Record<string, number>, reason: string): Promise<void> => {
       const body = JSON.parse(saved) as Record<string, unknown>;
       writeFileSync(join(fx.out, "campaign.json"), `${JSON.stringify({ ...body, ...patch }, null, 2)}\n`);
+      const spikeOut = join(fx.root, `out-spike-${reason}`);
       const stopped = await runOptLoop({
         ...hostOpts(fx),
+        out: spikeOut,
         mode: "dry-run",
         resumeFrom: fx.out,
         readOnlyTokens: () => 0,
@@ -5173,42 +5188,53 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       });
       expect(stopped.stopReport.reason).toBe(reason);
       expect(existsSync(join(fx.out, "round2"))).toBe(false);
+      expect(existsSync(join(spikeOut, "round2"))).toBe(false);
       writeFileSync(join(fx.out, "campaign.json"), saved);
     };
     await spike({ realRunWallS: 103 * 3600 }, "realRunWallCap");
     await spike({ readOnlyWallS: 48 * 3600 }, "readOnlyWallCap");
     await spike({ completedRounds: 10 }, "maxRounds");
 
+    const next = join(fx.root, "out-next");
+    const before = stampTree(fx.out);
     const continued = await runOptLoop({
       ...hostOpts(fx),
+      out: next,
       mode: "dry-run",
       resumeFrom: fx.out,
       readOnlyTokens: () => 2_000,
       executor: fakeExecutor(fx).executor,
       roles: citing,
     });
+    expect(stampTree(fx.out)).toEqual(before);
     expect(continued.rounds.map((round) => round.round)).toEqual([1, 2]);
     expect(existsSync(join(fx.out, "round1"))).toBe(true);
-    expect(existsSync(join(fx.out, "round2"))).toBe(true);
-    const traces = JSON.parse(readFileSync(join(fx.out, "round2/gap-traces.json"), "utf8")) as { traces: { sha256: string }[] };
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2"))).toBe(true);
+    const traces = JSON.parse(readFileSync(join(next, "round2/gap-traces.json"), "utf8")) as { traces: { sha256: string }[] };
     expect(traces.traces.map((hint) => hint.sha256)).toContain(taskSha);
-    const after = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as {
+    const after = JSON.parse(readFileSync(join(next, "campaign.json"), "utf8")) as {
       completedRounds: number;
       readOnlyTokens: number;
     };
     expect(after.completedRounds).toBe(2);
     expect(after.readOnlyTokens).toBe(3_000);
 
+    const cappedOut = join(fx.root, "out-cap");
+    const cappedBefore = stampTree(next);
     const capped = await runOptLoop({
       ...hostOpts(fx),
+      out: cappedOut,
       mode: "dry-run",
-      resumeFrom: fx.out,
+      resumeFrom: next,
       readOnlyTokens: () => 30_000_000,
       executor: fakeExecutor(fx).executor,
       roles: citing,
     });
+    expect(stampTree(next)).toEqual(cappedBefore);
     expect(capped.stopReport.reason).toBe("readOnlyTokenCap");
-    expect(existsSync(join(fx.out, "round3"))).toBe(false);
+    expect(existsSync(join(cappedOut, "round3"))).toBe(false);
+    expect(existsSync(join(next, "round3"))).toBe(false);
   });
 
   test("optimize --resume refuses a task-copy whose sha misses the signed attestation", async () => {
@@ -5226,14 +5252,17 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const bytes = readFileSync(taskCopy);
     bytes[0] = bytes[0] === 0 ? 1 : 0;
     writeFileSync(taskCopy, bytes);
+    const next = join(fx.root, "out-sha");
     await expect(runOptLoop({
       ...hostOpts(fx),
+      out: next,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: fakeExecutor(fx).executor,
       roles: citing,
     })).rejects.toThrow("resume trace sha mismatch");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2"))).toBe(false);
   });
 
   test("a rejected resumed round keeps the accepted baseline config and reward", async () => {
@@ -5251,8 +5280,11 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const acceptedConfig = JSON.parse(acceptedBaseline) as { parts: { "agent-loop": { maxSteps: number } } };
     expect(acceptedConfig.parts["agent-loop"].maxSteps).toBe(24);
     mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    const next = join(fx.root, "out-rejected");
+    const before = stampTree(fx.out);
     const second = await runOptLoop({
       ...hostOpts(fx),
+      out: next,
       mode: "dry-run",
       resumeFrom: fx.out,
       executor: {
@@ -5266,16 +5298,18 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: citing,
     });
     expect(second.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(stampTree(fx.out)).toEqual(before);
     expect(second.rounds[1]?.accepted).toBe(false);
     expect(second.accepted?.round).toBe(1);
     expect(readFileSync(join(fx.out, "baseline", "config.json"), "utf8")).toBe(acceptedBaseline);
-    const kept = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as { baselineReward: number | null };
+    expect(readFileSync(join(next, "baseline", "config.json"), "utf8")).toBe(acceptedBaseline);
+    const kept = JSON.parse(readFileSync(join(next, "campaign.json"), "utf8")) as { baselineReward: number | null };
     expect(kept.baselineReward).toBe(1);
-    const rejected = JSON.parse(readFileSync(join(fx.out, "round2/candidate/config.json"), "utf8")) as {
+    const rejected = JSON.parse(readFileSync(join(next, "round2/candidate/config.json"), "utf8")) as {
       parts: { "agent-loop": { maxSteps: number } };
     };
     expect(rejected.parts["agent-loop"].maxSteps).toBe(23);
-    const closure = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+    const closure = JSON.parse(readFileSync(join(next, "round2/closure.json"), "utf8")) as {
       closed?: boolean;
       accepted?: boolean;
       gates: { id: string; pass: boolean }[];
@@ -5299,11 +5333,13 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       rounds: 1,
       executor: fakeExecutor(fx).executor,
     });
+    const next = join(fx.root, "out-from");
+    const before = stampTree(fx.out);
     const previousBind = process.env.HARNESS_RELAY_BIND;
     process.env.HARNESS_RELAY_BIND = "127.0.0.1";
     try {
       const code = await main([
-        "optimize", "--from-round", fx.out, "--dry-run", "--rounds", "1",
+        "optimize", "--from-round", fx.out, "--out", next, "--dry-run", "--rounds", "1",
         "--attest-root", fx.attestRoot,
         "--attest-key-file", fx.keyFile,
         "--harness", fx.harnessPath,
@@ -5316,8 +5352,10 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       if (previousBind === undefined) delete process.env.HARNESS_RELAY_BIND;
       else process.env.HARNESS_RELAY_BIND = previousBind;
     }
-    expect(existsSync(join(fx.out, "round2/closure.json"))).toBe(true);
-    const result = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { rounds: { round: number }[] };
+    expect(stampTree(fx.out)).toEqual(before);
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2/closure.json"))).toBe(true);
+    const result = JSON.parse(readFileSync(join(next, "loop-result.json"), "utf8")) as { rounds: { round: number }[] };
     expect(result.rounds.map((round) => round.round)).toEqual([1, 2]);
   });
 
@@ -5333,6 +5371,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const recorded = JSON.parse(readFileSync(join(runDir, "result.json"), "utf8")) as { runId: string };
     writeHostAttestation({
       attestDir: fx.controlAttest,
+      outDir: fx.root,
       runDir,
       key: fx.key,
       harnessPath: fx.harnessPath,
@@ -5456,8 +5495,10 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       parts: { "agent-loop": { maxSteps: number } };
     };
     expect(baseline.parts["agent-loop"].maxSteps).toBe(25);
+    const next = join(fx.root, "out-noop");
     const second = await runOptLoop({
       ...hostOpts(fx),
+      out: next,
       mode: "dry-run",
       resumeFrom: fx.out,
       roles: {
@@ -5476,8 +5517,9 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     expect(fake.calls).toHaveLength(1);
     expect(second.rounds[1]?.accepted).toBe(false);
-    expect(existsSync(join(fx.out, "round2/runs"))).toBe(false);
-    const closure = JSON.parse(readFileSync(join(fx.out, "round2/closure.json"), "utf8")) as {
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2/runs"))).toBe(false);
+    const closure = JSON.parse(readFileSync(join(next, "round2/closure.json"), "utf8")) as {
       noWinner?: string;
       invalidCandidates?: { reason: string; keys?: string[] }[];
     };
@@ -5499,8 +5541,10 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as { hmacSha256: string };
     ledger.hmacSha256 = "0".repeat(64);
     writeFileSync(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+    const next = join(fx.root, "out-ledger");
     await expect(runOptLoop({
       ...hostOpts(fx),
+      out: next,
       mode: "dry-run",
       resumeFrom: fx.out,
       round0TracePath: join(fx.root, "operator.jsonl"),
@@ -5509,8 +5553,259 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       roles: citing,
     })).rejects.toThrow("resume trace sha mismatch");
     expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2"))).toBe(false);
+  });
+
+  test("gap-finder no_conclusion is retried once and that spend counts toward the cap", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    let calls = 0;
+    const stopped = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        async gap(input) {
+          calls += 1;
+          if (calls === 1) {
+            await relayPlantRole(input.baseUrl, "gap-finder", input.round, {});
+            throw new Error("role gap-finder returned no conclusion");
+          }
+          await relayRecord(input.baseUrl, {
+            type: "done",
+            seq: 2,
+            status: 200,
+            usage: { prompt_tokens: 30_000_000, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },
+          });
+          return stub.gap(input);
+        },
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(calls).toBe(2);
+    expect(stopped.stopReport.reason).toBe("readOnlyTokenCap");
+    expect(existsSync(join(fx.out, "round1/runs"))).toBe(false);
+  });
+
+  test("two gap-finder conclusions that are missing stop as no_conclusion", async () => {
+    const fx = fixture();
+    const stub = stubOptRoles(fx.key);
+    let calls = 0;
+    const stopped = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: {
+        async gap(input) {
+          calls += 1;
+          await relayPlantRole(input.baseUrl, "gap-finder", input.round, {});
+          throw new Error("role gap-finder returned no conclusion");
+        },
+        innovate: (input) => stub.innovate(input),
+        critic: (input) => stub.critic(input),
+        ranker: (input) => stub.ranker(input),
+        review: (input) => stub.review(input),
+      },
+    });
+    expect(calls).toBe(2);
+    expect(stopped.stopReport.reason).toBe("no_conclusion");
+  });
+
+  test("trace text keeps the AI Scientist head and tail, the OpenEvolve artifact cap, and the full path", () => {
+    const exact = "a".repeat(5100);
+    expect(trimLongString(exact)).toBe(exact);
+    const longer = `${"b".repeat(2500)}${"c".repeat(101)}${"d".repeat(2500)}`;
+    expect(trimLongString(longer)).toBe(`${"b".repeat(2500)}\n ... [101 characters truncated] ... \n${"d".repeat(2500)}`);
+    const capped = "e".repeat(20480);
+    expect(capArtifact(capped)).toBe(capped);
+    expect(capArtifact(`${capped}f`)).toBe(`${capped}\n... (truncated)`);
+    const path = "/tmp/loop/round1/roles/gap-finder/traces/control-trace.jsonl";
+    const shown = gapArtifactText(longer, path);
+    expect(shown.endsWith(`\n${path}`)).toBe(true);
+    expect(shown).toContain("[101 characters truncated]");
+    expect(shown).not.toContain("\n... (truncated)");
+  });
+
+  test("a missing relay log is an integrity fault and not an active patch", async () => {
+    const fx = fixture();
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: cited,
+      executor: {
+        name: "drop-log",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          const recorded = JSON.parse(readFileSync(join(request.runDir, "result.json"), "utf8")) as { runId: string };
+          unlinkSync(join(request.relayLogRoot ?? "", recorded.runId, "relay.jsonl"));
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(result.accepted).toBeNull();
+    const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
+      runs: { unscoredReason?: string }[];
+    };
+    expect(metrics.runs[0]?.unscoredReason).toBe("relay_log_missing");
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as {
+      patchActive: boolean;
+      runs: { active: boolean }[];
+    };
+    expect(activation.patchActive).toBe(false);
+    expect(activation.runs[0]?.active).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; accepted?: boolean };
+    expect(closure.reason).toBe("anti_forgery");
+    expect(closure.accepted).not.toBe(true);
+  });
+
+  test("an old layout without campaign.json imports signed tokens from round-2-shaped records", async () => {
+    const fx = fixture();
+    const runDir = join(fx.root, "control-run");
+    const tracePath = join(runDir, "trace.jsonl");
+    const lines = readFileSync(tracePath, "utf8").split("\n").filter((line) => line.trim() !== "");
+    const start = JSON.parse(lines[0] ?? "{}") as { effective?: Record<string, unknown> };
+    start.effective = { ...(start.effective ?? {}), "agent-loop.maxSteps": 20 };
+    lines[0] = JSON.stringify(start);
+    writeFileSync(tracePath, `${lines.join("\n")}\n`);
+    const recordedControl = JSON.parse(readFileSync(join(runDir, "result.json"), "utf8")) as { runId: string };
+    writeHostAttestation({
+      attestDir: fx.controlAttest,
+      outDir: fx.root,
+      runDir,
+      key: fx.key,
+      harnessPath: fx.harnessPath,
+      configPath: fx.controlConfig,
+      reward: 1,
+      meta: {
+        task: LOOP_TASK.path,
+        seed: 0,
+        arm: "control",
+        score_status: "scored",
+        tokens: 10,
+        exit: 0,
+        runDir: resolve(runDir),
+        runId: recordedControl.runId,
+        runPath: resolve(runDir),
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const usage = { prompt_tokens: 1, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } };
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: {
+        gap: (input) => cited.gap(input),
+        async innovate(input) {
+          const summary = "agent-loop.maxSteps=20";
+          await relayPlantRole(input.baseUrl, "innovator", input.round, { summary });
+          hostWriteSession(input.spawn, `${JSON.stringify({ type: "session", role: "innovator" })}\n`, fx.key);
+          return { session: { jsonl: "ignored\n" }, summary, parts: { "agent-loop": { maxSteps: 20 } } };
+        },
+        critic: (input) => cited.critic(input),
+        ranker: (input) => cited.ranker(input),
+        review: (input) => cited.review(input),
+      },
+      executor: {
+        name: "compaction",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          const result = JSON.parse(readFileSync(join(request.runDir, "result.json"), "utf8")) as { runId: string };
+          const log = join(request.relayLogRoot ?? "", result.runId, "relay.jsonl");
+          const rows: string[] = [];
+          for (let seq = 2; seq <= 5; seq += 1) {
+            rows.push(JSON.stringify({ type: "req", seq, runId: result.runId, systemConfigHashes: [], toolResults: [], compaction: true }));
+            rows.push(JSON.stringify({ type: "done", seq, status: 200, usage, role: "executor" }));
+          }
+          rows.push(JSON.stringify({
+            type: "done",
+            seq: 9,
+            status: 200,
+            usage: { prompt_tokens: 50, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 0 } },
+            role: "executor",
+          }));
+          appendFileSync(log, `${rows.join("\n")}\n`);
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    unlinkSync(join(fx.out, "campaign.json"));
+    const candidate = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
+    const signedRun = JSON.parse(readFileSync(join(candidate, "result.json"), "utf8")) as { runId: string };
+    writeHostAttestation({
+      attestDir: join(fx.attestRoot, "round1", LOOP_TASK.id, "seed0", "candidate"),
+      outDir: fx.out,
+      runDir: candidate,
+      key: fx.key,
+      harnessPath: fx.harnessPath,
+      configPath: join(fx.out, "round1", "candidate", "config.json"),
+      reward: 1,
+      meta: {
+        task: LOOP_TASK.path,
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: 29_000_000,
+        exit: 0,
+        runDir: candidate,
+        runId: signedRun.runId,
+        runPath: candidate,
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const next = join(fx.root, "out-old");
+    const before = stampTree(fx.out);
+    const resumed = await runOptLoop({
+      ...hostOpts(fx),
+      out: next,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      readOnlyTokens: () => 1_000_000,
+      executor: fakeExecutor(fx).executor,
+      roles: cited,
+    });
+    expect(stampTree(fx.out)).toEqual(before);
+    expect(resumed.stopReport.reason).toBe("readOnlyTokenCap");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(next, "round2"))).toBe(false);
+    const carried = JSON.parse(readFileSync(join(next, "campaign.json"), "utf8")) as { readOnlyTokens: number };
+    expect(carried.readOnlyTokens).toBe(30_000_000);
   });
 });
+
+function stampTree(root: string): string[] {
+  const rows: string[] = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    if (!dir) continue;
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      const linked = lstatSync(path, { bigint: true });
+      if (linked.isSymbolicLink()) continue;
+      if (linked.isDirectory()) {
+        stack.push(path);
+        continue;
+      }
+      if (!linked.isFile()) continue;
+      const sha = createHash("sha256").update(readFileSync(path)).digest("hex");
+      rows.push(`${path.slice(root.length)}\t${sha}\t${linked.mtimeNs.toString()}`);
+    }
+  }
+  rows.sort();
+  return rows;
+}
 
 function mirrorTaskCopy(runDir: string): string {
   const dest = join(runDir, "task-copy");

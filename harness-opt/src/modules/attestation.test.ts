@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -78,6 +78,7 @@ describe("devii-opt-attest/v1", () => {
     const host = layout("ts");
     writeHostAttestation({
       attestDir: host.attestDir,
+      outDir: host.root,
       runDir: host.runDir,
       key: host.key,
       harnessPath: host.harness,
@@ -105,12 +106,16 @@ describe("devii-opt-attest/v1", () => {
     expect(pythonFloatLexeme(1)).toBe("1.0");
     const text = readFileSync(join(host.attestDir, ATTEST_FILENAME), "utf8");
     expect(text).toContain("\"reward\": 1.0");
+    const run = body.run as { runDir?: string; runPath?: string };
+    expect(run.runDir).toBe("run");
+    expect(run.runPath).toBe("run");
   });
 
   test("a bad mac, a different config, and a symlink are rejected", () => {
     const host = layout("bad");
     writeHostAttestation({
       attestDir: host.attestDir,
+      outDir: host.root,
       runDir: host.runDir,
       key: host.key,
       harnessPath: host.harness,
@@ -162,6 +167,7 @@ describe("devii-opt-attest/v1", () => {
     mkdirSync(planted, { recursive: true });
     writeHostAttestation({
       attestDir: host.attestDir,
+      outDir: host.root,
       runDir: host.runDir,
       key: host.key,
       harnessPath: host.harness,
@@ -201,6 +207,87 @@ describe("devii-opt-attest/v1", () => {
     });
     expect(bare.ok).toBe(false);
     if (!bare.ok) expect(bare.reasons).toContain("runPath");
+  });
+
+  test("a copied signed run verifies, and a tamper or an escaping path does not", () => {
+    const host = layout("copy");
+    writeHostAttestation({
+      attestDir: host.attestDir,
+      outDir: host.root,
+      runDir: host.runDir,
+      key: host.key,
+      harnessPath: host.harness,
+      configPath: host.config,
+      reward: 1,
+      meta: {
+        task: "tasks2/i014",
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: 4,
+        exit: 0,
+        runDir: host.runDir,
+        runId: "host-run",
+        runPath: host.runDir,
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    });
+    const dest = join(host.root, "relocated");
+    cpSync(host.runDir, join(dest, "run"), { recursive: true });
+    cpSync(host.attestDir, join(dest, "attest"), { recursive: true });
+    const moved = verifyHostAttestation({
+      attestDir: join(dest, "attest"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: dest,
+      runDir: join(dest, "run"),
+    });
+    expect(moved.ok).toBe(true);
+    writeFileSync(join(dest, "run", "trace.jsonl"), "{\"type\":\"run_start\",\"tampered\":true}\n");
+    const tampered = verifyHostAttestation({
+      attestDir: join(dest, "attest"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: dest,
+      runDir: join(dest, "run"),
+    });
+    expect(tampered.ok).toBe(false);
+    if (!tampered.ok) expect(tampered.reasons).toContain("trace");
+    expect(() => writeHostAttestation({
+      attestDir: join(host.root, "escape-attest"),
+      outDir: host.root,
+      runDir: host.runDir,
+      key: host.key,
+      harnessPath: host.harness,
+      configPath: host.config,
+      reward: 1,
+      meta: {
+        task: "tasks2/i014",
+        seed: 0,
+        arm: "candidate",
+        score_status: "scored",
+        tokens: 4,
+        exit: 0,
+        runDir: host.runDir,
+        runId: "host-run",
+        runPath: join(host.root, "..", "outside"),
+        at: "2026-10-21T00:00:00+09:00",
+      },
+    })).toThrow(/escapes the out dir/);
+    const escaped = spawnSync("python3", ["-c", PYTHON_WRITE_ESCAPE, host.runDir, join(host.root, "escape-signed"), host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    expect(escaped.status).toBe(0);
+    const outside = verifyHostAttestation({
+      attestDir: join(host.root, "escape-signed"),
+      key: host.key,
+      configPath: host.config,
+      harnessPath: host.harness,
+      outDir: host.root,
+      runDir: host.runDir,
+    });
+    expect(outside.ok).toBe(false);
+    if (!outside.ok) expect(outside.reasons).toContain("runDir");
   });
 });
 
@@ -262,6 +349,33 @@ body = {
   "rewardFileSha": sha(run / "verifier" / "reward.txt"),
   "resultSha": sha(run / "result.json"),
   "run": {"task": "tasks2/i014", "seed": 0, "arm": "candidate", "score_status": "scored", "tokens": 4, "exit": 0, "runDir": str(run.resolve()), "runId": "host-run", "at": "2026-10-21T00:00:00+09:00"},
+}
+key = keyfile.read_bytes()
+body["hmacSha256"] = hmac.new(key, json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()
+attest.mkdir(parents=True, exist_ok=True)
+(attest / "attestation.json").write_text(json.dumps(body, indent=1, sort_keys=True) + "\\n")
+`;
+
+const PYTHON_WRITE_ESCAPE = `
+import hashlib, hmac, json, sys
+from pathlib import Path
+run, attest, harness, config, keyfile = map(Path, sys.argv[1:])
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def tree(root):
+    root = Path(root)
+    return {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob("*")) if p.is_file() and not p.is_symlink()}
+body = {
+  "schema": "devii-opt-attest/v1",
+  "mountedHarnessSha": sha(harness),
+  "mountedConfigSha": sha(config),
+  "traceSha": sha(run / "trace.jsonl"),
+  "piSessionShas": tree(run / ".pi-sessions"),
+  "outputShas": tree(run / "outputs"),
+  "reward": float(1),
+  "rewardFileSha": sha(run / "verifier" / "reward.txt"),
+  "resultSha": sha(run / "result.json"),
+  "run": {"task": "tasks2/i014", "seed": 0, "arm": "candidate", "score_status": "scored", "tokens": 4, "exit": 0, "runDir": "../escape", "runPath": "../escape", "runId": "host-run", "at": "2026-10-21T00:00:00+09:00"},
 }
 key = keyfile.read_bytes()
 body["hmacSha256"] = hmac.new(key, json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(), hashlib.sha256).hexdigest()

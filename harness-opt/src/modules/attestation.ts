@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Schema written by the host executor wrapper after the container exits. */
 export const ATTEST_SCHEMA = "devii-opt-attest/v1";
@@ -39,7 +39,7 @@ export interface AttestRunMeta {
   readonly runDir: string;
   /** Host-allocated id. The wrapper copies this; it does not invent one. */
   readonly runId: string;
-  /** Host-assigned run directory. Must equal the path the loop passed in. */
+  /** Host-assigned run directory. Stored relative to `outDir`, not as an absolute path. */
   readonly runPath: string;
   readonly at: string;
   /** One-time host nonce. Present only when the loop issued one. */
@@ -48,6 +48,8 @@ export interface AttestRunMeta {
 
 export interface HostAttestationWrite {
   readonly attestDir: string;
+  /** Loop output directory. `runDir` and `runPath` are signed relative to this directory. */
+  readonly outDir: string;
   readonly runDir: string;
   readonly key: Buffer;
   readonly harnessPath: string;
@@ -73,6 +75,8 @@ export interface VerifiedAttestation {
   readonly rewardFileSha: string | null;
   readonly resultSha: string | null;
   readonly arm: string;
+  /** `run.tokens` from the signed record. Absent becomes 0. */
+  readonly tokens: number;
 }
 
 export interface AttestationRejection {
@@ -185,6 +189,12 @@ export function verifyHostAttestation(input: {
   readonly key: Buffer;
   readonly configPath: string;
   readonly harnessPath?: string;
+  /**
+   * Loop output directory the signed run path is relative to.
+   * A copied or relocated tree verifies when this is the new location.
+   * Omitted: a relative path resolves against the parent of `attestDir`.
+   */
+  readonly outDir?: string;
   /** When set, the signed runDir and runPath must be this host path. */
   readonly runDir?: string;
   /** When set, the signed runId must be this host-allocated id. */
@@ -231,10 +241,15 @@ export function verifyHostAttestation(input: {
   if (!signedRunDir || !arm) reasons.push("runDir");
   if (!signedRunPath) reasons.push("runPath");
   if (!signedRunId) reasons.push("runId");
-  const runDir = signedRunDir ?? "";
-  if (input.runDir && runDir && resolve(input.runDir) !== resolve(runDir)) reasons.push("runDir");
-  if (signedRunPath && runDir && resolve(signedRunPath) !== resolve(runDir)) reasons.push("runPath");
-  if (input.runDir && signedRunPath && resolve(input.runDir) !== resolve(signedRunPath)) reasons.push("runPath");
+  const locatedDir = signedRunDir ? locateSignedRunPath(signedRunDir, input.outDir, input.attestDir) : null;
+  const locatedPath = signedRunPath ? locateSignedRunPath(signedRunPath, input.outDir, input.attestDir) : null;
+  if (!locatedDir || locatedDir.escaped) reasons.push("runDir");
+  if (!locatedPath || locatedPath.escaped) reasons.push("runPath");
+  const runDir = locatedDir && !locatedDir.escaped ? locatedDir.abs : "";
+  const runPath = locatedPath && !locatedPath.escaped ? locatedPath.abs : "";
+  if (runDir && runPath && runDir !== runPath) reasons.push("runPath");
+  if (input.runDir && runDir && resolve(input.runDir) !== runDir) reasons.push("runDir");
+  if (input.runDir && runPath && resolve(input.runDir) !== runPath) reasons.push("runPath");
   if (input.runId && signedRunId !== input.runId) reasons.push("runId");
   const signedNonce = runNode && runNode.t === "obj" ? stringField(runNode, "nonce") : null;
   if (input.expectedNonce && signedNonce !== input.expectedNonce) reasons.push("nonce");
@@ -280,15 +295,60 @@ export function verifyHostAttestation(input: {
     rewardFileSha,
     resultSha,
     arm,
+    tokens: runNode && runNode.t === "obj" ? integerField(runNode, "tokens") : 0,
   };
+}
+
+/**
+ * A signed run path is relative to the out dir.
+ * `..`, an empty segment, or a path that resolves outside that directory is an escape.
+ * An absolute path is the legacy docker writer. It is kept only when it stays inside
+ * the out dir (when one was given) and matches the host run.
+ */
+function locateSignedRunPath(
+  signed: string,
+  outDir: string | undefined,
+  attestDir: string,
+): { readonly abs: string; readonly escaped: boolean } {
+  if (signed.trim() === "" || signed.split(/[\\/]/).some((part) => part === "..")) {
+    return { abs: "", escaped: true };
+  }
+  if (isAbsolute(signed)) {
+    const abs = resolve(signed);
+    if (outDir && !insideDir(outDir, abs)) return { abs, escaped: true };
+    return { abs, escaped: false };
+  }
+  if (signed.split(/[\\/]/).some((part) => part === "")) return { abs: "", escaped: true };
+  const base = outDir ? resolve(outDir) : resolve(dirname(attestDir));
+  const abs = resolve(base, signed);
+  if (!insideDir(base, abs)) return { abs, escaped: true };
+  return { abs, escaped: false };
+}
+
+function insideDir(root: string, target: string): boolean {
+  const base = resolve(root);
+  const abs = resolve(target);
+  return abs === base || abs.startsWith(base + sep);
+}
+
+/** Posix path of `target` inside `outDir`. A path that leaves the out dir is refused. */
+export function relativeOutPath(outDir: string, target: string): string {
+  const rel = relative(resolve(outDir), resolve(target));
+  const posix = rel.split(sep).join("/");
+  if (rel === "" || isAbsolute(rel) || posix.split("/").some((part) => part === ".." || part === "")) {
+    throw new Error("attestation run path escapes the out dir");
+  }
+  return posix;
 }
 
 function attestBody(input: HostAttestationWrite): JsonNode {
   if (input.meta.runId.trim() === "") throw new Error("attestation runId is empty");
   if (input.meta.runPath.trim() === "") throw new Error("attestation runPath is empty");
-  const run = resolve(input.runDir);
-  const runPath = resolve(input.meta.runPath);
-  const layout = attestLayout(run);
+  if (input.outDir.trim() === "") throw new Error("attestation out dir is empty");
+  const runAbs = resolve(input.runDir);
+  const run = relativeOutPath(input.outDir, input.runDir);
+  const runPath = relativeOutPath(input.outDir, input.meta.runPath);
+  const layout = attestLayout(runAbs);
   const pairs: (readonly [string, JsonNode])[] = [
     [ATTEST_FIELDS.schema, { t: "str", v: ATTEST_SCHEMA }],
     [ATTEST_FIELDS.harness, { t: "str", v: sha256File(input.harnessPath) }],
@@ -297,8 +357,8 @@ function attestBody(input: HostAttestationWrite): JsonNode {
     [ATTEST_FIELDS.sessions, mapNode(treeShas(layout.sessions))],
     [ATTEST_FIELDS.outputs, mapNode(treeShas(layout.outputs))],
     [ATTEST_FIELDS.reward, input.reward === null ? NULL_NODE : { t: "num", lex: pythonFloatLexeme(input.reward) }],
-    [ATTEST_FIELDS.rewardFile, shaNode(fileShaOrNull(join(run, "verifier", "reward.txt")))],
-    [ATTEST_FIELDS.result, shaNode(fileShaOrNull(join(run, "result.json")))],
+    [ATTEST_FIELDS.rewardFile, shaNode(fileShaOrNull(join(runAbs, "verifier", "reward.txt")))],
+    [ATTEST_FIELDS.result, shaNode(fileShaOrNull(join(runAbs, "result.json")))],
     [ATTEST_FIELDS.meta, {
       t: "obj",
       v: [
@@ -505,6 +565,12 @@ function isSha(value: string | null): value is string {
 
 function unique(reasons: readonly string[]): string[] {
   return [...new Set(reasons)];
+}
+
+function integerField(node: JsonNode, key: string): number {
+  const child = field(node, key);
+  if (!child || child.t !== "num" || !/^-?(?:0|[1-9]\d*)$/.test(child.lex)) return 0;
+  return Number(child.lex);
 }
 
 function integerLexeme(value: number): string {

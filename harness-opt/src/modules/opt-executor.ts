@@ -24,6 +24,8 @@ export interface OptRunRequest {
   readonly arm: "control" | "candidate";
   readonly configPath: string;
   readonly runDir: string;
+  /** Loop output directory. The host attestation signs the run path relative to it. */
+  readonly outDir?: string;
   /** Host directory for `{attestDir}/attestation.json`. Never taken from stdout. */
   readonly attestDir: string;
   /** Host harness file mounted over the image harness. Optional unless `{harness}` is used. */
@@ -95,6 +97,7 @@ const PLACEHOLDERS = [
   "arm",
   "config",
   "runDir",
+  "outDir",
   "runId",
   "nonce",
   "relayLog",
@@ -267,6 +270,7 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   plantExecutorRelay(join(relayLogRoot, runId, "relay.jsonl"), runId, candidateHashFragment(hash));
   copyCheckerBeforeSign(request.runDir, relayLogRoot, runId);
   if (!attest) return;
+  if (!request.outDir || request.outDir.trim() === "") throw new Error("attestation out dir is missing");
   const runPath = resolve(request.runDir);
   const meta: AttestRunMeta = {
     task: request.task.path,
@@ -283,6 +287,7 @@ export function writeRunArtifacts(request: OptRunRequest, timing: RunArtifactTim
   };
   writeHostAttestation({
     attestDir: request.attestDir,
+    outDir: request.outDir,
     runDir: request.runDir,
     key: attest.key,
     harnessPath: attest.harnessPath,
@@ -409,7 +414,11 @@ function placeholderValue(name: Placeholder, request: OptRunRequest, driver: str
     if (!request.relayLogRoot || !request.runId) throw new Error("executor command needs a relay log for {relayLog}");
     return join(request.relayLogRoot, request.runId, "relay.jsonl");
   }
-  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId" | "nonce" | "relayLog">, string> = {
+  if (name === "outDir") {
+    if (!request.outDir || request.outDir.trim() === "") throw new Error("executor command needs an out dir for {outDir}");
+    return request.outDir;
+  }
+  const values: Record<Exclude<Placeholder, "driver" | "harness" | "runId" | "nonce" | "relayLog" | "outDir">, string> = {
     task: request.task.id,
     taskPath: request.task.path,
     seed: String(request.seed),

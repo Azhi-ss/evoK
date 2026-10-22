@@ -18,8 +18,8 @@ const USAGE = [
   "  demo                  one closed loop on the sample trace; prints per-stage status",
   "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        one loop; task and round-0 path/sha are required and have no default",
-  "  optimize --resume <loopOut> | --from-round <loopOut> [--rounds <n>]",
-  "                        round N+1 in that directory; gap input is the previous real-run trace, sha-checked; --rounds is how many further rounds (default 1)",
+  "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> [--rounds <n>]",
+  "                        read that loop read-only and write round N+1 into --out; the source directory is not modified; gap input is the previous real-run trace, sha-checked; --rounds is how many further rounds (default 1)",
   "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
   "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails; --stop-before-run writes the closure and stops before once/docker",
   "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
@@ -99,11 +99,16 @@ async function optimizeCommand(argv: readonly string[]): Promise<number> {
     return 1;
   }
   const resumeFrom = flag(argv, "--resume") ?? flag(argv, "--from-round");
-  const out = flag(argv, "--out") ?? resumeFrom ?? mkdtempSync(join(tmpdir(), "harness-opt-opt-"));
-  if (resumeFrom && resolve(out) !== resolve(resumeFrom)) {
-    process.stderr.write("optimize --resume writes into that loop directory\n");
+  const requestedOut = flag(argv, "--out");
+  if (resumeFrom && !requestedOut) {
+    process.stderr.write("optimize --resume needs a new --out directory\n");
     return 1;
   }
+  if (resumeFrom && requestedOut && resolve(requestedOut) === resolve(resumeFrom)) {
+    process.stderr.write("optimize --resume refuses to write into the source loop directory\n");
+    return 1;
+  }
+  const out = requestedOut ?? mkdtempSync(join(tmpdir(), "harness-opt-opt-"));
   const rounds = numberFlag(argv, "--rounds");
   const ewiThresholdSec = numberFlag(argv, "--ewi-threshold");
   if (rounds instanceof Error || ewiThresholdSec instanceof Error) {
