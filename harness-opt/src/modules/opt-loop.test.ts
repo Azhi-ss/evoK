@@ -5752,7 +5752,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(prompt.includes("q".repeat(20480))).toBe(false);
   });
 
-  test("a missing relay log is an integrity fault and not an active patch", async () => {
+  test("a missing relay log stops the loop as anti_forgery", async () => {
     const fx = fixture();
     const cited = citingRoles(fx.key, fx.attestRoot);
     const result = await runOptLoop({
@@ -5772,7 +5772,10 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       },
     });
     expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(result.rounds[0]?.reason).toBe("anti_forgery");
     expect(result.accepted).toBeNull();
+    const saved = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
+    expect(saved.stopReport.reason).toBe("anti_forgery");
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { unscoredReason?: string }[];
     };
@@ -5783,12 +5786,13 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     };
     expect(activation.patchActive).toBe(false);
     expect(activation.runs[0]?.active).toBe(false);
-    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; accepted?: boolean };
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; accepted?: boolean; rejectCode?: string };
     expect(closure.reason).toBe("anti_forgery");
+    expect(closure.rejectCode).toBeUndefined();
     expect(closure.accepted).not.toBe(true);
   });
 
-  test("an emptied relay log is relay_log_empty and not an active patch", async () => {
+  test("an empty relay log stops the loop as anti_forgery", async () => {
     const fx = fixture();
     const cited = citingRoles(fx.key, fx.attestRoot);
     const result = await runOptLoop({
@@ -5808,11 +5812,68 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       },
     });
     expect(result.stopReport.reason).toBe("anti_forgery");
+    expect(result.rounds[0]?.reason).toBe("anti_forgery");
     expect(result.accepted).toBeNull();
+    const saved = JSON.parse(readFileSync(join(fx.out, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
+    expect(saved.stopReport.reason).toBe("anti_forgery");
     const metrics = JSON.parse(readFileSync(join(fx.out, "round1/metrics.json"), "utf8")) as {
       runs: { unscoredReason?: string }[];
     };
     expect(metrics.runs[0]?.unscoredReason).toBe("relay_log_empty");
+    const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
+    expect(activation.patchActive).toBe(false);
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { reason?: string; rejectCode?: string };
+    expect(closure.reason).toBe("anti_forgery");
+    expect(closure.rejectCode).toBeUndefined();
+  });
+
+  test("a non-empty relay log whose every request is hashless rejects inactive_key", async () => {
+    const fx = fixture();
+    const cited = citingRoles(fx.key, fx.attestRoot);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      roles: cited,
+      executor: {
+        name: "hashless",
+        async run(request) {
+          const script = timing(request, 1);
+          writeRunArtifacts(request, script, { key: fx.key, harnessPath: fx.harnessPath });
+          const recorded = JSON.parse(readFileSync(join(request.runDir, "result.json"), "utf8")) as { runId: string };
+          const log = join(request.relayLogRoot ?? "", recorded.runId, "relay.jsonl");
+          const rows = readFileSync(log, "utf8").split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as { type?: string; systemConfigHashes?: unknown });
+          const rewritten = rows.map((row) => {
+            if (row.type !== "req") return row;
+            const next = { ...row };
+            delete next.systemConfigHashes;
+            return next;
+          });
+          writeFileSync(log, `${rewritten.map((row) => JSON.stringify(row)).join("\n")}\n`);
+          return observation(request, { reward: 1, tokens: script.tokens, wallS: script.wallS, timedOut: false });
+        },
+      },
+    });
+    const candidate = join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate");
+    const recorded = JSON.parse(readFileSync(join(candidate, "result.json"), "utf8")) as { runId: string };
+    const logText = readFileSync(join(fx.attestRoot, "relay-logs", recorded.runId, "relay.jsonl"), "utf8");
+    expect(logText.trim()).not.toBe("");
+    const reqs = logText.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as { type?: string; systemConfigHashes?: unknown }).filter((row) => row.type === "req");
+    expect(reqs.length).toBeGreaterThan(0);
+    expect(reqs.every((row) => row.systemConfigHashes === undefined)).toBe(true);
+    expect(result.stopReport.reason).toBeNull();
+    expect(result.accepted).toBeNull();
+    const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as {
+      reason?: string;
+      rejectCode?: string;
+      patchActive: boolean;
+      gates: { id: string; pass: boolean; code?: string }[];
+    };
+    expect(closure.reason).toBeUndefined();
+    expect(closure.rejectCode).toBe("inactive_key");
+    expect(closure.patchActive).toBe(false);
+    expect(closure.gates.find((gate) => gate.id === "G0")).toEqual({ id: "G0", pass: true });
+    expect(closure.gates.find((gate) => gate.id === "G2")).toEqual({ id: "G2", pass: false, code: "inactive_key" });
     const activation = JSON.parse(readFileSync(join(fx.out, "round1/activation.json"), "utf8")) as { patchActive: boolean };
     expect(activation.patchActive).toBe(false);
   });
@@ -5927,8 +5988,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
       executor: fakeExecutor(fx).executor,
       roles: cited,
     })).rejects.toThrow("resume source role log is missing");
-    const sample = readdirSync(external)[0];
-    if (!sample) throw new Error("external role logs are empty");
+    const sample = readdirSync(join(fx.out, "round1", "sessions")).filter((name) => name.endsWith(".spawn.json")).map((name) => {
+      const parsed = JSON.parse(readFileSync(join(fx.out, "round1", "sessions", name), "utf8")) as { role?: string; baseUrl?: string };
+      if (parsed.role !== "gap-finder" || typeof parsed.baseUrl !== "string") return "";
+      return parsed.baseUrl.split("/r/")[1]?.split("/")[0] ?? "";
+    }).find((id) => /^[0-9a-f]{32}$/.test(id));
+    if (!sample) throw new Error("gap-finder relay log is not named");
     const sampleLog = join(external, sample, "relay.jsonl");
     renameSync(sampleLog, `${sampleLog}.bak`);
     writeFileSync(join(fx.out, "relay-log-root.json"), `${JSON.stringify({ relayLogRoot: external }, null, 2)}\n`);
