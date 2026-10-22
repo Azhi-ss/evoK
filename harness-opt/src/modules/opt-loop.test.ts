@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../cli";
 import { relayRequestsActive } from "./activation";
-import { writeHostAttestation } from "./attestation";
+import { signedAttestationJson, writeHostAttestation } from "./attestation";
 import {
   claimNonce,
   CONTROL_CONFIG_SHA,
@@ -5185,7 +5185,8 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
 
     const spike = async (patch: Record<string, number>, reason: string): Promise<void> => {
       const body = JSON.parse(saved) as Record<string, unknown>;
-      writeFileSync(join(fx.out, "campaign.json"), `${JSON.stringify({ ...body, ...patch }, null, 2)}\n`);
+      delete body.hmacSha256;
+      writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, ...patch }));
       const spikeOut = join(fx.root, `out-spike-${reason}`);
       const stopped = await runOptLoop({
         ...hostOpts(fx),
@@ -5256,6 +5257,110 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(capped.stopReport.reason).toBe("readOnlyTokenCap");
     expect(existsSync(join(cappedOut, "round3"))).toBe(false);
     expect(existsSync(join(next, "round3"))).toBe(false);
+  });
+
+  test("a tampered or unsigned campaign.json is rejected", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    const saved = readFileSync(join(fx.out, "campaign.json"), "utf8");
+    const signed = JSON.parse(saved) as { hmacSha256?: string; readOnlyTokens: number };
+    expect(typeof signed.hmacSha256).toBe("string");
+    expect(signed.hmacSha256).toMatch(/^[0-9a-f]{64}$/);
+
+    const resume = (name: string) => runOptLoop({
+      ...hostOpts(fx),
+      out: join(fx.root, name),
+      attestRoot: attestWrite(fx, `attest-${name}`),
+      attestSource: fx.attestRoot,
+      mode: "dry-run",
+      resumeFrom: fx.out,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+
+    const tampered = JSON.parse(saved) as { readOnlyTokens: number };
+    tampered.readOnlyTokens += 1;
+    writeFileSync(join(fx.out, "campaign.json"), `${JSON.stringify(tampered, null, 2)}\n`);
+    await expect(resume("out-tampered")).rejects.toThrow("resume campaign signature rejected");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(fx.root, "out-tampered", "round2"))).toBe(false);
+
+    writeFileSync(join(fx.out, "campaign.json"), saved);
+    const unsigned = JSON.parse(saved) as Record<string, unknown>;
+    delete unsigned.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), `${JSON.stringify(unsigned, null, 2)}\n`);
+    await expect(resume("out-unsigned")).rejects.toThrow("resume campaign signature rejected");
+    expect(existsSync(join(fx.out, "round2"))).toBe(false);
+    expect(existsSync(join(fx.root, "out-unsigned", "round2"))).toBe(false);
+  });
+
+  test("a carried total near 30M makes the relay stop at the cap", async () => {
+    const fx = fixture();
+    const citing = citingRoles(fx.key, fx.attestRoot);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(fx).executor,
+      roles: citing,
+    });
+    mirrorTaskCopy(join(fx.out, "round1", "runs", LOOP_TASK.id, "seed0", "candidate"));
+    const carried = 29_999_990;
+    const body = JSON.parse(readFileSync(join(fx.out, "campaign.json"), "utf8")) as Record<string, unknown>;
+    delete body.hmacSha256;
+    writeFileSync(join(fx.out, "campaign.json"), signedAttestationJson(fx.key, { ...body, readOnlyTokens: carried }));
+    const upstream = await listenUpstream();
+    const next = join(fx.root, "out-carry");
+    const attest = attestWrite(fx, "attest-carry");
+    try {
+      const stopped = await runOptLoop({
+        ...hostOpts(fx),
+        out: next,
+        attestRoot: attest,
+        attestSource: fx.attestRoot,
+        mode: "dry-run",
+        resumeFrom: fx.out,
+        env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_UPSTREAM: upstream.url },
+        executor: fakeExecutor(fx).executor,
+        roles: {
+          ...citing,
+          async innovate(input) {
+            await postRole(input.baseUrl);
+            return citing.innovate(input);
+          },
+        },
+      });
+      expect(stopped.stopReport.reason).toBe("readOnlyTokenCap");
+      const recorded = JSON.parse(readFileSync(join(next, "loop-result.json"), "utf8")) as { stopReport: { reason: string | null } };
+      expect(recorded.stopReport.reason).toBe("readOnlyTokenCap");
+      expect(upstream.hits).toHaveLength(1);
+      const relayRoot = join(attest, "relay-logs");
+      const innovators = readdirSync(relayRoot).flatMap((name) => {
+        const text = readFileSync(join(relayRoot, name, "relay.jsonl"), "utf8");
+        if (!text.includes('"kind":"role:innovator"')) return [];
+        const sig = JSON.parse(readFileSync(join(relayRoot, name, "relay.jsonl.sig"), "utf8")) as { type?: string; carriedTokens?: number };
+        return [{ text, sig }];
+      });
+      expect(innovators).toHaveLength(1);
+      const innovator = innovators[0];
+      if (!innovator) throw new Error("innovator relay log");
+      expect(innovator.sig.type).toBe("relay_log");
+      expect(innovator.sig.carriedTokens).toBe(carried);
+      const rows = innovator.text.split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line) as { type?: string; tokens?: number; errClass?: string });
+      expect(rows.find((row) => row.type === "carried")?.tokens).toBe(carried);
+      expect(rows.some((row) => row.type === "done" && row.errClass === "readOnlyTokenCap")).toBe(true);
+      expect(readdirSync(relayRoot).some((name) => readFileSync(join(relayRoot, name, "relay.jsonl"), "utf8").includes('"kind":"role:critic"'))).toBe(false);
+    } finally {
+      await upstream.close();
+    }
   });
 
   test("optimize --resume refuses a task-copy whose sha misses the signed attestation", async () => {

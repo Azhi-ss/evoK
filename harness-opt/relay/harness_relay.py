@@ -104,13 +104,16 @@ def _parse_args(raw):
 
 
 class Relay:
-    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None, plant_enabled=True, allow_fake_upstream=False):
+    def __init__(self, *, port, log_root, upstream_key_file, attest_key_file, upstream_url=None, mounts=(), upstream=None, bind_host=None, plant_enabled=True, allow_fake_upstream=False, carried_tokens=0):
         if os.path.realpath(upstream_key_file) == os.path.realpath(attest_key_file):
             raise RuntimeError("upstream key and attest key are the same path")
         self.upstream_key = _read_secret(upstream_key_file)
         self.attest_key = _read_secret(attest_key_file)
         if self.upstream_key == self.attest_key:
             raise RuntimeError("upstream key and attest key have the same content")
+        if isinstance(carried_tokens, bool) or not isinstance(carried_tokens, int) or carried_tokens < 0:
+            raise RuntimeError("carried tokens")
+        self.carried_tokens = carried_tokens
         self.port = int(port)
         host = BIND_HOST if bind_host is None else str(bind_host)
         if host != BIND_HOST and host != "127.0.0.1":
@@ -192,6 +195,7 @@ class Relay:
         ts, iso = _stamp()
         self._append_obj(run_id, {"type": "relay_start", "bootId": self.boot_id, "pid": self.pid, "relaySha": self.relay_sha, "ts": ts, "ts_iso": iso})
         self._append_obj(run_id, {"type": "open", "runId": run_id, "kind": kind, "expectedConfigSha": expected_config_sha, "ts": ts, "ts_iso": iso})
+        self._append_obj(run_id, {"type": "carried", "tokens": self.carried_tokens})
         self.open_id = run_id
 
     def close_run(self, run_id: str) -> dict:
@@ -368,6 +372,7 @@ class Relay:
             "usageMissing": fault == "usage_missing",
             "refused": None,
             "loopTokens": self.loop_tokens,
+            "carriedTokens": self.carried_tokens,
         }
 
     def report(self, run_id: str) -> dict:
@@ -387,6 +392,7 @@ class Relay:
             "usageMissing": state["usage_missing"] or not state["saw_done"],
             "refused": state["refused"],
             "loopTokens": self.loop_tokens,
+            "carriedTokens": self.carried_tokens,
         }
 
     def record(self, run_id: str, row: dict) -> None:
@@ -432,7 +438,12 @@ class Relay:
             return
         if path.read_bytes() != state["body"]:
             return
-        body = {"type": "relay_log", "relayLogSha": hashlib.sha256(state["body"]).hexdigest(), "chain": state["mac"].hex()}
+        body = {
+            "type": "relay_log",
+            "relayLogSha": hashlib.sha256(state["body"]).hexdigest(),
+            "chain": state["mac"].hex(),
+            "carriedTokens": self.carried_tokens,
+        }
         raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         try:
             fd = os.open(sig, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -522,7 +533,7 @@ class Relay:
             req["conclusion"] = True
         self._append_obj(run_id, req)
         kind = self._state(run_id).get("kind") or ""
-        if kind in READ_ONLY_KINDS and self.loop_tokens >= READ_ONLY_TOKEN_CAP:
+        if kind in READ_ONLY_KINDS and self.carried_tokens + self.loop_tokens >= READ_ONLY_TOKEN_CAP:
             self._done(run_id, seq, status=429, usage=None, error="cap_refused", err_class="readOnlyTokenCap", resp=b"")
             return 429, b'{"error":"readOnlyTokenCap"}'
         if client_disconnect:
@@ -548,13 +559,13 @@ class Relay:
         return int(status), resp or b""
 
     def _cap_refusal(self, kind: str, usage):
-        """Refuse a counted role call whose usage would cross 200k or 30M."""
+        """Refuse a counted role call whose usage would cross 200k, or 30M including tokens carried in at startup."""
         if kind not in READ_ONLY_KINDS or not isinstance(usage, dict):
             return None
         weighed = weight(usage)
         if weighed is None:
             return None
-        if self.loop_tokens + weighed >= READ_ONLY_TOKEN_CAP:
+        if self.carried_tokens + self.loop_tokens + weighed >= READ_ONLY_TOKEN_CAP:
             return "readOnlyTokenCap"
         if kind == "role:innovator" and weighed >= INNOVATOR_CAP:
             return "innovatorCap"
@@ -898,6 +909,13 @@ def _one(flags, name):
     return values[-1]
 
 
+def _carried_tokens(flags) -> int:
+    raw = (flags.get("carried-tokens") or ["0"])[-1]
+    if not str(raw).isdecimal():
+        raise SystemExit("carried tokens")
+    return int(raw)
+
+
 def _relay_from(flags) -> Relay:
     upstream = os.environ.get("RELAY_UPSTREAM_KEY_FILE") or ""
     attest = os.environ.get("HARNESS_ATTEST_KEY_FILE") or ""
@@ -912,7 +930,7 @@ def _relay_from(flags) -> Relay:
     mode = (flags.get("mode") or [""])[-1]
     if mode != "dry-run":
         kwargs["plant_enabled"] = False
-    return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, **kwargs)
+    return Relay(port=port, log_root=_one(flags, "log-root"), upstream_key_file=upstream, attest_key_file=attest, bind_host=bind, carried_tokens=_carried_tokens(flags), **kwargs)
 
 
 def prepare_control(flags) -> Relay:

@@ -7,8 +7,10 @@ import { inspectAttestedActivation, relayRequestsActive, runStartConfigHash, typ
 import {
   assertAttestIsolated,
   assertAttestRoot,
+  attestationJsonMacOk,
   loadAttestKey,
   sha256File,
+  signedAttestationJson,
   verifyHostAttestation,
   type VerifiedAttestation,
 } from "./attestation";
@@ -684,11 +686,23 @@ function isRegularFile(path: string): boolean {
   }
 }
 
-function readCampaign(out: string): CampaignDisk | null {
+function readCampaign(out: string, key: Buffer): CampaignDisk | null {
   const file = join(out, CAMPAIGN_FILE);
   if (!existsSync(file)) return null;
-  const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<CampaignDisk>;
-  if (typeof parsed.completedRounds !== "number") return null;
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    throw new Error("resume campaign signature rejected");
+  }
+  if (!attestationJsonMacOk(key, text)) throw new Error("resume campaign signature rejected");
+  let parsed: Partial<CampaignDisk>;
+  try {
+    parsed = JSON.parse(text) as Partial<CampaignDisk>;
+  } catch {
+    throw new Error("resume campaign signature rejected");
+  }
+  if (typeof parsed.completedRounds !== "number") throw new Error("resume campaign signature rejected");
   return {
     completedRounds: parsed.completedRounds,
     readOnlyTokens: typeof parsed.readOnlyTokens === "number" ? parsed.readOnlyTokens : 0,
@@ -1001,7 +1015,7 @@ function loadResume(options: OptLoopOptions, key: Buffer): ResumeState {
   const task = requireLoopTask(options.task);
   const rounds = roundNumbers(source);
   if (rounds.length === 0) throw new Error("resume found no completed round");
-  const disk = readCampaign(source);
+  const disk = readCampaign(source, key);
   const completedRounds = disk?.completedRounds ?? rounds[rounds.length - 1] ?? 0;
   if (completedRounds < 1) throw new Error("resume found no completed round");
   const gapRound = disk?.gapRound ?? latestRunRound(source, task.id, rounds);
@@ -1179,13 +1193,14 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
   const relayPort = relayListenPort(env);
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
-  const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode);
+  const carriedReadOnly = resume?.readOnlyTokens ?? 0;
+  const relayCtl = new RelayControl(relayRoot, relayPort, relayBindHost(env), relayUpstream(env), options.attestKeyFile, upstreamKeyFile, options.mode, carriedReadOnly);
   activeRelay = relayCtl;
   activeRelayRoot = relayRoot;
-  const carriedReadOnly = resume?.readOnlyTokens ?? 0;
   let readOnlyTotal = carriedReadOnly;
   let gapReadOnly = 0;
-  // harness_relay.py loopTokens counts innovator, critic, and ranker only.
+  // harness_relay.py loopTokens is this process's new innovator, critic, and ranker spend.
+  // The relay was started with carriedReadOnly and caps carried plus that new spend.
   // Gap and reviewer close after that counter is already current, so the host
   // adds their own report.tokens. campaign.json is written after the reviewer.
   let reviewerReadOnly = 0;
@@ -2285,7 +2300,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
       ...(noWinnerRounds.length > 0 ? { noWinner: noWinnerRounds } : {}),
     },
   };
-  writeJson(join(options.out, CAMPAIGN_FILE), {
+  writeText(join(options.out, CAMPAIGN_FILE), signedAttestationJson(attestKey, {
     completedRounds,
     readOnlyTokens: readOnlyNow(),
     readOnlyWallS: options.readOnlyWallS?.() ?? readOnlyWallS,
@@ -2297,7 +2312,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     gapRound: latestGapRound,
     baselineEffective,
     previousEffective,
-  });
+  }));
   writeJson(join(options.out, "loop-result.json"), result);
   return result;
   } finally {
@@ -3948,10 +3963,11 @@ class RelayControl {
   private stderr = "";
   private dead: Error | null = null;
 
-  constructor(root: string, port: string, bindHost: string, upstreamUrl: string, attestKeyFile: string, upstreamKeyFile: string, mode: "dry-run" | "execute") {
+  constructor(root: string, port: string, bindHost: string, upstreamUrl: string, attestKeyFile: string, upstreamKeyFile: string, mode: "dry-run" | "execute", carriedTokens: number) {
+    if (!Number.isSafeInteger(carriedTokens) || carriedTokens < 0) throw new Error("carried tokens");
     const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
     const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
-    const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost, "--mode", mode];
+    const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost, "--mode", mode, "--carried-tokens", String(carriedTokens)];
     if (upstreamUrl !== "") args.push("--upstream", upstreamUrl);
     this.child = spawn("python3", args, {
       cwd: relayDir,

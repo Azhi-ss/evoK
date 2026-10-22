@@ -251,6 +251,49 @@ class RelayCase(unittest.TestCase):
         self.assertEqual(len(forwarded), 1)
         self.assertEqual(self.relay.loop_tokens, 200_000 + 30_000_000)
 
+    def test_carried_total_near_the_cap_is_refused_and_signed(self):
+        self.assertEqual(self.relay.carried_tokens, 0)
+        self.relay.close_run(self.run)
+        zero = json.loads(self.relay.log_path(self.run).with_name("relay.jsonl.sig").read_text(encoding="utf-8"))
+        self.assertEqual(zero["carriedTokens"], 0)
+        carried = 30_000_000 - 11
+        relay = Relay(
+            port=9,
+            log_root=self.root / "carried-logs",
+            upstream_key_file=self.up,
+            attest_key_file=self.att,
+            upstream=self.upstream,
+            allow_fake_upstream=True,
+            carried_tokens=carried,
+        )
+        run = new_run_id()
+        relay.open_run(run, "role:innovator", "abc")
+        forwarded = []
+
+        def at_carried_cap(body, stream):
+            forwarded.append(body)
+            return 200, b"{}", dict(USAGE)
+
+        relay.upstream = at_carried_cap
+        status, body = relay.handle("POST", f"/r/{run}/v1/chat/completions", b'{"messages":[]}', {"host": "10.204.0.1:9"})
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body.decode())["error"], "readOnlyTokenCap")
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(relay.carried_tokens, carried)
+        self.assertEqual(relay.loop_tokens, 12)
+        report = relay.close_run(run)
+        self.assertEqual(report["refused"], "readOnlyTokenCap")
+        self.assertEqual(report["carriedTokens"], carried)
+        self.assertEqual(report["loopTokens"], 12)
+        sig = json.loads(relay.log_path(run).with_name("relay.jsonl.sig").read_text(encoding="utf-8"))
+        self.assertEqual(sig["type"], "relay_log")
+        self.assertEqual(sig["carriedTokens"], carried)
+        self.assertTrue(relay.verify_log(run)["ok"])
+        rows = [json.loads(line) for line in relay.log_path(run).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([row["tokens"] for row in rows if row.get("type") == "carried"], [carried])
+        with self.assertRaises(RuntimeError):
+            Relay(port=9, log_root=self.root / "bad-carry", upstream_key_file=self.up, attest_key_file=self.att, upstream=self.upstream, allow_fake_upstream=True, carried_tokens=-1)
+
     def test_missing_cached_field_is_usage_missing(self):
         ledger = Ledger()
         ledger.reqs = [{"seq": 1, "toolResults": []}]

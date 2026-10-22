@@ -165,6 +165,38 @@ export function assertAttestRoot(attestRoot: string, out: string): void {
 }
 
 /**
+ * Pretty JSON whose `hmacSha256` is the attestation HMAC of every other field.
+ * Canonical bytes match `json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+ */
+export function signedAttestationJson(key: Buffer, value: unknown): string {
+  const unsigned = parseJson(JSON.stringify(value));
+  if (unsigned.t !== "obj") throw new Error("signed json body must be an object");
+  if (unsigned.v.some(([name]) => name === ATTEST_FIELDS.mac)) throw new Error("signed json body includes hmacSha256");
+  const mac = hmacSha256(key, canonicalNode(unsigned));
+  const signed: JsonNode = {
+    t: "obj",
+    v: [...unsigned.v, [ATTEST_FIELDS.mac, { t: "str", v: mac }]],
+  };
+  return `${prettyNode(signed, 0)}\n`;
+}
+
+/** True when `text` is an object whose `hmacSha256` matches the attestation canonical form. */
+export function attestationJsonMacOk(key: Buffer, text: string): boolean {
+  let root: JsonNode;
+  try {
+    root = parseJson(text);
+  } catch {
+    return false;
+  }
+  if (root.t !== "obj") return false;
+  const macNode = field(root, ATTEST_FIELDS.mac);
+  const mac = macNode && macNode.t === "str" ? macNode.v : "";
+  if (mac === "") return false;
+  const unsigned: JsonNode = { t: "obj", v: root.v.filter(([name]) => name !== ATTEST_FIELDS.mac) };
+  return macEqual(mac, hmacSha256(key, canonicalNode(unsigned)));
+}
+
+/**
  * Write `{attestDir}/attestation.json` the way the host wrapper does.
  * Call this only after the run directory's artifacts are complete.
  */
