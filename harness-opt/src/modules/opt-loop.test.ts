@@ -4541,7 +4541,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(activation).toEqual(roundActivation);
     const effective = JSON.parse(readFileSync(join(cwd, "candidates/effective.json"), "utf8")) as Record<string, unknown>;
     expect(effective["agent-loop.maxSteps"]).toBe(24);
-    expect(JSON.parse(readFileSync(join(cwd, "state/nodes/run_end.json"), "utf8"))).toBeNull();
+    expect(JSON.parse(readFileSync(join(cwd, "state/nodes/run_end.json"), "utf8"))).toEqual({ type: "run_end", goalContinuationTurns: 25 });
     const staged = JSON.parse(readFileSync(join(cwd, "state/nodes/gates.json"), "utf8")) as { gates: { id: string; pass: boolean }[] };
     const closure = JSON.parse(readFileSync(join(fx.out, "round1/closure.json"), "utf8")) as { gates: { id: string; pass: boolean }[] };
     expect(staged.gates).toEqual(closure.gates);

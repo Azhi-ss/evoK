@@ -24,7 +24,7 @@ function input(over: Partial<ReviewerGateInput> = {}): ReviewerGateInput {
 
 describe("reviewer gates", () => {
   test("passes in order when the run is real, active, and not worse", () => {
-    const report = evaluateReviewerGates(input());
+    const report = evaluateReviewerGates(input({ runEnd: { goalContinuationTurns: 25 } }));
     expect(report.verdict).toBe("accept");
     expect(report.gates.map((gate) => `${gate.id}:${gate.pass}`)).toEqual(["G0:true", "G1:true", "G2:true", "G3:true"]);
   });
@@ -119,10 +119,39 @@ describe("reviewer gates", () => {
     expect(exact.gates[2]).toEqual({ id: "G2", pass: true });
   });
 
+  test("G2 rejects with inactive_key when the run has no run_end, including a run_end-observable key, and 25 of 25 still passes", () => {
+    const none = evaluateReviewerGates(input({ runEnd: null }));
+    expect(none.gates[0]).toEqual({ id: "G0", pass: true });
+    expect(none.verdict).toBe("reject");
+    expect(none.rejectCode).toBe("inactive_key");
+    expect(none.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    const observable = evaluateReviewerGates(input({
+      changed: [{ path: "agent-loop.maxContinuationTurns", value: 10 }],
+      effective: { "agent-loop.maxContinuationTurns": 10 },
+      knobPaths: ["agent-loop.maxContinuationTurns"],
+      patchPaths: ["agent-loop.maxContinuationTurns"],
+      runEnd: null,
+    }));
+    expect(observable.gates[0]).toEqual({ id: "G0", pass: true });
+    expect(observable.verdict).toBe("reject");
+    expect(observable.rejectCode).toBe("inactive_key");
+    expect(observable.gates[2]).toEqual({ id: "G2", pass: false, code: "inactive_key" });
+    const exact = evaluateReviewerGates(input({
+      changed: [{ path: "agent-loop.maxSteps", value: 20 }],
+      effective: { "agent-loop.maxSteps": 20, "agent-loop.maxContinuationTurns": 25 },
+      knobPaths: ["agent-loop.maxSteps"],
+      patchPaths: ["agent-loop.maxSteps"],
+      runEnd: { goalContinuationTurns: 25 },
+    }));
+    expect(exact.verdict).toBe("accept");
+    expect(exact.gates[0]).toEqual({ id: "G0", pass: true });
+    expect(exact.gates[2]).toEqual({ id: "G2", pass: true });
+  });
+
   test("G3 rejects a timeout flag, a wall time at the official limit, or a reward under the signed baseline", () => {
     expect(evaluateReviewerGates(input({ timedOut: true })).verdict).toBe("reject");
     expect(evaluateReviewerGates(input({ wallS: 90, officialTimeoutSec: 90, timedOut: false })).gates[3]?.pass).toBe(false);
-    expect(evaluateReviewerGates(input({ wallS: 89.9, officialTimeoutSec: 90 })).verdict).toBe("accept");
+    expect(evaluateReviewerGates(input({ wallS: 89.9, officialTimeoutSec: 90, runEnd: { goalContinuationTurns: 25 } })).verdict).toBe("accept");
     expect(evaluateReviewerGates(input({ officialTimeoutSec: null })).gates[3]?.pass).toBe(false);
     expect(evaluateReviewerGates(input({ reward: 0, baselineReward: 1 })).gates[3]?.pass).toBe(false);
   });

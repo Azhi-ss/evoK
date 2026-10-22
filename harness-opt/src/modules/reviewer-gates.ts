@@ -136,10 +136,9 @@ export function patchTookEffect(input: {
     const bound = RUN_END_BOUNDS[leaf.path];
     if (bound && (!input.runEnd || !bound(leaf.value, input.runEnd))) return false;
   }
-  if (input.runEnd) {
-    const seen = input.runEnd.goalContinuationTurns;
-    if (typeof seen !== "number" || !Number.isFinite(seen) || seen > continuationCap(input.effective, input.changed)) return false;
-  }
+  if (!input.runEnd) return false;
+  const seen = input.runEnd.goalContinuationTurns;
+  if (typeof seen !== "number" || !Number.isFinite(seen) || seen > continuationCap(input.effective, input.changed)) return false;
   return true;
 }
 
