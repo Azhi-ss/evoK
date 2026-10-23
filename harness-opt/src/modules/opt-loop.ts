@@ -3830,27 +3830,59 @@ export function gapArtifactText(text: string, tracePath: string): string {
 }
 
 const SEARCH_HISTORY_CAP = 24_000;
-const SEARCH_HISTORY_RULE = "截断：历史块最多 24000 字。每一轮的每个候选一行摘要（round、候选 id、旋钮改动、critic 排除或保留、ranker 选中或名次、G0–G3 过否和原因、reward、accept/reject），这些行不丢。最近一轮保留全文。超出时先按整条丢掉最近一轮的详情，不从字符串中间截，不拆开 JSON。摘要行本身超过 24000 字就报错，不截断。这段在角色 prompt 里，计入只读 token 上限。";
+const SUMMARY_LINE_CAP = 400;
+const REASON_CLIP = 120;
+const SEARCH_HISTORY_RULE = "截断：历史块最多 24000 字。每一行摘要只列有变化的旋钮，写成 key: old→new；critic、ranker 和门的原因各最多 120 字；一行目标不超过 400 字。放得下时，最近一轮保留全文。超出 24000 时先按整条丢掉最近一轮的详情，不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行（最优候选、它的 reward、other N rejected），从最老的一轮开始，直到放得下。这段函数不报错，也不会把 0 条历史送进 prompt。这段在角色 prompt 里，计入只读 token 上限。";
 
 /**
- * Role view of the lineage. Every candidate of every round keeps one summary
- * line. Only the most recent round also keeps full detail entries. The JSON
- * body is at most 24,000 characters. Over that, detail entries drop from the
- * end, whole entries only. Summary lines are never cut. If they alone exceed
- * the cap, this throws. The block sits in the gap-finder and innovator prompt,
- * so its tokens count toward the innovator cap and the read-only cap.
- * Gate pass/fail rows are on the round and review events.
+ * Role view of the lineage. Each candidate is one summary line: changed knobs
+ * only (`key: old→new`), critic / ranker / gate reasons clipped to 120 chars,
+ * and the line kept to 400 chars. Reward and accept belong to the candidate
+ * that was actually evaluated; the others say `not evaluated`.
+ * The JSON body is at most 24,000 characters. Over that, recent-round detail
+ * entries drop from the end, whole entries only. If the summaries are still
+ * over, the oldest rounds collapse to one line each (best candidate, its
+ * reward, `other N rejected`) until the body fits. This does not throw.
+ * The block sits in the gap-finder and innovator prompt, so its tokens count
+ * toward the innovator cap and the read-only cap.
  */
 export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
   const groups = groupHistory(view.events());
   const nodes = view.nodeSummaries();
-  const summaries = groups.flatMap((group) => summaryLines(group.events, nodes));
   const recent = groups.length === 0 ? null : groups[groups.length - 1];
-  let details = recent ? detailEntries(recent.events, nodes) : [];
-  const render = (): string => JSON.stringify({ summaries, details });
-  while (render().length > SEARCH_HISTORY_CAP && details.length > 0) details = details.slice(0, -1);
-  if (render().length > SEARCH_HISTORY_CAP) throw new Error("search tree history summaries exceed 24000");
-  return `搜索树：${render()}\n${SEARCH_HISTORY_RULE}`;
+  let details: unknown[] = recent ? detailEntries(recent.events, nodes) : [];
+  let merged = 0;
+  const linesOf = (): string[] => groups.flatMap((group, index) => (
+    index < merged ? [mergedRoundLine(group.events, nodes)] : summaryLines(group.events, nodes)
+  ));
+  const size = (): number => JSON.stringify({ summaries: linesOf(), details }).length;
+  while (size() > SEARCH_HISTORY_CAP && details.length > 0) details = details.slice(0, -1);
+  while (size() > SEARCH_HISTORY_CAP && merged < groups.length) merged += 1;
+  let summaries = linesOf();
+  if (JSON.stringify({ summaries, details }).length > SEARCH_HISTORY_CAP) {
+    const bounded = boundHistory(summaries, details);
+    summaries = bounded.summaries;
+    details = bounded.details;
+  }
+  if (summaries.length === 0 && groups.length > 0) {
+    const last = groups[groups.length - 1];
+    summaries = last ? [mergedRoundLine(last.events, nodes)] : ["round=absent in source"];
+  }
+  return `搜索树：${JSON.stringify({ summaries, details })}\n${SEARCH_HISTORY_RULE}`;
+}
+
+/** Last resort after every round is already one line. Keeps the newest line. */
+function boundHistory(lines: string[], details: unknown[]): { summaries: string[]; details: unknown[] } {
+  let summaries = lines.slice();
+  let kept = details.slice();
+  const size = (): number => JSON.stringify({ summaries, details: kept }).length;
+  while (size() > SEARCH_HISTORY_CAP && kept.length > 0) kept = kept.slice(0, -1);
+  while (size() > SEARCH_HISTORY_CAP && summaries.length > 1) summaries = summaries.slice(1);
+  if (summaries.length === 0) return { summaries: ["round=absent in source"], details: kept };
+  while (size() > SEARCH_HISTORY_CAP && summaries[0] !== undefined && summaries[0].length > 1) {
+    summaries = [summaries[0].slice(0, summaries[0].length - 1)];
+  }
+  return { summaries, details: kept };
 }
 
 function groupHistory(events: readonly Record<string, unknown>[]): { readonly seq: number; readonly events: Record<string, unknown>[] }[] {
@@ -3909,23 +3941,98 @@ function detailEntries(events: readonly Record<string, unknown>[], nodes: readon
   return entries;
 }
 
+function mergedRoundLine(events: readonly Record<string, unknown>[], nodes: readonly Record<string, unknown>[]): string {
+  const lines = summaryLines(events, nodes);
+  const event = events.find((item) => item.kind === "round" || item.kind === "review");
+  let best = 0;
+  if (event && Array.isArray(event.candidates)) {
+    for (let index = 0; index < event.candidates.length; index += 1) {
+      const candidate = event.candidates[index];
+      const row = candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Record<string, unknown> : {};
+      const id = typeof row.id === "string" && row.id !== "" ? row.id : "absent in source";
+      if (evaluatedCandidate(event, id, row)) {
+        best = index;
+        break;
+      }
+    }
+  }
+  const chosen = lines[best] ?? lines[0] ?? "round=absent in source";
+  return `${chosen} other ${Math.max(0, lines.length - 1)} rejected`;
+}
+
 function formatSummary(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>, nodes: readonly Record<string, unknown>[]): string {
   const code = codeField(event.ranker);
-  const parts = [
-    `round=${roundField(event)}`,
-    `id=${flattenField(id)}`,
-    `knob=${knobField(event, id, candidate, nodes)}`,
-    `critic=${criticField(event.critic, id)}`,
-    `ranker=${rankerField(event.ranker, id)}`,
-  ];
-  if (code !== "") parts.push(`code=${flattenField(code)}`);
-  parts.push(
-    `gates=${gatesField(event.gates)}`,
-    `reward=${rewardField(event.reward)}`,
-    `verdict=${verdictField(event.accept)}`,
-    `reason=${reasonField(event)}`,
-  );
-  return parts.join(" ");
+  const evaluated = evaluatedCandidate(event, id, candidate);
+  return fitSummaryLine({
+    round: roundField(event),
+    id: flattenField(id),
+    knob: knobField(event, id, candidate, nodes),
+    critic: withReason(criticField(event.critic, id), attachedReason(event.critic, id)),
+    ranker: withReason(rankerField(event.ranker, id), attachedReason(event.ranker, id)),
+    code: code === "" ? "" : flattenField(code),
+    gates: gatesField(event.gates),
+    reward: evaluated ? rewardField(candidate.reward !== undefined ? candidate.reward : event.reward) : "not evaluated",
+    verdict: evaluated ? verdictField(candidate.accept !== undefined ? candidate.accept : event.accept) : "not evaluated",
+    reason: reasonField(event),
+  });
+}
+
+function evaluatedCandidate(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>): boolean {
+  if (!Array.isArray(event.candidates)) return true;
+  if (candidate.evaluated === true) return true;
+  if (candidate.evaluated === false) return false;
+  if (typeof candidate.reward === "number" && Number.isFinite(candidate.reward)) return true;
+  return rankerField(event.ranker, id) === "chosen";
+}
+
+function fitSummaryLine(parts: {
+  round: string;
+  id: string;
+  knob: string;
+  critic: string;
+  ranker: string;
+  code: string;
+  gates: string;
+  reward: string;
+  verdict: string;
+  reason: string;
+}): string {
+  let knob = parts.knob;
+  let critic = parts.critic;
+  let ranker = parts.ranker;
+  let gates = parts.gates;
+  let reason = parts.reason;
+  const build = (): string => {
+    const fields = [
+      `round=${parts.round}`,
+      `id=${parts.id}`,
+      `knob=${knob}`,
+      `critic=${critic}`,
+      `ranker=${ranker}`,
+    ];
+    if (parts.code !== "") fields.push(`code=${parts.code}`);
+    fields.push(`gates=${gates}`, `reward=${parts.reward}`, `verdict=${parts.verdict}`, `reason=${reason}`);
+    return fields.join(" ");
+  };
+  let line = build();
+  if (line.length <= SUMMARY_LINE_CAP) return line;
+  const shrink = (value: string, over: number): string => value.slice(0, Math.max(0, value.length - over));
+  const apply = (key: "reason" | "gates" | "knob" | "critic" | "ranker"): void => {
+    if (line.length <= SUMMARY_LINE_CAP) return;
+    const over = line.length - SUMMARY_LINE_CAP;
+    if (key === "reason") reason = shrink(reason, over);
+    if (key === "gates") gates = shrink(gates, over);
+    if (key === "knob") knob = shrink(knob, over);
+    if (key === "critic") critic = shrink(critic, over);
+    if (key === "ranker") ranker = shrink(ranker, over);
+    line = build();
+  };
+  apply("reason");
+  apply("gates");
+  apply("knob");
+  apply("critic");
+  apply("ranker");
+  return line.length > SUMMARY_LINE_CAP ? line.slice(0, SUMMARY_LINE_CAP) : line;
 }
 
 function roundField(event: Record<string, unknown>): string {
@@ -3937,11 +4044,111 @@ function roundField(event: Record<string, unknown>): string {
 }
 
 function knobField(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>, nodes: readonly Record<string, unknown>[]): string {
-  if (typeof candidate.summary === "string" && candidate.summary !== "") return flattenField(candidate.summary);
-  const node = nodes.find((item) => item.id === id);
-  if (node && typeof node.patchSummary === "string" && node.patchSummary !== "") return flattenField(node.patchSummary);
-  if (typeof event.knob === "string" && event.knob !== "") return flattenField(event.knob);
-  return "absent in source";
+  let text = "";
+  if (typeof candidate.knob === "string" && candidate.knob !== "") text = candidate.knob;
+  else if (candidate.changes && typeof candidate.changes === "object") text = JSON.stringify({ changes: candidate.changes, ...(typeof candidate.part === "string" ? { part: candidate.part } : {}) });
+  else if (typeof candidate.summary === "string" && candidate.summary !== "") text = candidate.summary;
+  else {
+    const node = nodes.find((item) => item.id === id);
+    if (node && typeof node.patchSummary === "string" && node.patchSummary !== "") text = node.patchSummary;
+    else if (typeof event.knob === "string" && event.knob !== "") text = event.knob;
+  }
+  let knob = compactKnob(text);
+  if (knob === "") knob = "absent in source";
+  if (candidate.invalid === true) {
+    const why = typeof candidate.invalidReason === "string" && candidate.invalidReason !== "" ? candidate.invalidReason : "invalid";
+    if (!knob.includes(`invalid ${why}`)) knob = `${knob} invalid ${why}`;
+  }
+  return knob;
+}
+
+/** Changed keys only, `key: old→new`. Prose that is not a change record stays, and the line cap trims it. */
+function compactKnob(text: string): string {
+  const flat = flattenField(text);
+  if (!flat.startsWith("{") || !flat.endsWith("}")) return flat;
+  try {
+    const parsed = JSON.parse(flat) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return flat;
+    const rendered = renderKnobChanges(parsed as Record<string, unknown>);
+    return rendered === "" ? flat : rendered;
+  } catch {
+    return flat;
+  }
+}
+
+function renderKnobChanges(value: Record<string, unknown>): string {
+  if ("before" in value && "after" in value) return diffLeaves(value.before, value.after);
+  const changes = value.changes;
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return "";
+  const prefix = typeof value.part === "string" && value.part !== "" ? value.part : "";
+  return diffChangeMap(changes as Record<string, unknown>, prefix);
+}
+
+function diffChangeMap(changes: Record<string, unknown>, prefix: string): string {
+  const parts: string[] = [];
+  for (const key of Object.keys(changes).sort()) {
+    const path = prefix === "" ? key : `${prefix}.${key}`;
+    const value = changes[key];
+    if (Array.isArray(value) && value.length >= 2) {
+      parts.push(`${path}: ${scalarText(value[0])}\u2192${scalarText(value[1])}`);
+      continue;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const row = value as Record<string, unknown>;
+      if ("old" in row || "before" in row || "new" in row || "after" in row) {
+        const old = "old" in row ? row.old : row.before;
+        const next = "new" in row ? row.new : row.after;
+        parts.push(`${path}: ${scalarText(old)}\u2192${scalarText(next)}`);
+        continue;
+      }
+    }
+    parts.push(`${path}: absent\u2192${scalarText(value)}`);
+  }
+  return parts.join(", ");
+}
+
+function diffLeaves(before: unknown, after: unknown): string {
+  const parts: string[] = [];
+  walkDiff(before, after, "", parts);
+  return parts.join(", ");
+}
+
+function walkDiff(before: unknown, after: unknown, path: string, parts: string[]): void {
+  if (sameShape(before, after)) return;
+  if (isPlainRecord(before) && isPlainRecord(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+    for (const key of keys) walkDiff(before[key], after[key], path === "" ? key : `${path}.${key}`, parts);
+    return;
+  }
+  if (path === "") return;
+  parts.push(`${path}: ${scalarText(before)}\u2192${scalarText(after)}`);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameShape(left: unknown, right: unknown): boolean {
+  return stableShape(left) === stableShape(right);
+}
+
+function stableShape(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableShape(item)).join(",")}]`;
+  if (isPlainRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableShape(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function scalarText(value: unknown): string {
+  if (value === undefined) return "absent";
+  if (typeof value === "string") {
+    const flat = flattenField(value);
+    return flat === "" ? "empty" : /^[^\s,:\u2192"]+$/.test(flat) ? flat : JSON.stringify(flat);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  return flattenField(JSON.stringify(value) ?? "null");
 }
 
 function slotKey(id: string): string {
@@ -3956,6 +4163,29 @@ function criticField(critic: unknown, id: string): string {
   const slot = slotKey(id);
   if (excluded.includes(id) || (slot !== "" && excluded.includes(slot))) return "excluded";
   return "kept";
+}
+
+function withReason(verdict: string, reason: string): string {
+  const clipped = clipText(reason, REASON_CLIP);
+  return clipped === "" ? verdict : `${verdict}:${clipped}`;
+}
+
+function attachedReason(source: unknown, id: string): string {
+  if (!source || typeof source !== "object" || Array.isArray(source)) return "";
+  const record = source as Record<string, unknown>;
+  const reasons = record.reasons;
+  if (reasons && typeof reasons === "object" && !Array.isArray(reasons)) {
+    const map = reasons as Record<string, unknown>;
+    const slot = slotKey(id);
+    const specific = map[id] ?? (slot !== "" ? map[slot] : undefined);
+    if (typeof specific === "string" && specific !== "") return specific;
+  }
+  return typeof record.reason === "string" ? record.reason : "";
+}
+
+function clipText(text: string, max: number): string {
+  const flat = flattenField(text);
+  return flat.length <= max ? flat : flat.slice(0, max);
 }
 
 function rankerField(ranker: unknown, id: string): string {
@@ -3987,7 +4217,7 @@ function gatesField(gates: unknown): string {
     const pass = row.pass === true ? "pass" : row.pass === false ? "fail" : "absent in source";
     let text = `${row.id}:${pass}`;
     if (typeof row.code === "string" && row.code !== "") text += `:${flattenField(row.code)}`;
-    if (typeof row.reason === "string" && row.reason !== "") text += `:${flattenField(row.reason)}`;
+    if (typeof row.reason === "string" && row.reason !== "") text += `:${clipText(row.reason, REASON_CLIP)}`;
     parts.push(text);
   }
   return parts.length === 0 ? "absent in source" : parts.join(",");

@@ -18,9 +18,11 @@ gap-finder 和 innovator 走原来塞「上一轮评语」的那条 prompt。历
 
 ## 截断
 
-这条只作用于搜索树历史块，不再用 trace 的 `trimLongString` 头尾截断，也不再把块从末尾切成 12000 字。历史块的 JSON 正文最多 **24000** 字。这是预注册的修正：上限写在本文，不新增 `pre-round1.json` 的签名字段。没打开搜索树时，预注册文件跟以前一样。
+这条只作用于搜索树历史块，不再用 trace 的 `trimLongString` 头尾截断，也不再把块从末尾切成 12000 字。历史块的 JSON 正文最多 **24000** 字。这是预注册的修正，全文在 `research/2026-10-23-search-tree-history-amendment.md`。上限不新增 `pre-round1.json` 的签名字段。没打开搜索树时，预注册文件跟以前一样。
 
-两层。每一轮的每个候选各一行固定摘要，字段是 round、候选 id、旋钮改动、critic 排除或保留、ranker 选中或名次、G0–G3 过否和原因、reward、accept/reject，以及评语。这些行不丢。最近一轮另保留全文详情。超出 24000 时，先按整条丢掉最近一轮的详情，从最后一条开始。不从字符串中间截，不拆开 JSON，不丢摘要行。摘要行本身超过 24000 字就报错，不截断。规则原文接在 JSON 后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
+两层，但摘要行先压短。旋钮只列有变化的键，写成 `key: old→new`。critic、ranker 和每一道门的原因各最多 120 字。一行目标不超过 400 字。reward 和 accept/reject 只写在真正跑过的那个候选上，其余候选写 `not evaluated`。放得下时，最近一轮另保留全文详情。
+
+超出 24000 时，先按整条丢掉最近一轮的详情，从最后一条开始。不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行：最优候选、它的 reward、以及 `other N rejected`。从最老的一轮开始，收到放得下为止。这段函数不报错，有历史时也不会把 0 条送进 prompt。规则原文接在 JSON 后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
 
 ## 导入
 
@@ -30,7 +32,9 @@ critic 的 `excluded` 以该轮 `ranker-input.json` 为准。空数组是「没�
 
 门的原因合并 closure 的 `gates` 和 `roles/reviewer-gate/state/nodes/gates.json`。同一 id 先留下已有的 pass，再补上缺失的 code 和 reason。源记录里的 reason 文本原样抄过来。
 
-候选补丁按该候选的真实目录名读。`roles/innovator-N/patch.json` 有 summary 时用它。否则读 `roles/innovator-N/candidates/<目录名>/patch.json`（跳过 `base`；只有一个目录时用它，多个目录时按补丁 id 或目录名对上 `cN`）。`candidates/nudge-early/patch.json` 就是这种真实目录名。round 级的 `candidates/<目录名>/patch.json` 只在补丁或目录名对得上该槽位时使用。
+候选补丁按该候选的真实目录名读。`roles/innovator-N/patch.json` 有 summary 时用它。否则读 `roles/innovator-N/candidates/<目录名>/patch.json`（跳过 `base`；只有一个目录时用它，多个目录时按补丁 id 或目录名对上 `cN`）。`candidates/nudge-early/patch.json` 就是这种真实目录名。round 级的 `candidates/<目录名>/patch.json` 只在补丁或目录名对得上该槽位时使用。摘要行里的旋钮不抄整段 summary，而是拿该候选 config 对 `baseline/config.json` 做叶键比较，只留下变化的键。
+
+reward 和 accept 只挂在这一轮真正评过的候选上，也就是 ranker 选出、配置写进 `candidate/config.json` 的那个。同轮其余候选在摘要行里写 `not evaluated`，不再复制这一轮的 reward 和 accept。
 
 accept 的权威来源按布局读，缺了不默认成 reject：
 

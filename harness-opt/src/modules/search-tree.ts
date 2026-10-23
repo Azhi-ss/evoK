@@ -218,7 +218,7 @@ export function importLoopHistories(
       const patch = readText(join(roundDir, "patch.diff"));
       const notes = join(roundDir, "run-notes.md");
       const score = existsSync(notes) ? notesReward(readText(notes)) : null;
-      const candidates = readCandidates(lin, roundDir, job.prefix, round, closure, loop, score, patch);
+      const candidates = readCandidates(lin, roundDir, job.prefix, round, closure, loop, score, patch, join(job.dir, "baseline", "config.json"));
       if (candidates.length === 0 && !closure && patch === "" && score === null) continue;
       for (const candidate of candidates) {
         if (lin.nodes.has(candidate.id)) continue;
@@ -282,7 +282,10 @@ export function importLoopHistories(
         summary: item.node.patchSummary,
         invalid: item.invalid,
         ...(item.invalidReason !== "" ? { invalidReason: item.invalidReason } : {}),
+        ...(item.knobDiff !== "" ? { knob: item.knobDiff } : {}),
+        evaluated: item.winner,
         reward: item.winner && typeof round.reward === "number" ? round.reward : ABSENT,
+        ...(item.winner ? { accept: round.accept } : {}),
       })),
     });
     if (Array.isArray(gates)) lin.gateLog({ round: round.round, source: round.prefix, gates });
@@ -300,6 +303,7 @@ interface BuiltCandidate {
   readonly invalidReason: string;
   readonly winner: boolean;
   readonly configFile: string;
+  readonly knobDiff: string;
 }
 
 interface BuiltRound {
@@ -560,6 +564,7 @@ function readCandidates(
   loop: Record<string, unknown> | null,
   score: number | null,
   patch: string,
+  baselineFile: string,
 ): BuiltCandidate[] {
   const invalid = invalidById(closure, loop, round);
   const slots = new Set<number>();
@@ -589,6 +594,7 @@ function readCandidates(
     const found = candidateSummary(roundDir, slot, marked, reason);
     const summary = found.summary;
     const configFile = found.configFile;
+    const knobDiff = diffKnob(baselineFile, configFile);
     const winner = named !== "" ? key === named : !marked && slot === (winnerSlot ? Number(winnerSlot) : 0);
     const scored = winner && accept === true && score !== null;
     const node = new Node({
@@ -606,9 +612,56 @@ function readCandidates(
       invalidReason: reason,
       winner,
       configFile,
+      knobDiff,
     });
   }
   return out;
+}
+
+/** Leaf keys that differ, `key: old→new`, sorted by path. Empty when the bytes cannot be compared. */
+function diffKnob(baselineFile: string, configFile: string): string {
+  if (configFile === "" || !existsSync(configFile) || !existsSync(baselineFile)) return "";
+  const before = readRecord(baselineFile);
+  const after = readRecord(configFile);
+  if (!before || !after) return "";
+  const parts: string[] = [];
+  walkKnob(before, after, "", parts);
+  return parts.join(", ");
+}
+
+function walkKnob(before: unknown, after: unknown, path: string, parts: string[]): void {
+  if (stableKnob(before) === stableKnob(after)) return;
+  if (isKnobRecord(before) && isKnobRecord(after)) {
+    const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+    for (const key of keys) walkKnob(before[key], after[key], path === "" ? key : `${path}.${key}`, parts);
+    return;
+  }
+  if (path === "") return;
+  parts.push(`${path}: ${knobScalar(before)}\u2192${knobScalar(after)}`);
+}
+
+function isKnobRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stableKnob(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableKnob(item)).join(",")}]`;
+  if (isKnobRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableKnob(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function knobScalar(value: unknown): string {
+  if (value === undefined) return "absent";
+  if (typeof value === "string") {
+    const flat = value.replace(/\s+/g, " ").trim();
+    return flat === "" ? "empty" : /^[^\s,:\u2192"]+$/.test(flat) ? flat : JSON.stringify(flat);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) return "null";
+  const text = JSON.stringify(value) ?? "null";
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function configLabel(round: number, slot: number, configFile: string, roundDir: string, winnerConfig: boolean): string {

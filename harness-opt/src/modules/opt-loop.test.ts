@@ -7557,6 +7557,12 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
 });
 
 describe("search tree", () => {
+  function historyBody(text: string): string {
+    const start = text.indexOf("搜索树：");
+    const end = text.indexOf("\n截断：", start);
+    return text.slice(start + "搜索树：".length, end);
+  }
+
   function rolePrompt(out: string, round: number, session: string): string {
     const recorded = JSON.parse(readFileSync(join(out, `round${round}`, "sessions", `${session}.argv.json`), "utf8")) as { argv: string[] };
     return recorded.argv[recorded.argv.length - 1] ?? "";
@@ -7743,11 +7749,16 @@ describe("search tree", () => {
     expect(text.includes("characters truncated")).toBe(false);
     expect(text.includes("24000")).toBe(true);
     expect(text.includes("最近一轮保留全文")).toBe(true);
-    expect(text.includes("这些行不丢")).toBe(true);
+    expect(text.includes("other N rejected")).toBe(true);
+    expect(text.includes("不报错")).toBe(true);
     expect(text.includes("计入只读 token 上限")).toBe(true);
+    const unevaluated = parsed.summaries.filter((line) => line.includes("id=old-c0") || line.includes("id=new-c1"));
+    expect(unevaluated.every((line) => line.includes("reward=not evaluated") && line.includes("verdict=not evaluated"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=old-c1") && line.includes("reward=0") && line.includes("verdict=reject"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=new-c0") && line.includes("reward=1") && line.includes("verdict=accept"))).toBe(true);
   });
 
-  test("search tree history fails when summary lines alone exceed 24000", () => {
+  test("search tree history compresses a huge knob instead of throwing", () => {
     const events: Record<string, unknown>[] = [{
       kind: "round",
       seq: 1,
@@ -7757,13 +7768,142 @@ describe("search tree", () => {
       accept: false,
       reward: 0,
       reason: "x",
-      candidates: [{ id: "c0", summary: `KNOB_${"Z".repeat(25000)}` }],
+      candidates: [{ id: "c0", summary: `KNOB_${"Z".repeat(25000)}`, evaluated: true }],
+      critic: { excluded: [], reason: `C${"C".repeat(500)}` },
+      ranker: { winnerId: "c0", reason: `R${"R".repeat(500)}` },
+      gates: [{ id: "G3", pass: false, reason: `G${"G".repeat(500)}` }],
       patch: `PATCH_SHOULD_NOT_BE_SLICED_${"P".repeat(1000)}`,
     }];
-    expect(() => searchHistorySection({
+    const text = searchHistorySection({
       events: () => events,
       nodeSummaries: () => [],
-    })).toThrow("search tree history summaries exceed 24000");
+    });
+    const body = historyBody(text);
+    expect(body.length).toBeLessThanOrEqual(24000);
+    const parsed = JSON.parse(body) as { summaries: string[]; details: unknown[] };
+    expect(parsed.summaries.length).toBeGreaterThan(0);
+    expect(parsed.summaries[0]?.includes("id=c0")).toBe(true);
+    expect(parsed.summaries[0]?.length).toBeLessThanOrEqual(400);
+    const summaryText = parsed.summaries.join("\n");
+    expect(summaryText.includes("Z".repeat(121))).toBe(false);
+    expect(summaryText.includes("C".repeat(121))).toBe(false);
+    expect(summaryText.includes("R".repeat(121))).toBe(false);
+    expect(summaryText.includes("G".repeat(121))).toBe(false);
+    expect(body.includes("PATCH_SHOULD_NOT_BE_SLICED_")).toBe(false);
+    expect(body.includes("Z".repeat(121))).toBe(false);
+    expect(text.includes("不报错")).toBe(true);
+  });
+
+  test("search tree history lists only changed knob keys", () => {
+    const text = searchHistorySection({
+      events: () => [{
+        kind: "round",
+        seq: 1,
+        group: "diff",
+        source: "diff",
+        round: 1,
+        accept: true,
+        reward: 1,
+        reason: "short",
+        candidates: [{
+          id: "diff-c0",
+          evaluated: true,
+          summary: JSON.stringify({
+            before: { parts: { "agent-loop": { maxSteps: 25, maxChars: 8 } }, mark: "same" },
+            after: { parts: { "agent-loop": { maxSteps: 20, maxChars: 8 } }, mark: "same" },
+          }),
+        }],
+      }],
+      nodeSummaries: () => [],
+    });
+    const parsed = JSON.parse(historyBody(text)) as { summaries: string[] };
+    expect(parsed.summaries).toEqual([
+      "round=diff/1 id=diff-c0 knob=parts.agent-loop.maxSteps: 25→20 critic=absent in source ranker=absent in source gates=absent in source reward=1 verdict=accept reason=short",
+    ]);
+    expect(parsed.summaries[0]?.includes("maxChars")).toBe(false);
+    expect(parsed.summaries[0]?.includes("mark")).toBe(false);
+  });
+
+  test("search tree history degrades across 3, 6 and 10 rounds without dropping every item", () => {
+    const run = (rounds: number, knobPad: number, patchPad: number) => {
+      const events: Record<string, unknown>[] = [];
+      for (let round = 1; round <= rounds; round += 1) {
+        events.push({
+          kind: "round",
+          seq: round,
+          group: `syn-r${round}`,
+          source: "syn",
+          round,
+          accept: round % 2 === 0,
+          reason: "because",
+          reward: round % 2 === 0 ? 1 : 0,
+          candidates: [0, 1, 2, 3, 4, 5].map((slot) => ({
+            id: `syn-r${round}-c${slot}`,
+            summary: `K_${"k".repeat(knobPad)}`,
+            evaluated: slot === 0,
+            reward: slot === 0 ? (round % 2 === 0 ? 1 : 0) : "absent in source",
+            accept: slot === 0 ? round % 2 === 0 : undefined,
+          })),
+          critic: { excluded: ["c5"], reason: `C${"C".repeat(400)}` },
+          ranker: { winnerId: "c0", reason: `R${"R".repeat(400)}`, codeWinner: "c1" },
+          gates: ["G0", "G1", "G2", "G3"].map((id) => ({ id, pass: id !== "G3", reason: `G${"G".repeat(400)}` })),
+          patch: `PATCH_${"P".repeat(patchPad)}`,
+        });
+      }
+      const text = searchHistorySection({ events: () => events, nodeSummaries: () => [] });
+      const body = historyBody(text);
+      expect(body.length).toBeLessThanOrEqual(24000);
+      const parsed = JSON.parse(body) as { summaries: string[]; details: { patch?: string }[] };
+      expect(parsed.summaries.length).toBeGreaterThan(0);
+      const summaryText = parsed.summaries.join("\n");
+      expect(summaryText.includes("C".repeat(121))).toBe(false);
+      expect(summaryText.includes("R".repeat(121))).toBe(false);
+      expect(summaryText.includes("G".repeat(121))).toBe(false);
+      expect(summaryText.includes("k".repeat(500))).toBe(false);
+      for (const line of parsed.summaries) {
+        expect(line.startsWith("round=")).toBe(true);
+        if (!/ other \d+ rejected$/.test(line)) expect(line.length).toBeLessThanOrEqual(400);
+      }
+      let expanded = false;
+      for (const line of parsed.summaries) {
+        const collapsed = / other \d+ rejected$/.test(line);
+        if (expanded) expect(collapsed).toBe(false);
+        if (!collapsed) expanded = true;
+      }
+      return parsed;
+    };
+
+    const three = run(3, 40, 20);
+    expect(three.summaries.filter((line) => line.includes("id=syn-r")).length).toBe(18);
+    expect(three.summaries.some((line) => line.includes("id=syn-r2-c0") && line.includes("reward=1") && line.includes("verdict=accept"))).toBe(true);
+    expect(three.summaries.some((line) => line.includes("id=syn-r2-c1") && line.includes("reward=not evaluated") && line.includes("verdict=not evaluated") && !line.includes("reward=1"))).toBe(true);
+    expect(three.summaries.some((line) => line.includes("id=syn-r2-c5") && line.includes("critic=excluded"))).toBe(true);
+    expect(three.details.some((item) => item.patch?.includes("PATCH_"))).toBe(true);
+    expect(three.summaries.some((line) => / other \d+ rejected$/.test(line))).toBe(false);
+
+    const six = run(6, 1500, 20000);
+    expect(six.summaries.filter((line) => line.includes("id=syn-r")).length).toBe(36);
+    expect(six.details.some((item) => item.patch !== undefined)).toBe(false);
+    expect(JSON.stringify(six).includes("P".repeat(40))).toBe(false);
+    expect(six.summaries.some((line) => / other \d+ rejected$/.test(line))).toBe(false);
+    for (let round = 1; round <= 6; round += 1) {
+      for (let slot = 0; slot < 6; slot += 1) {
+        expect(six.summaries.some((line) => line.includes(`id=syn-r${round}-c${slot}`))).toBe(true);
+      }
+    }
+
+    const ten = run(10, 1500, 20000);
+    expect(ten.details.some((item) => item.patch !== undefined)).toBe(false);
+    expect(ten.summaries[0]?.includes("round=syn/1")).toBe(true);
+    expect(ten.summaries[0]?.includes("id=syn-r1-c0")).toBe(true);
+    expect(ten.summaries[0]?.includes("reward=")).toBe(true);
+    expect(ten.summaries[0]).toMatch(/ other 5 rejected$/);
+    expect(ten.summaries[0]?.includes("id=syn-r1-c1")).toBe(false);
+    for (let slot = 0; slot < 6; slot += 1) {
+      expect(ten.summaries.some((line) => line.includes(`id=syn-r10-c${slot}`) && !/ other \d+ rejected$/.test(line))).toBe(true);
+    }
+    expect(ten.summaries.some((line) => line.includes("id=syn-r10-c0") && line.includes("reward=1"))).toBe(true);
+    expect(ten.summaries.some((line) => line.includes("id=syn-r10-c3") && line.includes("reward=not evaluated"))).toBe(true);
   });
 
   test("the tree stays quiet until the pinned round", async () => {
@@ -7933,40 +8073,68 @@ describe("search tree", () => {
     }
     const prompt = rolePrompt(fx.out, 1, "gap-finder");
     const innovator = rolePrompt(fx.out, 1, "innovator-0");
-    const start = prompt.indexOf("搜索树：");
-    const end = prompt.indexOf("\n截断：", start);
-    const history = prompt.slice(start + "搜索树：".length, end);
+    const history = historyBody(prompt);
     expect(history.length).toBeLessThanOrEqual(24000);
     const rendered = JSON.parse(history) as { summaries: string[] };
     expect(rendered.summaries.length).toBe(18);
     const round2Gates = "G0:pass:R2_G0_REASON,G1:pass:R2_G1_REASON,G2:pass:R2_G2_REASON,G3:pass:R2_G3_REASON";
     const round3Gates = "G0:pass,G1:pass,G2:pass,G3:fail:R3_G3_REASON";
+    const knobOf = (name: string, slot: number, invalid = ""): string => {
+      const steps = 20 + slot;
+      const bits = [`mark: control→${name}-c${slot}`];
+      if (steps !== 25) bits.push(`parts.agent-loop.maxSteps: 25→${steps}`);
+      const knob = bits.join(", ");
+      return invalid === "" ? knob : `${knob} invalid ${invalid}`;
+    };
+    const one = (
+      name: string,
+      slot: number,
+      fields: { critic: string; ranker: string; code: string; gates: string; reward: string; verdict: string; reason: string; invalid?: string },
+    ): string => [
+      `round=${name}/1`,
+      `id=${name}-r1-c${slot}`,
+      `knob=${knobOf(name, slot, fields.invalid ?? "")}`,
+      `critic=${fields.critic}`,
+      `ranker=${fields.ranker}`,
+      `code=${fields.code}`,
+      `gates=${fields.gates}`,
+      `reward=${fields.reward}`,
+      `verdict=${fields.verdict}`,
+      `reason=${fields.reason}`,
+    ].join(" ");
+    const absent = "absent in source";
+    const skipped = { reward: "not evaluated", verdict: "not evaluated" };
     const lines = [
-      "round=round1-r3/1 id=round1-r3-r1-c0 knob=R1_C0 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      "round=round1-r3/1 id=round1-r3-r1-c1 knob=R1_C1 critic=kept ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      "round=round1-r3/1 id=round1-r3-r1-c2 knob=R1_C2 critic=kept ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      "round=round1-r3/1 id=round1-r3-r1-c3 knob=R1_C3 critic=kept ranker=chosen code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      "round=round1-r3/1 id=round1-r3-r1-c4 knob=R1_C4 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      "round=round1-r3/1 id=round1-r3-r1-c5 knob=R1_C5 critic=excluded ranker=absent in source code=c1 gates=absent in source reward=0 verdict=reject reason=absent in source",
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c0 knob=R2_C0 critic=kept ranker=chosen code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c1 knob=R2_C1 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c2 knob=R2_C2 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c3 knob=R2_C3 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c4 knob=R2_C4 critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round2-1c104724/1 id=round2-1c104724-r1-c5 knob=R2_C5 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round2Gates} reward=1 verdict=accept reason=round2 cleared the gate.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c0 knob=R3_C0 critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c1 knob=R3_C1 critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c2 knob=NUDGE_EARLY_C2 critic=excluded ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c3 knob=R3_C3 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c4 knob=R3_C4 critic=kept ranker=chosen code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
-      `round=round3-e92ce52f-r2/1 id=round3-e92ce52f-r2-r1-c5 knob=R3_C5 invalid no_conclusion critic=kept ranker=absent in source code=c0 gates=${round3Gates} reward=0 verdict=reject reason=round3 reward fell.`,
+      one("round1-r3", 0, { critic: "excluded", ranker: absent, code: "c1", gates: absent, ...skipped, reason: absent }),
+      one("round1-r3", 1, { critic: "kept", ranker: absent, code: "c1", gates: absent, ...skipped, reason: absent }),
+      one("round1-r3", 2, { critic: "kept", ranker: absent, code: "c1", gates: absent, ...skipped, reason: absent }),
+      one("round1-r3", 3, { critic: "kept", ranker: "chosen", code: "c1", gates: absent, reward: "0", verdict: "reject", reason: absent }),
+      one("round1-r3", 4, { critic: "excluded", ranker: absent, code: "c1", gates: absent, ...skipped, reason: absent }),
+      one("round1-r3", 5, { critic: "excluded", ranker: absent, code: "c1", gates: absent, ...skipped, reason: absent }),
+      one("round2-1c104724", 0, { critic: "kept", ranker: "chosen", code: "c0", gates: round2Gates, reward: "1", verdict: "accept", reason: "round2 cleared the gate." }),
+      one("round2-1c104724", 1, { critic: "kept", ranker: absent, code: "c0", gates: round2Gates, ...skipped, reason: "round2 cleared the gate." }),
+      one("round2-1c104724", 2, { critic: "kept", ranker: absent, code: "c0", gates: round2Gates, ...skipped, reason: "round2 cleared the gate." }),
+      one("round2-1c104724", 3, { critic: "kept", ranker: absent, code: "c0", gates: round2Gates, ...skipped, reason: "round2 cleared the gate.", invalid: "no_conclusion" }),
+      one("round2-1c104724", 4, { critic: "kept", ranker: absent, code: "c0", gates: round2Gates, ...skipped, reason: "round2 cleared the gate." }),
+      one("round2-1c104724", 5, { critic: "kept", ranker: absent, code: "c0", gates: round2Gates, ...skipped, reason: "round2 cleared the gate.", invalid: "no_conclusion" }),
+      one("round3-e92ce52f-r2", 0, { critic: "kept", ranker: absent, code: "c0", gates: round3Gates, ...skipped, reason: "round3 reward fell." }),
+      one("round3-e92ce52f-r2", 1, { critic: "kept", ranker: absent, code: "c0", gates: round3Gates, ...skipped, reason: "round3 reward fell." }),
+      one("round3-e92ce52f-r2", 2, { critic: "excluded", ranker: absent, code: "c0", gates: round3Gates, ...skipped, reason: "round3 reward fell." }),
+      one("round3-e92ce52f-r2", 3, { critic: "kept", ranker: absent, code: "c0", gates: round3Gates, ...skipped, reason: "round3 reward fell.", invalid: "no_conclusion" }),
+      one("round3-e92ce52f-r2", 4, { critic: "kept", ranker: "chosen", code: "c0", gates: round3Gates, reward: "0", verdict: "reject", reason: "round3 reward fell." }),
+      one("round3-e92ce52f-r2", 5, { critic: "kept", ranker: absent, code: "c0", gates: round3Gates, ...skipped, reason: "round3 reward fell.", invalid: "no_conclusion" }),
     ];
-    expect(lines.length).toBe(36 / 2);
+    expect(lines.length).toBe(18);
+    expect(lines.every((line) => line.length <= 400)).toBe(true);
     expect(rendered.summaries).toEqual(lines);
     for (const line of lines) {
       expect(prompt.includes(line)).toBe(true);
       expect(innovator.includes(line)).toBe(true);
     }
+    expect(prompt.includes("NUDGE_EARLY_C2")).toBe(true);
+    const round2Others = lines.filter((line) => line.includes("id=round2-1c104724-r1-c") && !line.includes("id=round2-1c104724-r1-c0"));
+    expect(round2Others.length).toBe(5);
+    expect(round2Others.every((line) => line.includes("reward=not evaluated") && line.includes("verdict=not evaluated") && !line.includes("reward=1"))).toBe(true);
     expect(prompt.includes("PATCH_round3-e92ce52f-r2")).toBe(true);
     expect(prompt.includes("PATCH_round1-r3")).toBe(false);
     expect(prompt.includes("PATCH_round2-1c104724")).toBe(false);
