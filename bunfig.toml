@@ -4,3 +4,8 @@
 #   EVOK_LLM_LIVE_TEST=1 bun test --path-ignore-patterns="" ./src/newapi-live.live.test.ts
 [test]
 pathIgnorePatterns = ["**/*.live.test.ts"]
+
+# Workspaces default to the isolated linker, which hides transitive deps such
+# as @earendil-works/pi-ai from root tests. Keep the historical hoisted tree.
+[install]
+linker = "hoisted"

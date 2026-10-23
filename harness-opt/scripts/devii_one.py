@@ -518,6 +518,14 @@ def run_logged(command, env, log, timeout_sec):
     return process.returncode
 
 
+def _relay_hooks():
+    relay = Path(__file__).resolve().parents[1] / "relay"
+    if str(relay) not in sys.path:
+        sys.path.insert(0, str(relay))
+    import hooks
+    return hooks
+
+
 def execute(args, plan):
     run = Path(plan["runDir"])
     if run.exists():
@@ -560,7 +568,8 @@ def execute(args, plan):
             checker_env = base_env()
             if gateway is not None:
                 checker_env["BASE_URL"] = gateway.base_url
-            checker_exit = run_logged(checker, checker_env, run / "checker.log", limits["checker_timeout_sec"])
+            with _relay_hooks().ScorerWatch(run / "verifier", run / "verifier"):
+                checker_exit = run_logged(checker, checker_env, run / "checker.log", limits["checker_timeout_sec"])
         trace_src = actual / "trace.jsonl" if actual else None
         if trace_src and trace_src.is_file():
             with trace_src.open() as source, (run / "trace.jsonl").open("w") as target:
@@ -575,6 +584,7 @@ def execute(args, plan):
             "agent_exit": exit_code,
             "checker_exit": checker_exit,
         }
+        result = _relay_hooks().apply_score_accounting(result, run / "verifier", run / "verifier")
         (run / "result.json").write_text(json.dumps(result) + "\n")
         return result
     finally:

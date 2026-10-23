@@ -1,24 +1,44 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { flag } from "./args";
+import { flag, hasFlag } from "./args";
 import { runEmpty } from "./empty-run";
+import { citeEvidence, runOptLoop, runOptOnce } from "./modules/opt-loop";
+import { CommandOptExecutor, type OptTask } from "./modules/opt-executor";
+import type { OptRoleName } from "./modules/role-spawn";
 import { dispatchHarnessCommand, formatCommandResult, runClosedLoopDemo, type CommandResult } from "./session";
 
 const USAGE = [
-  "usage: harness-opt <empty|run|start|step|status|gate|stop|demo> [--out dir]",
+  "usage: harness-opt <empty|run|start|step|status|gate|stop|demo|optimize|optimize-one|cite-check> [--out dir]",
   "  empty                 fixture round; held-out is written to sealed/heldout-score.json",
   "  run --dev <dir>       one real round over that task bank; thresholds are required",
   "  start                 required unless files exist: --min-delta --tts-baseline --held-out-floor --token-budget --max-local-runs --max-wall-s --max-submits --heldout-score",
   "  step|status|gate|stop  continue the run in --out (default <cwd>/.harness-opt)",
   "  demo                  one closed loop on the sample trace; prints per-stage status",
+  "  optimize --dry-run --attest-root <dir> --attest-key-file <file> --harness <file> [--harness-sha <sha>] --control-attest <dir> --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        one loop; task and round-0 path/sha are required and have no default; --harness-sha or HARNESS_PIN_SHA overrides the default harness pin",
+  "  optimize --carry-from <loopOut> --carry-attest <attestRoot> [--carry-relay-logs <dir>] [--void-spend <relay-log-dir>]",
+  "                        fresh loop, not --resume; carry run.tokens plus role spend from that loop's signed records into the 30M cap; --void-spend is repeatable and adds that relay-log dir's usage, including unfinished requests, as a signed VOID entry",
+  "  optimize --search-tree-from-round <n> [--search-tree-import <loopOut>]",
+  "                        off unless <n> is set; <n> is written into signed pre-round1; --search-tree-import is repeatable and read-only",
+  "  optimize --resume <loopOut> | --from-round <loopOut> --out <newDir> --attest-out <newAttest> [--source-relay-logs <dir>] [--campaign-registry <file>] [--rounds <n>]",
+  "                        read that loop and its --attest-root read-only; write round N+1 into --out and new attestations and relay logs into --attest-out; --out and --attest-out must not sit inside the source run or the source attest root; gap input is the previous real-run trace, sha-checked; --source-relay-logs is the source role relay directory when it is not the recorded relayLogRoot; --campaign-registry is the host campaign-nonce file outside the out dir (default is campaign-registry.jsonl under the attest root); --rounds is how many further rounds (default 1)",
+  "  optimize --execute --pi-bin <path> --attest-root <dir> --attest-key-file <file> --harness <file> --control-attest <dir> [--executor-cmd '<json argv>'] [--stop-before-run] [--role-max-tokens <role>=<n>] --task <id> --task-path <path> --network devii-004-int --token-w <n> --round0-trace <path> --round0-sha <sha>",
+  "                        needs BASE_URL; --pi-bin launches the existing pi-subagents roles through the relay; without --pi-bin execute fails; --stop-before-run writes the closure and stops before once/docker",
+  "  optimize-one --attest-root <dir> --attest-key-file <file> --harness <file> --config <file> --control-config <file> --knob <name> --executor-cmd '<json argv>' --task <id> --task-path <path> --network devii-004-int --token-w <n>",
+  "                        one candidate seed to prove activation; task flags are required",
+  "  cite-check --log <relay.jsonl> --cwd <role cwd> --file <path> --sha <sha>",
+  "                        offline citation replay; relative reads resolve against the role cwd",
 ].join("\n");
 
 export async function main(argv: readonly string[]): Promise<number> {
   const [command, ...rest] = argv;
   if (command === "empty") return emptyCommand(rest);
   if (command === "demo") return demoCommand(rest);
+  if (command === "optimize") return optimizeCommand(rest);
+  if (command === "optimize-one") return optimizeOneCommand(rest);
+  if (command === "cite-check") return citeCheckCommand(rest);
   if (command === "run") return runCommand(rest);
   if (command === "start" || command === "step" || command === "status" || command === "gate" || command === "stop") {
     const commandResult = await dispatchHarnessCommand([command, ...rest], { cwd: process.cwd() });
@@ -27,6 +47,20 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   process.stderr.write(`${USAGE}\n`);
   return 1;
+}
+
+function citeCheckCommand(argv: readonly string[]): number {
+  const log = flag(argv, "--log");
+  const roleCwd = flag(argv, "--cwd");
+  const file = flag(argv, "--file");
+  const sha = flag(argv, "--sha");
+  if (!log || !roleCwd || !file || !sha) {
+    process.stderr.write("cite-check needs --log, --cwd, --file, and --sha\n");
+    return 1;
+  }
+  const result = citeEvidence({ log, cwd: roleCwd, file, sha });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  return result.ok ? 0 : 1;
 }
 
 async function emptyCommand(argv: readonly string[]): Promise<number> {
@@ -45,6 +79,303 @@ async function demoCommand(argv: readonly string[]): Promise<number> {
   const commandResult = await runClosedLoopDemo(out, { cwd: process.cwd() });
   writeResult(commandResult);
   return commandResult.ok ? 0 : 1;
+}
+
+async function optimizeCommand(argv: readonly string[]): Promise<number> {
+  const dry = hasFlag(argv, "--dry-run");
+  const execute = hasFlag(argv, "--execute");
+  if (!dry && !execute) {
+    process.stderr.write("optimize needs --dry-run or --execute\n");
+    return 1;
+  }
+  if (dry && execute) {
+    process.stderr.write("optimize received both --dry-run and --execute\n");
+    return 1;
+  }
+  const stopBeforeRun = hasFlag(argv, "--stop-before-run");
+  if (stopBeforeRun && !execute) {
+    process.stderr.write("optimize --stop-before-run needs --execute\n");
+    return 1;
+  }
+  const roleCaps = roleMaxTokensFlag(argv);
+  if (roleCaps instanceof Error) {
+    process.stderr.write(`${roleCaps.message}\n`);
+    return 1;
+  }
+  const resumeFrom = flag(argv, "--resume") ?? flag(argv, "--from-round");
+  const requestedOut = flag(argv, "--out");
+  const attestRoot = flag(argv, "--attest-root");
+  if (resumeFrom && !requestedOut) {
+    process.stderr.write("optimize --resume needs a new --out directory\n");
+    return 1;
+  }
+  if (resumeFrom && requestedOut) {
+    const outPath = resolve(requestedOut);
+    const run = resolve(resumeFrom);
+    if (outPath === run || outPath.startsWith(run + sep)) {
+      process.stderr.write("optimize --resume refuses to write into the source loop directory\n");
+      return 1;
+    }
+    if (attestRoot) {
+      const sourceAttest = resolve(attestRoot);
+      if (outPath === sourceAttest || outPath.startsWith(sourceAttest + sep)) {
+        process.stderr.write("optimize --resume refuses to write into the source attest directory\n");
+        return 1;
+      }
+    }
+  }
+  const attestOut = flag(argv, "--attest-out");
+  const sourceRelayLogs = flag(argv, "--source-relay-logs");
+  if (resumeFrom && !attestOut) {
+    process.stderr.write("optimize --resume needs a new --attest-out directory\n");
+    return 1;
+  }
+  if (resumeFrom && attestOut && attestRoot) {
+    const write = resolve(attestOut);
+    const source = resolve(attestRoot);
+    const run = resolve(resumeFrom);
+    if (write === source || write.startsWith(source + sep) || write === run || write.startsWith(run + sep)) {
+      process.stderr.write("optimize --resume refuses to write into the source attest directory\n");
+      return 1;
+    }
+  }
+  const out = requestedOut ?? mkdtempSync(join(tmpdir(), "harness-opt-opt-"));
+  const rounds = numberFlag(argv, "--rounds");
+  const ewiThresholdSec = numberFlag(argv, "--ewi-threshold");
+  if (rounds instanceof Error || ewiThresholdSec instanceof Error) {
+    process.stderr.write(`${rounds instanceof Error ? rounds.message : ewiThresholdSec instanceof Error ? ewiThresholdSec.message : ""}\n`);
+    return 1;
+  }
+  let executorCommand: readonly string[] | undefined;
+  if (execute) {
+    const raw = flag(argv, "--executor-cmd");
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+          process.stderr.write("optimize --executor-cmd must be a JSON array of strings\n");
+          return 1;
+        }
+        executorCommand = parsed as string[];
+      } catch {
+        process.stderr.write("optimize --executor-cmd must be a JSON array of strings\n");
+        return 1;
+      }
+    }
+  }
+  const driver = flag(argv, "--driver");
+  const piBin = flag(argv, "--pi-bin");
+  const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
+  const harnessPath = flag(argv, "--harness");
+  const harnessPin = flag(argv, "--harness-sha") ?? process.env.HARNESS_PIN_SHA;
+  const carryFrom = flag(argv, "--carry-from");
+  const carryAttest = flag(argv, "--carry-attest");
+  const carryRelayLogs = flag(argv, "--carry-relay-logs");
+  const voidSpend = repeatFlag(argv, "--void-spend");
+  const campaignRegistry = flag(argv, "--campaign-registry");
+  const searchTreeRaw = flag(argv, "--search-tree-from-round");
+  let searchTreeFromRound: number | undefined;
+  if (searchTreeRaw !== undefined) {
+    if (!/^[1-9][0-9]*$/.test(searchTreeRaw)) {
+      process.stderr.write("optimize --search-tree-from-round must be a positive integer\n");
+      return 1;
+    }
+    searchTreeFromRound = Number(searchTreeRaw);
+  }
+  const searchTreeImports = repeatFlag(argv, "--search-tree-import");
+  if (carryFrom && resumeFrom) {
+    process.stderr.write("optimize --carry-from is a fresh loop and does not resume\n");
+    return 1;
+  }
+  if (carryFrom && !carryAttest) {
+    process.stderr.write("optimize --carry-from needs --carry-attest\n");
+    return 1;
+  }
+  if (voidSpend.length > 0 && !carryFrom) {
+    process.stderr.write("optimize --void-spend needs --carry-from\n");
+    return 1;
+  }
+  const controlConfigPath = flag(argv, "--control-config");
+  const controlAttests = repeatFlag(argv, "--control-attest");
+  if (!attestRoot || !attestKeyFile || !harnessPath) {
+    process.stderr.write("optimize needs --attest-root, --attest-key-file (or HARNESS_ATTEST_KEY_FILE), and --harness\n");
+    return 1;
+  }
+  let task: OptTask;
+  let round0: { readonly path: string; readonly sha: string } | null = null;
+  try {
+    task = taskFromFlags(argv, "optimize");
+    if (!resumeFrom) round0 = round0FromFlags(argv);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  try {
+    const result = await runOptLoop({
+      out,
+      mode: dry ? "dry-run" : "execute",
+      attestRoot: resumeFrom ? attestOut ?? "" : attestRoot ?? "",
+      attestKeyFile,
+      harnessPath,
+      ...(harnessPin ? { harnessPin } : {}),
+      ...(carryFrom ? { carryFrom, carryAttest: carryAttest ?? "", ...(carryRelayLogs ? { carryRelayLogs } : {}), ...(voidSpend.length > 0 ? { voidSpend } : {}) } : {}),
+      controlAttests,
+      task,
+      ...(round0 ? { round0TracePath: round0.path, round0TraceSha: round0.sha } : {}),
+      ...(resumeFrom ? { resumeFrom, attestSource: attestRoot, ...(sourceRelayLogs ? { sourceRelayLogs } : {}) } : {}),
+      ...(campaignRegistry ? { campaignRegistry } : {}),
+      ...(searchTreeFromRound !== undefined ? { searchTreeFromRound } : {}),
+      ...(searchTreeImports.length > 0 ? { searchTreeImports } : {}),
+      ...(controlConfigPath ? { controlConfigPath } : {}),
+      ...(rounds !== undefined ? { rounds } : {}),
+      ...(ewiThresholdSec !== undefined ? { ewiThresholdSec } : {}),
+      ...(executorCommand ? { executorCommand } : {}),
+      ...(driver ? { driver } : {}),
+      ...(execute && piBin ? { piBin } : {}),
+      ...(stopBeforeRun ? { stopBeforeRun: true } : {}),
+      ...(Object.keys(roleCaps).length > 0 ? { roleMaxTokens: roleCaps } : {}),
+    });
+    process.stdout.write(`${JSON.stringify({ out, ...result }, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+async function optimizeOneCommand(argv: readonly string[]): Promise<number> {
+  if (!process.env.BASE_URL) {
+    process.stderr.write("optimize-one needs BASE_URL\n");
+    return 1;
+  }
+  const configPath = flag(argv, "--config");
+  const controlConfigPath = flag(argv, "--control-config");
+  const knob = flag(argv, "--knob");
+  const rawCommand = flag(argv, "--executor-cmd");
+  const attestRoot = flag(argv, "--attest-root");
+  const attestKeyFile = flag(argv, "--attest-key-file") ?? process.env.HARNESS_ATTEST_KEY_FILE;
+  const harnessPath = flag(argv, "--harness");
+  if (!configPath || !controlConfigPath || !knob || !rawCommand || !attestRoot || !attestKeyFile || !harnessPath) {
+    process.stderr.write("optimize-one needs --config, --control-config, --knob, --executor-cmd, --attest-root, --attest-key-file, and --harness\n");
+    return 1;
+  }
+  let executorCommand: string[];
+  try {
+    const parsed = JSON.parse(rawCommand) as unknown;
+    if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+      process.stderr.write("optimize-one --executor-cmd must be a JSON array of strings\n");
+      return 1;
+    }
+    executorCommand = parsed as string[];
+  } catch {
+    process.stderr.write("optimize-one --executor-cmd must be a JSON array of strings\n");
+    return 1;
+  }
+  const seed = seedFlag(argv);
+  if (seed instanceof Error) {
+    process.stderr.write(`${seed.message}\n`);
+    return 1;
+  }
+  let task: OptTask;
+  try {
+    task = taskFromFlags(argv, "optimize-one");
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  const out = flag(argv, "--out") ?? mkdtempSync(join(tmpdir(), "harness-opt-once-"));
+  const driver = flag(argv, "--driver");
+  try {
+    const result = await runOptOnce({
+      out,
+      attestRoot,
+      attestKeyFile,
+      harnessPath,
+      configPath,
+      controlConfigPath,
+      knob,
+      seed,
+      task,
+      executor: new CommandOptExecutor({
+        command: executorCommand,
+        ...(driver ? { driver } : {}),
+      }),
+    });
+    process.stdout.write(`${JSON.stringify({ out, ...result }, null, 2)}\n`);
+    return result.patchActive ? 0 : 1;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+function taskFromFlags(argv: readonly string[], command: string): OptTask {
+  const missing = ["--task", "--task-path", "--network", "--token-w"].filter((name) => flag(argv, name) === undefined);
+  if (missing.length > 0) throw new Error(`${command} needs ${missing.join(", ")}`);
+  const id = flag(argv, "--task") ?? "";
+  const path = flag(argv, "--task-path") ?? "";
+  const network = flag(argv, "--network") ?? "";
+  if (id.trim() === "" || path.trim() === "") throw new Error(`${command} needs --task and --task-path`);
+  if (network !== "devii-004-int") throw new Error(`${command} --network must be devii-004-int`);
+  const tokenW = Number(flag(argv, "--token-w"));
+  if (!Number.isFinite(tokenW) || tokenW <= 0) throw new Error(`${command} --token-w must be a positive number`);
+  return { id, path, split: "dev", network, tokenW };
+}
+
+function round0FromFlags(argv: readonly string[]): { readonly path: string; readonly sha: string } {
+  const missing = ["--round0-trace", "--round0-sha"].filter((name) => flag(argv, name) === undefined);
+  if (missing.length > 0) throw new Error(`optimize needs ${missing.join(", ")}`);
+  const path = flag(argv, "--round0-trace") ?? "";
+  const sha = flag(argv, "--round0-sha") ?? "";
+  if (path.trim() === "") throw new Error("optimize needs --round0-trace");
+  if (!/^[0-9a-f]{64}$/.test(sha)) throw new Error("optimize --round0-sha must be 64 hex characters");
+  return { path, sha };
+}
+
+function seedFlag(argv: readonly string[]): number | Error {
+  const raw = flag(argv, "--seed");
+  if (raw === undefined) return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) return new Error("optimize-one --seed must be a non-negative integer");
+  return value;
+}
+
+const ROLE_CAP_NAMES = ["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"] as const;
+
+function roleMaxTokensFlag(argv: readonly string[]): Partial<Record<OptRoleName, number>> | Error {
+  const caps: Partial<Record<OptRoleName, number>> = {};
+  for (const raw of repeatFlag(argv, "--role-max-tokens")) {
+    const match = /^([a-z-]+)=(\d+)$/.exec(raw);
+    if (!match?.[1] || !match[2]) return new Error("optimize --role-max-tokens must be role=tokens");
+    if (!(ROLE_CAP_NAMES as readonly string[]).includes(match[1])) {
+      return new Error("optimize --role-max-tokens role must be gap-finder, innovator, critic, ranker, or reviewer-gate");
+    }
+    const value = Number(match[2]);
+    if (!Number.isInteger(value) || value <= 0) return new Error("optimize --role-max-tokens must be a positive integer");
+    caps[match[1] as OptRoleName] = value;
+  }
+  return caps;
+}
+
+function repeatFlag(argv: readonly string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] !== name) continue;
+    const value = argv[index + 1];
+    if (value === undefined || value.startsWith("--")) continue;
+    values.push(value);
+  }
+  return values;
+}
+
+function numberFlag(argv: readonly string[], name: string): number | undefined | Error {
+  const raw = flag(argv, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || (name === "--rounds" && !Number.isInteger(value)) || value <= 0) {
+    return new Error(`optimize ${name} must be a positive ${name === "--rounds" ? "integer" : "number"}`);
+  }
+  return value;
 }
 
 async function runCommand(argv: readonly string[]): Promise<number> {

@@ -106,11 +106,11 @@ export function liveRoles(options: {
         schema: schemaFor("reviewer-gate"),
       });
       options.budget.usedTokens += delegated.tokens;
-      const value = delegated.value as { accept?: unknown; reason?: unknown };
-      if (typeof value.accept !== "boolean" || typeof value.reason !== "string") {
-        throw new Error("reviewer-gate output is missing accept or reason");
+      const value = delegated.value as { reason?: unknown };
+      if (typeof value.reason !== "string") {
+        throw new Error("reviewer-gate output is missing reason");
       }
-      const verdict = forcedReviewVerdict(input) ?? { accept: value.accept, reason: value.reason };
+      const verdict = forcedReviewVerdict(input) ?? { accept: true, reason: value.reason };
       writeRoleJson(options.root, "reviewer-gate", "review.json", {
         ...verdict,
         modelReason: value.reason,

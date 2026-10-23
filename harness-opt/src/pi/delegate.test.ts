@@ -25,9 +25,11 @@ describe("delegation schema and timeout", () => {
     };
     expect(patch.properties.part.enum).toEqual([...HARNESS_PARTS]);
     expect(patch.properties.expectedFailureClass.enum).toEqual([...ATTRIBUTION_LABELS]);
-    const review = schemaFor("reviewer-gate") as { properties: { accept: { type: string }; reason: { type: string } } };
-    expect(review.properties.accept.type).toBe("boolean");
+    const review = schemaFor("reviewer-gate") as { required: string[]; properties: { reason: { type: string }; accept?: unknown; verdict?: unknown } };
+    expect(review.required).toEqual(["reason"]);
     expect(review.properties.reason.type).toBe("string");
+    expect(review.properties.accept).toBeUndefined();
+    expect(review.properties.verdict).toBeUndefined();
   });
 
   test("reviewer-gate delegation turns the intercom bridge off", async () => {

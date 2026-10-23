@@ -5,8 +5,9 @@ import { delimiter, join, resolve } from "node:path";
 import { createHarnessOptExtension } from "../../extensions/harness-opt/index";
 import { runClosedLoopDemo } from "../session";
 import { EXTRA_AGENT_DIRS_ENV, PACKAGE_AGENT_DIR, pinPackageAgentDir, splitExtraAgentDirs } from "./agent-dirs";
+import { piSubagentsFile } from "./pi-subagents-file";
 
-const ROLES = ["gap-finder", "innovator", "reviewer-gate"] as const;
+const ROLES = ["gap-finder", "innovator", "critic", "ranker", "reviewer-gate"] as const;
 
 interface DiscoveredAgent {
   readonly name: string;
@@ -68,7 +69,7 @@ function isolateUserAgentDirs(): void {
 }
 
 async function discoveryApi(): Promise<DiscoveryApi> {
-  const agentsUrl = new URL("../../node_modules/pi-subagents/src/agents/agents.js", import.meta.url);
+  const agentsUrl = piSubagentsFile("src/agents/agents.js");
   return await import(agentsUrl.href) as DiscoveryApi;
 }
 
@@ -91,7 +92,7 @@ describe("package agent discovery", () => {
     ]);
   });
 
-  test("an out dir outside the package still discovers gap-finder, innovator, and reviewer-gate", async () => {
+  test("an out dir outside the package still discovers gap-finder, innovator, critic, ranker, and reviewer-gate", async () => {
     isolateUserAgentDirs();
     const out = outsideOutDir();
     const api = await discoveryApi();
@@ -109,7 +110,7 @@ describe("package agent discovery", () => {
       source: "user",
       path: PACKAGE_AGENT_DIR,
       state: "candidates",
-      candidateCount: 3,
+      candidateCount: 5,
     });
     const guard = resolve(PACKAGE_AGENT_DIR, "../extensions/harness-opt/role-guard.ts");
     for (const name of ROLES) {
@@ -119,6 +120,8 @@ describe("package agent discovery", () => {
       expect(agent?.subagentOnlyExtensions).toEqual([guard]);
     }
     expect(api.resolveAgentName("reviewer-gate", after.agents).agent?.acceptanceRole).toBe("read-only");
+    expect(api.resolveAgentName("critic", after.agents).agent?.acceptanceRole).toBe("read-only");
+    expect(api.resolveAgentName("ranker", after.agents).agent?.acceptanceRole).toBe("read-only");
     expect(api.resolveAgentName("reviewer", after.agents).agent?.filePath).not.toBe(join(PACKAGE_AGENT_DIR, "reviewer-gate.md"));
   });
 

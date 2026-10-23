@@ -8,7 +8,7 @@
  import zlib from "node:zlib";
  
  import {
-@@ -77,12 +78,103 @@
+@@ -77,12 +78,104 @@
  const outputDir = process.env.OUTPUT_DIR || "/app/outputs";
  const runDir = process.env.RUN_DIR || codeDir;
  const tracePath = process.env.TRACE_PATH || path.join(runDir, "trace.jsonl");
@@ -87,6 +87,7 @@
 +const envContextWindow = Number.parseInt(process.env.HARNESS_CONTEXT_WINDOW || "131072", 10);
 +const effective = {
 +	"agent-loop.maxSteps": positiveInt(candidateValue("agent-loop", "maxSteps"), 25),
++	"agent-loop.maxContinuationTurns": positiveInt(candidateValue("agent-loop", "maxContinuationTurns"), 25),
 +	"agent-loop.noProgressTurns": positiveInt(candidateValue("agent-loop", "noProgressTurns"), 3),
 +	"agent-loop.maxNudges": nonNegativeInt(candidateValue("agent-loop", "maxNudges"), 2),
 +	"agent-loop.requireWrite": typeof candidateValue("agent-loop", "requireWrite") === "boolean" ? candidateValue("agent-loop", "requireWrite") : true,
@@ -114,14 +115,15 @@
  process.env.PI_CODING_AGENT_DIR = agentDir;
  
  mkdirSync(agentDir, { recursive: true });
-@@ -101,8 +193,8 @@
+@@ -101,8 +194,9 @@
  	path.join(agentDir, "pi-goal.json"),
  	`${JSON.stringify({
  		continuationLimits: {
 -			automaticTurns: 25,
 -			noProgressTurns: 3,
-+			automaticTurns: effective["agent-loop.maxSteps"],
++			automaticTurns: effective["agent-loop.maxContinuationTurns"],
 +			noProgressTurns: effective["agent-loop.noProgressTurns"],
++			maxContinuationTurns: effective["agent-loop.maxContinuationTurns"],
  		},
  		rpc: {
  			enabled: true,
@@ -241,7 +243,7 @@
  	CODE_DIR: codeDir,
  	OUTPUT_DIR: outputDir,
  	TASK_PATH: taskPath,
-@@ -844,6 +990,21 @@
+@@ -844,6 +990,24 @@
  	CONTRACT_FIRST_GATE: contractFirstGate,
  }) + outputContractGuidance + runtimeGuidance + skillsSection;
  
@@ -259,11 +261,14 @@
 +		}
 +	}
 +}
++if (candidateActive) {
++	leadSystem += "\n\n### Loaded candidate config\ncandidateConfigHash: " + candidateConfigHash + "\n";
++}
 +
  const teamTemplate = readFileSync(path.join(HARNESS_HOME, "prompts", "team.md"), "utf8");
  const teamPrompt = render(teamTemplate, {
  	CODE_DIR: codeDir,
-@@ -911,12 +1072,16 @@
+@@ -911,12 +1075,16 @@
  }
  
  const settingsManager = SettingsManager.inMemory({
@@ -283,7 +288,7 @@
  const baseBashDef = createBashToolDefinition(codeDir);
  const safeBashTool = {
  	...baseBashDef,
-@@ -939,7 +1104,7 @@
+@@ -939,7 +1107,7 @@
  	resourceLoader: leadLoader,
  	settingsManager,
  	sessionManager,
@@ -292,41 +297,80 @@
  });
  await session.bindExtensions({});
  
-@@ -948,6 +1113,23 @@
+@@ -948,6 +1116,59 @@
  const startedAt = Date.now();
  const deadline = timeoutSec > 0 ? startedAt + timeoutSec * 1000 : 0;
  const stats = { assistant_text: 0, tool_calls: 0, tool_errors: 0, turns: 0, retries: 0, usage: null };
-+let goalRunActive = false;
-+let goalTurnEnds = 0;
-+let goalContinuationTurns = 0;
-+let goalContinuationFromGoal = false;
++// steps: stats.turns, one session agent_end, capped by agent-loop.maxSteps.
++// maxSteps does not set continuationLimits.automaticTurns.
++// continuation turns: official automaticModelTurns, or "N of M automatic model responses",
++// replaces the count; until one arrives, each goal-run turn_end increments it.
++// agent-loop.maxContinuationTurns is written as continuationLimits.automaticTurns
++// and continuationLimits.maxContinuationTurns. The host cancels when the count reaches it.
++// If continuation turns keep arriving after that cancel, abort the session once.
++// A successful abort writes one continuation_abort line and is not repeated.
++// A failed abort writes abort_error.
++// relay calls (assistant_message, auto_retry_start) are not capped by either knob.
++let goalRunActive = false, goalRunId = "";
++let continuationTurns = 0;
++let continuationFromGoal = false;
++let continuationCapped = false;
++let continuationAbortSent = false;
++function setContinuationTurns(n) {
++	if (typeof n !== "number" || !Number.isFinite(n)) return;
++	if (continuationCapped) {
++		if (n > continuationTurns) {
++			continuationTurns = n;
++			if (!continuationAbortSent) {
++				continuationAbortSent = true;
++				const runId = goalRunId;
++				const seen = continuationTurns;
++				const cap = effective["agent-loop.maxContinuationTurns"];
++				session.abort().then(() => {
++					trace({ type: "continuation_abort", runId, continuationTurns: seen, cap, ts: Date.now() });
++				}, (err) => {
++					trace({ ts: Date.now(), type: "abort_error", error: String(err) });
++				});
++			}
++		}
++		return;
++	}
++	continuationTurns = n;
++	if (continuationTurns >= effective["agent-loop.maxContinuationTurns"]) {
++		continuationCapped = true;
++		leadLoader.eventBus.emit("pi-goal:cancel", { runId: goalRunId, reason: "maxContinuationTurns" });
++	}
++}
 +function noteGoalContinuation(ev) {
 +	if (!ev || typeof ev !== "object") return;
-+	if (typeof ev.automaticModelTurns === "number" && Number.isFinite(ev.automaticModelTurns)) {
-+		goalContinuationTurns = Math.max(goalContinuationTurns, ev.automaticModelTurns);
-+		goalContinuationFromGoal = true;
++	let official = null;
++	if (typeof ev.automaticModelTurns === "number" && Number.isFinite(ev.automaticModelTurns)) official = ev.automaticModelTurns;
++	else {
++		const reason = typeof ev.reason === "string" ? ev.reason : "";
++		const match = /(\d+) of \d+ automatic model responses/.exec(reason);
++		if (match) official = Number(match[1]);
 +	}
-+	const reason = typeof ev.reason === "string" ? ev.reason : "";
-+	const match = /(\d+) of \d+ automatic model responses/.exec(reason);
-+	if (match) {
-+		goalContinuationTurns = Math.max(goalContinuationTurns, Number(match[1]));
-+		goalContinuationFromGoal = true;
-+	}
++	if (official === null) return;
++	continuationFromGoal = true;
++	setContinuationTurns(official);
 +}
  const subagentLaunches = [];
  const processCalls = [];
  let leadText = "";
-@@ -988,6 +1170,9 @@
+@@ -988,6 +1202,12 @@
  				result: event.result,
  			});
  			return;
 +		case "turn_end":
-+			if (goalRunActive) goalTurnEnds++;
++			if (goalRunActive && !continuationFromGoal) setContinuationTurns(continuationTurns + 1);
 +			return;
  		case "agent_end":
  			stats.turns++;
++			if (stats.turns >= effective["agent-loop.maxSteps"]) {
++				session.abort().catch((err) => trace({ ts: Date.now(), type: "abort_error", error: String(err) }));
++			}
  			return;
-@@ -1027,7 +1212,7 @@
+@@ -1027,7 +1215,7 @@
  	}
  });
  
@@ -335,7 +379,7 @@
  	ts: Date.now(),
  	type: "run_start",
  	model: `harness/${modelName}`,
-@@ -1042,7 +1227,14 @@
+@@ -1042,7 +1230,14 @@
  	skills: promptSkills.map((s) => s.name),
  	skillDiagnostics: activeSkillsResource.diagnostics,
  	expectedContracts: { ...contracts, expectedFiles: Array.from(contracts.expectedFiles) },
@@ -351,7 +395,7 @@
  
  function listArtifacts(root) {
  	const out = [];
-@@ -1094,6 +1286,11 @@
+@@ -1094,6 +1289,11 @@
  	};
  }
  
@@ -363,7 +407,7 @@
  async function runPrompt(prompt, label) {
  	const toolCallsBefore = stats.tool_calls;
  	const remainingMs = deadline > 0 ? deadline - Date.now() : 0;
-@@ -1119,7 +1316,7 @@
+@@ -1119,7 +1319,7 @@
  		if (phaseToolCalls === 0) {
  			return { ok: false, error: "phase completed without tool calls" };
  		}
@@ -372,11 +416,11 @@
  			return { ok: false, error: verification.issues.join("; ") };
  		}
  		return { ok: true };
-@@ -1212,11 +1409,13 @@
+@@ -1212,11 +1418,13 @@
  		: null;
  
  	try {
-+		goalRunActive = true;
++		goalRunActive = true; goalRunId = runId;
  		if (deadline > 0 && remainingMs <= 0) return { ok: false, error: "deadline already exceeded" };
  
  		const terminalPromise = new Promise((resolve) => {
@@ -386,7 +430,7 @@
  				if (ev.type === "state" && ["complete", "blocked", "paused", "usage_limited", "budget_limited", "cleared"].includes(ev.status)) {
  					terminalEvent = ev;
  					resolve({ ok: ev.status === "complete", event: ev });
-@@ -1241,7 +1440,7 @@
+@@ -1241,7 +1443,7 @@
  		const phaseToolCalls = stats.tool_calls - toolCallsBefore;
  		const verification = verifyArtifacts(contracts, outputDir, codeDir);
  
@@ -395,7 +439,7 @@
  			return { ok: true, status: "complete" };
  		}
  		if (terminalEvent?.status === "blocked") {
-@@ -1250,13 +1449,15 @@
+@@ -1250,13 +1452,14 @@
  		if (phaseToolCalls === 0) {
  			return { ok: false, error: terminalEvent?.reason || "phase completed without tool calls" };
  		}
@@ -407,12 +451,11 @@
  	} catch (err) {
  		return { ok: false, error: String(err && err.stack ? err.stack : err) };
  	} finally {
-+		if (!goalContinuationFromGoal) goalContinuationTurns = goalTurnEnds;
 +		goalRunActive = false;
  		if (typeof unsubscribe === "function") unsubscribe();
  		if (timer) clearTimeout(timer);
  		if (checkpointTimer) clearTimeout(checkpointTimer);
-@@ -1281,7 +1482,7 @@
+@@ -1281,7 +1485,7 @@
  
  let verification = verifyArtifacts(contracts, outputDir, codeDir);
  let nudges = 0;
@@ -421,7 +464,7 @@
  
  // A missing artifact that carries the graded answer blocks scoring; a missing
  // QC/manifest/decision-log does not. Rank the missing files so the nudge asks for
-@@ -1318,7 +1519,7 @@
+@@ -1318,7 +1522,7 @@
  	}
  }
  
@@ -430,7 +473,7 @@
  	nudges++;
  	const lengthStopped = contracts.expectedFiles.size > 0 && /(?:length|max[_ -]?tokens?)/i.test(lastStopReason);
  	const { critical, advisory } = splitMissingArtifacts(verification.issues);
-@@ -1357,7 +1558,7 @@
+@@ -1357,7 +1561,7 @@
  }
  
  const artifacts = listArtifacts(outputDir);
@@ -439,7 +482,7 @@
  const status = finalOk ? "ok" : "failed";
  
  const launchedRoles = [...new Set(subagentLaunches.map((l) => l.agent))];
-@@ -1389,7 +1590,7 @@
+@@ -1389,7 +1593,7 @@
  };
  writeFileSync(path.join(runDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
  
@@ -448,13 +491,17 @@
  	ts: Date.now(),
  	type: "run_end",
  	status,
-@@ -1397,7 +1598,9 @@
+@@ -1397,7 +1610,13 @@
  	artifact_count: artifacts.length,
  	subagent_calls: subagentLaunches.length,
  	verification_ok: verification.ok,
 -});
 +};
-+if (candidateActive) runEnd.goalContinuationTurns = goalContinuationTurns;
++if (candidateActive) {
++	runEnd.goalContinuationTurns = continuationTurns;
++	runEnd.maxContinuationTurns = effective["agent-loop.maxContinuationTurns"];
++	runEnd.steps = stats.turns;
++}
 +trace(runEnd);
  unsubscribe();
  session.dispose();

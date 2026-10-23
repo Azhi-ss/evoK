@@ -146,8 +146,10 @@ describe("harnessopt_submit_gate", () => {
     const innovator = readFileSync(join(root, "agents", "innovator.md"), "utf8");
     for (const part of HARNESS_PARTS) expect(innovator).toContain(part);
     const reviewer = readFileSync(join(root, "agents", "reviewer-gate.md"), "utf8");
-    expect(reviewer).toContain("布尔");
+    expect(reviewer).toContain("reason");
     expect(reviewer).toContain("字符串");
+    expect(reviewer).not.toContain("held-out");
+    expect(reviewer).not.toContain("布尔");
     for (const label of ATTRIBUTION_LABELS) {
       expect(GAP_FINDER_TASK).toContain(label);
       expect(INNOVATOR_TASK_PREFIX).toContain(label);
