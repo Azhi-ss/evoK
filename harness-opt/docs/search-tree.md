@@ -20,9 +20,11 @@ gap-finder 和 innovator 走原来塞「上一轮评语」的那条 prompt。历
 
 这条只作用于搜索树历史块，不再用 trace 的 `trimLongString` 头尾截断，也不再把块从末尾切成 12000 字。历史块的 JSON 正文最多 **24000** 字。这是预注册的修正，全文在 `research/2026-10-23-search-tree-history-amendment.md`。上限不新增 `pre-round1.json` 的签名字段。没打开搜索树时，预注册文件跟以前一样。
 
-两层，但摘要行先压短。旋钮只列有变化的键，写成 `key: old→new`。critic、ranker 和每一道门的原因各最多 120 字。一行目标不超过 400 字。reward 和 accept/reject 只写在真正跑过的那个候选上，其余候选写 `not evaluated`。放得下时，最近一轮另保留全文详情。
+两层，但摘要行先压短。结构化的旋钮改动只列有变化的键，写成 `key: old→new`。没有结构化记录时保留原文摘要，不改写成 `key: old→new`。critic、ranker 和每一道门的原因各最多 120 字。一行目标不超过 400 字。门被缩短到空时写成 `gates=truncated`；源里没有门、而且这一栏没有被缩短时，仍是 `gates=absent in source`。reward 和 accept/reject 只写在真正跑过的那个候选上，其余候选写 `not evaluated`。放得下时，最近一轮另保留全文详情。
 
-超出 24000 时，先按整条丢掉最近一轮的详情，从最后一条开始。不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行：最优候选、它的 reward、以及 `other N rejected`。从最老的一轮开始，收到放得下为止。这段函数不报错，有历史时也不会把 0 条送进 prompt。规则原文接在 JSON 后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
+超出 24000 时，先按整条丢掉最近一轮的详情，从最后一条开始。不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行：最优候选、它的 reward、以及 `other N rejected`。从最老的一轮开始，收到放得下为止。每一轮都已收成一行却还超出时，丢掉最老的那一行，最新的一轮保留。这段函数不报错，有历史时也不会把 0 条送进 prompt。
+
+JSON 里的 `degradation` 按轮记下实际用过的等级：`none`、`details_dropped`、`oldest_merged`、`line_dropped`。同一份数组写进 lineage 的 `kind: "history"` 事件（`role` 为 `gap-finder`），签名后留在 `search-tree.json` 的 `events` 里。规则原文接在 JSON 后面。这段文字在角色 prompt 里，因此计入 innovator 单次上限和只读 3000 万上限。
 
 ## 导入
 

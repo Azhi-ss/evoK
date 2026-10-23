@@ -2515,7 +2515,9 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
         treeParent = null;
         tried.splice(0, tried.length);
       }
-      searchHistory = searchHistorySection(lineage.roleView());
+      const renderedHistory = renderSearchHistory(lineage.roleView());
+      searchHistory = formatSearchHistory(renderedHistory);
+      lineage.log("history", { round, role: "gap-finder", degradation: renderedHistory.degradation });
     }
     const gapPrompt = gapTaskPrompt({ round, traces: gapTraces, previousReview, control, ...(searchHistory ? { searchHistory } : {}) });
     const launchGap = () => attemptRole({
@@ -2638,7 +2640,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     let innovatorHalted = false;
     for (let slot = 0; slot < INNOVATORS_PER_ROUND; slot += 1) {
       const sessionName = `innovator-${slot}`;
-      const innovatorHistory = lineage && searchFrom !== undefined && round >= searchFrom ? searchHistorySection(lineage.roleView()) : undefined;
+      const innovatorHistory = searchHistory;
       const innovatePrompt = innovatorTaskPrompt({
         round,
         knob: gap.knob,
@@ -3832,57 +3834,88 @@ export function gapArtifactText(text: string, tracePath: string): string {
 const SEARCH_HISTORY_CAP = 24_000;
 const SUMMARY_LINE_CAP = 400;
 const REASON_CLIP = 120;
-const SEARCH_HISTORY_RULE = "截断：历史块最多 24000 字。每一行摘要只列有变化的旋钮，写成 key: old→new；critic、ranker 和门的原因各最多 120 字；一行目标不超过 400 字。放得下时，最近一轮保留全文。超出 24000 时先按整条丢掉最近一轮的详情，不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行（最优候选、它的 reward、other N rejected），从最老的一轮开始，直到放得下。这段函数不报错，也不会把 0 条历史送进 prompt。这段在角色 prompt 里，计入只读 token 上限。";
+const SEARCH_HISTORY_RULE = "截断：历史块最多 24000 字。有变化的旋钮若是结构化改动记录，写成 key: old→new；没有结构化记录时保留原文摘要。critic、ranker 和门的原因各最多 120 字；一行目标不超过 400 字。行长不够时先缩短评语，再缩短门；门被缩短到空时写成 gates=truncated，源里没有门仍是 gates=absent in source。放得下时，最近一轮保留全文。超出 24000 时先按整条丢掉最近一轮的详情，不从字符串中间截，不拆开 JSON。仍然超出就把最早的轮次收成一行（最优候选、它的 reward、other N rejected），从最老的一轮开始，直到放得下。JSON 里的 degradation 按轮记下 none、details_dropped、oldest_merged 或 line_dropped。这段函数不报错，也不会把 0 条历史送进 prompt。这段在角色 prompt 里，计入只读 token 上限。";
 
-/**
- * Role view of the lineage. Each candidate is one summary line: changed knobs
- * only (`key: old→new`), critic / ranker / gate reasons clipped to 120 chars,
- * and the line kept to 400 chars. Reward and accept belong to the candidate
- * that was actually evaluated; the others say `not evaluated`.
- * The JSON body is at most 24,000 characters. Over that, recent-round detail
- * entries drop from the end, whole entries only. If the summaries are still
- * over, the oldest rounds collapse to one line each (best candidate, its
- * reward, `other N rejected`) until the body fits. This does not throw.
- * The block sits in the gap-finder and innovator prompt, so its tokens count
- * toward the innovator cap and the read-only cap.
- */
-export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
-  const groups = groupHistory(view.events());
-  const nodes = view.nodeSummaries();
-  const recent = groups.length === 0 ? null : groups[groups.length - 1];
-  let details: unknown[] = recent ? detailEntries(recent.events, nodes) : [];
-  let merged = 0;
-  const linesOf = (): string[] => groups.flatMap((group, index) => (
-    index < merged ? [mergedRoundLine(group.events, nodes)] : summaryLines(group.events, nodes)
-  ));
-  const size = (): number => JSON.stringify({ summaries: linesOf(), details }).length;
-  while (size() > SEARCH_HISTORY_CAP && details.length > 0) details = details.slice(0, -1);
-  while (size() > SEARCH_HISTORY_CAP && merged < groups.length) merged += 1;
-  let summaries = linesOf();
-  if (JSON.stringify({ summaries, details }).length > SEARCH_HISTORY_CAP) {
-    const bounded = boundHistory(summaries, details);
-    summaries = bounded.summaries;
-    details = bounded.details;
-  }
-  if (summaries.length === 0 && groups.length > 0) {
-    const last = groups[groups.length - 1];
-    summaries = last ? [mergedRoundLine(last.events, nodes)] : ["round=absent in source"];
-  }
-  return `搜索树：${JSON.stringify({ summaries, details })}\n${SEARCH_HISTORY_RULE}`;
+type HistoryLevel = "none" | "details_dropped" | "oldest_merged" | "line_dropped";
+
+interface HistoryRender {
+  summaries: string[];
+  details: unknown[];
+  degradation: { round: string; level: HistoryLevel }[];
 }
 
-/** Last resort after every round is already one line. Keeps the newest line. */
-function boundHistory(lines: string[], details: unknown[]): { summaries: string[]; details: unknown[] } {
-  let summaries = lines.slice();
-  let kept = details.slice();
-  const size = (): number => JSON.stringify({ summaries, details: kept }).length;
-  while (size() > SEARCH_HISTORY_CAP && kept.length > 0) kept = kept.slice(0, -1);
-  while (size() > SEARCH_HISTORY_CAP && summaries.length > 1) summaries = summaries.slice(1);
-  if (summaries.length === 0) return { summaries: ["round=absent in source"], details: kept };
-  while (size() > SEARCH_HISTORY_CAP && summaries[0] !== undefined && summaries[0].length > 1) {
-    summaries = [summaries[0].slice(0, summaries[0].length - 1)];
+/**
+ * Role view of the lineage. Structured knob changes are `key: old→new`.
+ * Prose stays when the change record is not structured. Critic, ranker, and
+ * gate reasons are clipped to 120 characters, and each line targets 400.
+ * A gates field shortened to nothing becomes `truncated`, which is distinct
+ * from `absent in source`. Reward and accept belong to the candidate that
+ * was actually evaluated; the others say `not evaluated`.
+ * The JSON body, including `degradation`, is at most 24,000 characters.
+ * Over that, recent-round detail entries drop from the end, whole entries
+ * only, then the oldest rounds collapse to one line, then those lines drop
+ * oldest first. The newest line is kept. This does not throw.
+ */
+export function searchHistorySection(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): string {
+  return formatSearchHistory(renderSearchHistory(view));
+}
+
+function formatSearchHistory(rendered: HistoryRender): string {
+  return `搜索树：${historyJson(rendered)}\n${SEARCH_HISTORY_RULE}`;
+}
+
+function historyJson(rendered: HistoryRender): string {
+  return JSON.stringify({ summaries: rendered.summaries, details: rendered.details, degradation: rendered.degradation });
+}
+
+function renderSearchHistory(view: { events(): readonly Record<string, unknown>[]; nodeSummaries(): readonly Record<string, unknown>[] }): HistoryRender {
+  const groups = groupHistory(view.events());
+  const nodes = view.nodeSummaries();
+  const labels = groups.map((group) => roundLabel(group.events));
+  const recent = groups.length - 1;
+  const fullDetails = recent >= 0 ? detailEntries(groups[recent]?.events ?? [], nodes) : [];
+  let details = fullDetails.slice();
+  let merged = 0;
+  let dropped = 0;
+  const summariesFor = (): string[] => groups.flatMap((group, index) => {
+    if (index < dropped) return [];
+    return index < merged ? [mergedRoundLine(group.events, nodes)] : summaryLines(group.events, nodes);
+  });
+  const degradationFor = (): HistoryRender["degradation"] => labels.map((round, index) => ({
+    round,
+    level: index < dropped ? "line_dropped"
+      : index < merged ? "oldest_merged"
+        : index === recent && details.length < fullDetails.length ? "details_dropped"
+          : "none",
+  }));
+  const pack = (): HistoryRender => ({ summaries: summariesFor(), details, degradation: degradationFor() });
+  const size = (): number => historyJson(pack()).length;
+  while (size() > SEARCH_HISTORY_CAP && details.length > 0) details = details.slice(0, -1);
+  while (size() > SEARCH_HISTORY_CAP && merged < groups.length) merged += 1;
+  while (size() > SEARCH_HISTORY_CAP && summariesFor().length > 1) dropped += 1;
+  let rendered = pack();
+  if (historyJson(rendered).length > SEARCH_HISTORY_CAP && rendered.summaries.length > 0) {
+    const summaries = rendered.summaries.slice();
+    const last = summaries.length - 1;
+    while (historyJson({ ...rendered, summaries }).length > SEARCH_HISTORY_CAP && summaries[last] !== undefined && summaries[last].length > 1) {
+      summaries[last] = summaries[last].slice(0, -1);
+    }
+    rendered = { ...rendered, summaries };
   }
-  return { summaries, details: kept };
+  if (rendered.summaries.length === 0 && groups.length > 0) {
+    const last = groups[groups.length - 1];
+    let summaries = [last ? mergedRoundLine(last.events, nodes) : "round=absent in source"];
+    const degradation = labels.map((round, index) => ({
+      round,
+      level: (index === labels.length - 1 ? "oldest_merged" : "line_dropped") as HistoryLevel,
+    }));
+    rendered = { summaries, details: [], degradation };
+    while (historyJson(rendered).length > SEARCH_HISTORY_CAP && rendered.summaries[0] !== undefined && rendered.summaries[0].length > 1) {
+      summaries = [rendered.summaries[0].slice(0, -1)];
+      rendered = { summaries, details: [], degradation };
+    }
+  }
+  return rendered;
 }
 
 function groupHistory(events: readonly Record<string, unknown>[]): { readonly seq: number; readonly events: Record<string, unknown>[] }[] {
@@ -4021,7 +4054,7 @@ function fitSummaryLine(parts: {
     if (line.length <= SUMMARY_LINE_CAP) return;
     const over = line.length - SUMMARY_LINE_CAP;
     if (key === "reason") reason = shrink(reason, over);
-    if (key === "gates") gates = shrink(gates, over);
+    if (key === "gates") gates = shrinkGates(gates, over);
     if (key === "knob") knob = shrink(knob, over);
     if (key === "critic") critic = shrink(critic, over);
     if (key === "ranker") ranker = shrink(ranker, over);
@@ -4032,7 +4065,33 @@ function fitSummaryLine(parts: {
   apply("knob");
   apply("critic");
   apply("ranker");
-  return line.length > SUMMARY_LINE_CAP ? line.slice(0, SUMMARY_LINE_CAP) : line;
+  if (line.length > SUMMARY_LINE_CAP) line = line.slice(0, SUMMARY_LINE_CAP);
+  return repairEmptyGates(line);
+}
+
+/** A gates value cut down to nothing is `truncated`, not an empty field and not `absent in source`. */
+function shrinkGates(value: string, over: number): string {
+  if (over <= 0 || value === "truncated") return value;
+  if (value.length <= over) return "truncated";
+  return value.slice(0, value.length - over);
+}
+
+function repairEmptyGates(line: string): string {
+  const mark = line.match(/(?:^| )gates=(?: |$)/);
+  if (!mark || mark.index === undefined) return line;
+  const at = mark[0].startsWith(" ") ? mark.index + 1 : mark.index;
+  const next = `${line.slice(0, at)}gates=truncated${line.slice(at + "gates=".length)}`;
+  if (next.length <= SUMMARY_LINE_CAP) return next;
+  const token = "gates=truncated";
+  const tokenAt = next.indexOf(token);
+  let before = next.slice(0, tokenAt);
+  let after = next.slice(tokenAt + token.length);
+  let extra = next.length - SUMMARY_LINE_CAP;
+  if (after.length >= extra) return before + token + after.slice(0, after.length - extra);
+  extra -= after.length;
+  before = before.slice(0, Math.max(0, before.length - extra));
+  const repaired = before + token;
+  return repaired.length <= SUMMARY_LINE_CAP ? repaired : token.slice(0, SUMMARY_LINE_CAP);
 }
 
 function roundField(event: Record<string, unknown>): string {
@@ -4041,6 +4100,11 @@ function roundField(event: Record<string, unknown>): string {
   }
   if (typeof event.group === "string" && event.group !== "") return event.group;
   return "absent in source";
+}
+
+function roundLabel(events: readonly Record<string, unknown>[]): string {
+  const event = events.find((item) => item.kind === "round" || item.kind === "review");
+  return event ? roundField(event) : "absent in source";
 }
 
 function knobField(event: Record<string, unknown>, id: string, candidate: Record<string, unknown>, nodes: readonly Record<string, unknown>[]): string {

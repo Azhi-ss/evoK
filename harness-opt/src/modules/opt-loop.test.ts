@@ -7853,7 +7853,11 @@ describe("search tree", () => {
       const text = searchHistorySection({ events: () => events, nodeSummaries: () => [] });
       const body = historyBody(text);
       expect(body.length).toBeLessThanOrEqual(24000);
-      const parsed = JSON.parse(body) as { summaries: string[]; details: { patch?: string }[] };
+      const parsed = JSON.parse(body) as {
+        summaries: string[];
+        details: { patch?: string }[];
+        degradation: { round: string; level: string }[];
+      };
       expect(parsed.summaries.length).toBeGreaterThan(0);
       const summaryText = parsed.summaries.join("\n");
       expect(summaryText.includes("C".repeat(121))).toBe(false);
@@ -7880,12 +7884,25 @@ describe("search tree", () => {
     expect(three.summaries.some((line) => line.includes("id=syn-r2-c5") && line.includes("critic=excluded"))).toBe(true);
     expect(three.details.some((item) => item.patch?.includes("PATCH_"))).toBe(true);
     expect(three.summaries.some((line) => / other \d+ rejected$/.test(line))).toBe(false);
+    expect(three.degradation).toEqual([
+      { round: "syn/1", level: "none" },
+      { round: "syn/2", level: "none" },
+      { round: "syn/3", level: "none" },
+    ]);
 
     const six = run(6, 1500, 20000);
     expect(six.summaries.filter((line) => line.includes("id=syn-r")).length).toBe(36);
     expect(six.details.some((item) => item.patch !== undefined)).toBe(false);
     expect(JSON.stringify(six).includes("P".repeat(40))).toBe(false);
     expect(six.summaries.some((line) => / other \d+ rejected$/.test(line))).toBe(false);
+    expect(six.degradation).toEqual([
+      { round: "syn/1", level: "none" },
+      { round: "syn/2", level: "none" },
+      { round: "syn/3", level: "none" },
+      { round: "syn/4", level: "none" },
+      { round: "syn/5", level: "none" },
+      { round: "syn/6", level: "details_dropped" },
+    ]);
     for (let round = 1; round <= 6; round += 1) {
       for (let slot = 0; slot < 6; slot += 1) {
         expect(six.summaries.some((line) => line.includes(`id=syn-r${round}-c${slot}`))).toBe(true);
@@ -7904,6 +7921,105 @@ describe("search tree", () => {
     }
     expect(ten.summaries.some((line) => line.includes("id=syn-r10-c0") && line.includes("reward=1"))).toBe(true);
     expect(ten.summaries.some((line) => line.includes("id=syn-r10-c3") && line.includes("reward=not evaluated"))).toBe(true);
+    expect(ten.degradation.map((row) => row.round)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((round) => `syn/${round}`));
+    expect(ten.degradation[0]).toEqual({ round: "syn/1", level: "oldest_merged" });
+    expect(ten.degradation[9]).toEqual({ round: "syn/10", level: "details_dropped" });
+    expect(ten.degradation.some((row) => row.level === "line_dropped")).toBe(false);
+    const mergedRounds = new Set(ten.summaries.filter((line) => / other \d+ rejected$/.test(line)).map((line) => /round=(\S+)/.exec(line)?.[1] ?? ""));
+    for (const row of ten.degradation) {
+      const present = ten.summaries.some((line) => line.includes(`round=${row.round} `));
+      if (!present) expect(row.level).toBe("line_dropped");
+      else if (mergedRounds.has(row.round)) expect(row.level).toBe("oldest_merged");
+      else if (row.round === "syn/10") expect(row.level).toBe("details_dropped");
+      else expect(row.level).toBe("none");
+    }
+  });
+
+  test("search tree history drops oldest lines before it sends nothing", () => {
+    const events: Record<string, unknown>[] = [];
+    for (let round = 1; round <= 80; round += 1) {
+      events.push({
+        kind: "round",
+        seq: round,
+        group: `drop-r${round}`,
+        source: "drop",
+        round,
+        accept: false,
+        reward: 0,
+        reason: "r",
+        candidates: [0, 1].map((slot) => ({
+          id: `drop-r${round}-c${slot}`,
+          summary: "K".repeat(360),
+          evaluated: slot === 0,
+        })),
+        gates: "absent in source",
+      });
+    }
+    const text = searchHistorySection({ events: () => events, nodeSummaries: () => [] });
+    const body = historyBody(text);
+    expect(body.length).toBeLessThanOrEqual(24000);
+    const parsed = JSON.parse(body) as { summaries: string[]; degradation: { round: string; level: string }[] };
+    expect(parsed.degradation).toHaveLength(80);
+    expect(parsed.degradation[0]).toEqual({ round: "drop/1", level: "line_dropped" });
+    expect(parsed.degradation[79]).toEqual({ round: "drop/80", level: "oldest_merged" });
+    expect(parsed.summaries.length).toBeGreaterThan(0);
+    expect(parsed.summaries.some((line) => line.includes("id=drop-r80-c0"))).toBe(true);
+    expect(parsed.summaries.some((line) => line.includes("id=drop-r1-c0"))).toBe(false);
+    expect(text.includes("不报错")).toBe(true);
+  });
+
+  test("search tree history marks a wiped gates field as truncated", () => {
+    const text = searchHistorySection({
+      events: () => [{
+        kind: "round",
+        seq: 1,
+        group: "gate",
+        source: "gate",
+        round: 1,
+        accept: false,
+        reward: 0,
+        reason: "short",
+        candidates: [
+          { id: "gate-c0", summary: "short", evaluated: false },
+          { id: "gate-c1", summary: "K".repeat(500), evaluated: true },
+        ],
+        gates: "absent in source",
+      }],
+      nodeSummaries: () => [],
+    });
+    const parsed = JSON.parse(historyBody(text)) as { summaries: string[] };
+    const short = parsed.summaries.find((line) => line.includes("id=gate-c0"));
+    const long = parsed.summaries.find((line) => line.includes("id=gate-c1"));
+    expect(short).toContain("gates=absent in source");
+    expect(long).toContain("gates=truncated");
+    expect(long).not.toContain("gates=absent in source");
+    expect(long).not.toMatch(/(?:^| )gates=(?: |$)/);
+    expect(long?.length).toBeLessThanOrEqual(400);
+    expect(parsed.summaries).toHaveLength(2);
+  });
+
+  test("search tree history keeps unstructured knob prose", () => {
+    const text = searchHistorySection({
+      events: () => [{
+        kind: "round",
+        seq: 1,
+        group: "prose",
+        source: "prose",
+        round: 1,
+        accept: false,
+        reward: 0,
+        reason: "short",
+        candidates: [{ id: "prose-c0", summary: "lowered maxSteps early", evaluated: true }],
+        gates: "absent in source",
+      }],
+      nodeSummaries: () => [],
+    });
+    const parsed = JSON.parse(historyBody(text)) as { summaries: string[]; degradation: { round: string; level: string }[] };
+    expect(parsed.summaries).toEqual([
+      "round=prose/1 id=prose-c0 knob=lowered maxSteps early critic=absent in source ranker=absent in source gates=absent in source reward=0 verdict=reject reason=short",
+    ]);
+    expect(parsed.summaries[0]?.includes("→")).toBe(false);
+    expect(parsed.degradation).toEqual([{ round: "prose/1", level: "none" }]);
   });
 
   test("the tree stays quiet until the pinned round", async () => {
@@ -7922,6 +8038,13 @@ describe("search tree", () => {
     expect(second.includes("搜索树")).toBe(true);
     expect(second.includes("accept the idle cap")).toBe(true);
     expect(second.includes("上一轮评语")).toBe(true);
+    const history = JSON.parse(historyBody(second)) as { degradation: { round: string; level: string }[]; summaries: string[] };
+    expect(history.summaries.length).toBeGreaterThan(0);
+    expect(history.degradation.length).toBeGreaterThan(0);
+    const saved = JSON.parse(treeText(fx.out)) as { events: { kind?: string; round?: number; degradation?: { round: string; level: string }[] }[] };
+    const logged = saved.events.filter((event) => event.kind === "history" && event.round === 2);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.degradation).toEqual(history.degradation);
     const pre = JSON.parse(readFileSync(join(fx.out, "pre-round1.json"), "utf8")) as { searchTreeFromRound?: number };
     expect(pre.searchTreeFromRound).toBe(2);
   });
