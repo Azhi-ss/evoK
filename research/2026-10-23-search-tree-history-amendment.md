@@ -42,3 +42,5 @@ reward 和 accept/reject 只写在这一轮真正评过的那个候选上。其�
 
 - 上一版正文 sha256：`afe051878d254e42c4b290dfa5fac05112f509fe9cc99595a44eb78592288c48`
 - 上一版实现提交：`cadaad3bd9edc9973662a69c0e22e7ee490c6df1`
+- 本修订实现提交：`6cb47b475326aca262ee8a0ec2df92ce5fb8fc48`
+- 该提交中的本文件 sha256：`2d221ba40ee59b87c9df06530fe9f6f8025956334d7628544b6fd0ba8338d6b6`（4669 字节）。上面两行锚点是后补的，不在这份 sha 里，代码没有再改。
