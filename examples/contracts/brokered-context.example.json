@@ -1,0 +1,128 @@
+{
+  "schema": "evok.brokered-context/v1",
+  "missionId": "mission-toy-challenge",
+  "taskId": "task-feature-pipeline",
+  "runId": "run-2026-10-24-0007",
+  "targetAgentId": "researcher-1@run-2026-10-24-0007",
+  "role": "researcher",
+  "competition": {
+    "competitionId": "toy-challenge",
+    "version": "2026.1",
+    "contractDigest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
+    "policyDigest": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e"
+  },
+  "context": {
+    "kind": "role",
+    "roleContext": {
+      "schema": "evok.role-context/v1",
+      "role": "researcher",
+      "objective": "Improve the feature pipeline.",
+      "hypothesis": "Target encoding reduces overfit.",
+      "evidenceRefs": [
+        "ledger:exp-0007",
+        "ledger:exp-0011"
+      ],
+      "allowedPaths": [
+        "src/features/**"
+      ],
+      "tools": [
+        "read",
+        "edit",
+        "bash"
+      ],
+      "competition": {
+        "competitionId": "toy-challenge",
+        "version": "2026.1",
+        "metric": "rmse",
+        "direction": "minimize"
+      },
+      "resources": {
+        "cpus": 4,
+        "memoryBytes": 17179869184,
+        "gpuCount": 1,
+        "gpuNames": [
+          "NVIDIA A100-SXM4-80GB"
+        ],
+        "deadlineAt": "2026-10-24T02:00:00.000Z"
+      },
+      "rules": {
+        "objective": "Predict the target within the split discipline.",
+        "scoring.metric": "rmse",
+        "scoring.direction": "minimize",
+        "dataSplit.kind": "kfold",
+        "dataSplit.folds": 5,
+        "submission.format": "csv:id,prediction",
+        "limits.network": "none"
+      },
+      "audit": {
+        "role": "researcher",
+        "contractDigest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
+        "policyDigest": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e",
+        "source": "team-coordinator",
+        "targetAgentId": "researcher-1@run-2026-10-24-0007",
+        "runId": "run-2026-10-24-0007",
+        "missionId": "mission-toy-challenge",
+        "taskId": "task-feature-pipeline",
+        "memoryDigest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+      },
+      "digest": "ecc4464de0b9d07b107920e132f07155741af34e72de60fd38064ab0d05adebd"
+    }
+  },
+  "memorySlice": {
+    "schema": "evok.memory-slice/v1",
+    "sliceId": "slice-2026-10-24-0007",
+    "missionId": "mission-toy-challenge",
+    "taskId": "task-feature-pipeline",
+    "runId": "run-2026-10-24-0007",
+    "sourceRefs": [
+      "runs/run-2026-10-24-0006/result.json"
+    ],
+    "evidenceRefs": [
+      "runs/run-2026-10-24-0006/snapshot",
+      "runs/run-2026-10-24-0006/result.json"
+    ],
+    "artifactRefs": [
+      "runs/run-2026-10-24-0006/snapshot/src/features.py"
+    ],
+    "facts": [
+      {
+        "name": "best_score",
+        "value": 0.4127,
+        "source": "runs/run-2026-10-24-0006/result.json"
+      },
+      {
+        "name": "validation_fold",
+        "value": 3,
+        "source": "runs/run-2026-10-24-0006/snapshot"
+      }
+    ],
+    "findings": [
+      {
+        "findingId": "f-1",
+        "summary": "target encoding leaked the label across folds",
+        "ok": false,
+        "sourceRefs": [
+          "runs/run-2026-10-24-0006/result.json"
+        ]
+      }
+    ],
+    "readPolicy": {
+      "references": true,
+      "summaries": true,
+      "bodies": false,
+      "sensitive": false
+    },
+    "issuedAt": "2026-10-24T01:05:00.000Z",
+    "digest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+  },
+  "digests": {
+    "contract": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
+    "policy": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e",
+    "context": "ecc4464de0b9d07b107920e132f07155741af34e72de60fd38064ab0d05adebd",
+    "memory": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0",
+    "inventory": "86c0d65a56a136250824d19b5291e3ffa968129aa291d764b069d59c82717058",
+    "lease": "faab04b2bf43654f7ce719b2cb9c3c1ceb399b8936645096aecd4d65f338a7c1"
+  },
+  "source": "team-coordinator",
+  "digest": "f3d2902196f815e4b6a5c450092431b2e5c0380814e0d950c30d256b2a694042"
+}

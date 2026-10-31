@@ -1,0 +1,47 @@
+{
+  "schema": "evok.memory-slice/v1",
+  "sliceId": "slice-2026-10-24-0007",
+  "missionId": "mission-toy-challenge",
+  "taskId": "task-feature-pipeline",
+  "runId": "run-2026-10-24-0007",
+  "sourceRefs": [
+    "runs/run-2026-10-24-0006/result.json"
+  ],
+  "evidenceRefs": [
+    "runs/run-2026-10-24-0006/snapshot",
+    "runs/run-2026-10-24-0006/result.json"
+  ],
+  "artifactRefs": [
+    "runs/run-2026-10-24-0006/snapshot/src/features.py"
+  ],
+  "facts": [
+    {
+      "name": "best_score",
+      "value": 0.4127,
+      "source": "runs/run-2026-10-24-0006/result.json"
+    },
+    {
+      "name": "validation_fold",
+      "value": 3,
+      "source": "runs/run-2026-10-24-0006/snapshot"
+    }
+  ],
+  "findings": [
+    {
+      "findingId": "f-1",
+      "summary": "target encoding leaked the label across folds",
+      "ok": false,
+      "sourceRefs": [
+        "runs/run-2026-10-24-0006/result.json"
+      ]
+    }
+  ],
+  "readPolicy": {
+    "references": true,
+    "summaries": true,
+    "bodies": false,
+    "sensitive": false
+  },
+  "issuedAt": "2026-10-24T01:05:00.000Z",
+  "digest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+}
