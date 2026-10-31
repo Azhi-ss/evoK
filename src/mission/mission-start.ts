@@ -80,6 +80,9 @@ import {
   type ReconciliationReport,
 } from "./mission-resume";
 import { ContextBroker, type MemoryProvider } from "../execution/context-broker";
+import { checkHostCapabilities } from "../execution/host-capabilities";
+import type { HostInventory } from "../execution/host-inventory";
+import type { ResourceRequest } from "../execution/resource-lease";
 import type { CompetitionContract } from "../competition/competition-contract";
 import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
@@ -403,8 +406,9 @@ export interface StartMissionOptions {
    * Per-competition contract + rule-visibility policy. When supplied, every
    * Candidate Run receives a broker-assembled, role-scoped context bound to
    * that Run and agent; the generic task constraints stay non-sensitive and
-   * carry no rules. When absent, the Run keeps the legacy prompt and no role
-   * context (backward-compatible default).
+   * carry no rules. If the contract declares resources, `inventory` is
+   * required and the broker grants a Run-bound lease before dispatch. When
+   * absent, the Run keeps the legacy prompt and no role context.
    */
   readonly competitionContext?: MissionCompetitionContext;
   /**
@@ -461,6 +465,66 @@ export interface MissionCompetitionContext {
   readonly policy: RuleVisibilityPolicy;
   /** Optional durable-memory source for the per-Run MemorySlice. */
   readonly memory?: MemoryProvider;
+  /** Dynamic host snapshot used to check and grant this competition's resources. */
+  readonly inventory?: HostInventory;
+  /** Optional per-run override; contract resource requirements remain the floor. */
+  readonly resourceRequest?: ResourceRequest;
+}
+
+function resourceRequestForCompetition(context: MissionCompetitionContext): ResourceRequest | undefined {
+  const requirements = context.contract.resources;
+  const requested = context.resourceRequest;
+  if (!requirements && !requested) return undefined;
+  if (!requirements) return requested;
+  const gpus = requirements.gpu
+    ? requested?.gpus === undefined
+      ? requirements.gpu.count
+      : typeof requested.gpus === "number"
+        ? Math.max(requirements.gpu.count, requested.gpus)
+        : requested.gpus.length < requirements.gpu.count
+          ? (() => { throw new MissionStartRejectedError("resourceRequest.gpus cannot be below the competition GPU requirement"); })()
+          : requested.gpus
+    : requested?.gpus;
+  return {
+    cpus: Math.max(requirements.cpus, requested?.cpus ?? 0),
+    memoryBytes: Math.max(requirements.memoryBytes, requested?.memoryBytes ?? 0),
+    ...(gpus !== undefined ? { gpus } : {}),
+    ...(requested?.timeLimitMs !== undefined
+      ? { timeLimitMs: requested.timeLimitMs }
+      : requirements && context.contract.limits.timeLimitMs !== undefined
+        ? { timeLimitMs: context.contract.limits.timeLimitMs }
+        : {}),
+  };
+}
+
+interface PreparedCompetitionContext {
+  readonly broker?: ContextBroker;
+  readonly resourceRequest?: ResourceRequest;
+}
+
+function prepareCompetitionContext(context: MissionCompetitionContext | undefined): PreparedCompetitionContext {
+  if (context === undefined) return {};
+  const resourceRequest = resourceRequestForCompetition(context);
+  if (resourceRequest !== undefined && context.inventory === undefined) {
+    throw new MissionStartRejectedError("competition resource requests need a HostInventory before the Mission can start");
+  }
+  if (context.contract.resources !== undefined) {
+    try {
+      checkHostCapabilities(context.inventory!, context.contract.resources);
+    } catch (error) {
+      throw new MissionStartRejectedError(`host does not satisfy competition resources: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    resourceRequest,
+    broker: new ContextBroker({
+      contract: context.contract,
+      policy: context.policy,
+      ...(context.inventory ? { inventory: context.inventory } : {}),
+      ...(context.memory ? { memory: context.memory } : {}),
+      source: "mission-controller",
+    }),
+  };
 }
 
 /**
@@ -767,6 +831,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   }
   const draft = await loadMissionDraft(options.projectRoot, options.missionId);
   assertStartable(draft, options);
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext);
   const dir = missionDir(options.projectRoot, draft.id);
   await mkdir(dir, { recursive: true });
 
@@ -899,7 +964,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   ].filter((line) => line !== "").join("\n");
 
   return runMissionController({
-    options, draft, record, reserveCost, releaseLock,
+    options, draft, record, reserveCost, releaseLock, competition: preparedCompetitionContext,
     mode: { kind: "start", baselineRunId, baselineTask, baselineInstructions },
   });
 }
@@ -920,13 +985,14 @@ export interface ControllerInit {
   readonly record: MissionRecord;
   readonly reserveCost: number;
   readonly releaseLock: () => Promise<void>;
+  readonly competition: PreparedCompetitionContext;
   readonly mode:
     | { readonly kind: "start"; readonly baselineRunId: string; readonly baselineTask: DraftPlanTask; readonly baselineInstructions: string }
     | { readonly kind: "resume" };
 }
 
 export async function runMissionController(init: ControllerInit): Promise<StartMissionOutcome> {
-  const { options, draft, reserveCost, releaseLock } = init;
+  const { options, draft, reserveCost, releaseLock, competition } = init;
   let record: MissionRecord = init.record;
   // #114 observability seam (shadows the module writer; no call-site churn).
   const persist = makePersistNotifier(options);
@@ -941,14 +1007,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
   // Per-competition context broker. Construction validates that the policy is
   // bound to THIS Mission's contract, so rules are never shared across
   // competitions; each Run then gets its own role-scoped context.
-  const broker = options.competitionContext
-    ? new ContextBroker({
-        contract: options.competitionContext.contract,
-        policy: options.competitionContext.policy,
-        ...(options.competitionContext.memory ? { memory: options.competitionContext.memory } : {}),
-        source: "mission-controller",
-      })
-    : undefined;
+  const { broker, resourceRequest: competitionResourceRequest } = competition;
 
   // A single abort owner: an external user signal aborts every dispatch in
   // this start (baseline + loop + decisions).
@@ -1029,6 +1088,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           role: "researcher",
           objective: args.objective,
           ...(args.evidenceRefs ? { evidenceRefs: args.evidenceRefs } : {}),
+          ...(competitionResourceRequest ? { resourceRequest: competitionResourceRequest } : {}),
           allowedPaths: ["."],
           tools: roleTools,
         })
@@ -1793,6 +1853,7 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
       `the accepted Mission was served by tier "${previous.modelTier}" but resume requests "${requestedTier}"; silent model rerouting is rejected (resume with the accepted tier)`,
     );
   }
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext);
 
   // A stale lock (dead process) is reclaimed atomically.
   await rm(lock, { force: true }).catch(() => {});
@@ -1853,6 +1914,7 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
     record,
     reserveCost: options.reserveCost ?? 0,
     releaseLock,
+    competition: preparedCompetitionContext,
     mode: { kind: "resume" },
   });
   return { ...outcome, reconciliation };

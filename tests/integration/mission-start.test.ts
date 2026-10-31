@@ -35,6 +35,7 @@ import { SandboxBoundary } from "../../src/security-boundary";
 import { PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/pi-agent-runtime";
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
+import { probeHostInventory } from "../../src/execution/host-inventory";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -783,5 +784,44 @@ describe("broker-assembled context at the Mission Run seam", () => {
     expect(prompt).not.toContain("ROLE CONTEXT");
     expect(prompt).not.toContain("hardRules");
     expect(Object.keys(constraintsFromPrompt(prompt)).sort()).toEqual(["missionId", "runId", "taskId"]);
+  });
+
+  test("contract resource requirements are checked before dispatch and the lease summary reaches the Run", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-broker-resources"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = createCompetitionContract({
+      version: "2026.1",
+      competitionId: "toy-resources",
+      objective: "Run with the declared CPU and memory floor.",
+      scoring: { metric: "rmse", direction: "minimize" },
+      dataSplit: { kind: "kfold", folds: 5, holdout: "protected" },
+      submission: { format: "csv:id,prediction" },
+      limits: { timeLimitMs: 60_000, network: "none" },
+      resources: { cpus: 1, memoryBytes: 1 },
+    });
+    const policy = createRuleVisibilityPolicy({
+      competitionId: contract.competitionId,
+      contractDigest: contract.digest,
+      allow: { researcher: ["scoring.metric"] },
+    });
+    const inventory = await probeHostInventory({
+      exec: async () => ({ code: 0, stdout: "" }),
+      now: () => new Date("2026-10-24T00:00:00Z"),
+    });
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      competitionContext: { contract, policy, inventory },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    expect(outcome.status).toBe("baseline-complete");
+    expect(writes.prompts[0]).toContain('"resources":{"cpus":1,"memoryBytes":1,"gpuCount":0,"gpuNames":[]');
   });
 });
