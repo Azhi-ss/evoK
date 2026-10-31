@@ -1,0 +1,54 @@
+{
+  "schema": "evok.role-context/v1",
+  "role": "researcher",
+  "objective": "Improve the feature pipeline.",
+  "hypothesis": "Target encoding reduces overfit.",
+  "evidenceRefs": [
+    "ledger:exp-0007",
+    "ledger:exp-0011"
+  ],
+  "allowedPaths": [
+    "src/features/**"
+  ],
+  "tools": [
+    "read",
+    "edit",
+    "bash"
+  ],
+  "competition": {
+    "competitionId": "toy-challenge",
+    "version": "2026.1",
+    "metric": "rmse",
+    "direction": "minimize"
+  },
+  "resources": {
+    "cpus": 4,
+    "memoryBytes": 17179869184,
+    "gpuCount": 1,
+    "gpuNames": [
+      "NVIDIA A100-SXM4-80GB"
+    ],
+    "deadlineAt": "2026-10-24T02:00:00.000Z"
+  },
+  "rules": {
+    "objective": "Predict the target within the split discipline.",
+    "scoring.metric": "rmse",
+    "scoring.direction": "minimize",
+    "dataSplit.kind": "kfold",
+    "dataSplit.folds": 5,
+    "submission.format": "csv:id,prediction",
+    "limits.network": "none"
+  },
+  "audit": {
+    "role": "researcher",
+    "contractDigest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
+    "policyDigest": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e",
+    "source": "team-coordinator",
+    "targetAgentId": "researcher-1@run-2026-10-24-0007",
+    "runId": "run-2026-10-24-0007",
+    "missionId": "mission-toy-challenge",
+    "taskId": "task-feature-pipeline",
+    "memoryDigest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+  },
+  "digest": "ecc4464de0b9d07b107920e132f07155741af34e72de60fd38064ab0d05adebd"
+}
