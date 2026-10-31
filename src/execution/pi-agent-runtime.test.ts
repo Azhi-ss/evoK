@@ -7,6 +7,7 @@ import { createAgentSession, ModelRuntime, SessionManager, SettingsManager } fro
 import {
   PiAgentRuntime,
   SessionPolicyViolation,
+  computeInputDigest,
   defaultSessionFactory,
   InMemoryDurableIntentStore,
   FileDurableIntentStore,
@@ -19,6 +20,10 @@ import {
   type SessionModelResolver,
 } from "./pi-agent-runtime";
 import { createEvokModelResolver } from "../evok-model";
+import { createCompetitionContract } from "../competition/competition-contract";
+import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
+import { RoleContextError, assembleRoleContext, type RoleTaskContext } from "./role-context";
+import { createMemorySlice } from "./memory-slice";
 import { OrchestraValidationError } from "./model-orchestra";
 import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "../toy-harness";
 
@@ -1091,5 +1096,229 @@ describe("PiAgentRuntime crash-safety (#23)", () => {
     expect(loaded).toBeDefined();
     expect(loaded?.status).toBe("COMPLETED");
     expect(loaded?.result?.text).toBe("disk persisted");
+  });
+});
+
+describe("PiAgentRuntime role-scoped context injection", () => {
+  // Rooted at the runtime's tmpdir root so the test works where /tmp is a symlink (macOS).
+  const approvedWorkspace = workspace(join(tmpdir(), "evok-role-context-approved"));
+  const contract = createCompetitionContract({
+    version: "2026.1",
+    competitionId: "challenge-a",
+    objective: "Predict the target within the split discipline.",
+    scoring: { metric: "rmse", direction: "minimize" },
+    dataSplit: { kind: "kfold", folds: 5, holdout: "protected" },
+    submission: { format: "csv:id,prediction", maxPerDay: 5, quota: 50 },
+    limits: { timeLimitMs: 3_600_000, network: "none" },
+  });
+  const policy = createRuleVisibilityPolicy({
+    competitionId: "challenge-a",
+    contractDigest: contract.digest,
+    allow: { researcher: ["objective", "scoring.metric", "scoring.direction"] },
+  });
+
+  const roleContext = (role: "researcher" | "critic" | "reviewer"): RoleTaskContext => assembleRoleContext({
+    role,
+    contract,
+    policy,
+    source: "mission-controller",
+    objective: "Improve the feature pipeline.",
+    evidenceRefs: ["ledger:exp-1"],
+    allowedPaths: ["src/features/**"],
+    tools: ["read"],
+  });
+
+  function captureRuntime(options: ConstructorParameters<typeof PiAgentRuntime>[0] = {}) {
+    const prompts: string[] = [];
+    const loadedResources: unknown[] = [];
+    let created = 0;
+    const runtime = new PiAgentRuntime({
+      ...options,
+      sessionFactory: async (sessionOptions) => {
+        created++;
+        loadedResources.push(sessionOptions.evokResources);
+        const fake = fakeSession([completeEnd]);
+        return {
+          ...fake.session,
+          sessionId: `role-context-session-${created}`,
+          async prompt(text: string) {
+            prompts.push(text);
+            await fake.session.prompt(text);
+          },
+        };
+      },
+    });
+    return { runtime, prompts, loadedResources, created: () => created };
+  }
+
+  test("target agent sees its rules and context digest; shared resources stay clean", async () => {
+    const context = roleContext("researcher");
+    const store = new InMemoryDurableIntentStore();
+    const { runtime, prompts, loadedResources } = captureRuntime({
+      intentStore: store,
+      resources: {
+        userRoot: "/tmp/evok-role-ctx-user",
+        projectRoot: "/tmp/evok-role-ctx-project",
+        systemPrompt: "shared system prompt",
+        appendSystemPromptPaths: [],
+        skills: [],
+        diagnostics: [],
+        readRoots: [],
+      },
+    });
+    await runtime.execute(request({ role: { name: "researcher" }, workspace: approvedWorkspace, roleContext: context }));
+
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain(`=== ROLE CONTEXT BEGIN (role=researcher, digest=${context.digest}) ===`);
+    expect(prompts[0]).toContain(JSON.stringify(context));
+    expect(prompts[0]).toContain('"rules":{"objective":"Predict the target within the split discipline.","scoring.metric":"rmse","scoring.direction":"minimize"}');
+    expect(prompts[0]).toContain("=== ROLE CONTEXT END ===");
+
+    // The context never leaks into the shared per-Run resources (#110 seam).
+    const shared = JSON.stringify(loadedResources[0]);
+    expect(shared).toContain("shared system prompt");
+    expect(shared).not.toContain(context.digest);
+    expect(shared).not.toContain("scoring.metric");
+
+    // The digest is bound into the intent input digest for audit/idempotency.
+    const intents = await store.listIntents();
+    expect(intents.length).toBe(1);
+    expect(intents[0].inputDigest).toBe(computeInputDigest(request({ role: { name: "researcher" }, roleContext: context })));
+    expect(intents[0].inputDigest).not.toBe(computeInputDigest(request({ role: { name: "researcher" } })));
+    expect(computeInputDigest(request({ roleContext: context, role: { name: "researcher" } })))
+      .toBe(computeInputDigest(request({ roleContext: context, role: { name: "researcher" } })));
+  });
+
+  test("an agent without a role context receives none of it", async () => {
+    const context = roleContext("researcher");
+    const { runtime, prompts } = captureRuntime();
+    await runtime.execute(request({ role: { name: "critic", instructions: "find defects" }, workspace: approvedWorkspace }));
+
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).not.toContain("ROLE CONTEXT");
+    expect(prompts[0]).not.toContain(context.digest);
+    expect(prompts[0]).not.toContain("scoring.metric");
+    // Backward compatibility: no context means the legacy prompt/digest shape.
+    expect(prompts[0]).toBe("Task objective: inspect the repository\nRole: critic\nRole instructions: find defects");
+  });
+
+  test("a context addressed to another role fails closed before any session or intent", async () => {
+    const store = new InMemoryDurableIntentStore();
+    const { runtime, prompts, created } = captureRuntime({ intentStore: store });
+    await expect(runtime.execute(request({
+      role: { name: "researcher" },
+      roleContext: roleContext("critic"),
+    }))).rejects.toBeInstanceOf(RoleContextError);
+    expect(created()).toBe(0);
+    expect(prompts).toEqual([]);
+    expect(await store.listIntents()).toEqual([]);
+  });
+
+  test("a tampered context (digest mismatch) fails closed before dispatch", async () => {
+    const context = roleContext("researcher");
+    const tampered = { ...context, rules: { ...context.rules, "scoring.metric": "maximize" } } as RoleTaskContext;
+    const { runtime, prompts, created } = captureRuntime();
+    await expect(runtime.execute(request({ role: { name: "researcher" }, roleContext: tampered })))
+      .rejects.toThrow("role context digest mismatch");
+    expect(created()).toBe(0);
+    expect(prompts).toEqual([]);
+  });
+
+  // ── Broker-bound context: targetAgentId + runId + memory ─────────────────
+  const boundContext = (args: { targetAgentId: string; runId: string; memoryDigest?: string }): RoleTaskContext => assembleRoleContext({
+    role: "researcher",
+    contract,
+    policy,
+    source: "mission-controller",
+    objective: "Improve the feature pipeline.",
+    evidenceRefs: ["ledger:exp-1"],
+    tools: ["read"],
+    targetAgentId: args.targetAgentId,
+    runId: args.runId,
+    missionId: "m-unit",
+    taskId: "task-1",
+    ...(args.memoryDigest !== undefined ? { memoryDigest: args.memoryDigest } : {}),
+  });
+  const identity = { branchId: "exp-2", runId: "m-unit:exp:2", attempt: 2, workspaceId: "w-2", fencingToken: 2 };
+  const memorySlice = createMemorySlice({
+    sliceId: "slice-exp-2",
+    missionId: "m-unit",
+    taskId: "task-1",
+    runId: "m-unit:exp:2",
+    evidenceRefs: ["ledger:exp-1"],
+    findings: [{ findingId: "f-1", summary: "the leaky column overfit the fold", ok: false }],
+  });
+
+  test("a bound context reaches exactly its target agent and run, with its memory slice", async () => {
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: memorySlice.digest });
+    const { runtime, prompts } = captureRuntime();
+    await runtime.execute(request({
+      // A concrete agent name with the researcher audience still matches.
+      role: { name: "evok-experiment-repair", audience: "researcher" },
+      workspace: approvedWorkspace,
+      identity,
+      targetAgentId: "researcher@m-unit:exp:2",
+      roleContext: context,
+      memorySlice,
+    }));
+
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]).toContain(`=== ROLE CONTEXT BEGIN (role=researcher, digest=${context.digest}) ===`);
+    expect(prompts[0]).toContain(`=== MEMORY SLICE BEGIN (slice=slice-exp-2, digest=${memorySlice.digest}) ===`);
+    expect(prompts[0]).toContain("the leaky column overfit the fold");
+    expect(prompts[0]).not.toContain("credentials");
+
+    // The binding and the memory digest are part of the Run's input identity.
+    const bound = request({ role: { name: "evok-experiment-repair", audience: "researcher" }, identity, targetAgentId: "researcher@m-unit:exp:2", roleContext: context, memorySlice });
+    expect(computeInputDigest(bound)).not.toBe(computeInputDigest({ ...bound, targetAgentId: "researcher@m-unit:exp:3" }));
+    expect(computeInputDigest(bound)).not.toBe(computeInputDigest({ ...bound, identity: { ...identity, runId: "m-unit:exp:3" } }));
+    expect(computeInputDigest(bound)).not.toBe(computeInputDigest({ ...bound, memorySlice: undefined }));
+    expect(computeInputDigest(bound)).not.toBe(computeInputDigest({ ...bound, role: { name: "evok-experiment-repair", audience: "critic" } }));
+  });
+
+  test("target agent mismatches and incomplete bindings fail closed before dispatch", async () => {
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId });
+    const legacy = roleContext("researcher");
+    const cases: Array<[string, Partial<PiAgentRuntimeRequest>]> = [
+      ["mismatched target agent", { roleContext: context, targetAgentId: "researcher@m-unit:exp:3", identity }],
+      ["context bound but request has no target", { roleContext: context, identity }],
+      ["request bound but context has no binding", { roleContext: legacy, targetAgentId: "researcher@m-unit:exp:2", identity }],
+      ["bound context with a foreign identity run", { roleContext: context, targetAgentId: "researcher@m-unit:exp:2", identity: { ...identity, runId: "m-unit:exp:9" } }],
+      ["bound context without any identity", { roleContext: context, targetAgentId: "researcher@m-unit:exp:2" }],
+      // A partial binding (agent without run) is not a valid binding.
+      ["context declares the agent but no run", { roleContext: assembleRoleContext({
+        role: "researcher", contract, policy, source: "mission-controller", objective: "x",
+        targetAgentId: "researcher@m-unit:exp:2",
+      }), targetAgentId: "researcher@m-unit:exp:2", identity }],
+    ];
+    for (const [label, overrides] of cases) {
+      const { runtime, prompts, created } = captureRuntime();
+      await expect(runtime.execute(request({ role: { name: "researcher" }, ...overrides }))).rejects.toBeInstanceOf(RoleContextError);
+      expect(created()).toBe(0);
+      expect(prompts).toEqual([]);
+      expect(label.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("a memory slice from another run or another context binding fails closed", async () => {
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: memorySlice.digest });
+    const otherRun = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: "m-unit:exp:9" });
+    const otherContent = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: identity.runId, facts: [{ name: "note", value: "different" }] });
+
+    for (const overrides of [
+      { roleContext: undefined, memorySlice }, // memory requires a bound context
+      { roleContext: context, memorySlice: otherRun },
+      { roleContext: context, memorySlice: otherContent },
+      { roleContext: context, memorySlice: { ...memorySlice, findings: [] } as typeof memorySlice }, // tampered digest
+    ]) {
+      const { runtime, created } = captureRuntime();
+      await expect(runtime.execute(request({
+        role: { name: "researcher" },
+        identity,
+        targetAgentId: "researcher@m-unit:exp:2",
+        ...overrides,
+      }))).rejects.toBeInstanceOf(RoleContextError); // fail-closed: binding or memory digest mismatch
+      expect(created()).toBe(0);
+    }
   });
 });

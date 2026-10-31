@@ -32,7 +32,9 @@ import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
 import { SandboxBoundary } from "../../src/security-boundary";
-import type { SessionModelResolver } from "../../src/pi-agent-runtime";
+import { PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/pi-agent-runtime";
+import { createCompetitionContract } from "../../src/competition/competition-contract";
+import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -655,5 +657,131 @@ describe("duplicate controllers (#112 AC7)", () => {
     }).catch((e: unknown) => e as Error);
     expect(again).toBeInstanceOf(MissionStartRejectedError);
     expect((again as Error).message).toMatch(/already/);
+  });
+});
+
+/**
+ * ContextBroker at the Mission Run seam: a Candidate Run receives its rules
+ * through a broker-assembled role context bound to that Run/agent, while the
+ * generic task constraints stay non-sensitive (never the full hardRules
+ * array). The session is a controlled local writer so the evaluator still
+ * measures a real artifact.
+ */
+function brokerSession(writes: { prompts: string[]; answer: string }) {
+  return async (options: { cwd?: string }): Promise<AgentRuntimeSession> => {
+    let listener: ((event: Record<string, unknown>) => void) | undefined;
+    return {
+      sessionId: `broker-session-${Math.random().toString(36).slice(2)}`,
+      subscribe(next) { listener = next; return () => { listener = undefined; }; },
+      async prompt(text: string) {
+        writes.prompts.push(text);
+        listener?.({ type: "agent_start" });
+        await writeFile(join(options.cwd!, "answer.txt"), `${writes.answer}\n`);
+        listener?.({
+          type: "agent_end",
+          messages: [{
+            role: "assistant",
+            content: [{ type: "text", text: "candidate materialized" }],
+            usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+            stopReason: "stop",
+          }],
+        });
+      },
+      async abort() {},
+      dispose() { listener = undefined; },
+      getSessionStats() {
+        return { tokens: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 }, cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } };
+      },
+    };
+  };
+}
+
+function constraintsFromPrompt(prompt: string): Record<string, unknown> {
+  const line = prompt.split("\n").find((entry) => entry.startsWith("Constraints: "));
+  if (!line) throw new Error("prompt carried no Constraints block");
+  return JSON.parse(line.slice("Constraints: ".length)) as Record<string, unknown>;
+}
+
+describe("broker-assembled context at the Mission Run seam", () => {
+  test("rules reach the Run only through an allowlisted role context, not the task constraints", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-broker-ctx"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = createCompetitionContract({
+      version: "2026.1",
+      competitionId: "toy-challenge",
+      objective: "Predict the target within the split discipline.",
+      scoring: { metric: "rmse", direction: "minimize" },
+      dataSplit: { kind: "kfold", folds: 5, holdout: "protected" },
+      submission: { format: "csv:id,prediction", maxPerDay: 5 },
+      limits: { timeLimitMs: 3_600_000, network: "none" },
+    });
+    const policy = createRuleVisibilityPolicy({
+      competitionId: "toy-challenge",
+      contractDigest: contract.digest,
+      allow: { researcher: ["scoring.metric", "scoring.direction", "dataSplit.folds"] },
+    });
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      competitionContext: { contract, policy },
+      // The factory owns the runtime policy (same grants as the default one).
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("baseline-complete");
+    expect(outcome.evaluation.ok).toBe(true);
+    expect(writes.prompts).toHaveLength(1);
+    const prompt = writes.prompts[0]!;
+
+    // The generic task carries identity only — never the full hardRules array.
+    const constraints = constraintsFromPrompt(prompt);
+    expect(Object.keys(constraints).sort()).toEqual(["missionId", "runId", "taskId"]);
+    expect(prompt).not.toContain("hardRules");
+    expect(JSON.stringify(constraints)).not.toContain("no external submission");
+
+    // The role context carries exactly the allowlisted rules for the researcher.
+    expect(prompt).toContain("=== ROLE CONTEXT BEGIN (role=researcher,");
+    expect(prompt).toContain('"rules":{"scoring.metric":"rmse","scoring.direction":"minimize","dataSplit.folds":5}');
+    expect(prompt).toContain('"targetAgentId":"evok-baseline-candidate@m-broker-ctx:baseline:1"');
+    expect(prompt).toContain('"runId":"m-broker-ctx:baseline:1"');
+    expect(prompt).not.toContain('"holdout":"protected"'); // not allowlisted for researcher
+    expect(prompt).not.toContain('"maxPerDay"');
+  });
+
+  test("without a competition context the Run keeps the legacy prompt and still carries no rule array", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-no-broker"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.5" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      // The factory owns the runtime policy (same grants as the default one).
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("baseline-complete");
+    const prompt = writes.prompts[0]!;
+    expect(prompt).not.toContain("ROLE CONTEXT");
+    expect(prompt).not.toContain("hardRules");
+    expect(Object.keys(constraintsFromPrompt(prompt)).sort()).toEqual(["missionId", "runId", "taskId"]);
   });
 });

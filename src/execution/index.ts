@@ -40,6 +40,150 @@ export type {
   ScheduleOptions,
   ScheduledBranchResult,
 } from "./team-execution";
+export {
+  HOST_INVENTORY_SCHEMA,
+  HostInventoryError,
+  hostInventoryDigest,
+  parseNvidiaSmiGpuRows,
+  probeHostInventory,
+  validateHostInventory,
+} from "./host-inventory";
+export type {
+  GpuDevice,
+  HostCpu,
+  HostDisk,
+  HostInventory,
+  HostInventoryProbeOptions,
+  HostMemory,
+} from "./host-inventory";
+export {
+  checkHostCapabilities,
+  gpuBackendFromName,
+} from "./host-capabilities";
+export {
+  RESOURCE_EXIT_REASONS,
+  RESOURCE_LEASE_SCHEMA,
+  RESOURCE_USAGE_SCHEMA,
+  ResourceCapabilityError,
+  grantResourceLease,
+  recordResourceUsage,
+  validateResourceLease,
+  validateResourceUsage,
+} from "./resource-lease";
+export type {
+  GpuLease,
+  GrantLeaseOptions,
+  ResourceCapabilityMismatch,
+  ResourceExitReason,
+  ResourceLease,
+  ResourceRequest,
+  ResourceUsage,
+} from "./resource-lease";
+export {
+  RUN_MANIFEST_SCHEMA,
+  RunManifestError,
+  completeRunManifest,
+  createRunManifest,
+  parseRunManifest,
+  serializeRunManifest,
+  validateRunManifest,
+} from "./run-manifest";
+export type {
+  CreateRunManifestInput,
+  RunManifest,
+  RunOutcome,
+} from "./run-manifest";
+export {
+  RESEARCHER_CONTEXT_FORBIDDEN_FIELDS,
+  RESEARCHER_CONTEXT_SCHEMA,
+  ResearcherContextError,
+  buildResearcherContext,
+  summarizeLeaseResources,
+} from "./researcher-context";
+export type {
+  ResearcherCompetitionSummary,
+  ResearcherContext,
+  ResearcherResourceSummary,
+} from "./researcher-context";
+export {
+  EXECUTION_CONTEXT_SCHEMA,
+  ExecutionContextError,
+  createExecutionContext,
+  validateExecutionContext,
+} from "./execution-context";
+export type {
+  CreateExecutionContextInput,
+  EvaluationDataAccess,
+  ExecutionAudience,
+  ExecutionContext,
+} from "./execution-context";
+export {
+  ROLE_CONTEXT_SCHEMA,
+  RoleContextError,
+  assembleRoleContext,
+  validateRoleContext,
+} from "./role-context";
+export type {
+  AssembleRoleContextInput,
+  RoleContextAudit,
+  RoleTaskContext,
+} from "./role-context";
+export {
+  DELEGATABLE_CAPABILITIES,
+  FORBIDDEN_DELEGATION_CAPABILITIES,
+  SubagentAuthorityError,
+  assertDelegationPermitted,
+  createPiSubagentsAdapter,
+} from "./subagents-adapter";
+export type {
+  DelegatableCapability,
+  ForbiddenDelegationCapability,
+  SubagentDelegation,
+  SubagentDelegationResult,
+  SubagentTransport,
+} from "./subagents-adapter";
+export {
+  AGENT_RESULT_SCHEMA,
+  DEFAULT_MEMORY_READ_POLICY,
+  MEMORY_SENSITIVE_FIELDS,
+  MEMORY_SLICE_SCHEMA,
+  MEMORY_WRITE_PROPOSAL_SCHEMA,
+  MemorySliceError,
+  createMemorySlice,
+  createMemoryWriteProposal,
+  validateAgentResult,
+  validateMemorySlice,
+  validateMemoryWriteProposal,
+} from "./memory-slice";
+export type {
+  AgentResult,
+  MemoryFact,
+  MemoryFinding,
+  MemoryReadPolicy,
+  MemorySlice,
+  MemorySliceInput,
+  MemoryWriteProposal,
+  MemoryWriteProposalInput,
+} from "./memory-slice";
+export {
+  BROKERED_CONTEXT_SCHEMA,
+  CONTEXT_ROLES,
+  ContextBroker,
+  ContextBrokerError,
+  TRUSTED_CONTEXT_ROLES,
+  isTrustedContextRole,
+  validateBrokeredContext,
+} from "./context-broker";
+export type {
+  AssembleRunContextInput,
+  BrokeredContext,
+  BrokeredContextBody,
+  ContextBrokerOptions,
+  ContextRole,
+  MemoryProvider,
+  MemoryProviderRequest,
+  TrustedContextRole,
+} from "./context-broker";
 export * from "./dag-scheduler";
 export * from "./model-orchestra";
 export * from "./pi-agent-runtime";

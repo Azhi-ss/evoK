@@ -79,6 +79,9 @@ import {
   isExplicitResumeRequest,
   type ReconciliationReport,
 } from "./mission-resume";
+import { ContextBroker, type MemoryProvider } from "../execution/context-broker";
+import type { CompetitionContract } from "../competition/competition-contract";
+import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
 export const MISSION_SCHEMA_VERSION = 1 as const;
 const MISSION_FILENAME = "mission.json";
@@ -396,6 +399,19 @@ export interface StartMissionOptions {
   readonly resolver: SessionModelResolver;
   readonly resources: EvokResources;
   readonly evaluator: BaselineEvaluator;
+  /**
+   * Per-competition contract + rule-visibility policy. When supplied, every
+   * Candidate Run receives a broker-assembled, role-scoped context bound to
+   * that Run and agent; the generic task constraints stay non-sensitive and
+   * carry no rules. When absent, the Run keeps the legacy prompt and no role
+   * context (backward-compatible default).
+   */
+  readonly competitionContext?: MissionCompetitionContext;
+  /**
+   * Test/broker seam: builds the runtime for one attempt (fresh workspace
+   * root). Defaults to a PiAgentRuntime wired to `resolver`/`resources`.
+   */
+  readonly runtimeFactory?: (workspaceRoot: string) => PiAgentRuntime;
   /** Enforceable budget unit; must match the draft's declared unit. */
   readonly budgetUnits?: string;
   readonly tier?: string;
@@ -433,6 +449,18 @@ export interface StartMissionOptions {
    * is not an execution or authorization path.
    */
   readonly onPersistedEvent?: (event: HistoryEvent, record: MissionRecord) => void | Promise<void>;
+}
+
+/**
+ * One competition as this Mission runs it: its own contract + policy. The
+ * broker validates the binding, so a Mission can never broadcast another
+ * competition's rules.
+ */
+export interface MissionCompetitionContext {
+  readonly contract: CompetitionContract;
+  readonly policy: RuleVisibilityPolicy;
+  /** Optional durable-memory source for the per-Run MemorySlice. */
+  readonly memory?: MemoryProvider;
 }
 
 /**
@@ -864,7 +892,9 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     baselineTask.expectedOutputs?.length ? `Expected outputs: ${baselineTask.expectedOutputs.join("; ")}` : "",
     draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
     "Produce the real artifact files in the workspace. Do NOT write a score file, do NOT self-report a score, and do NOT claim verification: an independent evaluator measures the immutable snapshot after you finish. Text claims are never evidence.",
-    `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
+    options.competitionContext
+      ? "Your competition rules for this role are in the ROLE CONTEXT block. The sandbox enforces no network and no external submission."
+      : `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
     "Read-only project inspection is allowed; writes are confined to this workspace. Stop when the baseline artifact is materialized.",
   ].filter((line) => line !== "").join("\n");
 
@@ -908,6 +938,17 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
   const baselineRunId = startMode?.baselineRunId ?? record.baselineRunId ?? `${draft.id}:baseline:1`;
   const allowBash = (record.permissions ?? draft.constraints.permissions ?? []).includes("local-shell-in-workspace");
   const roleTools = [...READ_ONLY_TOOLS, "write", "edit", ...(allowBash ? ["bash"] : [])];
+  // Per-competition context broker. Construction validates that the policy is
+  // bound to THIS Mission's contract, so rules are never shared across
+  // competitions; each Run then gets its own role-scoped context.
+  const broker = options.competitionContext
+    ? new ContextBroker({
+        contract: options.competitionContext.contract,
+        policy: options.competitionContext.policy,
+        ...(options.competitionContext.memory ? { memory: options.competitionContext.memory } : {}),
+        source: "mission-controller",
+      })
+    : undefined;
 
   // A single abort owner: an external user signal aborts every dispatch in
   // this start (baseline + loop + decisions).
@@ -941,11 +982,13 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     current: MissionRecord;
     runId: string;
     attempt: number;
+    taskId: string;
     branchId: string;
     roleName: string;
     instructions: string;
     objective: string;
     expectedOutputs: readonly string[];
+    evidenceRefs?: readonly string[];
     reserve: number;
     kind: "baseline" | "experiment";
   }): Promise<{ record: MissionRecord; outcome: AttemptOutcome; result?: AgentRuntimeResult }> => {
@@ -971,6 +1014,27 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       await releaseLock();
       throw new BudgetExhaustedError(r.stopReason!);
     }
+
+    // Assemble the injectable context BEFORE any durable dispatch: rules for
+    // THIS competition and this agent's audience, bound to this Run/agent, plus
+    // the optional memory slice. A tampered/foreign context fails closed here,
+    // leaving no persisted intent behind.
+    const targetAgentId = `${args.roleName}@${args.runId}`;
+    const brokered = broker
+      ? await broker.assemble({
+          missionId: draft.id,
+          taskId: args.taskId,
+          runId: args.runId,
+          targetAgentId,
+          role: "researcher",
+          objective: args.objective,
+          ...(args.evidenceRefs ? { evidenceRefs: args.evidenceRefs } : {}),
+          allowedPaths: ["."],
+          tools: roleTools,
+        })
+      : undefined;
+    const roleContext = brokered?.context.kind === "role" ? brokered.context.roleContext : undefined;
+
     r = { ...r, reserved: r.reserved + args.reserve };
     const intentId = `${args.runId}:intent`;
     r = withEvent(r, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: args.runId, intentId, attempt: args.attempt } }, {
@@ -985,12 +1049,12 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     const disposeWorkspace = () => rm(workspaceParent, { recursive: true, force: true }).catch(() => {});
 
     // A fresh runtime per attempt: no reused session, workspace, or attempt id.
-    const runtime = new PiAgentRuntime({
-      workspaceRoot: workspaceParent,
+    const runtime = (options.runtimeFactory ?? ((workspaceRoot: string) => new PiAgentRuntime({
+      workspaceRoot,
       modelResolver: options.resolver,
       resources: options.resources,
       sandbox: { allowBash },
-    });
+    })))(workspaceParent);
 
     let result: AgentRuntimeResult;
     try {
@@ -998,7 +1062,10 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         {
           task: {
             objective: args.objective,
-            constraints: { missionId: draft.id, runId: args.runId, hardRules: record.contract.hardRules },
+            // Non-sensitive task identity only. Rules and execution constraints
+            // reach the agent through the brokered role context or the sandbox
+            // — never as a broadcast array on the generic task.
+            constraints: { missionId: draft.id, runId: args.runId, taskId: args.taskId },
             expectedOutputs: args.expectedOutputs,
           },
           role: {
@@ -1006,8 +1073,16 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
             instructions: args.instructions,
             tools: roleTools,
             allowCodingTools: true,
+            ...(broker ? { audience: "researcher" as const } : {}),
             ...(allowBash ? { allowTestExecution: true } : {}),
           },
+          ...(roleContext !== undefined
+            ? {
+                targetAgentId: targetAgentId,
+                roleContext,
+                ...(brokered?.memorySlice ? { memorySlice: brokered.memorySlice } : {}),
+              }
+            : {}),
           workspace: {
             path: join(workspaceParent, args.kind),
             isolated: true,
@@ -1229,6 +1304,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         current: record,
         runId: baselineRunId,
         attempt: 1,
+        taskId: baselineTask.taskId,
         branchId: "baseline",
         roleName: "evok-baseline-candidate",
         instructions: baselineInstructions,
@@ -1322,7 +1398,9 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         `Measured evidence so far (independent evaluator; durable refs live under this mission's runs dir):\n${evidence}`,
         draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
         "Produce the real artifact files. Do NOT write a score file, do NOT self-report a score, do NOT claim success: an independent evaluator measures the immutable snapshot after you finish. Failed attempts are evidence, not results to hide.",
-        `Hard rules: ${[...record.contract.hardRules, "no network", "no external submission"].join("; ")}`,
+        broker
+          ? "Your competition rules for this role are in the ROLE CONTEXT block. The sandbox enforces no network and no external submission."
+          : `Hard rules: ${[...record.contract.hardRules, "no network", "no external submission"].join("; ")}`,
         "Read-only project inspection is allowed; writes are confined to this workspace.",
       ].join("\n");
     };
@@ -1540,11 +1618,13 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         current: record,
         runId: expRunId,
         attempt: expAttempt,
+        taskId: task.taskId,
         branchId: `exp-${expAttempt}`,
         roleName: `evok-experiment-${proposal.action}`,
         instructions: experimentInstructions(proposal, directorInput),
         objective: proposal.task!.objective,
         expectedOutputs: outputs,
+        evidenceRefs: directorInput.observations.flatMap((observation) => observation.evidenceRefs),
         reserve: proposal.expectedCost ?? reserveCost,
         kind: "experiment",
       });

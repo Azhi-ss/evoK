@@ -30,6 +30,9 @@ import { MissingAuthenticationError, type SessionModelResolver } from "../evok-m
 import type { EvokResources } from "../evok-resources";
 import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
 import { isShellToolName, resolveUserBash } from "./user-bash";
+import { RoleContextError, validateRoleContext, type RoleTaskContext } from "./role-context";
+import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import type { RuleAudienceRole } from "../competition/rule-visibility";
 export { MissingAuthenticationError } from "../evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -45,6 +48,12 @@ export interface RolePlan {
   readonly name: string;
   readonly instructions?: string;
   readonly tools?: readonly string[];
+  /**
+   * Audience role whose rule allowlist this agent consumes. Defaults to
+   * `name`; a concrete agent name (e.g. `evok-experiment-repair`) sets it so
+   * the broker-assembled context still matches its audience.
+   */
+  readonly audience?: RuleAudienceRole;
   /** Team verification roles are constrained to their declared capabilities. */
   readonly verificationRole?: VerificationRole;
   readonly allowTestExecution?: boolean;
@@ -74,6 +83,24 @@ export interface PiAgentRuntimeRequest {
   readonly intentId?: string;
   readonly identity?: BranchRunIdentity;
   readonly repair?: boolean;
+  /**
+   * Optional role-scoped injectable context. Validated before dispatch and
+   * injected into this Run's prompt only when `roleContext.role` matches
+   * this agent's audience role; never merged into shared resources or another
+   * agent's context.
+   */
+  readonly roleContext?: RoleTaskContext;
+  /**
+   * The one agent instance this request targets. A role context that declares
+   * a target agent must match it exactly; a bound request whose context lacks
+   * the binding fails closed.
+   */
+  readonly targetAgentId?: string;
+  /**
+   * Optional memory slice for this Run. Only injected with a bound role
+   * context, and its digest must match the context's audit binding.
+   */
+  readonly memorySlice?: MemorySlice;
 }
 
 export type IntentStatus =
@@ -284,6 +311,10 @@ export function computeInputDigest(input: PiAgentRuntimeRequest): string {
     },
     role: {
       name: input.role.name,
+      // Audience changes which role context matches this agent, so it is part
+      // of the input identity. Conditional: requests without it keep the
+      // legacy digest unchanged.
+      ...(input.role.audience !== undefined ? { audience: input.role.audience } : {}),
       instructions: input.role.instructions,
       tools: input.role.tools,
       verificationRole: input.role.verificationRole,
@@ -291,6 +322,21 @@ export function computeInputDigest(input: PiAgentRuntimeRequest): string {
       allowCodingTools: input.role.allowCodingTools,
     },
     tier: input.tier ?? "default",
+    // Conditional so requests without a role context keep their prior digest
+    // (persisted idempotency records stay valid).
+    ...(input.roleContext !== undefined
+      ? {
+          roleContext: input.roleContext.digest,
+          // Bound identities are part of what the Run is: a context injected
+          // for another agent/Run is a different input.
+          roleContextBinding: {
+            targetAgentId: input.targetAgentId ?? null,
+            runId: input.identity?.runId ?? null,
+          },
+        }
+      : {}),
+    ...(input.memorySlice !== undefined ? { memorySlice: input.memorySlice.digest } : {}),
+    ...(input.targetAgentId !== undefined ? { targetAgentId: input.targetAgentId } : {}),
   });
 }
 
@@ -590,10 +636,100 @@ function toolsFor(
   return requested;
 }
 
-function promptFor(input: PiAgentRuntimeRequest, redactor: SecretRedactor): string {
+/**
+ * Validates the optional role context and memory slice, and fails closed
+ * unless every declared binding agrees: context role vs audience role,
+ * context target agent vs request target, context run vs identity run, and
+ * memory slice digest/run vs the context audit.
+ *
+ * A context without any binding stays accepted (legacy `assembleRoleContext`
+ * callers), but only for requests that declare no target/memory binding.
+ */
+function boundContextFor(input: PiAgentRuntimeRequest): { roleContext?: RoleTaskContext; memorySlice?: MemorySlice } {
+  const context = input.roleContext === undefined ? undefined : validateRoleContext(input.roleContext);
+  const audience = input.role.audience ?? input.role.name;
+  if (context === undefined) {
+    if (input.targetAgentId !== undefined) {
+      throw new RoleContextError("a target agent binding requires a role context");
+    }
+    if (input.memorySlice !== undefined) {
+      throw new RoleContextError("a memory slice is injected only together with a role context");
+    }
+    return {};
+  }
+  if (context.role !== audience) {
+    throw new RoleContextError(`role context role "${context.role}" does not match this agent's role "${audience}"`);
+  }
+  const boundAgentId = context.audit.targetAgentId;
+  const boundRunId = context.audit.runId;
+  // A bound context is all-or-nothing: an agent id without its run id (or a
+  // request target without a fully bound context) is a partial binding and
+  // fails closed. Only a context with NO binding at all stays legacy.
+  const declaresBinding = boundAgentId !== undefined || boundRunId !== undefined || input.targetAgentId !== undefined;
+  if (!declaresBinding) {
+    // Legacy unbound context: the role match above is the whole binding.
+  } else {
+    if (boundAgentId === undefined || input.targetAgentId === undefined) {
+      throw new RoleContextError("role context and request must both declare the target agent binding");
+    }
+    if (boundAgentId !== input.targetAgentId) {
+      throw new RoleContextError(
+        `role context targets agent "${boundAgentId}" but this request targets "${input.targetAgentId}"`,
+      );
+    }
+    const runId = input.identity?.runId;
+    if (boundRunId === undefined || runId === undefined) {
+      throw new RoleContextError("a bound role context requires both the context runId and the request's identity.runId");
+    }
+    if (boundRunId !== runId) {
+      throw new RoleContextError(
+        `role context is bound to run "${boundRunId}" but this request's identity run is "${runId}"`,
+      );
+    }
+  }
+  if (input.memorySlice === undefined) return { roleContext: context };
+
+  let memorySlice: MemorySlice;
+  try {
+    memorySlice = validateMemorySlice(input.memorySlice);
+  } catch (error) {
+    // One boundary error type: a bad slice never reaches a session.
+    throw new RoleContextError(`memory slice is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const runId = input.identity?.runId;
+  if (runId === undefined || memorySlice.runId !== runId) {
+    throw new RoleContextError(
+      `memory slice is bound to run "${memorySlice.runId}" but this request's identity run is "${runId ?? "(missing)"}"`,
+    );
+  }
+  if (context.audit.runId === undefined || context.audit.runId !== memorySlice.runId) {
+    throw new RoleContextError("memory slice run does not match the role context binding");
+  }
+  if (context.audit.missionId !== undefined && context.audit.missionId !== memorySlice.missionId) {
+    throw new RoleContextError("memory slice Mission does not match the role context binding");
+  }
+  if (context.audit.taskId !== undefined && context.audit.taskId !== memorySlice.taskId) {
+    throw new RoleContextError("memory slice Task does not match the role context binding");
+  }
+  if (context.audit.memoryDigest !== memorySlice.digest) {
+    throw new RoleContextError("memory slice digest does not match the role context binding");
+  }
+  return { roleContext: context, memorySlice };
+}
+
+function promptFor(
+  input: PiAgentRuntimeRequest,
+  redactor: SecretRedactor,
+  roleContext?: RoleTaskContext,
+  memorySlice?: MemorySlice,
+): string {
   const constraints = input.task.constraints ? `\nConstraints: ${JSON.stringify(redactor.redact(input.task.constraints))}` : "";
   const outputs = input.task.expectedOutputs?.length ? `\nExpected outputs: ${input.task.expectedOutputs.map((output) => redactor.redactText(output)).join(", ")}` : "";
-  return redactor.redactText(`Task objective: ${input.task.objective}\nRole: ${input.role.name}${input.role.instructions ? `\nRole instructions: ${input.role.instructions}` : ""}${constraints}${outputs}`);
+  // Boundaries are explicit so the agent can tell role-scoped context and
+  // memory from task text; the digests bind what was injected.
+  const roleBlock = roleContext === undefined ? "" : `\n=== ROLE CONTEXT BEGIN (role=${roleContext.role}, digest=${roleContext.digest}) ===\n${JSON.stringify(roleContext)}\n=== ROLE CONTEXT END ===`;
+  const memoryBlock = memorySlice === undefined ? "" : `\n=== MEMORY SLICE BEGIN (slice=${memorySlice.sliceId}, digest=${memorySlice.digest}) ===\n${JSON.stringify(memorySlice)}\n=== MEMORY SLICE END ===`;
+  return redactor.redactText(`Task objective: ${input.task.objective}\nRole: ${input.role.name}${input.role.instructions ? `\nRole instructions: ${input.role.instructions}` : ""}${constraints}${outputs}${roleBlock}${memoryBlock}`);
 }
 
 function objectFromText(text: string | undefined): Record<string, unknown> | undefined {
@@ -797,6 +933,10 @@ export class PiAgentRuntime {
       throw new TypeError("an approved isolated workspace is required");
     }
     if (signal?.aborted) throw abortError();
+
+    // Fail closed before any workspace use, session, or intent dispatch: a
+    // tampered or foreign role context/memory slice never reaches a model.
+    const { roleContext, memorySlice } = boundContextFor(input);
 
     const redactor = this.redactorFor(input);
     const requestedPolicy: SandboxPolicy = restrictSandboxPolicy(this.sandboxPolicy, input.workspace.sandbox ?? {});
@@ -1047,7 +1187,7 @@ export class PiAgentRuntime {
         throw abortError();
       }
       try {
-        await session.prompt(promptFor(input, redactor));
+        await session.prompt(promptFor(input, redactor, roleContext, memorySlice));
       } catch (error) {
         if (eventError) throw eventError;
         throw error;
