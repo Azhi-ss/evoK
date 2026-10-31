@@ -15,6 +15,14 @@ Vocabulary authority stays [`CONTEXT.md`](../CONTEXT.md); ownership stays
 [ADR-0005](adr/0005-pi-sdk-execution-path.md). This document adds no gate,
 promotion, or submit authority.
 
+This repository is an evoK application built on the Pi SDK, not a single Pi
+plugin. `src/execution/pi-agent-runtime.ts` is the Pi SDK adapter used by the
+Research Run. `ContextBroker`, `MemorySlice`, and `subagents-adapter` are core
+evoK modules. The three packages under `plugins/` are experimental Chord pilot
+plugins loaded explicitly through `src/cli/*-plugin.ts`; they are not Pi
+InteractiveMode extensions, are not auto-discovered by Pi, and are not loaded
+by the default `evok` CLI.
+
 ## Topology
 
 ```
@@ -96,7 +104,8 @@ Rules:
 - **Pre-run capability check.** `checkHostCapabilities(inventory,
   requirements)` (`execution/host-capabilities.ts`) validates the contract's
   typed `resources` against the probed HostInventory before a Run: CPU cores
-  and memory always, storage only when the probe recorded a disk reading,
+  and memory always, and storage only when the probe recorded a disk reading
+  (a storage requirement with no disk reading fails closed),
   GPU count plus per-device backend/model/min-VRAM (a device that cannot
   verify a requirement does not qualify). Mismatches fail closed with
   `ResourceCapabilityError`. Type-only coupled to the competition pack — no
@@ -170,7 +179,7 @@ it fails closed.
 
 `MemorySlice` (`execution/memory-slice.ts`) is what one short-lived agent may
 remember from earlier Runs of the same Mission: `sliceId`, `missionId`,
-`taskId`, `runId`, `sourceRefs` / `evidenceRefs` / `artifactRefs`, structured
+`taskId`, `runId`, `targetAgentId`, `sourceRefs` / `evidenceRefs` / `artifactRefs`, structured
 `facts` and `findings`, a fixed `readPolicy`, and a content digest. The read
 policy is not configurable: references and summaries are readable, bodies and
 sensitive content are not. Slices are frozen and serializable; a persisted
@@ -188,7 +197,7 @@ identity.
 ## Mission-start Run assembly
 
 `startAuthorizedMission` / `resumeAuthorizedMission` accept an optional
-`competitionContext` (`{ contract, policy, memory? }`) and an optional
+`competitionContext` (`{ contract, policy, memory?, inventory?, resourceRequest? }`) and an optional
 `runtimeFactory` seam. When a competition context is supplied:
 
 1. the controller builds ONE `ContextBroker` for that competition (policy must
@@ -202,6 +211,14 @@ identity.
    (`missionId`, `runId`, `taskId`) — never the full `hardRules` array; rules
    reach the agent only through its role context, and execution limits
    (network, submission, credentials) stay enforced by the sandbox.
+
+If the contract declares `resources`, Mission start requires a matching
+`HostInventory`, checks the competition requirements before dispatch, and
+passes the contract resource floor into the broker so each candidate receives a
+Run-bound `ResourceLease` summary. The lease is currently an execution-context
+record and capability gate; GPU environment mapping, cgroup/container limits,
+and automatic `RunManifest`/`ResourceUsage` persistence remain a separate
+execution-adapter step.
 
 Without a competition context the Run keeps the legacy prompt and no role
 context (backward-compatible default); the generic constraints still carry no

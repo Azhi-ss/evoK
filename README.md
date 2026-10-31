@@ -2,6 +2,11 @@
 
 Standalone harness for unattended autonomous research and verifiable Method Improvement (task-internal RSI) inside one Mission: mission control, task DAG, isolated experiments (Pi SDK AgentSession as replaceable agent runtime), independent evaluation, evidence-gated promotion, and a submission broker. Compatible with existing competition arms. Product baseline: [ADR-0014](docs/adr/0014-prd-rsi-baseline.md).
 
+evoK is an application built on the Pi SDK. Its ContextBroker and MemorySlice
+are core evoK execution modules; the three packages under `plugins/` are
+experimental Chord pilot plugins loaded explicitly by their local loaders, not
+Pi auto-discovered extensions.
+
 `bun install` at this repo root installs the `harness-opt` workspace, including `pi-subagents` 0.79.1. `bunfig.toml` keeps the hoisted linker so root packages still resolve transitive deps such as `@earendil-works/pi-ai`.
 
 - How to use: [docs/how-to-use.md](docs/how-to-use.md) — Explore → intake → review → start → research
