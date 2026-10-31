@@ -48,9 +48,10 @@ function catalogFrom(runtime: ModelRuntime, refs: string[], defaultRef?: string)
 
 describe("parseEvokArgs", () => {
   test("reads request positional, --tier, --project, --orchestra and --timeout-ms", () => {
-    const parsed = parseEvokArgs(["hello world", "--tier", "deep", "--project", "/tmp/p", "--timeout-ms", "42"]);
+    const parsed = parseEvokArgs(["hello world", "--tier", "deep", "--thinking", "max", "--project", "/tmp/p", "--timeout-ms", "42"]);
     expect(parsed.request).toBe("hello world");
     expect(parsed.tier).toBe("deep");
+    expect(parsed.thinking).toBe("max");
     expect(parsed.project).toBe("/tmp/p");
     expect(parsed.timeoutMs).toBe(42);
     expect(parsed.error).toBeUndefined();
@@ -58,6 +59,7 @@ describe("parseEvokArgs", () => {
 
   test("rejects an unknown tier and unknown flag", () => {
     expect(parseEvokArgs(["x", "--tier", "ultra"]).error).toContain("--tier");
+    expect(parseEvokArgs(["x", "--thinking", "turbo"]).error).toContain("--thinking");
     expect(parseEvokArgs(["x", "--bogus"]).error).toContain("--bogus");
   });
 

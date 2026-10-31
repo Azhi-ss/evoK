@@ -106,6 +106,8 @@ export const EVOK_EXIT = Object.freeze({
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_RESERVE_COST = 0.01;
 const TIERS = new Set(["default", "fast", "deep", "mid"]);
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export type EvokThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 function parseTimeout(raw: string | undefined): number | string {
   const value = Number(raw);
@@ -116,6 +118,8 @@ export interface ParsedEvokArgs {
   readonly request?: string;
   readonly project?: string;
   readonly tier: string;
+  /** Pi thinking level passed to foreground and Mission runtime sessions. */
+  readonly thinking?: EvokThinkingLevel;
   readonly orchestra?: string;
   readonly timeoutMs: number;
   /** #111: skill-led Mission intake/drafting path (ends at draft review). */
@@ -161,6 +165,7 @@ options:
                     --project at a workspace.
   --tier <tier>     model tier: default | fast | deep | mid (default: default)
   --orchestra <f>   JSON file binding {fast?, deep?, mid?} to Pi catalog refs
+  --thinking <level> Pi thinking level: off | minimal | low | medium | high | xhigh | max
   --timeout-ms <n>  bound one Run to n milliseconds (default: ${DEFAULT_TIMEOUT_MS})
   --intake          Mission intake: turn the request into a saved, reviewable
                     Mission draft + initial plan via the mission-intake skill.
@@ -232,6 +237,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let request: string | undefined;
   let project: string | undefined;
   let tier = "default";
+  let thinking: EvokThinkingLevel | undefined;
   let orchestra: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
   let intake = false;
@@ -257,6 +263,10 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     } else if (arg === "--tier") {
       tier = argv[++i] ?? "";
       if (!TIERS.has(tier)) return { tier, timeoutMs, reserveCost, error: `--tier must be one of ${[...TIERS].join(", ")} (got "${tier}")` };
+    } else if (arg === "--thinking") {
+      const value = argv[++i] ?? "";
+      if (!THINKING_LEVELS.has(value)) return { tier, timeoutMs, reserveCost, error: `--thinking must be one of ${[...THINKING_LEVELS].join(", ")} (got "${value}")` };
+      thinking = value as EvokThinkingLevel;
     } else if (arg === "--orchestra") {
       orchestra = argv[++i];
       if (!orchestra) return { tier, timeoutMs, reserveCost, error: "--orchestra requires a JSON file path" };
@@ -341,6 +351,7 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   }
   return {
     request, project, tier, orchestra, timeoutMs,
+    ...(thinking ? { thinking } : {}),
     ...(intake ? { intake: true } : {}),
     ...(start ? { start: true } : {}),
     ...(status ? { status: true } : {}),
@@ -499,6 +510,7 @@ export async function runEvok(options: EvokRunOptions): Promise<number> {
       workspaceRoot: options.workspaceRoot ?? tmpdir(),
       modelResolver: resolver,
       resources,
+      ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
     });
   try {
     const probe = await resolver.resolve(args.tier);
@@ -997,7 +1009,12 @@ async function runMissionStart(
   if (!options.startRunner && !baselineOnly && director === undefined) {
     director = createPiMissionDirector({
       resources,
-      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources }),
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
+      }),
       tier: args.tier,
     });
   }
@@ -1010,6 +1027,12 @@ async function runMissionStart(
       resources,
       evaluator,
       tier: args.tier,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
+      }),
       signal: bound.signal,
       reserveCost: options.reserveCost ?? args.reserveCost ?? DEFAULT_RESERVE_COST,
       ...(priceModelCost ? { priceModelCost } : {}),
@@ -1173,7 +1196,12 @@ async function runMissionResume(
   if (!options.resumeRunner && director === undefined) {
     director = createPiMissionDirector({
       resources,
-      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources }),
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
+      }),
       tier: args.tier,
     });
   }
@@ -1186,6 +1214,12 @@ async function runMissionResume(
       resources,
       evaluator,
       tier: args.tier,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot,
+        modelResolver: resolver,
+        resources,
+        ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
+      }),
       signal: bound.signal,
       reserveCost: options.reserveCost ?? args.reserveCost ?? DEFAULT_RESERVE_COST,
       ...(priceModelCost ? { priceModelCost } : {}),
