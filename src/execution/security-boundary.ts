@@ -54,6 +54,17 @@ export interface SandboxPolicy {
   readonly maxFileBytes?: number;
 }
 
+/**
+ * Trusted runtime-only options for a boundary. These options are deliberately
+ * separate from SandboxPolicy so an agent request cannot opt itself out of the
+ * default protected-segment checks. Resource discovery may mark an explicitly
+ * approved read root as a skill namespace, which can contain a directory named
+ * `policy` without making the rest of the protected namespace readable.
+ */
+export interface SandboxBoundaryOptions {
+  readonly protectedReadRoots?: readonly string[];
+}
+
 const DEFAULT_PROTECTED_SEGMENTS = new Set([
   ".env", "credentials", "credential", "secret", "secrets", "evaluator", "evaluation", "contract", "ledger", "policy",
 ]);
@@ -232,12 +243,16 @@ export class SandboxBoundary {
   private readonly protectedPaths: readonly string[];
   private readonly readRoots: readonly string[];
   private readonly realReadRoots: readonly string[];
+  private readonly protectedReadRoots: readonly string[];
 
-  constructor(policy: SandboxPolicy = {}) {
+  constructor(policy: SandboxPolicy = {}, options: SandboxBoundaryOptions = {}) {
     validatePolicy(policy);
     this.root = resolve(policy.root ?? "/tmp/evok-sandbox");
     this.readRoots = Object.freeze([...new Set((policy.readRoots ?? []).map((path) => resolve(path)))]);
     this.realReadRoots = Object.freeze(this.readRoots.map((path) => realpathSafe(path)));
+    this.protectedReadRoots = Object.freeze([...new Set((options.protectedReadRoots ?? [])
+      .map((path) => resolve(path))
+      .filter((path) => this.readRoots.includes(path)))]);
     this.policy = deepFreeze({
       ...policy,
       root: this.root,
@@ -255,7 +270,13 @@ export class SandboxBoundary {
 
   private isProtected(target: string): boolean {
     if (this.protectedPaths.some((path) => within(path, target))) return true;
-    const parts = normalizedPath(relative(this.root, target)).split("/").filter(Boolean).map((part) => part.toLowerCase());
+    // Resource skill roots are trusted read-only namespaces. Evaluate default
+    // protected segments relative to that root so the root itself may be named
+    // `policy`, while `.env`, `credentials`, and similar files below it remain
+    // protected. Untrusted readRoots do not get this exception.
+    const protectedRoot = this.protectedReadRoots.find((path) => within(path, target));
+    const relativeBase = protectedRoot ?? this.root;
+    const parts = normalizedPath(relative(relativeBase, target)).split("/").filter(Boolean).map((part) => part.toLowerCase());
     return parts.some((part) => DEFAULT_PROTECTED_SEGMENTS.has(part) || part.startsWith(".env."));
   }
 

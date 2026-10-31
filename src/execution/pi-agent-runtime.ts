@@ -435,6 +435,8 @@ export interface EvokSessionResources {
   readonly appendSystemPrompt?: string;
   /** Ordered, already-enumerated approved SKILL.md files (project-first). */
   readonly skillFiles: readonly string[];
+  /** Approved skill directories whose protected names are safe to read. */
+  readonly readRoots?: readonly string[];
   /** evoK user resource root (normally ~/.evok); used as SDK agentDir. */
   readonly userRoot?: string;
 }
@@ -802,6 +804,8 @@ export const defaultSessionFactory: AgentSessionFactory = async (options) => {
     root: cwd,
     allowedTools: sdkOptions.tools,
     allowBash: sandbox?.allowBash === true,
+  }, {
+    protectedReadRoots: evokResources?.readRoots,
   });
   const securityExtension = createSandboxSecurityExtension({ boundary, redactor });
   // #110: explicit evoK resource sources. noSkills stays true UNCONDITIONALLY:
@@ -1048,6 +1052,10 @@ export class PiAgentRuntime {
         ...(readRoots.length > 0 ? { readRoots } : {}),
         allowedTools: tools,
         allowBash: requestedPolicy.allowBash === true,
+      }, {
+        protectedReadRoots: this.resources?.readRoots
+          ?.map((path) => resolve(path))
+          .filter((path) => readRoots.includes(path)),
       });
       const events: RuntimeEvent[] = [];
       const seen = new Set<string>();
@@ -1068,6 +1076,7 @@ export class PiAgentRuntime {
           ? {
               evokResources: {
                 skillFiles: acceptedSkillFilesFromDiscovered(this.resources.skills),
+                readRoots: this.resources.readRoots,
                 ...(this.resources.systemPrompt !== undefined ? { systemPrompt: this.resources.systemPrompt } : {}),
                 ...(this.resources.appendSystemPrompt !== undefined ? { appendSystemPrompt: this.resources.appendSystemPrompt } : {}),
                 userRoot: this.resources.userRoot,

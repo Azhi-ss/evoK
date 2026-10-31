@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -97,6 +97,25 @@ describe("security boundary", () => {
     expect(() => boundary.assertPath("/home/me/other/secret.txt", "read")).toThrow(SandboxViolation);
     // protected segments remain protected even inside a read root
     expect(() => boundary.assertPath("/home/me/research-project/.env", "read")).toThrow(SandboxViolation);
+  });
+
+  test("trusted skill read roots allow a protected root name without exposing protected files below it", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "evok-skill-root-"));
+    const skillRoot = join(parent, "policy");
+    const projectRoot = join(parent, "project");
+    await mkdir(skillRoot);
+    await mkdir(join(projectRoot, ".evok"), { recursive: true });
+    await writeFile(join(skillRoot, "SKILL.md"), "---\nname: policy\n---\n");
+    const boundary = new SandboxBoundary({
+      root: join(parent, "run"),
+      readRoots: [skillRoot, projectRoot],
+      protectedPaths: [join(projectRoot, ".evok")],
+    }, { protectedReadRoots: [skillRoot] });
+
+    expect(boundary.assertPath(join(skillRoot, "SKILL.md"), "read")).toBe(join(skillRoot, "SKILL.md"));
+    expect(() => boundary.assertPath(join(skillRoot, ".env"), "read")).toThrow(SandboxViolation);
+    expect(() => boundary.assertPath(join(projectRoot, "policy", "rules.md"), "read")).toThrow(SandboxViolation);
+    expect(() => boundary.assertPath(join(projectRoot, ".evok", "policy", "rules.md"), "read")).toThrow(SandboxViolation);
   });
 
   test("readRoots cannot escape through a symlink committed inside the project", async () => {
