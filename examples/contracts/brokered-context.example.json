@@ -63,17 +63,18 @@
         "runId": "run-2026-10-24-0007",
         "missionId": "mission-toy-challenge",
         "taskId": "task-feature-pipeline",
-        "memoryDigest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+        "memoryDigest": "3cef0b9fcdd67adf60b65d392ca59c43943c593f10660daeb75f7da144dddb57"
       },
-      "digest": "ecc4464de0b9d07b107920e132f07155741af34e72de60fd38064ab0d05adebd"
+      "digest": "9cf382604be95d87749db79612403ed28222be26685d09022e4960dd35cc3c2d"
     }
   },
   "memorySlice": {
-    "schema": "evok.memory-slice/v1",
+    "schema": "evok.memory-slice/v2",
     "sliceId": "slice-2026-10-24-0007",
     "missionId": "mission-toy-challenge",
     "taskId": "task-feature-pipeline",
     "runId": "run-2026-10-24-0007",
+    "targetAgentId": "researcher-1@run-2026-10-24-0007",
     "sourceRefs": [
       "runs/run-2026-10-24-0006/result.json"
     ],
@@ -113,16 +114,16 @@
       "sensitive": false
     },
     "issuedAt": "2026-10-24T01:05:00.000Z",
-    "digest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+    "digest": "3cef0b9fcdd67adf60b65d392ca59c43943c593f10660daeb75f7da144dddb57"
   },
   "digests": {
     "contract": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
     "policy": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e",
-    "context": "ecc4464de0b9d07b107920e132f07155741af34e72de60fd38064ab0d05adebd",
-    "memory": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0",
+    "context": "9cf382604be95d87749db79612403ed28222be26685d09022e4960dd35cc3c2d",
+    "memory": "3cef0b9fcdd67adf60b65d392ca59c43943c593f10660daeb75f7da144dddb57",
     "inventory": "86c0d65a56a136250824d19b5291e3ffa968129aa291d764b069d59c82717058",
     "lease": "faab04b2bf43654f7ce719b2cb9c3c1ceb399b8936645096aecd4d65f338a7c1"
   },
   "source": "team-coordinator",
-  "digest": "f3d2902196f815e4b6a5c450092431b2e5c0380814e0d950c30d256b2a694042"
+  "digest": "2bcd13e2089f62b417c5de26c0591af274d0f128175fb7696647bce8d461aa0e"
 }

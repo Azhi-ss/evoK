@@ -714,6 +714,9 @@ function boundContextFor(input: PiAgentRuntimeRequest): { roleContext?: RoleTask
   if (context.audit.memoryDigest !== memorySlice.digest) {
     throw new RoleContextError("memory slice digest does not match the role context binding");
   }
+  if (input.targetAgentId === undefined || memorySlice.targetAgentId !== input.targetAgentId) {
+    throw new RoleContextError("memory slice target agent does not match the request binding");
+  }
   return { roleContext: context, memorySlice };
 }
 

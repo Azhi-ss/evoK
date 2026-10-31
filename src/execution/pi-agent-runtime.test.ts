@@ -1245,6 +1245,7 @@ describe("PiAgentRuntime role-scoped context injection", () => {
     missionId: "m-unit",
     taskId: "task-1",
     runId: "m-unit:exp:2",
+    targetAgentId: "researcher@m-unit:exp:2",
     evidenceRefs: ["ledger:exp-1"],
     findings: [{ findingId: "f-1", summary: "the leaky column overfit the fold", ok: false }],
   });
@@ -1302,8 +1303,8 @@ describe("PiAgentRuntime role-scoped context injection", () => {
 
   test("a memory slice from another run or another context binding fails closed", async () => {
     const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: memorySlice.digest });
-    const otherRun = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: "m-unit:exp:9" });
-    const otherContent = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: identity.runId, facts: [{ name: "note", value: "different" }] });
+    const otherRun = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: "m-unit:exp:9", targetAgentId: "researcher@m-unit:exp:2" });
+    const otherContent = createMemorySlice({ sliceId: "slice-other", missionId: "m-unit", taskId: "task-1", runId: identity.runId, targetAgentId: "researcher@m-unit:exp:2", facts: [{ name: "note", value: "different" }] });
 
     for (const overrides of [
       { roleContext: undefined, memorySlice }, // memory requires a bound context

@@ -108,7 +108,7 @@ function selectGpus(inventory: HostInventory, request: ResourceRequest["gpus"]):
     }
     return available.slice(0, request);
   }
-  return request.map((selector) => {
+  const selected = request.map((selector) => {
     const device = typeof selector === "number"
       ? available.find((gpu) => gpu.index === selector)
       : available.find((gpu) => gpu.uuid === selector);
@@ -117,6 +117,15 @@ function selectGpus(inventory: HostInventory, request: ResourceRequest["gpus"]):
     }
     return device;
   });
+  const seen = new Set<string>();
+  for (const device of selected) {
+    const key = device.uuid ?? `index:${device.index}`;
+    if (seen.has(key)) {
+      throw new ResourceCapabilityError("unknown-gpu", `gpu ${key} was selected more than once`);
+    }
+    seen.add(key);
+  }
+  return selected;
 }
 
 /**

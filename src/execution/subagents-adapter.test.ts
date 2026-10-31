@@ -67,6 +67,8 @@ describe("pi-subagents adapter", () => {
     await expect(adapter.delegate(delegation("admin"))).rejects.toThrow(/capability must be one of/);
     await expect(adapter.delegate({ ...delegation("research"), context: { objective: "raw, unsanitized" } as never }))
       .rejects.toThrow(/researcher-context/);
+    await expect(adapter.delegate({ ...delegation("research"), context: { ...context(), credentials: "secret" } as never }))
+      .rejects.toThrow(/unsupported fields/);
     expect(() => assertDelegationPermitted(null)).toThrow(SubagentAuthorityError);
     expect(() => assertDelegationPermitted({ ...delegation("research"), agent: "" })).toThrow(/agent is required/);
   });
@@ -106,7 +108,7 @@ function childContext(args: { targetAgentId?: string; runId?: string } = {}): Ro
 }
 
 function childMemory(runId = CHILD.runId) {
-  return createMemorySlice({ sliceId: "slice-sub-1", missionId: "m-1", taskId: "task-exp-3", runId, findings: [{ findingId: "f-1", summary: "grouped split needed" }] });
+  return createMemorySlice({ sliceId: "slice-sub-1", missionId: "m-1", taskId: "task-exp-3", runId, targetAgentId: CHILD.targetAgentId, findings: [{ findingId: "f-1", summary: "grouped split needed" }] });
 }
 
 function childDelegation(overrides: Partial<SubagentDelegation> = {}): SubagentDelegation {

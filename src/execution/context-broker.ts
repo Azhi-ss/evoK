@@ -162,6 +162,17 @@ function stringList(label: string, value: unknown): string[] {
   return [...value];
 }
 
+const NETWORK_RANK: Record<"none" | "restricted" | "open", number> = { none: 0, restricted: 1, open: 2 };
+
+function boundedNetwork(contractNetwork: "none" | "restricted" | "open", requested?: "none" | "restricted" | "open"):
+  "none" | "restricted" | "open" {
+  const network = requested ?? contractNetwork;
+  if (NETWORK_RANK[network] > NETWORK_RANK[contractNetwork]) {
+    throw new ContextBrokerError(`requested network policy "${network}" exceeds the competition contract limit "${contractNetwork}"`);
+  }
+  return network;
+}
+
 export function isTrustedContextRole(role: string): role is TrustedContextRole {
   return (TRUSTED_CONTEXT_ROLES as readonly string[]).includes(role);
 }
@@ -274,8 +285,17 @@ export class ContextBroker {
   }
 
   private leaseFor(input: AssembleRunContextInput, taskId: string): ResourceLease | undefined {
-    if (input.lease !== undefined) return validateResourceLease(input.lease);
+    if (input.lease !== undefined) {
+      const lease = validateResourceLease(input.lease);
+      if (lease.taskId !== taskId) throw new ContextBrokerError(`resource lease taskId "${lease.taskId}" does not match this Task "${taskId}"`);
+      return lease;
+    }
     if (input.resourceRequest === undefined) return undefined;
+    if (this.contract.limits.timeLimitMs !== undefined
+      && input.resourceRequest.timeLimitMs !== undefined
+      && input.resourceRequest.timeLimitMs > this.contract.limits.timeLimitMs) {
+      throw new ContextBrokerError("resource request timeLimitMs exceeds the competition contract limit");
+    }
     if (this.inventory === undefined) {
       throw new ContextBrokerError("a resource request needs a HostInventory to grant a lease against");
     }
@@ -303,6 +323,9 @@ export class ContextBroker {
     if (slice.runId !== binding.runId) {
       throw new ContextBrokerError(`memory slice runId "${slice.runId}" does not match this Run "${binding.runId}"`);
     }
+    if (slice.targetAgentId !== binding.targetAgentId) {
+      throw new ContextBrokerError(`memory slice targetAgentId "${slice.targetAgentId}" does not match this agent "${binding.targetAgentId}"`);
+    }
     return slice;
   }
 
@@ -319,7 +342,12 @@ export class ContextBroker {
     if (!input.workspace || typeof input.workspace.root !== "string" || input.workspace.root.trim() === "") {
       throw new ContextBrokerError("a trusted execution context requires an approved workspace root");
     }
-    const timeLimitMs = input.timeLimitMs ?? input.resourceRequest?.timeLimitMs;
+    if (input.timeLimitMs !== undefined && this.contract.limits.timeLimitMs !== undefined
+      && input.timeLimitMs > this.contract.limits.timeLimitMs) {
+      throw new ContextBrokerError("execution context timeLimitMs exceeds the competition contract limit");
+    }
+    const requestedTimeLimit = input.timeLimitMs ?? input.resourceRequest?.timeLimitMs;
+    const timeLimitMs = requestedTimeLimit ?? this.contract.limits.timeLimitMs;
     return createExecutionContext({
       audience: args.role,
       contract: this.contract,
@@ -330,7 +358,7 @@ export class ContextBroker {
         isolated: input.workspace.isolated ?? true,
         readRoots: input.workspace.readRoots ?? [],
       },
-      network: input.network ?? this.contract.limits.network,
+      network: boundedNetwork(this.contract.limits.network, input.network),
       ...(timeLimitMs !== undefined ? { timeLimitMs } : {}),
       source: args.source,
     });
@@ -384,6 +412,9 @@ export function validateBrokeredContext(raw: unknown): BrokeredContext {
     if (memorySlice.missionId !== missionId || memorySlice.taskId !== taskId || memorySlice.runId !== runId) {
       throw new ContextBrokerError("brokered context memory slice is bound to another Mission/Task/Run");
     }
+    if (memorySlice.targetAgentId !== targetAgentId) {
+      throw new ContextBrokerError("brokered context memory slice is bound to another target agent");
+    }
     if (digests.memory !== memorySlice.digest) throw new ContextBrokerError("brokered context memory digest does not match the slice");
   } else if (digests.memory !== undefined) {
     throw new ContextBrokerError("brokered context declares a memory digest without a memory slice");
@@ -405,6 +436,9 @@ export function validateBrokeredContext(raw: unknown): BrokeredContext {
     if (audit.memoryDigest !== digests.memory) throw new ContextBrokerError("brokered context memory digest does not match the role context audit");
   } else {
     const executionContext = validateExecutionContext(raw.context.executionContext);
+    if (executionContext.audience !== role) {
+      throw new ContextBrokerError("brokered execution context audience does not match the wrapper role");
+    }
     if (executionContext.contract.digest !== digests.contract) {
       throw new ContextBrokerError("brokered context contract digest does not match its execution context");
     }

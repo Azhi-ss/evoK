@@ -1,9 +1,10 @@
 {
-  "schema": "evok.memory-slice/v1",
+  "schema": "evok.memory-slice/v2",
   "sliceId": "slice-2026-10-24-0007",
   "missionId": "mission-toy-challenge",
   "taskId": "task-feature-pipeline",
   "runId": "run-2026-10-24-0007",
+  "targetAgentId": "researcher-1@run-2026-10-24-0007",
   "sourceRefs": [
     "runs/run-2026-10-24-0006/result.json"
   ],
@@ -43,5 +44,5 @@
     "sensitive": false
   },
   "issuedAt": "2026-10-24T01:05:00.000Z",
-  "digest": "e3de95ec3813f05253e0f4f4d0b502d79b49ba15f9c5b51fe89ff21ed94765c0"
+  "digest": "3cef0b9fcdd67adf60b65d392ca59c43943c593f10660daeb75f7da144dddb57"
 }

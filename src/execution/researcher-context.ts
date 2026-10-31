@@ -29,6 +29,7 @@ export const RESEARCHER_CONTEXT_FORBIDDEN_FIELDS = [
 
 /** The only scalar/list fields the assembler will pass through. */
 const ALLOWED_INPUT_FIELDS = ["objective", "hypothesis", "evidenceRefs", "allowedPaths", "tools", "competition", "lease"] as const;
+const CONTEXT_FIELDS = new Set(["schema", "objective", "hypothesis", "evidenceRefs", "allowedPaths", "tools", "competition", "resources", "redacted"]);
 
 /** A sanitized view of the competition: identity + scoring only, no rules body. */
 export interface ResearcherCompetitionSummary {
@@ -140,5 +141,60 @@ export function buildResearcherContext(input: unknown): ResearcherContext {
     ...(input.competition !== undefined ? { competition: summarizeCompetition(input.competition) } : {}),
     resources,
     redacted: deepFreeze(redacted) as readonly string[],
+  } as ResearcherContext);
+}
+
+/** Validates a context crossing the legacy subagent transport boundary. */
+export function validateResearcherContext(raw: unknown): ResearcherContext {
+  if (!isRecord(raw)) throw new ResearcherContextError("researcher context must be an object");
+  if (raw.schema !== RESEARCHER_CONTEXT_SCHEMA) {
+    throw new ResearcherContextError(`researcher context schema must be ${RESEARCHER_CONTEXT_SCHEMA}`);
+  }
+  const unknown = Object.keys(raw).filter((key) => !CONTEXT_FIELDS.has(key));
+  if (unknown.length > 0) {
+    throw new ResearcherContextError(`researcher context contains unsupported fields: ${unknown.join(", ")}`);
+  }
+  if (typeof raw.objective !== "string" || raw.objective.trim() === "") {
+    throw new ResearcherContextError("researcher context objective is required");
+  }
+  if (raw.hypothesis !== undefined && typeof raw.hypothesis !== "string") {
+    throw new ResearcherContextError("researcher context hypothesis must be a string");
+  }
+  const evidenceRefs = stringList("researcher context evidenceRefs", raw.evidenceRefs);
+  const allowedPaths = stringList("researcher context allowedPaths", raw.allowedPaths);
+  const tools = stringList("researcher context tools", raw.tools);
+  const competition = raw.competition === undefined ? undefined : summarizeCompetition(raw.competition);
+  if (!isRecord(raw.resources)) throw new ResearcherContextError("researcher context resources are required");
+  const resources = raw.resources;
+  for (const key of ["cpus", "memoryBytes", "gpuCount"] as const) {
+    if (!Number.isSafeInteger(resources[key]) || (resources[key] as number) < 0) {
+      throw new ResearcherContextError(`researcher context resources.${key} must be an integer >= 0`);
+    }
+  }
+  if (!Array.isArray(resources.gpuNames) || resources.gpuNames.some((name) => typeof name !== "string" || name.trim() === "")) {
+    throw new ResearcherContextError("researcher context resources.gpuNames must be an array of non-empty strings");
+  }
+  if (resources.deadlineAt !== undefined && (typeof resources.deadlineAt !== "string" || resources.deadlineAt.trim() === "")) {
+    throw new ResearcherContextError("researcher context resources.deadlineAt must be a non-empty string");
+  }
+  if (!Array.isArray(raw.redacted) || raw.redacted.some((name) => typeof name !== "string" || name.trim() === "")) {
+    throw new ResearcherContextError("researcher context redacted must be an array of non-empty strings");
+  }
+  return deepFreeze({
+    schema: RESEARCHER_CONTEXT_SCHEMA,
+    objective: raw.objective,
+    ...(raw.hypothesis !== undefined ? { hypothesis: raw.hypothesis } : {}),
+    evidenceRefs,
+    allowedPaths,
+    tools,
+    ...(competition !== undefined ? { competition } : {}),
+    resources: deepFreeze({
+      cpus: resources.cpus,
+      memoryBytes: resources.memoryBytes,
+      gpuCount: resources.gpuCount,
+      gpuNames: [...resources.gpuNames],
+      ...(resources.deadlineAt !== undefined ? { deadlineAt: resources.deadlineAt } : {}),
+    }) as ResearcherResourceSummary,
+    redacted: [...raw.redacted],
   } as ResearcherContext);
 }

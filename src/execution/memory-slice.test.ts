@@ -23,6 +23,7 @@ function input(overrides: Partial<MemorySliceInput> = {}): MemorySliceInput {
     missionId: "m-1",
     taskId: "task-exp-2",
     runId: "m-1:exp:2",
+    targetAgentId: "researcher@m-1:exp:2",
     sourceRefs: ["runs/exp-2/result.json"],
     evidenceRefs: ["runs/exp-2/snapshot", "runs/exp-2/result.json"],
     artifactRefs: ["runs/exp-2/snapshot/model.py"],
@@ -49,11 +50,12 @@ describe("MemorySlice", () => {
   });
 
   test("rejects credentials, hidden data, transcripts, and global budgets", () => {
-    for (const key of ["credentials", "apiKey", "hiddenData", "holdout", "transcript", "history", "globalBudget", "rules"]) {
+    for (const key of ["credentials", "APIKEY", "hiddenData", "holdout", "transcript", "history", "globalBudget", "rules"]) {
       expect(() => createMemorySlice({ ...input(), [key]: "leak" } as MemorySliceInput)).toThrow(MemorySliceError);
       expect(() => createMemorySlice({ ...input(), [key]: "leak" } as MemorySliceInput)).toThrow(/sensitive/);
     }
     expect(() => createMemorySlice(input({ facts: [{ name: "transcript", value: "full chat log" }] }))).toThrow(/sensitive/);
+    expect(() => createMemorySlice(input({ facts: [{ name: "TrAnScRiPt", value: "full chat log" }] }))).toThrow(/sensitive/);
     expect(() => createMemorySlice(input({ findings: [{ findingId: "f", summary: "x", ...{ globalBudget: 100 } } as never] }))).toThrow(/sensitive/);
     expect(() => createMemorySlice(input({ readPolicy: { references: true, summaries: true, bodies: true, sensitive: false } as never }))).toThrow(/deny bodies/);
   });
@@ -61,10 +63,11 @@ describe("MemorySlice", () => {
   test("persisted tampering fails validation", () => {
     const slice = createMemorySlice(input());
     expect(() => validateMemorySlice({ ...slice, findings: [] })).toThrow(/digest mismatch/);
-    expect(() => validateMemorySlice({ ...slice, schema: "evok.memory-slice/v2" })).toThrow(/schema/);
+    expect(() => validateMemorySlice({ ...slice, schema: "evok.memory-slice/v3" })).toThrow(/schema/);
     expect(() => validateMemorySlice({ ...slice, readPolicy: { references: true, summaries: true, bodies: true, sensitive: true } }))
       .toThrow(/deny bodies/);
     expect(() => createMemorySlice(input({ runId: "" }))).toThrow(/runId is required/);
+    expect(() => createMemorySlice(input({ targetAgentId: "" }))).toThrow(/targetAgentId is required/);
   });
 });
 
@@ -124,5 +127,12 @@ describe("AgentResult", () => {
         rationale: "x",
       }),
     })).toThrow(/memoryWrite must be bound to the same run/);
+    expect(() => validateAgentResult({
+      ...result,
+      memoryWrite: createMemoryWriteProposal({
+        proposalId: "p-3", missionId: "m-other", taskId: "task-exp-2", runId: "m-1:exp:2", agentId: "researcher@m-1:exp:2",
+        rationale: "x",
+      }),
+    })).toThrow(/memoryWrite must be bound to the same missionId/);
   });
 });

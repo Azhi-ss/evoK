@@ -62,24 +62,25 @@ describe("checkHostCapabilities", () => {
     expect(mismatchOf(lowMemory, REQUIREMENTS)).toBe("insufficient-memory");
   });
 
-  test("storage is checked only when the inventory carries a disk reading", () => {
+  test("storage fails closed when the inventory has no disk reading", () => {
     const withDisk = makeInventory({ gpus: [A100], disk: { path: "/data", freeBytes: 1024, totalBytes: 200 * 1024 ** 3 } });
     expect(mismatchOf(withDisk, REQUIREMENTS)).toBe("insufficient-storage");
-    // No disk reading: storage cannot be verified, so it is not a failure.
+    // No disk reading: storage cannot be verified, so the requirement fails.
     const noDisk = makeInventory({ gpus: [A100] });
-    expect(mismatchOf(noDisk, REQUIREMENTS)).toBeUndefined();
+    expect(mismatchOf(noDisk, REQUIREMENTS)).toBe("insufficient-storage");
   });
 
   test("gpu count, backend, model, and min VRAM mismatches fail closed", () => {
-    expect(mismatchOf(makeInventory({}), REQUIREMENTS)).toBe("insufficient-gpus");
-    expect(mismatchOf(makeInventory({ gpus: [MI250] }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
-    expect(mismatchOf(makeInventory({ gpus: [{ ...A100, name: "NVIDIA H100 80GB" }] }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
-    expect(mismatchOf(makeInventory({ gpus: [{ ...A100, memoryTotalBytes: 20 * 1024 ** 3 }] }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
+    const disk = { path: "/data", freeBytes: 100 * 1024 ** 3, totalBytes: 200 * 1024 ** 3 };
+    expect(mismatchOf(makeInventory({ disk }), REQUIREMENTS)).toBe("insufficient-gpus");
+    expect(mismatchOf(makeInventory({ gpus: [MI250], disk }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
+    expect(mismatchOf(makeInventory({ gpus: [{ ...A100, name: "NVIDIA H100 80GB" }], disk }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
+    expect(mismatchOf(makeInventory({ gpus: [{ ...A100, memoryTotalBytes: 20 * 1024 ** 3 }], disk }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
   });
 
   test("a device with unknown memory does not satisfy a min-VRAM requirement", () => {
     const unknownMemory: GpuDevice = { index: 0, name: "NVIDIA A100-SXM4-80GB" };
-    expect(mismatchOf(makeInventory({ gpus: [unknownMemory] }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
+    expect(mismatchOf(makeInventory({ gpus: [unknownMemory], disk: { path: "/data", freeBytes: 100 * 1024 ** 3, totalBytes: 200 * 1024 ** 3 } }), REQUIREMENTS)).toBe("gpu-requirement-mismatch");
   });
 
   test("requirements without a gpu or storage skip those checks", () => {

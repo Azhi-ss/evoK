@@ -49,7 +49,9 @@ export function checkHostCapabilities(inventory: HostInventory, requirements: Co
   if (host.memory.totalBytes < requirements.memoryBytes) {
     throw new ResourceCapabilityError("insufficient-memory", `competition requires ${requirements.memoryBytes} bytes but the host inventory lists ${host.memory.totalBytes}`);
   }
-  // Storage is verifiable only when the probe recorded a disk reading.
+  if (requirements.storageBytes !== undefined && host.disk === undefined) {
+    throw new ResourceCapabilityError("insufficient-storage", "competition requires storageBytes but the host inventory has no disk reading");
+  }
   if (requirements.storageBytes !== undefined && host.disk !== undefined && host.disk.freeBytes < requirements.storageBytes) {
     throw new ResourceCapabilityError("insufficient-storage", `competition requires ${requirements.storageBytes} free bytes but ${host.disk.path} has ${host.disk.freeBytes}`);
   }

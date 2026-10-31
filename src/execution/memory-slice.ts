@@ -17,15 +17,15 @@
  */
 import { deepFreeze, digestValue } from "./security-boundary";
 
-export const MEMORY_SLICE_SCHEMA = "evok.memory-slice/v1" as const;
+export const MEMORY_SLICE_SCHEMA = "evok.memory-slice/v2" as const;
 export const MEMORY_WRITE_PROPOSAL_SCHEMA = "evok.memory-write-proposal/v1" as const;
 export const AGENT_RESULT_SCHEMA = "evok.agent-result/v1" as const;
 
 /**
  * Content that a memory slice, fact, or write proposal must never carry.
- * Keys are matched exactly (case-sensitively) against every object level the
- * slice assembler accepts, so a builder that passes a credential store or a
- * transcript fails closed instead of leaking it into an agent prompt.
+ * Keys are matched case-insensitively against every object level the slice
+ * assembler accepts, so common casing variants cannot smuggle a credential
+ * store or transcript into an agent prompt.
  */
 export const MEMORY_SENSITIVE_FIELDS = [
   "credentials", "credential", "secrets", "secret", "apiKeys", "apiKey", "token", "password",
@@ -70,6 +70,8 @@ export interface MemorySliceInput {
   readonly missionId: string;
   readonly taskId: string;
   readonly runId: string;
+  /** The one agent instance allowed to consume this slice. */
+  readonly targetAgentId: string;
   readonly sourceRefs?: readonly string[];
   readonly evidenceRefs?: readonly string[];
   readonly artifactRefs?: readonly string[];
@@ -79,13 +81,14 @@ export interface MemorySliceInput {
   readonly issuedAt?: string;
 }
 
-/** A frozen, digest-addressed memory slice bound to one Mission Task Run. */
+/** A frozen, digest-addressed memory slice bound to one Mission Task Run and agent. */
 export interface MemorySlice {
   readonly schema: typeof MEMORY_SLICE_SCHEMA;
   readonly sliceId: string;
   readonly missionId: string;
   readonly taskId: string;
   readonly runId: string;
+  readonly targetAgentId: string;
   readonly sourceRefs: readonly string[];
   readonly evidenceRefs: readonly string[];
   readonly artifactRefs: readonly string[];
@@ -153,6 +156,7 @@ export class MemorySliceError extends Error {
 }
 
 const SENSITIVE = new Set<string>(MEMORY_SENSITIVE_FIELDS);
+const SENSITIVE_CANONICAL = new Set([...SENSITIVE].map((key) => key.toLowerCase().replace(/[^a-z0-9]/g, "")));
 const FACT_KEYS = new Set(["name", "value", "source"]);
 const FINDING_KEYS = new Set(["findingId", "summary", "ok", "sourceRefs"]);
 
@@ -167,10 +171,14 @@ function requireNonEmpty(label: string, value: unknown): string {
 
 function assertNoSensitiveKeys(label: string, keys: readonly string[]): void {
   for (const key of keys) {
-    if (SENSITIVE.has(key)) {
+    if (SENSITIVE_CANONICAL.has(key.toLowerCase().replace(/[^a-z0-9]/g, ""))) {
       throw new MemorySliceError(`${label} "${key}" is sensitive and can never be part of agent memory`);
     }
   }
+}
+
+function isSensitiveName(value: string): boolean {
+  return SENSITIVE_CANONICAL.has(value.toLowerCase().replace(/[^a-z0-9]/g, ""));
 }
 
 function stringList(label: string, value: unknown): string[] {
@@ -191,7 +199,7 @@ function factsOf(value: unknown): MemoryFact[] {
       if (!FACT_KEYS.has(key)) throw new MemorySliceError(`unsupported memory fact field "${key}"`);
     }
     const name = requireNonEmpty("memory fact name", raw.name);
-    if (SENSITIVE.has(name)) {
+    if (isSensitiveName(name)) {
       throw new MemorySliceError(`memory fact "${name}" names sensitive content and can never be part of agent memory`);
     }
     if (typeof raw.value !== "string" && typeof raw.value !== "number" && typeof raw.value !== "boolean") {
@@ -218,7 +226,7 @@ function findingsOf(value: unknown): MemoryFinding[] {
       if (!FINDING_KEYS.has(key)) throw new MemorySliceError(`unsupported memory finding field "${key}"`);
     }
     const findingId = requireNonEmpty("memory finding findingId", raw.findingId);
-    if (SENSITIVE.has(findingId)) {
+    if (isSensitiveName(findingId)) {
       throw new MemorySliceError(`memory finding "${findingId}" names sensitive content and can never be part of agent memory`);
     }
     if (raw.ok !== undefined && typeof raw.ok !== "boolean") {
@@ -260,6 +268,7 @@ export function createMemorySlice(input: MemorySliceInput): MemorySlice {
     missionId: requireNonEmpty("memory slice missionId", input.missionId),
     taskId: requireNonEmpty("memory slice taskId", input.taskId),
     runId: requireNonEmpty("memory slice runId", input.runId),
+    targetAgentId: requireNonEmpty("memory slice targetAgentId", input.targetAgentId),
     sourceRefs: stringList("memory slice sourceRefs", input.sourceRefs),
     evidenceRefs: stringList("memory slice evidenceRefs", input.evidenceRefs),
     artifactRefs: stringList("memory slice artifactRefs", input.artifactRefs),
@@ -350,8 +359,12 @@ export function validateAgentResult(
       throw new MemorySliceError(`agent result ${key} "${result[key]}" does not match the dispatched ${key} "${expected}"`);
     }
   }
-  if (result.memoryWrite && result.memoryWrite.runId !== result.runId) {
-    throw new MemorySliceError("agent result memoryWrite must be bound to the same run");
+  if (result.memoryWrite) {
+    for (const key of ["missionId", "taskId", "runId", "agentId"] as const) {
+      if (result.memoryWrite[key] !== result[key]) {
+        throw new MemorySliceError(`agent result memoryWrite must be bound to the same ${key}`);
+      }
+    }
   }
   return deepFreeze(result);
 }

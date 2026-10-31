@@ -13,7 +13,7 @@
  * delegate) or any equivalent, and pi-subagents stays an optional dependency
  * that the core packs do not import.
  */
-import { RESEARCHER_CONTEXT_SCHEMA, type ResearcherContext } from "./researcher-context";
+import { validateResearcherContext, type ResearcherContext } from "./researcher-context";
 import { validateRoleContext, type RoleTaskContext } from "./role-context";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
 
@@ -92,10 +92,10 @@ export function assertDelegationPermitted(delegation: unknown): asserts delegati
   if (typeof candidate.task !== "string" || candidate.task.trim() === "") {
     throw new SubagentAuthorityError("delegation task is required");
   }
-  const context = candidate.context;
-  if (context === null || typeof context !== "object" || Array.isArray(context)
-    || (context as Record<string, unknown>).schema !== RESEARCHER_CONTEXT_SCHEMA) {
-    throw new SubagentAuthorityError("delegation context must be a researcher-context assembly (minimal context, no rules/credentials/budget)");
+  try {
+    validateResearcherContext(candidate.context);
+  } catch (error) {
+    throw new SubagentAuthorityError(`delegation context must be a validated researcher-context assembly: ${error instanceof Error ? error.message : String(error)}`);
   }
   assertFreshChildIdentity(candidate);
 }
@@ -161,6 +161,9 @@ function assertFreshChildIdentity(candidate: Record<string, unknown>): void {
     }
     if (slice.runId !== runId) {
       throw new SubagentAuthorityError("delegated memory slice belongs to another run than the delegated child");
+    }
+    if (slice.targetAgentId !== targetAgentId) {
+      throw new SubagentAuthorityError("delegated memory slice belongs to another target agent than the delegated child");
     }
   }
 }

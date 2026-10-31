@@ -99,6 +99,7 @@ export {
   ResearcherContextError,
   buildResearcherContext,
   summarizeLeaseResources,
+  validateResearcherContext,
 } from "./researcher-context";
 export type {
   ResearcherCompetitionSummary,

@@ -92,6 +92,12 @@ describe("resource lease", () => {
       .toThrow(/not in the host inventory/);
   });
 
+  test("duplicate explicit gpu selectors cannot inflate a lease", async () => {
+    const host = await inventory();
+    expect(() => grantResourceLease({ inventory: host, taskId: "t", request: { gpus: [0, "GPU-aaaa-0000"] } }))
+      .toThrow(/selected more than once/);
+  });
+
   test("lease validate round-trips and rejects label-only gpus", async () => {
     const lease = grantResourceLease({ inventory: await inventory(), taskId: "task-4", request: { cpus: 1, gpus: 1 } });
     const restored = validateResourceLease(JSON.parse(JSON.stringify(lease)));

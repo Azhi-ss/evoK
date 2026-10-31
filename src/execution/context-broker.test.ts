@@ -105,6 +105,7 @@ describe("ContextBroker", () => {
           missionId: request.missionId,
           taskId: request.taskId,
           runId: request.runId,
+          targetAgentId: request.targetAgentId,
           evidenceRefs: request.evidenceRefs,
           findings: [{ findingId: "f-1", summary: "drop the leaky column", ok: false }],
         });
@@ -153,7 +154,7 @@ describe("ContextBroker", () => {
     const broker = new ContextBroker({
       contract: alpha,
       policy: policyFor(alpha),
-      memory: () => createMemorySlice({ sliceId: "s", missionId: "m-1", taskId: "task-exp-2", runId: "m-1:exp:9" }),
+      memory: () => createMemorySlice({ sliceId: "s", missionId: "m-1", taskId: "task-exp-2", runId: "m-1:exp:9", targetAgentId: "researcher@m-1:exp:2" }),
     });
     await expect(broker.assemble(runInput())).rejects.toThrow(/runId .* does not match this Run/);
   });
@@ -183,6 +184,10 @@ describe("ContextBroker", () => {
     // A trusted context without a lease is never assembled.
     await expect(new ContextBroker({ contract: alpha, policy: policyFor(alpha) }).assemble(trustedInput(alpha, "evaluator", "holdout", false)))
       .rejects.toThrow(/requires a resource lease/);
+    await expect(broker.assemble({ ...trustedInput(alpha, "executor"), network: "open" }))
+      .rejects.toThrow(/exceeds the competition contract limit/);
+    await expect(broker.assemble({ ...trustedInput(alpha, "executor"), timeLimitMs: 3_600_001 }))
+      .rejects.toThrow(/exceeds the competition contract limit/);
   });
 
   test("tampered or cross-wired brokered contexts fail validation", async () => {
