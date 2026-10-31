@@ -1,0 +1,42 @@
+{
+  "schema": "evok.competition-contract/v1",
+  "version": "2026.1",
+  "competitionId": "toy-challenge",
+  "title": "Toy challenge",
+  "objective": "Predict the target within the split discipline.",
+  "scoring": {
+    "metric": "rmse",
+    "direction": "minimize"
+  },
+  "dataSplit": {
+    "kind": "kfold",
+    "folds": 5,
+    "holdout": "protected"
+  },
+  "submission": {
+    "format": "csv:id,prediction",
+    "maxPerDay": 5,
+    "quota": 50
+  },
+  "limits": {
+    "timeLimitMs": 3600000,
+    "network": "none",
+    "allowedResources": [
+      "cpu",
+      "gpu"
+    ]
+  },
+  "resources": {
+    "cpus": 8,
+    "memoryBytes": 34359738368,
+    "gpu": {
+      "backend": "cuda",
+      "count": 1,
+      "model": "A100",
+      "minMemoryBytes": 42949672960
+    },
+    "storageBytes": 107374182400,
+    "maxConcurrency": 4
+  },
+  "digest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026"
+}

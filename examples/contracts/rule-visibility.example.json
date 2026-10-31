@@ -1,0 +1,27 @@
+{
+  "schema": "evok.rule-visibility/v1",
+  "competitionId": "toy-challenge",
+  "contractDigest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026",
+  "allow": {
+    "researcher": [
+      "objective",
+      "scoring.metric",
+      "scoring.direction",
+      "dataSplit.kind",
+      "dataSplit.folds",
+      "submission.format",
+      "limits.network"
+    ],
+    "critic": [
+      "scoring.metric",
+      "dataSplit.kind",
+      "dataSplit.holdout",
+      "submission.maxPerDay"
+    ],
+    "reviewer": [
+      "scoring.metric",
+      "dataSplit.holdout"
+    ]
+  },
+  "digest": "edfdcdaf7b3a9f33ea522fe63d1a8ff15b32aefe55c1153d438adefdc0688c5e"
+}

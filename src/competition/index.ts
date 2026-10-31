@@ -39,6 +39,26 @@ export {
 } from "./suite-metric";
 export { localJsExportsRunner } from "./local-js-exports-runner";
 export {
+  COMPETITION_CONTRACT_SCHEMA,
+  COMPETITION_GPU_BACKENDS,
+  CompetitionContractError,
+  competitionContractDigest,
+  createCompetitionContract,
+  validateCompetitionContract,
+} from "./competition-contract";
+export type {
+  CompetitionContract,
+  CompetitionContractInput,
+  CompetitionDataSplit,
+  CompetitionGpuBackend,
+  CompetitionGpuRequirements,
+  CompetitionLimits,
+  CompetitionResourceRequirements,
+  CompetitionScoring,
+  CompetitionSplitKind,
+  CompetitionSubmission,
+} from "./competition-contract";
+export {
   CAPABILITY_GATE_THRESHOLD,
   DEFAULT_DEPLOY_ARENA_CHALLENGE_ID,
   DEPLOY_ARENA_COMPETITION_ID,
@@ -59,6 +79,22 @@ export type {
   DeployArenaSubmission,
   DeployArenaWorker,
 } from "./deploy-arena";
+export {
+  RULE_AUDIENCE_ROLES,
+  RULE_SUMMARY_FIELDS,
+  RULE_VISIBILITY_SCHEMA,
+  RuleVisibilityError,
+  createRuleVisibilityPolicy,
+  ruleVisibilityDigest,
+  summarizeRulesForRole,
+  validateRuleVisibilityPolicy,
+} from "./rule-visibility";
+export type {
+  RuleAudienceRole,
+  RuleSummaryField,
+  RuleVisibilityPolicy,
+  RuleVisibilityPolicyInput,
+} from "./rule-visibility";
 export type {
   SuiteEvalStatus,
   SuiteMetricContract,
