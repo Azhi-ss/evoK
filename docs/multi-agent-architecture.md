@@ -15,13 +15,13 @@ Vocabulary authority stays [`CONTEXT.md`](../CONTEXT.md); ownership stays
 [ADR-0005](adr/0005-pi-sdk-execution-path.md). This document adds no gate,
 promotion, or submit authority.
 
-This repository is an evoK application built on the Pi SDK, not a single Pi
-plugin. `src/execution/pi-agent-runtime.ts` is the Pi SDK adapter used by the
-Research Run. `ContextBroker`, `MemorySlice`, and `subagents-adapter` are core
-evoK modules. The three packages under `plugins/` are experimental Chord pilot
-plugins loaded explicitly through `src/cli/*-plugin.ts`; they are not Pi
-InteractiveMode extensions, are not auto-discovered by Pi, and are not loaded
-by the default `evok` CLI.
+This repository is an evoK application built on the Pi SDK with one Pi plugin
+entry at `extensions/evok.ts`. `src/execution/pi-agent-runtime.ts` is the Pi
+SDK adapter used by the Research Run. `ContextBroker`, `MemorySlice`, and
+`subagents-adapter` are core evoK modules. The three packages under
+`plugins/` are internal Chord seat modules loaded together by
+`src/cli/evok-plugin.ts`; the old `src/cli/*-plugin.ts` loaders remain as
+module-level compatibility seams, not separate Pi extensions.
 
 ## Topology
 

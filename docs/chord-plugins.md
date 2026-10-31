@@ -1,7 +1,7 @@
-# Chord multi-plugin pilot
+# evoK Pi plugin with three internal Chord seats
 
-How to install and load the three independent Chord plugins that landed
-on the Pi 0.86 / Chord wave. Per-seat contracts stay in the
+How to install and load the single evoK Pi plugin entry with its three internal
+Chord seats that landed on the Pi 0.86 / Chord wave. Per-seat contracts stay in the
 ET-CHORD-SPLIT notes this page points at. This page is the install / load / limits how-to
 (ET-DOC-CHORD / #193).
 
@@ -16,28 +16,28 @@ hot-plug. npm may list `@earendil-works/chord@^0.86`; that is a
 dependency pin, **not** a product promise that plugins hot-plug.
 
 This path is an **experimental local pilot**. It is **not** an official
-changelog capability, **not** a shipped evoK CLI/TUI verb, and **not**
-production multi-environment distributed Chord. If the experiment fails
-or is abandoned, **roll back to the single extension entry** (the
-shipped `evok` CLI / Pi native TUI). That rollback is acceptable.
+changelog capability and **not** production multi-environment distributed
+Chord. The shipped Pi surface is the single `evok` extension entry; the
+Chord seats are internal modules behind that entry.
 
-The packages follow the same `chord.facets` convention as pi 0.86
-example plugins. That does **not** make Pi experimental `-e` a shipped
-evoK product path.
+The internal seat packages follow the same `chord.facets` convention as Pi
+0.86 example plugins. That convention does **not** make the seats independently
+installable Pi packages; Pi loads the single `extensions/evok.ts` entry.
 
 This note does **not** open Cordis / DSH.
 
-## Three independent seats
+## One Pi plugin, three internal seats
 
-| Plugin | Seat | Package | Local loader | Spec |
+| Module | Seat | Package | Compatibility loader | Spec |
 | --- | --- | --- | --- | --- |
 | `evok-platform` | Mission / 编排 / TUI·CLI | `plugins/evok-platform/` | `src/cli/evok-platform-plugin.ts` | [evok-platform-chord.md](evok-platform-chord.md) (#190) |
 | `evok-research` | 选点 / Harness / SelectionPolicy | `plugins/evok-research/` | `src/cli/evok-research-plugin.ts` | [evok-research-chord.md](evok-research-chord.md) (#191) |
 | `evok-eval` | eval / promotion / Broker | `plugins/evok-eval/` | `src/cli/evok-eval-plugin.ts` | [evok-eval-chord.md](evok-eval-chord.md) (#192) |
 
-Each plugin is independently declarable and loadable. Loading one does
-**not** declare or load the others. There is no shipped product command
-that mounts all three at once.
+The unified `evok` entry loads all three seats together. Each seat remains
+independently declarable and loadable through its compatibility loader for
+focused tests and local experiments, but those loaders are not separate Pi
+extensions or user install targets.
 
 Seat locks that stay true after load:
 
@@ -54,7 +54,7 @@ Seat locks that stay true after load:
 
 From the evoK repo root. Current `main` already pins
 `@earendil-works/pi-coding-agent@0.86.1` and
-`@earendil-works/chord@0.86.1`. The three plugins live in-repo and
+`@earendil-works/chord@0.86.1`. The three internal seat modules live in-repo and
 declare peer `@earendil-works/chord@^0.86.1` plus conventional
 `chord.facets.session` + `chord.facets.tui`.
 
@@ -62,14 +62,14 @@ declare peer `@earendil-works/chord@^0.86.1` plus conventional
 # from the evoK repo root
 bun install
 
-# confirm the three in-repo packages are present
-ls plugins/evok-platform/package.json \
-   plugins/evok-research/package.json \
-   plugins/evok-eval/package.json
+# use the unified Pi extension from this checkout
+pi --extension ./extensions/evok.ts
 ```
 
-They are **not** published npm plugins and are **not** installed from a
-marketplace. You do **not** need a Chord daemon, Cordis, or DSH.
+The internal seat packages are **not** published as separate npm plugins and
+are **not** installed from a marketplace. The root package manifest declares
+`pi.extensions: ["./extensions/evok.ts"]`. You do **not** need a Chord daemon,
+Cordis, or DSH.
 
 A fresh clone that is missing `node_modules` is the only install step.
 There is no extra Chord bootstrap.
@@ -82,41 +82,29 @@ command via a custom `listCommands` service. Those names are **not** Pi
 InteractiveMode slashes and **not** CLI mainline verbs.
 
 ```ts
-import { loadEvokPlatformPlugin } from "../src/cli/evok-platform-plugin";
-import { loadEvokResearchPlugin } from "../src/cli/evok-research-plugin";
-import { loadEvokEvalPlugin } from "../src/cli/evok-eval-plugin";
+import { loadEvokPlugin } from "../src/cli/evok-plugin";
 
-const platform = await loadEvokPlatformPlugin();
-// platform.declaration.changelogOfficialHotPlug === false
-// platform.seat.experimental === true
+const evok = await loadEvokPlugin();
+// evok.modules.platform.seat.experimental === true
+// evok.modules.research.seat.defaultSelectionId === "fixed_uct"
+// evok.modules.eval.seat.failClosed === true
 
-const research = await loadEvokResearchPlugin();
-// research.seat.defaultSelectionId === "fixed_uct"
-// research.seat.progressiveDefault === "off"
-
-const evalPlugin = await loadEvokEvalPlugin();
-// evalPlugin.seat.failClosed === true
-// evalPlugin.seat.autoSubmitFailClosed === true
-// evalPlugin.seat.eliteIsPromotion === false
-
-await platform.dispose();
-await research.dispose();
-await evalPlugin.dispose();
+await evok.dispose();
 ```
 
-`declareEvok*Plugin()` reads each package's declared facet paths. Load
-with `{ facets: "session" }` for the seat service alone, or the default
-`"session+tui"` to also register the smoke command.
+`declareEvokPlugin()` describes the unified product entry. The compatibility
+`declareEvok*Plugin()` functions still read each seat package's declared facet
+paths. Load with `{ facets: "session" }` for seat services alone, or the
+default `"session+tui"` to also register the internal smoke commands.
 
-Calling all three loaders in one process is a **local experiment**, still
-the same in-process pilot. It is **not** a distributed Chord fabric and
-**not** changelog-official hot-plug.
+The unified loader is still an in-process pilot. It is **not** a distributed
+Chord fabric and **not** changelog-official hot-plug.
 
 Declare-only snippets and seat fields: the three Spec columns above.
 
-## Hot-plug expectations
+## Internal seat loading
 
-What the local pilot path actually does:
+What the internal loader path actually does:
 
 - Each `package.json` can be declared from its `chord.facets` map.
 - Each loader can bring up session alone, or session + tui.
@@ -128,13 +116,15 @@ What the local pilot path actually does:
 What this path does **not** do:
 
 - Changelog-official Chord hot-plug (the 0.86 notes never promised it).
-- Pi experimental `-e` as a shipped evoK product command.
+- Chord seat hot-plug through Pi experimental `-e`; the supported entry is
+  the unified `extensions/evok.ts` extension.
 - Production multi-environment / multi-host Chord.
-- A new CLI or TUI slash that enables the three plugins.
+- Separate user-facing CLI or TUI slashes for the internal seats.
 - Cordis / DSH.
 
-If hot-plug fails: keep using the shipped single extension entry. Do
-not treat a failed or missing plugin load as a product regression.
+If a Chord facet fails to load, the unified extension reports the load failure;
+the seat remains unavailable until the underlying module is fixed. This is an
+experimental path, not a promise of external Chord hot-plug.
 
 ## Smoke (from ET-CHORD-SPLIT-PLATFORM / RESEARCH / EVAL)
 
@@ -142,6 +132,7 @@ Offline; no InteractiveMode and no live model.
 
 ```bash
 # ET-CHORD-SPLIT-PLATFORM / #190
+bun test src/cli/evok-plugin.test.ts
 bun test src/cli/evok-platform-plugin.test.ts
 
 # ET-CHORD-SPLIT-RESEARCH / #191
@@ -187,8 +178,8 @@ Handoffs with the original smoke write-ups:
 ## What this note does not claim
 
 - Changelog-official or production Chord hot-plug
-- A shipped CLI/TUI command that installs or mounts the three plugins
-- Pi experimental `-e` as an evoK product path
+- Three separate user-installed Pi plugins for the internal seats
+- Pi experimental `-e` as a separate Chord-seat product path
 - Production multi-environment distributed Chord
 - Cordis / DSH
 - New plugin code, or any change to gates / defaults

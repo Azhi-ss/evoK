@@ -24,18 +24,15 @@ writeback not opened). `/skill <name>` loads L1 from that tagged
 catalog and is not authorization. The TUI is an entry mirror, not
 Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
-The experimental `evok-platform` Chord plugin loader
-(`evok-platform-plugin.ts`) is a local pilot seat, not changelog-official
-hot-plug and not a second control plane.
-The experimental `evok-research` Chord plugin loader
-(`evok-research-plugin.ts`) is the 选点 / Harness / SelectionPolicy seat
-(default `fixed_uct`; Progressive opt-in only), not changelog-official
-hot-plug and not Promotion authority.
-The experimental `evok-eval` Chord plugin loader
-(`evok-eval-plugin.ts`) is the eval / promotion / Broker seat
-(fail-closed; auto-submit fail-closed; Elite ≠ Promotion), not
-changelog-official hot-plug and not a second control plane.
-Install / load / limits for all three:
+The user-facing Pi extension is the single `evok` entry at
+`../../extensions/evok.ts`. It loads the three internal Chord seats through
+`evok-plugin.ts`: platform (Mission / orchestration / TUI·CLI), research
+(选点 / Harness / SelectionPolicy; default `fixed_uct`), and eval (promotion /
+Broker; fail-closed). The per-seat loaders
+(`evok-platform-plugin.ts`, `evok-research-plugin.ts`, and
+`evok-eval-plugin.ts`) remain compatibility seams for focused tests and module
+ownership; they are not separate Pi extensions or user install targets.
+Install / load / limits for the unified plugin and its internal seats:
 [docs/chord-plugins.md](../../docs/chord-plugins.md).
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
