@@ -1,0 +1,47 @@
+{
+  "schema": "evok.run-manifest/v1",
+  "runId": "run-0001",
+  "taskId": "task-feature-pipeline",
+  "attempt": 1,
+  "contract": {
+    "version": "2026.1",
+    "digest": "c7e8c9eab120458732bfef5363a7d4bc236455579c0adf774fc533e2a6c7c026"
+  },
+  "inventoryDigest": "307473f80e470b3cb20b89f96d989776803e23ebacace4dcfece1a7f4627a84d",
+  "lease": {
+    "schema": "evok.resource-lease/v1",
+    "leaseId": "lease-cc159a47c4a8b65b",
+    "taskId": "task-feature-pipeline",
+    "grantedAt": "2026-10-24T01:00:00.000Z",
+    "deadlineAt": "2026-10-24T02:00:00.000Z",
+    "cpus": 4,
+    "memoryBytes": 17179869184,
+    "gpus": [
+      {
+        "device": {
+          "index": 0,
+          "name": "NVIDIA A100-SXM4-80GB",
+          "uuid": "GPU-4f8e2c1a-1111-2222-3333-444455556666",
+          "memoryTotalBytes": 85899345920
+        }
+      }
+    ],
+    "inventoryDigest": "307473f80e470b3cb20b89f96d989776803e23ebacace4dcfece1a7f4627a84d",
+    "digest": "4097d50064e77ff1871f547bdb1fc87fce0b8853c1926e9d28fae558796e9418"
+  },
+  "createdAt": "2026-10-24T01:00:01.000Z",
+  "usage": {
+    "schema": "evok.resource-usage/v1",
+    "leaseId": "lease-cc159a47c4a8b65b",
+    "wallTimeMs": 3420000,
+    "cpuTimeMs": 3100000,
+    "peakMemoryBytes": 12884901888,
+    "gpu": {
+      "peakMemoryBytes": 42949672960,
+      "utilizationPercent": 87
+    },
+    "exitReason": "completed"
+  },
+  "outcome": "completed",
+  "digest": "0033e414e9c80a27591514b193e6186e11b3f05eeba9cdd8c9a9a06475b64223"
+}
