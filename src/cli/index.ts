@@ -6,3 +6,4 @@
  * stop live in `src/mission/`.
  */
 export * from "./evok-cli";
+export * from "./evok-plugin";

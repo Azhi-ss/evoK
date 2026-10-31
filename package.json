@@ -6,6 +6,9 @@
   "bin": {
     "evok": "./bin/evok.ts"
   },
+  "pi": {
+    "extensions": ["./extensions/evok.ts"]
+  },
   "scripts": {
     "evok": "bun bin/evok.ts",
     "harness-opt": "bun harness-opt/src/cli.ts",
