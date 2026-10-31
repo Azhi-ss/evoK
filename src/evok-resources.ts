@@ -18,7 +18,7 @@
  * Resource discovery does not grant additional tool, network, or filesystem
  * authority. A Skill body is not authorization to start, continue, or submit.
  */
-import { lstat, readFile, readdir, realpath, symlink, mkdir, writeFile } from "node:fs/promises";
+import { cp, lstat, readFile, readdir, realpath, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -207,8 +207,10 @@ function frontmatterField(text: string, key: string): string | undefined {
 
 /**
  * Packaging source → Pi root. Runtime discovery then scans the Pi root.
- * Existing dest SKILL.md wins (no overwrite). Prefers a symlink into the
- * bundled tree; copies SKILL.md when a link cannot be created.
+ * Existing dest SKILL.md wins (no overwrite). Copy the packaged skill into
+ * the project tree so a Run's read roots remain inside the project. A
+ * symlink would make the skill's real path escape the project sandbox and
+ * would be rejected by the runtime containment boundary.
  */
 export async function syncBundledSkillsIntoPiRoot(options: {
   readonly projectRoot: string;
@@ -242,12 +244,7 @@ export async function syncBundledSkillsIntoPiRoot(options: {
     }
     const srcDir = dirname(file);
     await mkdir(dirname(destDir), { recursive: true });
-    try {
-      await symlink(srcDir, destDir);
-    } catch {
-      await mkdir(destDir, { recursive: true });
-      await writeFile(destFile, text);
-    }
+    await cp(srcDir, destDir, { recursive: true, force: false, errorOnExist: false });
   }
   return { destinations: Object.freeze(destinations) };
 }
