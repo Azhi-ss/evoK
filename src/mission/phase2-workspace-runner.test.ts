@@ -55,6 +55,22 @@ describe("phase2 workspace research runner", () => {
     expect(research.getRevision(view.revisions[0].revisionId).change.sourceDigest).toBe("sha-candidate");
   });
 
+  test("a Pi-managed workspace reports the durable handoff without launching a second researcher", async () => {
+    const {workspaceDir, research} = setup({sourceDigest: "unused", executionExit: 0});
+    const bridge = join(workspaceDir, "scripts", "pi_campaign_work.py");
+    mkdirSync(join(workspaceDir, "scripts"));
+    writeFileSync(bridge, "");
+    const calls: string[][] = [];
+    const runner = createPhase2WorkspaceRunner({workspaceDir, taskId: "hb016",
+      async run(args) {
+        calls.push([...args]);
+        return {code: 0, stdout: JSON.stringify({id: "proposal-003", state: "review-pending"}), stderr: ""};
+      }});
+    expect(await runner(research)).toMatchObject({pending: {state: "review-pending"}});
+    expect(calls).toEqual([["python3", bridge, "pending"]]);
+    expect(research.directorView().revisions.length).toBe(0);
+  });
+
   test("a failed execution is negative evidence without a score", async () => {
     const { research, runner } = setup({ sourceDigest: "sha-failed", executionExit: 1, costCNY: 3 });
     const outcome = await runner(research);
