@@ -1,6 +1,7 @@
 /**
  * Production research hook for a Phase 2 tick (#208). Drives the
- * coordinator-provided workspace evaluator:
+ * coordinator-provided workspace evaluator. A Pi-managed campaign already
+ * has a single writer; its tick reads that handoff instead. Legacy contract:
  *
  *   python3 local/evaluate_candidate.py --propose PARENT_TREE FEEDBACK_JSON NEW_TREE
  *   python3 local/evaluate_candidate.py CANDIDATE TASK_ID NEW_RESULT_DIR
@@ -58,6 +59,14 @@ export function createPhase2WorkspaceRunner(options: Phase2WorkspaceRunnerOption
   const run = options.run ?? runPhase2Command;
   const python = options.python ?? "python3";
   const script = join(options.workspaceDir, "local", "evaluate_candidate.py");
+  const handoff = join(options.workspaceDir, "scripts", "pi_campaign_work.py");
+  if (existsSync(handoff)) {
+    return async (): Promise<Record<string, unknown>> => {
+      const status = await run([python, handoff, "pending"]);
+      if (status.code !== 0) throw new Phase2Error("could not read Pi campaign handoff: " + status.stderr.trim().slice(0, 300));
+      return {owner: "pi-main-session", pending: JSON.parse(status.stdout)};
+    };
+  }
   return async (research: Phase2Research): Promise<Record<string, unknown>> => {
     const view = research.directorView();
     const parent = view.nomineeId ? research.getRevision(view.nomineeId) : null;

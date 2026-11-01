@@ -19,7 +19,7 @@ research workflow and CLI contract.
 | Layer | API | Owns |
 |---|---|---|
 | Research workflow | `Phase2Research` (`src/mission/phase2-research.ts`) | Immutable revisions, local/cloud evidence, shared budget, Director nomination, ticks, sanitized researcher view |
-| Production research hook | `createPhase2WorkspaceRunner` (`src/mission/phase2-workspace-runner.ts`) | Drives `local/evaluate_candidate.py` propose + score; S1-metered costs are never double-booked |
+| Production research hook | `createPhase2WorkspaceRunner` (`src/mission/phase2-workspace-runner.ts`) | Reads the Pi campaign handoff, or drives a legacy workspace evaluator; S1-metered costs are never double-booked |
 | Competition adapter | `Phase2PlaygroundAdapter` (`src/competition/phase2-playground.ts`) | Official pins, release checks, deterministic submit pipeline, attempt/quota/reconciliation, official status ingestion |
 | Real platform | `CliPhase2Platform` (`src/competition/phase2-cli-platform.ts`) | `bohr wenyon` / `playground` 0.1.45 argv; credentials stay in the user's CLI login |
 | Offline platform | `FakePhase2Platform` (`src/competition/phase2-fake-platform.ts`) | Scripted kit/quota/timeout/tamper/official responses |
@@ -56,7 +56,14 @@ cannot stop two processes from consuming the same daily quota.
 invoke the wired runner → re-nominate → recompute `nextAction()`. It never
 just prints "keep researching".
 
-Production runner contract (coordinator-owned workspace files):
+In a Pi-managed competition workspace, the interactive Pi session is the Director.
+The project supplies a campaign host to the EvoK extension. `evok_status` reads
+durable work, and `evok_dispatch` gives a fresh Researcher one experiment.
+Setting `reviewRequested` keeps the result for an independent Reviewer before
+evaluation. `tick --workspace` reads the same handoff without starting another
+Director. The workspace scheduler owns measurement and release.
+
+Older workspaces without the Pi handoff keep the original runner contract:
 
 ```bash
 python3 local/evaluate_candidate.py --propose PARENT_TREE FEEDBACK_JSON NEW_TREE
