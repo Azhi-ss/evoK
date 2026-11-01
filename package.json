@@ -12,6 +12,7 @@
   "scripts": {
     "evok": "bun bin/evok.ts",
     "harness-opt": "bun harness-opt/src/cli.ts",
+    "phase2": "bun src/cli/phase2-cli.ts",
     "example:lifecycle": "bun examples/lifecycle/recovery-example.ts",
     "test": "bun test",
     "test:live": "bun test --path-ignore-patterns=\"\" ./src/newapi-live.live.test.ts",
