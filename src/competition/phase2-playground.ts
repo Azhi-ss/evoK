@@ -367,8 +367,8 @@ export function isPhase2Eligible(revision: Phase2Revision): boolean {
     && phase2LatestScore(revision, "noisy-repeat") !== undefined;
 }
 
-/** Competition-defined ranking: withheld validation, then screening, then
- * id for determinism. The Director nominates; the adapter only ranks. */
+/** Compare performance on the common panel, including the decisive rerun.
+ * When performance ties, choose the cheaper measured panel. */
 export function strongestPhase2Revision(revisions: readonly Phase2Revision[]): Phase2Revision | null {
   const eligible = revisions.filter(isPhase2Eligible);
   if (eligible.length === 0) return null;
@@ -377,6 +377,16 @@ export function strongestPhase2Revision(revisions: readonly Phase2Revision[]): P
     if (withheld !== 0) return withheld;
     const screening = (phase2LatestScore(b, "screening") ?? Number.NEGATIVE_INFINITY) - (phase2LatestScore(a, "screening") ?? Number.NEGATIVE_INFINITY);
     if (screening !== 0) return screening;
+    const repeat = phase2LatestScore(b, "noisy-repeat")! - phase2LatestScore(a, "noisy-repeat")!;
+    if (repeat !== 0) return repeat;
+    const cost = (revision: Phase2Revision) => {
+      const panel = ["screening","withheld-validation","noisy-repeat"].map(kind =>
+        [...revision.evidence].reverse().find(observation => observation.kind === kind)?.cost);
+      return panel.every((n): n is number => typeof n === "number" && Number.isFinite(n))
+        ? panel.reduce((total, n) => total + n, 0) : Number.POSITIVE_INFINITY;
+    };
+    const left = cost(a), right = cost(b);
+    if (left !== right) return left < right ? -1 : 1;
     return a.id < b.id ? -1 : 1;
   })[0];
 }

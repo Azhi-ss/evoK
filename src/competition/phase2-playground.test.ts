@@ -251,3 +251,15 @@ describe("phase2 source tree digest", () => {
     expect(() => digestPhase2Directory(join(dir, "missing"))).toThrow();
   });
 });
+
+test("equally accurate candidates are ranked by decisive repeat and measured panel cost", async () => {
+  const {strongestPhase2Revision} = await import("./phase2-playground");
+  const revision = (id: string, repeat: number, cost: number) => ({
+    id, summary:id, change:{}, contentDigest:id, createdAt:"now",
+    evidence:(["screening","withheld-validation","noisy-repeat"] as const).map(kind => ({
+      kind, at:"now", score:kind==="noisy-repeat"?repeat:0.5, cost
+    }))
+  });
+  const costly = revision("a",1,4), cheap = revision("z",1,1), unreliable = revision("x",0,0.5);
+  expect(strongestPhase2Revision([costly,cheap,unreliable])?.id).toBe("z");
+});
