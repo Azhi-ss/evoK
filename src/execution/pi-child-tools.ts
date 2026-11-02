@@ -2,15 +2,15 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
-import { controlSchemas, hostToolSchemas, validateWorkerAction, workerTools, type WorkerProfile } from "./pi-child-protocol";
+import { controlSchemas, hostToolSchemas, validateWorkerAction, workerTools, type WorkerProfile, type WorkerControl } from "./pi-child-protocol";
 
 export interface WorkerBinding {
-  nodeId: string; remainingToolTurns: number; profile: WorkerProfile; tools: string[]; roleRunId: string;
+  nodeId: string; controls: readonly WorkerControl[]; depth: number; remainingToolTurns: number; profile: WorkerProfile; tools: string[]; roleRunId: string;
   provider: {alias: string; config: ProviderConfig}; toolServer?: {url: string; key: string};
 }
 export function installPiWorkerTools(pi: ExtensionAPI, stateDir: string) {
   const binding: WorkerBinding = JSON.parse(readFileSync(join(stateDir, "active.json"), "utf8"));
-  const allowed = workerTools(binding.profile, binding.tools);
+  const allowed = workerTools(binding.profile, binding.tools, binding.controls, binding.depth);
   pi.registerProvider(binding.provider.alias, binding.provider.config);
   pi.on("before_agent_start", () => {pi.setActiveTools(allowed);});
   pi.on("session_start", () => {pi.setActiveTools(allowed);});
@@ -40,7 +40,7 @@ export function installPiWorkerTools(pi: ExtensionAPI, stateDir: string) {
       description: isControl ? "Record one EvoK control action and finish this turn. Call this tool alone." : "Run the named operation on this node's scoped inputs.",
       async execute(_id, args, signal) {
         if (isControl) {
-          const action = validateWorkerAction(name, args, binding.profile);
+          const action = validateWorkerAction(name, args, binding.profile, allowed);
           writeFileSync(join(stateDir, binding.roleRunId + ".action.json"), JSON.stringify(action), {flag: "wx", mode: 0o600});
           return {content: [{type: "text", text: "Recorded."}], details: {}, terminate: true};
         }
