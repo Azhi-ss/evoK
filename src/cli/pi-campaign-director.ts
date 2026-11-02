@@ -1,5 +1,6 @@
 // Pi owns the interactive Director session. The campaign host owns durable work and evidence.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerRoundWake, type RoundWakeHost } from "./pi-round-wake";
 import { Type } from "typebox";
 
 export interface CampaignDispatch {
@@ -13,6 +14,8 @@ export interface CampaignDispatch {
 }
 
 export interface PiCampaignHost {
+  rounds?: RoundWakeHost;
+  hypotheses?(values: string[]): Promise<unknown>;
   status(): Promise<unknown>;
   dispatch(input: CampaignDispatch): Promise<{ job: { state: string } | null; summary?: string }>;
   retry(input: { jobId: string; claimId: string; reason: string }): Promise<unknown>;
@@ -24,8 +27,15 @@ function result(details: unknown) {
 }
 
 export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost) {
+  const wake = host.rounds ? registerRoundWake(pi, host.rounds) : undefined;
   let active: { jobId: string; role: string; abort: AbortController; done: Promise<void> } | undefined;
 
+  if (host.hypotheses) pi.registerTool({
+    name: "evok_hypotheses", label: "EvoK · 研究假设",
+    description: "Replace the campaign's ordered backlog of untested hypotheses. A dispatched hypothesis is removed automatically.",
+    parameters: Type.Object({ hypotheses: Type.Array(Type.String({minLength:1,maxLength:2000}), {maxItems:32,uniqueItems:true}) }),
+    async execute(_call, params) { return result(await host.hypotheses!(params.hypotheses)); }
+  });
   pi.registerTool({
     name: "evok_status",
     label: "EvoK · 状态",
@@ -86,7 +96,7 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
       };
       const run = async () => {
         const receipt = await host.dispatch({ ...params, sessionId, signal: abort.signal });
-        if (params.role !== "researcher" || !params.reviewRequested || receipt.job?.state !== "review-pending")
+        if (params.role !== "researcher" || receipt.job?.state !== "review-pending")
           return receipt;
         abort.signal.throwIfAborted();
         if (active) active.role = "reviewer";
@@ -110,6 +120,7 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
           if (active?.abort === abort) {
             active = undefined;
             if (ctx.hasUI) ctx.ui.setStatus("evok-child", undefined);
+            if (!abort.signal.aborted && wake) void wake(ctx);
           }
         });
       active = { jobId: params.jobId, role: params.role, abort, done };
