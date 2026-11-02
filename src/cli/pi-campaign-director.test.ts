@@ -39,13 +39,23 @@ test("the main Pi session stays available while its named child runs and can rea
     },
   });
   const ctx = { sessionManager: { getSessionId: () => "main-A" } };
-  const call = (name: string, args: object) => tools.get(name).execute("call", args, undefined, undefined, ctx);
+  const call = (name: string, args: object) =>
+    tools.get(name).execute("call", args, undefined, undefined, ctx);
   const experiment = {
     role: "researcher",
     jobId: "exp-03",
     objective: "Test early delivery",
     sourcePaths: ["runtime/agent.py"],
     reviewRequested: true,
+    collaborators: [
+      {
+        role_name: "timer",
+        capability_profile: "diagnostic",
+        task_goal: "Locate the deadline failure",
+        evidence_refs: ["screening"],
+        deliverable_spec: "An observation",
+      },
+    ],
   };
   const receipt = await call("evok_dispatch", experiment);
   expect(receipt.details).toMatchObject({ jobId: "exp-03", state: "starting" });
@@ -57,6 +67,7 @@ test("the main Pi session stays available while its named child runs and can rea
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(seen.map((x) => x.role)).toEqual(["researcher", "reviewer"]);
   expect(seen[1].sourcePaths).toBeUndefined();
+  expect(seen[1].collaborators).toBeUndefined();
   expect(seen[1].sessionId).toBe("main-A");
   expect(notices.at(-1).message.content).toContain("completed");
   expect(notices[0].options).toEqual({ triggerTurn: false });
