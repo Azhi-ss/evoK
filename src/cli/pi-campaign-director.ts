@@ -2,16 +2,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerRoundWake, type RoundWakeHost } from "./pi-round-wake";
 import { Type } from "typebox";
+import { directorCollaboratorBatch, type CollaboratorSpec } from "../execution/pi-child-protocol";
+
+export type CampaignLimits = { researcherCNY?: number; reviewerCNY?: number; roundCNY?: number };
 
 export interface CampaignDispatch {
+  limits?: CampaignLimits;
   role: "researcher" | "reviewer";
   jobId: string;
   objective: string;
   reviewRequested?: boolean;
   sourcePaths?: string[];
+  collaborators?: CollaboratorSpec[];
   sessionId: string;
   signal: AbortSignal;
-  onStatus?: (line: string)=>void;
+  onStatus?: (line: string) => void;
 }
 
 export interface PiCampaignHost {
@@ -31,12 +36,22 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
   const wake = host.rounds ? registerRoundWake(pi, host.rounds) : undefined;
   let active: { jobId: string; role: string; abort: AbortController; done: Promise<void> } | undefined;
 
-  if (host.hypotheses) pi.registerTool({
-    name: "evok_hypotheses", label: "EvoK · 研究假设",
-    description: "Replace the campaign's ordered backlog of untested hypotheses. A dispatched hypothesis is removed automatically.",
-    parameters: Type.Object({ hypotheses: Type.Array(Type.String({minLength:1,maxLength:2000}), {maxItems:32,uniqueItems:true}) }),
-    async execute(_call, params) { return result(await host.hypotheses!(params.hypotheses)); }
-  });
+  if (host.hypotheses)
+    pi.registerTool({
+      name: "evok_hypotheses",
+      label: "EvoK · 研究假设",
+      description:
+        "Replace the campaign's ordered backlog of untested hypotheses. A dispatched hypothesis is removed automatically.",
+      parameters: Type.Object({
+        hypotheses: Type.Array(Type.String({ minLength: 1, maxLength: 2000 }), {
+          maxItems: 32,
+          uniqueItems: true,
+        }),
+      }),
+      async execute(_call, params) {
+        return result(await host.hypotheses!(params.hypotheses));
+      },
+    });
   pi.registerTool({
     name: "evok_status",
     label: "EvoK · 状态",
@@ -64,8 +79,23 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
       objective: Type.String({
         minLength: 1,
         maxLength: 2000,
-        description: "This round's hypothesis or review question. Do not copy the conversation or competition rules.",
+        description:
+          "This round's hypothesis or review question. Do not copy the conversation or competition rules.",
       }),
+      limits: Type.Optional(
+        Type.Object(
+          {
+            researcherCNY: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 300 })),
+            reviewerCNY: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 300 })),
+            roundCNY: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 300 })),
+          },
+          {
+            additionalProperties: false,
+            description:
+              "CNY ceilings for this job's Researcher, Reviewer and shared experiment round. A registered ceiling may only be tightened.",
+          },
+        ),
+      ),
       sourcePaths: Type.Optional(
         Type.Array(Type.String({ minLength: 1 }), {
           minItems: 1,
@@ -75,6 +105,7 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
             "Researcher only: select the specific runtime files for this experiment from evok_status, or name an intended new file. Reviewer automatically receives the frozen diff.",
         }),
       ),
+      collaborators: Type.Optional(directorCollaboratorBatch),
       reviewRequested: Type.Optional(
         Type.Boolean({
           description: "Dispatch a fresh independent Reviewer on the finished candidate before evaluation.",
@@ -85,22 +116,34 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
       if (active) throw Error("EvoK already has an active " + active.role + " for " + active.jobId);
       if (params.role === "researcher" && !params.sourcePaths?.length)
         throw Error("select sourcePaths for this experiment from evok_status");
-      if (params.role === "reviewer" && (params.sourcePaths || params.reviewRequested))
+      if (
+        params.role === "reviewer" &&
+        (params.sourcePaths || params.reviewRequested || params.collaborators)
+      )
         throw Error("the Reviewer uses the frozen candidate diff");
       const abort = new AbortController();
       const sessionId = ctx.sessionManager.getSessionId();
       if (ctx.hasUI) ctx.ui.setStatus("evok-child", "● " + params.role + " · " + params.jobId);
       const publish = (text: string) => {
         if (!abort.signal.aborted && ctx.sessionManager.getSessionId() === sessionId) {
-          pi.sendMessage({ customType: "evok-experiment", content: text, display: true }, { triggerTurn: false });
+          pi.sendMessage(
+            { customType: "evok-experiment", content: text, display: true },
+            { triggerTurn: false },
+          );
         }
       };
       const run = async () => {
-        const receipt = await host.dispatch({ ...params, sessionId, signal: abort.signal,
-          onStatus:line=>{ if(ctx.hasUI && !abort.signal.aborted) ctx.ui.setStatus("evok-child","● "+line); }
+        const receipt = await host.dispatch({
+          ...params,
+          sessionId,
+          signal: abort.signal,
+          onStatus: (line) => {
+            if (abort.signal.aborted || ctx.sessionManager.getSessionId() !== sessionId) return;
+            if (ctx.hasUI) ctx.ui.setStatus("evok-child", "● " + line);
+            if (line.endsWith("已交付")) publish("EvoK · " + line);
+          },
         });
-        if (params.role !== "researcher" || receipt.job?.state !== "review-pending")
-          return receipt;
+        if (params.role !== "researcher" || receipt.job?.state !== "review-pending") return receipt;
         abort.signal.throwIfAborted();
         if (active) active.role = "reviewer";
         if (ctx.hasUI) ctx.ui.setStatus("evok-child", "● reviewer · " + params.jobId);
@@ -117,7 +160,9 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
         .then(
           (outcome) => publish("EvoK · " + params.jobId + " · " + JSON.stringify(outcome)),
           (error) =>
-            publish("EvoK · " + params.jobId + " · " + (error instanceof Error ? error.message : String(error))),
+            publish(
+              "EvoK · " + params.jobId + " · " + (error instanceof Error ? error.message : String(error)),
+            ),
         )
         .finally(() => {
           if (active?.abort === abort) {

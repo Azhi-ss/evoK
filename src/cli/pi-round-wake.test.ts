@@ -12,8 +12,12 @@ test("shutdown during model switch restores the session without dispatching or a
     closed = 0,
     ack = 0;
   let markSwitch!: () => void, resumeSwitch!: () => void;
-  const switching = new Promise<void>(resolve => { markSwitch = resolve; });
-  const resumed = new Promise<void>(resolve => { resumeSwitch = resolve; });
+  const switching = new Promise<void>((resolve) => {
+    markSwitch = resolve;
+  });
+  const resumed = new Promise<void>((resolve) => {
+    resumeSwitch = resolve;
+  });
   const ctx = {
     get model() {
       return model;
@@ -27,8 +31,7 @@ test("shutdown during model switch restores the session without dispatching or a
   };
   const pi = {
     on: (name: string, fn: any) => events.set(name, fn),
-    appendEntry: (customType: string, data: any) =>
-      entries.push({ type: "custom", customType, data }),
+    appendEntry: (customType: string, data: any) => entries.push({ type: "custom", customType, data }),
     getThinkingLevel: () => level,
     setThinkingLevel: (v: string) => {
       level = v;
