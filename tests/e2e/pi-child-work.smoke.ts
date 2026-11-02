@@ -9,6 +9,7 @@ import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 
 const plugin = process.argv[2]; if (!plugin) throw Error("pass installed pi-subagents bundle/index.js");
+const recruit = process.argv[3] === "recruit";
 const dir = await mkdtemp(join(tmpdir(), "evok-native-smoke-"));
 const home = join(dir, "pi"), cwd = join(dir, "work"), output = join(dir, "proof.json");
 await Promise.all([mkdir(home), mkdir(cwd)]);
@@ -25,11 +26,13 @@ const server = createServer(async (req, res) => {
   if (isChild) calls.push({key, tools: body.tools?.map((t:any) => t.function.name).sort(), prior: messages.includes("unique-native-history"),
     clean: !/AMBIENT_SECRET_SENTINEL|parent-transcript-marker|round-[12]-key/.test(messages), max: body.reasoning_effort === "max"});
   const args = {decision_tag: "阶段发现就绪", summary: "unique-native-history", evidence_refs: [], modified_files: []};
-  const tool = {index: 0, id: "call"+calls.length, type: "function", function: {name: "evok_deliver", arguments: JSON.stringify(args)}};
+  const mkTool = (index: number, name: string, arguments_: unknown) => ({index, id: "call"+calls.length+"-"+index, type: "function", function: {name, arguments: JSON.stringify(arguments_)}});
+  const tools = recruit && calls.length === 1 ? [mkTool(0,"evok_read_evidence",{ref:"one"}),mkTool(1,"evok_read_evidence",{ref:"two"})]
+    : recruit && calls.length === 2 ? [mkTool(0,"evok_recruit",{collaborators:[{role_name:"counterexample",task_goal:"unique-native-history",capability_profile:"diagnostic",evidence_refs:[],deliverable_spec:"Give a counterexample"}]})] : [mkTool(0,"evok_deliver", args)];
   const chunk = (delta: object, finish_reason: string|null) => "data: " + JSON.stringify({id: "offline", model: body.model, created: 1,
     object: "chat.completion.chunk", choices: [{index:0,delta,finish_reason}],usage: {prompt_tokens:20,completion_tokens:10,total_tokens:30}}) + "\n\n";
   res.writeHead(200, {"Content-Type":"text/event-stream"});
-  res.end(chunk(isChild ? {role:"assistant",tool_calls:[tool]} : {role:"assistant",content:"standby"}, null) + chunk({}, isChild?"tool_calls":"stop") + "data: [DONE]\n\n");
+  res.end(chunk(isChild ? {role:"assistant",tool_calls:tools} : {role:"assistant",content:"standby"}, null) + chunk({}, isChild?"tool_calls":"stop") + "data: [DONE]\n\n");
 });
 server.listen(0,"127.0.0.1"); await once(server,"listening");
 const address=server.address(); if (!address || typeof address==="string") throw Error("missing local server");
@@ -54,9 +57,9 @@ export default function(pi){
    for(let i=1;i<=2;i++){
      const id={missionId:'mission',taskId:'work',runId:'round'+i,targetAgentId:'node-A'};
      const memorySlice=createMemorySlice({...id,sliceId:'slice'+i});
-     const roleContext=assembleRoleContext({...id,role:'researcher',contract,policy,objective:'Improve.',source:'offline',memoryDigest:memorySlice.digest});
+     const roleContext=assembleRoleContext({...id,role:'researcher',contract,policy,objective:'Improve.',source:'offline',tools:${JSON.stringify(recruit ? ['evok_read_evidence']:[])},memoryDigest:memorySlice.digest});
      results.push(await runPiWorker(pi,{nodeId:'node-A',roleName:'analyst',profile:'diagnostic',cwd:${JSON.stringify(cwd)},stateDir:${JSON.stringify(join(dir,"state"))},task:'Deliver.',roleContext,memorySlice,
-        nativePlugin:${JSON.stringify(resolve(plugin))}, model:{alias:'evok-meter-fixture',id:modelId,config:{...config,apiKey:'round-'+i+'-key'}},resumeRunId:results[0]?.nativeRunId,timeoutMs:35000}));
+        depth:1, controls:${JSON.stringify(recruit ? ['evok_recruit']:[])}, tools:${JSON.stringify(recruit?['evok_read_evidence']:[])},execute:async(name,args)=>'scoped:'+args.ref, nativePlugin:${JSON.stringify(resolve(plugin))}, model:{alias:'evok-meter-fixture',id:modelId,config:{...config,apiKey:'round-'+i+'-key'}},resumeRunId:results[0]?.nativeRunId,timeoutMs:35000}));
    }
    writeFileSync(${JSON.stringify(output)},JSON.stringify(results));
  }catch(e){writeFileSync(${JSON.stringify(output)},JSON.stringify({error:String(e),stack:e.stack}));}}});
@@ -71,9 +74,9 @@ try {
   for(let n=0;n<900 && proc.exitCode===null;n++) {const data=await readFile(output,'utf8').catch(()=>undefined); if(data){results=JSON.parse(data);break;} await delay(100);}
   assert.ok(Array.isArray(results), JSON.stringify({results,stderr,scratch:dir}));
   assert.equal(parentRequests,0);
-  assert.deepEqual(results.map(r=>[r.toolTurns,r.remainingToolTurns]),[[1,7],[1,6]]);
+  assert.deepEqual(results.map(r=>[r.toolTurns,r.remainingToolTurns]),recruit?[[2,6],[1,5]]:[[1,7],[1,6]]);
   assert.notEqual(results[0].nativeRunId,results[1].nativeRunId);
-  assert.deepEqual(results.map(r=>r.action.name),['evok_deliver','evok_deliver']);
-  assert.deepEqual(calls,[1,2].map(i=>({key:'Bearer round-'+i+'-key',tools:['evok_deliver'],prior:i===2,clean:true,max:true})));
+  assert.deepEqual(results.map(r=>r.action.name),[recruit?'evok_recruit':'evok_deliver','evok_deliver']);
+  assert.deepEqual(calls,(recruit?[1,1,2]:[1,2]).map(i=>({key:'Bearer round-'+i+'-key',tools:recruit?['evok_deliver','evok_read_evidence','evok_recruit']:['evok_deliver'],prior:i===2,clean:true,max:true})));
   console.log(JSON.stringify({nativeRuns:results.map(r=>r.nativeRunId), calls}));
 } finally {proc.kill('SIGTERM');await exit;server.close(); if(process.env.EVOK_KEEP_FIXTURE!=='1') await rm(dir,{recursive:true,force:true});}

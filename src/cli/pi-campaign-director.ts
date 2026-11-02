@@ -11,6 +11,7 @@ export interface CampaignDispatch {
   sourcePaths?: string[];
   sessionId: string;
   signal: AbortSignal;
+  onStatus?: (line: string)=>void;
 }
 
 export interface PiCampaignHost {
@@ -95,7 +96,9 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
         }
       };
       const run = async () => {
-        const receipt = await host.dispatch({ ...params, sessionId, signal: abort.signal });
+        const receipt = await host.dispatch({ ...params, sessionId, signal: abort.signal,
+          onStatus:line=>{ if(ctx.hasUI && !abort.signal.aborted) ctx.ui.setStatus("evok-child","● "+line); }
+        });
         if (params.role !== "researcher" || receipt.job?.state !== "review-pending")
           return receipt;
         abort.signal.throwIfAborted();

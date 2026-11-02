@@ -12,7 +12,7 @@ import { validateRoleContext, type RoleTaskContext } from "./role-context";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
 import { digestValue } from "./security-boundary";
 import { Check } from "typebox/value";
-import { workerTools, validateWorkerAction, hostToolSchemas, type WorkerProfile, type WorkerAction } from "./pi-child-protocol";
+import { workerTools, validateWorkerAction, hostToolSchemas, type WorkerControl, type WorkerProfile, type WorkerAction } from "./pi-child-protocol";
 import type { WorkerBinding } from "./pi-child-tools";
 
 type Host = Pick<ExtensionAPI, "events" | "registerProvider" | "unregisterProvider">;
@@ -20,7 +20,7 @@ export interface PiWorkerRequest {
   nodeId: string; roleName: string; profile: WorkerProfile; cwd: string; stateDir: string; task: string;
   roleContext: RoleTaskContext; memorySlice: MemorySlice;
   model: {alias: string; id: string; config: ProviderConfig};
-  nativePlugin?: string; remainingToolTurns?: number; resumeRunId?: string; signal?: AbortSignal; timeoutMs?: number; tools?: readonly string[];
+  controls?: readonly WorkerControl[]; depth?: number; nativePlugin?: string; remainingToolTurns?: number; resumeRunId?: string; signal?: AbortSignal; timeoutMs?: number; tools?: readonly string[];
   execute?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   onStarted?: (nativeRunId: string) => void | Promise<void>;
 }
@@ -29,7 +29,7 @@ async function json(path: string) { return JSON.parse(await readFile(path, "utf8
 export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<{nativeRunId: string; action: WorkerAction; toolTurns: number; remainingToolTurns: number}> {
   const memory = validateMemorySlice(input.memorySlice);
   const context = validateRoleContext(input.roleContext);
-  if (context.audit.targetAgentId !== memory.targetAgentId || context.audit.runId !== memory.runId ||
+  if (input.nodeId !== memory.targetAgentId || context.audit.targetAgentId !== memory.targetAgentId || context.audit.runId !== memory.runId ||
       context.audit.memoryDigest !== memory.digest || context.audit.taskId !== memory.taskId || context.audit.missionId !== memory.missionId) {
     throw Error("worker memory and context bindings do not match");
   }
@@ -42,9 +42,12 @@ export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<{n
   const cwd = await realpath(input.cwd), stateDir = await realpath(input.stateDir);
   const inside = relative(cwd, stateDir);
   if (inside !== ".." && !inside.startsWith("../")) throw Error("worker control directory must be outside its workspace");
-  const tools = workerTools(input.profile, input.tools);
+  if (input.tools?.some(name => !context.tools.includes(name))) throw Error("scoped tool not granted by broker");
+  const depth = input.depth ?? 3;
+  if (!Number.isInteger(depth) || depth < 0 || depth > 3) throw Error("invalid worker depth");
+  const tools = workerTools(input.profile, input.tools, input.controls, depth);
   const identity = digestValue({nodeId: input.nodeId, missionId: memory.missionId, targetAgentId: memory.targetAgentId,
-    cwd, role: context.role, profile: input.profile, tools, model: alias + "/" + id, allowedPaths: context.allowedPaths,
+    cwd, role: context.role, profile: input.profile, roleName: input.roleName, depth, tools, model: alias + "/" + id, allowedPaths: context.allowedPaths,
     policyDigest: context.audit.policyDigest, contractDigest: context.audit.contractDigest});
   const history = join(stateDir, "native-history.json");
   const previous = await json(history).catch(error => {if(error.code !== "ENOENT") throw error; return undefined;});
@@ -55,7 +58,7 @@ export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<{n
   if (remainingToolTurns === 0) throw Error("node tool-turn budget exhausted");
   input.signal?.throwIfAborted();
   const round = randomUUID(), actionFile = join(stateDir, round + ".action.json"), activeFile = join(stateDir, "active.json");
-  const binding: WorkerBinding = {nodeId: input.nodeId, roleRunId: round, remainingToolTurns, profile: input.profile, tools, provider: {alias, config}};
+  const binding: WorkerBinding = {nodeId: input.nodeId, roleRunId: round, remainingToolTurns, controls: input.controls ?? [], depth, profile: input.profile, tools, provider: {alias, config}};
   let server: Server | undefined, bindingOwned = false;
   let owner: ChildProcessWithoutNullStreams | undefined;
   let ownerEnded: Promise<unknown> | undefined;
@@ -127,7 +130,7 @@ export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<{n
           ["observed", "not-started"].includes(state.processTerminal?.state)) {
         if (stopTime !== undefined || state.state !== "complete") throw Error("worker " + state.state + ": " + (state.error ?? state.steps?.[0]?.error ?? "no result"));
         const raw = await json(actionFile);
-        const action = validateWorkerAction(raw.name, raw.args, input.profile);
+        const action = validateWorkerAction(raw.name, raw.args, input.profile, tools);
         const toolTurns = await json(join(stateDir, round + ".turns.json"));
         if (!Number.isInteger(toolTurns) || toolTurns < 1 || toolTurns > remainingToolTurns) throw Error("invalid worker tool-turn receipt");
         const remaining = remainingToolTurns - toolTurns;
