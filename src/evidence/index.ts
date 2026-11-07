@@ -142,18 +142,22 @@ export type {
   BudgetSpendKind,
 } from "./budget-gate";
 export {
+  RESEARCH_DECISION_PACKET_SCHEMA,
   RESEARCH_MEMORY_DEFAULT_MAX_CARDS,
   RESEARCH_MEMORY_FINDING_CARD_SCHEMA,
   RESEARCH_MEMORY_REVISION,
   RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION,
   RESEARCH_MEMORY_SNAPSHOT_SCHEMA,
   ResearchMemoryError,
+  assertPacketCardRefs,
+  projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   validateResearchMemorySnapshot,
 } from "./research-memory";
 export type {
   ResearchCardLifecycle,
+  ResearchDecisionPacket,
   ResearchFindingCard,
   ResearchMemorySnapshot,
   ResearchMemorySource,

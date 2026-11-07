@@ -64,10 +64,14 @@ import {
 export type { RuntimeUsage } from "../pi-agent-runtime";
 import {
   buildDirectorInput,
+  deriveDecisionDelta,
   DirectorDecisionFailedError,
   DirectorProposalRejectedError,
   validateDirectorProposal,
+  type DecisionDelta,
   type DirectorAction,
+  type DirectorDecision,
+  type DirectorInput,
   type DirectorProposal,
   type MissionDirector,
 } from "./mission-director";
@@ -85,11 +89,15 @@ import type { HostInventory } from "../execution/host-inventory";
 import type { ResourceRequest } from "../execution/resource-lease";
 import {
   createResearchMemoryProvider,
+  loadResearchMemorySnapshot,
   publishResearchMemorySnapshot,
 } from "../execution/research-memory-provider";
 import {
+  assertPacketCardRefs,
+  projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
+  type ResearchDecisionPacket,
   type ResearchMemorySource,
   type ResearchMemorySummary,
   type ResearchRunFinding,
@@ -337,6 +345,46 @@ export interface DecisionRecord {
   readonly tokens: RuntimeUsage["tokens"];
   readonly cost: number;
   readonly at: string;
+  /** M1-T2: which decision stage this priced call belonged to. */
+  readonly phase?: DecisionPhase;
+  /** M1-T2: the logical two-stage decision these calls belong to. */
+  readonly decisionGroupId?: string;
+  /** M1-T2: the validated proposal (frozen for the blind stage). */
+  readonly proposal?: DirectorProposal;
+  /** M1-T2: the actual model that served this stage (trusted-side pricing). */
+  readonly model?: ModelConfigView;
+  /** M1-T2: the pinned Memory view the revision stage actually received. */
+  readonly memory?: DecisionMemoryUse;
+  /** M1-T2: controller-derived delta between the two stages. */
+  readonly delta?: DecisionDelta;
+  /** M1-T2: the revision's own reason, kept next to the blind rationale. */
+  readonly revisionReason?: string;
+  /** M1-T2: considered actions the revision did not select. */
+  readonly rejectedAlternatives?: readonly RejectedAlternative[];
+}
+
+/** The two stages of one Director decision (M1-T2). */
+export type DecisionPhase = "blind" | "revision";
+
+/** Durable audit fields one decision stage contributes to its priced call. */
+type DecisionAuditFields = Pick<DecisionRecord, "phase" | "decisionGroupId" | "model" | "memory" | "delta" | "revisionReason" | "rejectedAlternatives">;
+
+/** What the Memory-informed stage was shown, and which cards it used. */
+export interface DecisionMemoryUse {
+  readonly snapshotId: string;
+  readonly snapshotDigest: string;
+  readonly packetDigest: string;
+  readonly cardRefs: readonly string[];
+  readonly usedCardRefs: readonly string[];
+}
+
+/** One bounded action the revision did not choose, with its reason. */
+export interface RejectedAlternative {
+  readonly action: DirectorAction;
+  readonly objective?: string;
+  /** Set only when a real (frozen or declared) proposal is being audited. */
+  readonly proposal?: DirectorProposal;
+  readonly reason: string;
 }
 
 export type MissionStatus =
@@ -1391,6 +1439,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     rejection: string | undefined,
     proposal?: DirectorProposal,
     usage?: RuntimeUsage,
+    extra: Partial<DecisionAuditFields> = {},
   ): Promise<MissionRecord> => {
     const decision: DecisionRecord = {
       decisionId: args.decisionId,
@@ -1400,14 +1449,16 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       accepted,
       ...(proposal?.action ? { action: proposal.action } : {}),
       ...(proposal?.rationale ? { rationale: proposal.rationale } : {}),
+      ...(proposal ? { proposal } : {}),
       ...(rejection ? { rejection } : {}),
       tokens: { ...(usage?.tokens ?? ZERO_USAGE.tokens) },
       cost,
       at: now(),
+      ...extra,
     };
     const event: HistoryEvent = accepted
-      ? { type: "DIRECTOR_CALLED", at: now(), detail: { decisionId: args.decisionId, action: proposal?.action, cost } }
-      : { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: args.decisionId, attempt: args.attempt, reason: rejection } };
+      ? { type: "DIRECTOR_CALLED", at: now(), detail: { decisionId: args.decisionId, action: proposal?.action, cost, ...(extra.phase ? { phase: extra.phase } : {}), ...(extra.delta ? { delta: extra.delta } : {}) } }
+      : { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: args.decisionId, attempt: args.attempt, reason: rejection, ...(extra.phase ? { phase: extra.phase } : {}) } };
     return withEvent(r, event, { decisions: [...(r.decisions ?? []), decision] });
   };
 
@@ -1556,6 +1607,203 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       return { ...r, reserved: r.reserved + decisionReserve };
     };
 
+    /**
+     * One bounded decision STAGE (#211): up to MAX_DECISION_ATTEMPTS priced
+     * calls, controller re-validation, and one durable DecisionRecord per call.
+     * Both stages reserve, meter, and settle through the same budget rules, so
+     * the Memory-informed revision is never free reasoning.
+     */
+    // The T4 path returned above and a resume without a port is rejected
+    // earlier; this guard keeps the loop honest for any future caller.
+    const director = options.director;
+    if (director === undefined) {
+      await releaseLock();
+      throw new MissionStartRejectedError("autonomous continuation requires a Mission Director decision port");
+    }
+    const decideStage = async (args: {
+      current: MissionRecord;
+      stageInput: DirectorInput;
+      phase: DecisionPhase;
+      decisionGroupId: string;
+      decisionId: (attempt: number) => string;
+      blindProposal?: DirectorProposal;
+      packet?: ResearchDecisionPacket;
+    }): Promise<{ record: MissionRecord; proposal?: DirectorProposal; blockedReason?: string }> => {
+      let r = args.current;
+      let blockedReason: string | undefined;
+      const stageExtra = { phase: args.phase, decisionGroupId: args.decisionGroupId } as const;
+
+      /** Durable audit fields for one accepted stage call (#211 AC6). */
+      const auditOf = (proposal: DirectorProposal, call: DirectorDecision): Partial<DecisionAuditFields> => {
+        const usedCardRefs = [...new Set(call.usedMemoryRefs ?? [])];
+        const base = { ...stageExtra, ...(call.model ? { model: call.model } : {}) };
+        if (args.phase === "blind") return base;
+        const rejectedAlternatives: RejectedAlternative[] = (proposal.alternatives ?? []).map((alternative) => ({
+          action: alternative.action,
+          objective: alternative.objective,
+          reason: "not selected: only the head action dispatches",
+        }));
+        // A delta only exists when Memory was actually delivered; an Off or
+        // unpinned Mission must never attribute a change to Memory it never saw.
+        if (args.packet === undefined || args.blindProposal === undefined) {
+          return { ...base, revisionReason: proposal.rationale, ...(rejectedAlternatives.length ? { rejectedAlternatives } : {}) };
+        }
+        const delta = deriveDecisionDelta(args.blindProposal, proposal);
+        if (delta !== "unchanged") {
+          rejectedAlternatives.push({
+            action: args.blindProposal.action,
+            ...(args.blindProposal.task ? { objective: args.blindProposal.task.objective } : {}),
+            proposal: args.blindProposal,
+            reason: `superseded by the Memory-informed revision (delta ${delta})`,
+          });
+        }
+        return {
+          ...base,
+          delta,
+          revisionReason: proposal.rationale,
+          ...(rejectedAlternatives.length ? { rejectedAlternatives } : {}),
+          memory: {
+            snapshotId: args.packet.snapshotId,
+            snapshotDigest: args.packet.snapshotDigest,
+            packetDigest: args.packet.digest,
+            cardRefs: args.packet.cards.map((card) => card.cardId),
+            usedCardRefs,
+          },
+        };
+      };
+
+      for (let decisionAttempt = 1; decisionAttempt <= MAX_DECISION_ATTEMPTS; decisionAttempt++) {
+        const stateVersion = r.stateVersion ?? 0;
+        const decisionId = args.decisionId(decisionAttempt);
+        const reserved = reserveDecisionSlot(r);
+        if (reserved.status === "budget-exhausted") return { record: reserved };
+        r = reserved;
+        let call: DirectorDecision;
+        try {
+          call = await director.decide(args.stageInput, runController.signal, decisionAttempt);
+        } catch (error) {
+          if ((error as Error).name === "AbortError" || aborted()) {
+            r = withEvent(r, { type: "RUN_INTERRUPTED", at: now(), detail: { decisionId } }, {
+              status: "interrupted",
+              stopReason: "user interruption during a director decision; result unconfirmed until recovery",
+            });
+            await persist(options.projectRoot, r);
+            await releaseLock();
+            throw abortError("director decision");
+          }
+          if (error instanceof DirectorDecisionFailedError) {
+            r = { ...r, reserved: Math.max(0, r.reserved - decisionReserve) };
+            r = withEvent(r, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId, reason: error.message, phase: args.phase } }, {
+              status: "decision-failed",
+              stopReason: `decision-model run failed: ${error.message}`,
+            });
+            await persist(options.projectRoot, r);
+            await releaseLock();
+            throw error;
+          }
+          // A rejection surfaced by the adapter (non-JSON / invalid JSON) is
+          // still a REAL priced model call: meter its carried usage so the
+          // correction attempt counts against the budget (AC7), then retry.
+          if (error instanceof DirectorProposalRejectedError && error.usage) {
+            const metered = await meterDecision({
+              current: { ...r, reserved: Math.max(0, r.reserved - decisionReserve) },
+              decisionId, stateVersion, attempt: decisionAttempt,
+              usage: error.usage, sessionId: error.sessionId, model: error.model,
+            });
+            r = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: error.sessionId }, metered.cost, false, error.message, undefined, error.usage, { ...stageExtra, ...(error.model ? { model: error.model } : {}) });
+            if (metered.unknownCost) {
+              r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+                status: "budget-exhausted",
+                stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+              });
+              await persist(options.projectRoot, r);
+              await releaseLock();
+              throw new BudgetExhaustedError(r.stopReason!);
+            }
+            blockedReason = error.message;
+            await persist(options.projectRoot, r);
+            continue;
+          }
+          // A rejection without any carried usage (no model call happened).
+          const reason = error instanceof DirectorProposalRejectedError ? error.message : String((error as Error).message ?? error);
+          r = { ...r, reserved: Math.max(0, r.reserved - decisionReserve) };
+          r = await appendDecision(r, { decisionId, stateVersion, attempt: decisionAttempt }, 0, false, reason, undefined, ZERO_USAGE, stageExtra);
+          blockedReason = reason;
+          await persist(options.projectRoot, r);
+          continue;
+        }
+
+        // Validate AGAIN in the controller (never trust the adapter). A revision
+        // must also only claim Memory cards that were actually delivered.
+        let accepted: DirectorProposal;
+        try {
+          accepted = validateDirectorProposal(call.proposal, args.stageInput);
+          // The stage input is the frozen base state (#209 "same trusted state"),
+          // so the authoritative budget can only have shrunk since it was built:
+          // re-check the request against the live available budget here instead
+          // of accepting a proposal the dispatch gate must refuse.
+          const liveAvailable = r.budget.remaining - Math.max(0, r.reserved - decisionReserve);
+          if ((accepted.expectedCost ?? 0) > liveAvailable + 1e-12) {
+            throw new DirectorProposalRejectedError(
+              `over-budget proposal: it expects ${accepted.expectedCost} ${r.budget.units} but only ${liveAvailable} is available now; propose within the remaining budget or stop`,
+            );
+          }
+          if (args.packet) assertPacketCardRefs(args.packet, call.usedMemoryRefs ?? []);
+          else if (call.usedMemoryRefs?.length) {
+            throw new DirectorProposalRejectedError("no Research Decision Packet was delivered, so no Memory card can be claimed as used");
+          }
+        } catch (error) {
+          const reason = (error as Error).message;
+          const metered = await meterDecision({
+            current: { ...r, reserved: Math.max(0, r.reserved - decisionReserve) },
+            decisionId, stateVersion, attempt: decisionAttempt,
+            usage: call.usage, sessionId: call.sessionId, model: call.model,
+          });
+          r = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, false, reason, undefined, call.usage, { ...stageExtra, ...(call.model ? { model: call.model } : {}) });
+          if (metered.unknownCost) {
+            r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+              status: "budget-exhausted",
+              stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+            });
+            await persist(options.projectRoot, r);
+            await releaseLock();
+            throw new BudgetExhaustedError(r.stopReason!);
+          }
+          blockedReason = reason;
+          await persist(options.projectRoot, r);
+          continue;
+        }
+
+        const metered = await meterDecision({
+          current: { ...r, reserved: Math.max(0, r.reserved - decisionReserve) },
+          decisionId, stateVersion, attempt: decisionAttempt,
+          usage: call.usage, sessionId: call.sessionId, model: call.model,
+        });
+        r = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, true, undefined, accepted, call.usage, auditOf(accepted, call));
+        if (metered.unknownCost) {
+          r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
+            status: "budget-exhausted",
+            stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
+          });
+          await persist(options.projectRoot, r);
+          await releaseLock();
+          throw new BudgetExhaustedError(r.stopReason!);
+        }
+        // A priced decision may itself cross the budget: metered cost leaves
+        // consumed/remaining honest; enforce a hard stop here.
+        if (r.budget.consumed > r.budget.total + 1e-12) {
+          r = withEvent(r, { type: "BUDGET_EXHAUSTED", at: now(), detail: { consumed: r.budget.consumed, total: r.budget.total } }, {
+            status: "budget-exhausted",
+            stopReason: `declared budget ${r.budget.total} ${r.budget.units} exceeded after a decision call; no further dispatch`,
+          });
+        }
+        // The accepted proposal is durable BEFORE the caller shows any Memory.
+        await persist(options.projectRoot, r);
+        return { record: r, proposal: accepted };
+      }
+      return { record: r, blockedReason };
+    };
+
     while (true) {
       // After a candidate Run or priced decision crosses the budget the loop
       // ends with a truthful persisted terminal status (no throw needed).
@@ -1583,145 +1831,93 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         stopConditions: record.stopConditions ?? draft.stopConditions,
       });
 
-      // Bounded decision with correction attempts. EVERY call is a fresh,
-      // priced Run; correction consumes the same authorized resources.
-      let proposal: DirectorProposal | undefined;
-      let blockedReason: string | undefined;
-      for (let decisionAttempt = 1; decisionAttempt <= MAX_DECISION_ATTEMPTS; decisionAttempt++) {
-        const stateVersion = record.stateVersion ?? 0;
-        const decisionId = `${draft.id}:director:${stateVersion}:${decisionAttempt}`;
-        const reserved = reserveDecisionSlot(record);
-        if (reserved.status === "budget-exhausted") {
-          record = reserved;
-          break;
-        }
-        record = reserved;
-        let call;
-        try {
-          call = await options.director.decide(directorInput, runController.signal, decisionAttempt);
-        } catch (error) {
-          if ((error as Error).name === "AbortError" || aborted()) {
-            record = withEvent(record, { type: "RUN_INTERRUPTED", at: now(), detail: { decisionId } }, {
-              status: "interrupted",
-              stopReason: "user interruption during a director decision; result unconfirmed until recovery",
-            });
-            await persist(options.projectRoot, record);
-            await releaseLock();
-            throw abortError("director decision");
-          }
-          if (error instanceof DirectorDecisionFailedError) {
-            record = { ...record, reserved: Math.max(0, record.reserved - decisionReserve) };
-            record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId, reason: error.message } }, {
-              status: "decision-failed",
-              stopReason: `decision-model run failed: ${error.message}`,
-            });
-            await persist(options.projectRoot, record);
-            await releaseLock();
-            throw error;
-          }
-          // A rejection surfaced by the adapter (non-JSON / invalid JSON) is
-          // still a REAL priced model call: meter its carried usage so the
-          // correction attempt counts against the budget (AC6), then retry.
-          if (error instanceof DirectorProposalRejectedError && error.usage) {
-            const metered = await meterDecision({
-              current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
-              decisionId, stateVersion, attempt: decisionAttempt,
-              usage: error.usage, sessionId: error.sessionId, model: error.model,
-            });
-            record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: error.sessionId }, metered.cost, false, error.message, undefined, error.usage);
-            if (metered.unknownCost) {
-              record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
-                status: "budget-exhausted",
-                stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
-              });
-              await persist(options.projectRoot, record);
-              await releaseLock();
-              throw new BudgetExhaustedError(record.stopReason!);
-            }
-            blockedReason = error.message;
-            await persist(options.projectRoot, record);
-            continue;
-          }
-          // A rejection without any carried usage (no model call happened).
-          const reason = error instanceof DirectorProposalRejectedError ? error.message : String((error as Error).message ?? error);
-          record = { ...record, reserved: Math.max(0, record.reserved - decisionReserve) };
-          record = await appendDecision(record, { decisionId, stateVersion, attempt: decisionAttempt }, 0, false, reason, undefined, ZERO_USAGE);
-          blockedReason = reason;
-          await persist(options.projectRoot, record);
-          continue;
-        }
+      // ── M1-T2 two-stage decision (#211) ──────────────────────────────────
+      // Stage 1 is Memory-blind: it sees the same trusted state as before and
+      // nothing from Research Memory. Its validated proposal is persisted
+      // (frozen) BEFORE any Memory card is loaded, so a crash or revision can
+      // never regenerate a purportedly blind proposal after Memory was visible.
+      // Stage 2 receives that same base state plus the frozen proposal and one
+      // pinned Decision Packet, and ONLY its Revised Proposal can dispatch.
+      const stateVersion = record.stateVersion ?? 0;
+      const decisionGroupId = `${draft.id}:director:${stateVersion}`;
 
-        // Validate AGAIN in the controller (never trust the adapter).
-        let accepted: DirectorProposal;
-        try {
-          accepted = validateDirectorProposal(call.proposal, directorInput);
-        } catch (error) {
-          const reason = (error as Error).message;
-          const metered = await meterDecision({
-            current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
-            decisionId, stateVersion, attempt: decisionAttempt,
-            usage: call.usage, sessionId: call.sessionId, model: call.model,
-          });
-          record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, false, reason, undefined, call.usage);
-          if (metered.unknownCost) {
-            record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
-              status: "budget-exhausted",
-              stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
-            });
-            await persist(options.projectRoot, record);
-            await releaseLock();
-            throw new BudgetExhaustedError(record.stopReason!);
-          }
-          blockedReason = reason;
-          await persist(options.projectRoot, record);
-          continue;
-        }
-
-        const metered = await meterDecision({
-          current: { ...record, reserved: Math.max(0, record.reserved - decisionReserve) },
-          decisionId, stateVersion, attempt: decisionAttempt,
-          usage: call.usage, sessionId: call.sessionId, model: call.model,
-        });
-        record = await appendDecision(metered.record, { decisionId, stateVersion, attempt: decisionAttempt, sessionId: call.sessionId }, metered.cost, true, undefined, accepted, call.usage);
-        if (metered.unknownCost) {
-          record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { decisionId, reason: "decision usage without meterable cost" } }, {
-            status: "budget-exhausted",
-            stopReason: "decision-model usage has no meterable cost in the declared unit; refusing to treat unknown cost as zero",
-          });
-          await persist(options.projectRoot, record);
-          await releaseLock();
-          throw new BudgetExhaustedError(record.stopReason!);
-        }
-        // A priced decision may itself cross the budget: metered cost leaves
-        // consumed/remaining honest; enforce a hard stop here.
-        if (record.budget.consumed > record.budget.total + 1e-12) {
-          record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { consumed: record.budget.consumed, total: record.budget.total } }, {
-            status: "budget-exhausted",
-            stopReason: `declared budget ${record.budget.total} ${record.budget.units} exceeded after a decision call; no further dispatch`,
-          });
-        }
-        proposal = accepted;
-        await persist(options.projectRoot, record);
-        break;
-      }
-
+      const blindStage = await decideStage({
+        current: record,
+        stageInput: directorInput,
+        phase: "blind",
+        decisionGroupId,
+        decisionId: (attempt) => `${decisionGroupId}:${attempt}`,
+      });
+      record = blindStage.record;
       if (record.status === "budget-exhausted") {
-        // Pre-decision budget stop: persist and surface a truthful error, never
-        // silently wait for another prompt.
         await persist(options.projectRoot, record);
         await releaseLock();
         throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the next decision; no further dispatch");
       }
-      if (!proposal) {
-        const reason = blockedReason ?? "the decision model returned no usable proposal";
-        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason } }, {
+      if (!blindStage.proposal) {
+        const reason = blindStage.blockedReason ?? "the decision model returned no usable proposal";
+        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "blind" } }, {
           status: "director-blocked",
-          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts (${reason}); stopping for an explicit decision instead of guessing`,
+          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-blind stage (${reason}); stopping for an explicit decision instead of guessing`,
         });
         await persist(options.projectRoot, record);
         await releaseLock();
         throw new DirectorBlockedError(record.stopReason!, reason);
       }
+      const blindProposal = blindStage.proposal;
+
+      // Stage 0/2 pin: one snapshot, loaded only after the blind proposal is
+      // durably frozen. Damaged Memory fails closed rather than deciding on an
+      // empty research history.
+      let pinnedPacket: ResearchDecisionPacket | undefined;
+      if (researchMemoryEnabled) {
+        try {
+          const snapshot = await loadResearchMemorySnapshot(memoryDir);
+          if (snapshot !== undefined) pinnedPacket = projectResearchDecisionPacket(snapshot);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: decisionGroupId, reason } }, {
+            status: "director-blocked",
+            stopReason: `Research Memory could not be pinned for the revision stage (${reason}); refusing to decide on damaged memory`,
+          });
+          await persist(options.projectRoot, record);
+          await releaseLock();
+          throw new DirectorBlockedError(record.stopReason!, reason);
+        }
+      }
+
+      const revisionStage = await decideStage({
+        current: record,
+        stageInput: {
+          ...directorInput,
+          decisionPhase: {
+            blindProposal,
+            ...(pinnedPacket ? { memoryPacket: pinnedPacket } : {}),
+          },
+        },
+        phase: "revision",
+        decisionGroupId,
+        decisionId: (attempt) => `${decisionGroupId}:${attempt}:revision`,
+        blindProposal,
+        ...(pinnedPacket ? { packet: pinnedPacket } : {}),
+      });
+      record = revisionStage.record;
+      if (record.status === "budget-exhausted") {
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the Memory-informed revision; no further dispatch");
+      }
+      if (!revisionStage.proposal) {
+        const reason = revisionStage.blockedReason ?? "the decision model returned no usable revised proposal";
+        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "revision" } }, {
+          status: "director-blocked",
+          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-informed stage (${reason}); the frozen Blind Proposal was NOT dispatched`,
+        });
+        await persist(options.projectRoot, record);
+        await releaseLock();
+        throw new DirectorBlockedError(record.stopReason!, reason);
+      }
+      const proposal = revisionStage.proposal;
 
       if (proposal.action === "stop") {
         record = withEvent(record, { type: "DIRECTOR_STOPPED", at: now(), detail: { stateVersion: record.stateVersion, stopReason: proposal.stopReason, rationale: proposal.rationale } }, {
@@ -1827,7 +2023,9 @@ export function summarizeMission(record: MissionRecord): {
       evidenceRefs: record.baseline.evidenceRefs,
     } : { evidenceRefs: [] }),
     experiments: experiments.length,
-    decisions: record.decisions?.length ?? 0,
+    // One logical two-stage decision per decisionGroupId (#211); legacy
+    // records without a group id keep counting one price line per decision.
+    decisions: new Set((record.decisions ?? []).map((decision) => decision.decisionGroupId ?? decision.decisionId)).size,
     negativeEvidence: experiments.filter((entry) => !entry.ok).length,
     ...(record.researchMemory ? { researchMemory: record.researchMemory } : {}),
   };

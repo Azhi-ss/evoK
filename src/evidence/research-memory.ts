@@ -12,6 +12,7 @@ import { deepFreeze, digestValue } from "../security-boundary";
 export const RESEARCH_MEMORY_SNAPSHOT_SCHEMA = "evok.research-memory-snapshot/v1" as const;
 export const RESEARCH_MEMORY_FINDING_CARD_SCHEMA = "evok.research-memory-finding-card/v1" as const;
 export const RESEARCH_MEMORY_REVISION = "research-memory/v1" as const;
+export const RESEARCH_DECISION_PACKET_SCHEMA = "evok.research-decision-packet/v1" as const;
 export const RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION = "research-memory-retrieval/v1" as const;
 /** Hard retrieval bound; trusted policy may lower it, never trust an absent value. */
 export const RESEARCH_MEMORY_DEFAULT_MAX_CARDS = 8;
@@ -69,6 +70,22 @@ export interface ResearchMemorySnapshot {
   readonly memoryRevision: typeof RESEARCH_MEMORY_REVISION;
   readonly retrievalPolicyRevision: typeof RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION;
   readonly maxCards: number;
+  readonly cards: readonly ResearchFindingCard[];
+  readonly omittedCardCount: number;
+  readonly digest: string;
+}
+
+/**
+ * The bounded Memory view one Memory-informed decision stage receives: cards
+ * from exactly ONE pinned snapshot, plus the omission count. It is a
+ * presentation projection of an already-derived snapshot, never a new store.
+ */
+export interface ResearchDecisionPacket {
+  readonly schema: typeof RESEARCH_DECISION_PACKET_SCHEMA;
+  readonly missionId: string;
+  readonly snapshotId: string;
+  readonly snapshotDigest: string;
+  readonly ledgerRevision: number;
   readonly cards: readonly ResearchFindingCard[];
   readonly omittedCardCount: number;
   readonly digest: string;
@@ -228,6 +245,42 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
 
 function snapshotIdFor(digest: string): string {
   return `research-memory:${digest}`;
+}
+
+/**
+ * Projects the decision packet from ONE verified snapshot. The packet is
+ * deterministic for the same snapshot and card limit, and can only ever carry
+ * cards that snapshot already published.
+ */
+export function projectResearchDecisionPacket(
+  snapshot: ResearchMemorySnapshot,
+  options: { readonly maxCards?: number } = {},
+): ResearchDecisionPacket {
+  const verified = validateResearchMemorySnapshot(snapshot);
+  const limit = options.maxCards === undefined
+    ? verified.maxCards
+    : Math.min(maxCardsOf(options.maxCards), verified.maxCards);
+  const cards = verified.cards.slice(0, limit);
+  const body = {
+    schema: RESEARCH_DECISION_PACKET_SCHEMA,
+    missionId: verified.missionId,
+    snapshotId: verified.snapshotId,
+    snapshotDigest: verified.digest,
+    ledgerRevision: verified.ledgerRevision,
+    cards,
+    omittedCardCount: verified.omittedCardCount + (verified.cards.length - cards.length),
+  };
+  return deepFreeze({ ...body, digest: digestValue(body) });
+}
+
+/** Used Memory refs must belong to the delivered packet, never another one. */
+export function assertPacketCardRefs(packet: ResearchDecisionPacket, usedRefs: readonly string[]): void {
+  const delivered = new Set(packet.cards.map((card) => card.cardId));
+  for (const ref of usedRefs) {
+    if (!delivered.has(ref)) {
+      throw new ResearchMemoryError(`Memory ref "${ref}" is not part of the delivered packet`);
+    }
+  }
 }
 
 /** Rebuilds a persisted/loaded snapshot and fails closed on any corruption. */

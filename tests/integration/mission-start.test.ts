@@ -1012,3 +1012,353 @@ describe("Research Memory rejection never costs authoritative history (#210)", (
     expect(record.researchMemory).toBeUndefined();
   });
 });
+
+// ── M1-T2 (#211): Memory-blind Proposal → Memory-informed Revision ──────────
+
+const DECISION_USAGE = {
+  tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
+  cost: { input: 0.002, output: 0.003, cacheRead: 0, cacheWrite: 0, total: 0.005 },
+};
+
+type StageScript = { proposal: unknown; usedMemoryRefs?: string[] };
+
+/** A deterministic two-stage decision port that records what each stage saw. */
+function twoStageDirector(script: (input: DirectorInput, stage: "blind" | "revision", attempt: number) => StageScript) {
+  const calls: Array<{ input: DirectorInput; stage: "blind" | "revision"; attempt: number }> = [];
+  const director: MissionDirector = {
+    id: "two-stage-scripted",
+    async decide(input, _signal, attempt = 1) {
+      const stage = input.decisionPhase === undefined ? "blind" : "revision";
+      calls.push({ input: structuredClone(input), stage, attempt });
+      const result = script(input, stage, attempt);
+      return {
+        proposal: result.proposal as never,
+        sessionId: `${stage}-${attempt}`,
+        usage: DECISION_USAGE,
+        model: { provider: CONTROL_PROVIDER, model: "deterministic", id: `${CONTROL_PROVIDER}/deterministic` },
+        ...(result.usedMemoryRefs ? { usedMemoryRefs: result.usedMemoryRefs } : {}),
+      };
+    },
+  };
+  return { director, calls };
+}
+
+const investigateTask = (objective: string, stateVersion: number) => ({
+  stateVersion,
+  action: "investigate",
+  rationale: `measured baseline is available; ${objective}`,
+  task: { objective, expectedOutputs: ["answer.txt"] },
+  expectedCost: 0.001,
+});
+
+describe("Memory-blind and Memory-informed Director decisions (#211)", () => {
+  test("the blind stage sees no Research Memory; the revision is the same prompt plus the frozen proposal and one pinned packet", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-prompts"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-t2-prompts");
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const decisionPrompts: string[] = [];
+    let decisionCalls = 0;
+
+    // The REAL Pi decision adapter: its prompts are what the model actually saw.
+    const { createPiMissionDirector } = await import("../../src/mission-director");
+    const director = createPiMissionDirector({
+      resources,
+      runtimeFactory: (root) => new PiAgentRuntime({
+        workspaceRoot: root,
+        sessionFactory: async (): Promise<AgentRuntimeSession> => {
+          let listener: ((event: Record<string, unknown>) => void) | undefined;
+          return {
+            sessionId: `decision-${decisionCalls}`,
+            subscribe(next) { listener = next; return () => { listener = undefined; }; },
+            async prompt(text: string) {
+              decisionPrompts.push(text);
+              decisionCalls += 1;
+              const stateVersion = Number(text.match(/"stateVersion":(\d+)/)?.[1]);
+              const proposal = { ...investigateTask("materialize answer.txt again in a fresh workspace", stateVersion), basedOn: [`${draft.id}:baseline:1`] };
+              const body = decisionCalls === 2
+                ? { ...proposal, usedMemoryRefs: [`finding:${draft.id}:baseline:1`] }
+                : proposal;
+              listener?.({ type: "agent_start" });
+              listener?.({
+                type: "agent_end",
+                messages: [{
+                  role: "assistant",
+                  content: [{ type: "text", text: JSON.stringify(body) }],
+                  usage: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+                  stopReason: "stop",
+                }],
+              });
+            },
+            async abort() {},
+            dispose() { listener = undefined; },
+            getSessionStats() {
+              return { tokens: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 }, cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } };
+            },
+          };
+        },
+      }),
+    });
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    // One decision (both stages) then the authorized one-Experiment bound.
+    expect(outcome.status).toBe("iteration-limit");
+    expect(outcome.experiments).toHaveLength(1);
+    expect(decisionPrompts).toHaveLength(2);
+
+    // AC1: the blind prompt carries the trusted state and NO Memory projection.
+    expect(decisionPrompts[0]).toContain("CURRENT AUTHORITATIVE MISSION STATE (JSON):");
+    expect(decisionPrompts[0]).not.toContain("RESEARCH DECISION PACKET");
+    expect(decisionPrompts[0]).not.toContain("BLIND PROPOSAL");
+    expect(decisionPrompts[0]).toContain("0.75"); // measured evidence stays visible
+    expect(decisionPrompts[0]).not.toContain("finding:");
+
+    // AC9: the revision prompt is the SAME prompt plus only the allowed fields
+    // (the runtime-appended task Constraints block is identical in both).
+    const withoutConstraints = (text: string) => text.split("\n").filter((line) => !line.startsWith("Constraints: ")).join("\n");
+    const base = withoutConstraints(decisionPrompts[0]!);
+    const revisionPrompt = withoutConstraints(decisionPrompts[1]!);
+    expect(revisionPrompt.slice(0, base.length)).toBe(base);
+    expect(constraintsFromPrompt(decisionPrompts[1]!)).toEqual(constraintsFromPrompt(decisionPrompts[0]!));
+    const added = revisionPrompt.slice(base.length);
+    expect(added).toContain("BLIND PROPOSAL (frozen, JSON):");
+    expect(added).toContain("RESEARCH DECISION PACKET (one pinned snapshot, JSON):");
+    expect(added).toContain(`finding:${draft.id}:baseline:1`);
+    expect(added).toContain('"action":"investigate"');
+    expect(added).not.toContain('"observations"');
+    expect(added).not.toContain('"stopConditions"');
+    expect(added).not.toContain('"contract"');
+
+    // Both proposals, the pinned refs, the derived delta, and per-stage usage
+    // are durable; the model identity is the trusted-side one.
+    const decisions = outcome.record.decisions!;
+    const firstBlind = decisions.find((d) => d.phase === "blind")!;
+    const firstRevision = decisions.find((d) => d.phase === "revision")!;
+    expect(firstBlind.proposal?.action).toBe("investigate");
+    expect(firstRevision.proposal?.action).toBe("investigate");
+    expect(firstRevision.delta).toBe("unchanged");
+    expect(firstRevision.revisionReason).toContain("measured baseline");
+    expect(firstRevision.memory?.snapshotId).toBe(`research-memory:${firstRevision.memory!.snapshotDigest}`);
+    expect(firstRevision.memory?.cardRefs).toContain(`finding:${draft.id}:baseline:1`);
+    expect(firstRevision.memory?.usedCardRefs).toEqual([`finding:${draft.id}:baseline:1`]);
+    expect(outcome.record.usage.decisions).toHaveLength(2);
+  });
+
+  test("the Blind Proposal is frozen before any Memory card is visible and only the Revised Proposal dispatches", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-freeze"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const frozenAtRevision: number[] = [];
+    const { director } = twoStageDirector((input, stage) => {
+      const last = input.observations[input.observations.length - 1]!;
+      if (input.observations.length >= 2) {
+        return { proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "two observations", stopReason: "done" } };
+      }
+      if (stage === "blind") {
+        return { proposal: investigateTask("blind-only task objective", input.stateVersion) };
+      }
+      return { proposal: { ...investigateTask("revised task after Memory", input.stateVersion), basedOn: [last.runId] } };
+    });
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      onPersistedEvent: async (event, record) => {
+        if (event.type === "DIRECTOR_CALLED" && event.detail?.phase === "revision" && frozenAtRevision.length === 0) {
+          // What was already durable when the revision call was persisted.
+          frozenAtRevision.push(record.decisions!.filter((d) => d.phase === "blind").length);
+        }
+      },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(frozenAtRevision).toEqual([1]);
+    expect(outcome.experiments).toHaveLength(1);
+    // Only the Revised Proposal reached the Task/Run path.
+    const directTasks = outcome.record.tasks!.filter((task) => task.source === "director");
+    expect(directTasks).toHaveLength(1);
+    expect(directTasks[0]!.objective).toBe("revised task after Memory");
+    expect(JSON.stringify(outcome.record.tasks)).not.toContain("blind-only task objective");
+
+    const revision = outcome.record.decisions!.find((d) => d.phase === "revision" && d.accepted)!;
+    expect(revision.delta).toBe("replaced");
+    expect(revision?.rejectedAlternatives?.map((entry) => entry.objective ?? entry.proposal?.task?.objective)).toContain("blind-only task objective");
+    expect(revision?.rejectedAlternatives?.[0]?.reason).toMatch(/superseded/);
+  });
+
+  test("a withdrawn blind action dispatches nothing and is recorded as withdrawn", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-withdraw"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const { director } = twoStageDirector((input, stage) => ({
+      proposal: stage === "blind"
+        ? investigateTask("blind action that Memory later withdraws", input.stateVersion)
+        : { stateVersion: input.stateVersion, action: "stop", rationale: "Memory shows the direction is already covered", stopReason: "withdrawn after Memory" },
+    }));
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("director-stopped");
+    expect(outcome.experiments).toHaveLength(0);
+    expect(writes.prompts).toHaveLength(1); // baseline only
+    const revision = outcome.record.decisions!.find((d) => d.phase === "revision")!;
+    expect(revision.delta).toBe("withdrawn");
+    expect(revision.rejectedAlternatives?.[0]?.proposal?.task?.objective).toContain("withdraws");
+  });
+
+  test("a revision claiming Memory cards outside the pinned packet is rejected, metered, and never dispatched", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-badrefs"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const { director } = twoStageDirector((input, stage, attempt) => {
+      if (input.observations.length >= 2) {
+        return { proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "two observations", stopReason: "done" } };
+      }
+      if (stage === "blind") return { proposal: investigateTask("bounded next experiment", input.stateVersion) };
+      if (attempt === 1) {
+        return { proposal: investigateTask("bounded next experiment", input.stateVersion), usedMemoryRefs: ["finding:another-mission:baseline:1"] };
+      }
+      return { proposal: investigateTask("bounded next experiment", input.stateVersion), usedMemoryRefs: [`finding:${draft.id}:baseline:1`] };
+    });
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    const rejectedRevision = outcome.record.decisions!.find((d) => d.phase === "revision" && !d.accepted)!;
+    expect(rejectedRevision.rejection).toMatch(/not part of the delivered packet/);
+    expect(rejectedRevision.cost).toBeGreaterThan(0); // the failed revision was still priced
+    const acceptedRevision = outcome.record.decisions!.find((d) => d.phase === "revision" && d.accepted)!;
+    expect(acceptedRevision.memory?.usedCardRefs).toEqual([`finding:${draft.id}:baseline:1`]);
+    expect(acceptedRevision.memory?.cardRefs).toContain(`finding:${draft.id}:baseline:1`);
+    expect(outcome.experiments).toHaveLength(1);
+  });
+
+  test("a revision priced against the frozen budget is re-checked against the live budget before acceptance", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-livebudget"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    // The revision sees the frozen base state, so it can only be caught by the
+    // live check: this proposal fits the frozen budget but not the live one.
+    let frozenAvailable = 0;
+    const { director } = twoStageDirector((input, stage, attempt) => {
+      if (stage === "blind") {
+        frozenAvailable = input.budget.remaining - input.budget.reserved;
+        return { proposal: investigateTask("bounded next experiment", input.stateVersion) };
+      }
+      if (attempt === 1) {
+        return { proposal: { ...investigateTask("bounded next experiment", input.stateVersion), expectedCost: frozenAvailable - 0.001 } };
+      }
+      return { proposal: investigateTask("bounded next experiment", input.stateVersion) };
+    });
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    const revisions = outcome.record.decisions!.filter((decision) => decision.phase === "revision");
+    expect(revisions[0]!.accepted).toBe(false);
+    expect(revisions[0]!.rejection).toMatch(/available now/);
+    expect(revisions[0]!.cost).toBeGreaterThan(0); // still a priced call
+    expect(revisions[1]!.accepted).toBe(true);
+    expect(outcome.experiments).toHaveLength(1);
+  });
+
+  test("both stages and every correction attempt are independently metered against the same budget", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t2-budget"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const { director } = twoStageDirector((input, stage, attempt) => ({
+      // One malformed blind attempt (still a real priced call), then valid ones.
+      proposal: stage === "blind" && attempt === 1
+        ? { broken: true }
+        : investigateTask("bounded next experiment", input.stateVersion),
+    }));
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      reserveCost: 0.005,
+      director,
+      maxExperiments: 1,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    // blind rejection + blind correction + revision; the post-Experiment bound
+    // stops the loop without asking for another decision.
+    const decisions = outcome.record.decisions!;
+    expect(decisions.map((decision) => decision.phase)).toEqual(["blind", "blind", "revision"]);
+    expect(decisions.map((decision) => decision.accepted)).toEqual([false, true, true]);
+    expect(decisions.every((decision) => decision.cost === DECISION_USAGE.cost.total)).toBe(true);
+    // The trusted-side model identity of each stage is durable, not inferred.
+    expect(decisions.every((decision) => decision.model?.id === `${CONTROL_PROVIDER}/deterministic`)).toBe(true);
+    const decisionSpend = (outcome.record.usage.decisions ?? []).reduce((sum, line) => sum + line.cost.total, 0);
+    expect(decisionSpend).toBeCloseTo(DECISION_USAGE.cost.total * 3, 6);
+    const accounted = outcome.record.usage.intake.cost.total
+      + outcome.record.usage.runs.reduce((sum, line) => sum + line.cost.total, 0)
+      + decisionSpend;
+    expect(accounted).toBeCloseTo(outcome.record.budget.consumed, 6);
+    // Every decision line above is a settled reservation, not a free call.
+    expect(outcome.record.budget.remaining).toBeCloseTo(outcome.record.budget.total - outcome.record.budget.consumed, 6);
+  });
+});

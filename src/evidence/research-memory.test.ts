@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   RESEARCH_MEMORY_DEFAULT_MAX_CARDS,
   ResearchMemoryError,
+  RESEARCH_DECISION_PACKET_SCHEMA,
+  assertPacketCardRefs,
+  projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   validateResearchMemorySnapshot,
@@ -134,5 +137,38 @@ describe("research memory snapshot validation (#210)", () => {
   test("a snapshot carrying a sensitive field is rejected", () => {
     const snapshot = projectResearchMemorySnapshot(source());
     expect(() => validateResearchMemorySnapshot({ ...snapshot, transcript: "raw chat" })).toThrow(/sensitive/);
+  });
+});
+
+describe("research decision packet (#211)", () => {
+  test("pins one snapshot and carries only its delivered card refs", () => {
+    const snapshot = projectResearchMemorySnapshot(source());
+    const packet = projectResearchDecisionPacket(snapshot);
+    expect(packet.schema).toBe(RESEARCH_DECISION_PACKET_SCHEMA);
+    expect(packet.snapshotId).toBe(snapshot.snapshotId);
+    expect(packet.snapshotDigest).toBe(snapshot.digest);
+    expect(packet.cards.map((card) => card.cardId)).toEqual(snapshot.cards.map((card) => card.cardId));
+    expect(packet.digest).toBe(projectResearchDecisionPacket(snapshot).digest);
+  });
+
+  test("a trusted card limit truncates the packet and shows the omission count", () => {
+    const snapshot = projectResearchMemorySnapshot(source());
+    const packet = projectResearchDecisionPacket(snapshot, { maxCards: 1 });
+    expect(packet.cards).toHaveLength(1);
+    expect(packet.omittedCardCount).toBe(snapshot.omittedCardCount + snapshot.cards.length - 1);
+    expect(() => projectResearchDecisionPacket(snapshot, { maxCards: 0 })).toThrow(/maxCards/);
+  });
+
+  test("used Memory refs outside the delivered packet fail closed", () => {
+    const packet = projectResearchDecisionPacket(projectResearchMemorySnapshot(source()));
+    const delivered = packet.cards[0]!.cardId;
+    expect(() => assertPacketCardRefs(packet, [delivered])).not.toThrow();
+    expect(() => assertPacketCardRefs(packet, ["finding:m-other:exp:9"])).toThrow(/not part of the delivered packet/);
+  });
+
+  test("a packet cannot be built from a foreign or damaged snapshot", () => {
+    const snapshot = projectResearchMemorySnapshot(source());
+    const tampered = { ...snapshot, cards: [...snapshot.cards, snapshot.cards[0]!] };
+    expect(() => projectResearchDecisionPacket(tampered)).toThrow();
   });
 });

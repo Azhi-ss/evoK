@@ -196,6 +196,22 @@ _Avoid_: Transcript memory, second evidence ledger, session memory
 A bounded presentation projection of one Finding: a short summary, applicability label, lifecycle, and typed source refs. It is not an authoritative Evidence record.
 _Avoid_: Evidence, claim, full history
 
+**Blind Proposal**:
+The Mission Director's bounded next action formed from the trusted Mission state and measured Evidence BEFORE any Research Memory is visible. It is validated, durably frozen, and kept as the counterfactual baseline for the later revision.
+_Avoid_: Draft decision, first guess, history-blind proposal
+
+**Revised Proposal**:
+The Memory-informed revision of one Blind Proposal, formed from the same frozen base state plus one pinned Research Decision Packet. Only the Revised Proposal can dispatch; Research Memory adds context, never authority.
+_Avoid_: Memory output, second opinion, Memory-approved action
+
+**Research Decision Packet**:
+The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
+_Avoid_: Memory dump, second snapshot, full history
+
+**Decision Delta**:
+The controller-derived comparison of a Blind Proposal and its Revised Proposal: unchanged, reordered, replaced, withdrawn, or expanded-via-existing-search. It is computed from the proposals, never declared by the model.
+_Avoid_: Model-reported change, Memory score
+
 **Negative Evidence**:
 Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances.
 _Avoid_: Error log

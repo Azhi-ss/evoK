@@ -52,6 +52,14 @@ snapshots validated on load. It is derived and advisory; Mission history
 stays the only write log, and no gate / T48 / hang / Broker predicate
 changes.
 
+Amendment (M1-T2 / #211): the pinned Research Decision Packet
+(`projectResearchDecisionPacket`, `evok.research-decision-packet/v1`)
+lives here. It is a bounded, content-addressed presentation view of ONE
+validated Research Memory snapshot, and `assertPacketCardRefs` refuses a
+decision that claims a card outside it. The packet is advisory: the
+mission controller still derives decision deltas, validates both proposal
+stages, and keeps every budget / permission / gate predicate unchanged.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
