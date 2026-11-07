@@ -1,6 +1,7 @@
 // Pi owns the interactive Director session. The campaign host owns durable work and evidence.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerRoundWake, type RoundWakeHost } from "./pi-round-wake";
+import { createSupervisorRoundHost, type SupervisorOptions } from "./pi-supervisor";
 import { Type } from "typebox";
 import { directorCollaboratorBatch, type CollaboratorSpec } from "../execution/pi-child-protocol";
 
@@ -21,6 +22,7 @@ export interface CampaignDispatch {
 
 export interface PiCampaignHost {
   rounds?: RoundWakeHost;
+  supervision?: Omit<SupervisorOptions, "status">;
   hypotheses?(values: string[]): Promise<unknown>;
   status(): Promise<unknown>;
   dispatch(input: CampaignDispatch): Promise<{ job: { state: string } | null; summary?: string }>;
@@ -33,7 +35,10 @@ function result(details: unknown) {
 }
 
 export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost) {
-  const wake = host.rounds ? registerRoundWake(pi, host.rounds) : undefined;
+  const rounds = host.rounds && host.supervision
+    ? createSupervisorRoundHost(pi, host.rounds, { ...host.supervision, status: () => host.status() })
+    : host.rounds;
+  const wake = rounds ? registerRoundWake(pi, rounds) : undefined;
   let active: { jobId: string; role: string; abort: AbortController; done: Promise<void> } | undefined;
 
   if (host.hypotheses)

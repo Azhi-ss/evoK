@@ -1,0 +1,21 @@
+{
+  "schema": "evok.phase2.state.v1",
+  "nomineeId": "rev-validated",
+  "budget": { "cap": 300, "units": "cny", "spent": [] },
+  "quota": null,
+  "revisions": [{
+    "id": "rev-validated", "summary": "Validated fixture", "contentDigest": "abc",
+    "change": { "treeDigest": "abc" }, "createdAt": "2026-11-07T10:00:00Z",
+    "evidence": [
+      { "kind": "screening", "score": 0.75, "cost": 1, "at": "2026-11-07T10:00:00Z" },
+      { "kind": "withheld-validation", "score": 0.5, "cost": 1, "at": "2026-11-07T11:00:00Z" },
+      { "kind": "noisy-repeat", "score": 0.75, "cost": 1, "at": "2026-11-07T12:00:00Z" }
+    ]
+  }],
+  "attempts": [{
+    "id": "attempt-123", "revisionId": "rev-validated", "attemptId": "123",
+    "idempotencyKey": "fixture-123", "real": true, "state": "scored",
+    "official": { "score": 0.25, "cost": 2.5, "status": "complete", "at": "2026-11-08T12:00:00Z" },
+    "history": [{ "at": "2026-11-07T12:00:00Z", "state": "submitting", "detail": "fixture" }]
+  }]
+}

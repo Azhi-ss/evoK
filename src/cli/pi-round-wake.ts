@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { SUPERVISOR_DECISIONS, type SupervisorEvent } from "./pi-supervisor";
 
 export interface RoundReport {
   id: string;
@@ -14,6 +15,7 @@ export interface RoundReport {
   budget?: { remaining?: number };
   quota?: { mode: string; remaining: number | null };
   hold?: string;
+  supervisor?: SupervisorEvent;
 }
 
 export interface RoundWakeHost {
@@ -22,6 +24,7 @@ export interface RoundWakeHost {
   acknowledge(report: RoundReport): Promise<void>;
   openDirector(
     report: RoundReport,
+    selection?: { provider: string; model: string },
   ): Promise<{ provider: string; model: string; close(): Promise<void> }>;
 }
 
@@ -110,7 +113,7 @@ export function registerRoundWake(pi: ExtensionAPI, host: RoundWakeHost) {
       report = await host.report(sessionId);
       if (!report || !current() || report.sessionId !== sessionId) return;
       const prior = delivered(ctx, report.id);
-      if (prior.answered) {
+      if (prior.answered || (report.supervisor && prior.seen)) {
         await host.acknowledge(report);
         return;
       }
@@ -123,7 +126,7 @@ export function registerRoundWake(pi: ExtensionAPI, host: RoundWakeHost) {
       )
         return;
       const previous = ctx.model;
-      const meter = await host.openDirector(report);
+      const meter = await host.openDirector(report, { provider: previous.provider, model: previous.id });
       const selection = {
         id: report.id,
         alias: meter.provider,
@@ -173,9 +176,10 @@ export function registerRoundWake(pi: ExtensionAPI, host: RoundWakeHost) {
             details: { id: report.id, provider: meter.provider },
             display: !prior.seen,
             content:
-              "EvoK research round delivered. " +
+              (report.supervisor ? "EvoK supervision rule triggered. " : "EvoK research round delivered. ") +
               JSON.stringify(report) +
-              "\nRead evok_status. Choose the next testable hypothesis, continue local research if submissions are unavailable, or stop if the evidence warrants it.",
+              "\n" + (report.supervisor ? SUPERVISOR_DECISIONS :
+                "Read evok_status. Choose the next testable hypothesis, continue local research if submissions are unavailable, or stop if the evidence warrants it."),
           },
           { triggerTurn: true },
         );
