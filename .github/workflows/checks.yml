@@ -1,0 +1,44 @@
+name: checks
+
+# Deterministic gates on a clean runner. Staged rollout: this workflow runs only
+# what cannot depend on the host — types and whitespace. The test suite is NOT
+# wired yet: `bun test --rerun-all-tests` has a host/SDK failure set that must be
+# confirmed on this runner before it can gate a merge (see
+# docs/agents/known-failures.md). Until then the full gate stays local
+# (`bun run check`, also installed as the pre-commit hook).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whitespace gate diffs against the push/PR base, which must exist.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: install
+        run: bun install --frozen-lockfile
+      - name: typecheck
+        run: bun run typecheck
+      - name: whitespace
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            git diff --check "$BASE..HEAD"
+          else
+            # First push of a branch: its base object does not exist here, so
+            # prove the tip commit and leave the rest to the local hook.
+            git show --check --format= HEAD
+          fi
