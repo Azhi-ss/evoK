@@ -86,6 +86,19 @@ repeated Experiment objective carries advisory replication context — never a
 rejection or a Memory-owned veto. Existing Experiment Validity, Promotion,
 Admission, Budget, hang/T48 and Broker predicates are untouched.
 
+Amendment (M1-T9 / #218): the evaluation arms live here too. A trusted
+configuration value selects `off` / `sham` / `real` (`researchMemoryModeOf`,
+durable on the Mission record so a resume cannot switch arms), and the
+Schema-only Sham is a projection, not a second store: `shamResearchMemorySnapshot`
+and `shamResearchDecisionPacket` keep the real card count, order, kinds, limits,
+reserved categories and omission counts while replacing every card with an
+`evok.research-memory-control-card/v1` slot — no research fact, ref,
+applicability or directional advice, explicitly marked `control: "sham"`, and
+validated to fail closed otherwise. The three-arm report and its offline replay
+(`src/mission/memory-evaluation.ts`) are pure reads over authoritative durable
+records: they pin each Run to the state visible before it began and change no
+evaluator, Promotion, Admission, Budget, hang/T48 or Broker predicate.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

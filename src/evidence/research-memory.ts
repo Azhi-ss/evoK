@@ -31,6 +31,13 @@ export const SYNTHESIS_FINDING_CARD_SCHEMA = "evok.research-memory-synthesis-fin
 export const SYNTHESIS_PITFALL_CARD_SCHEMA = "evok.research-memory-pitfall-card/v1" as const;
 /** M1-T4: an operational failure projected from its Run, never a scientific claim. */
 export const OPERATIONAL_PITFALL_CARD_SCHEMA = "evok.research-memory-operational-pitfall-card/v1" as const;
+/**
+ * M1-T9: the Schema-only Sham slot. It occupies the same structural position as
+ * one real card (kind, bounded presentation) while carrying no research fact, no
+ * refs, no applicability and no directional advice, and is explicitly marked as
+ * a control input.
+ */
+export const RESEARCH_CONTROL_CARD_SCHEMA = "evok.research-memory-control-card/v1" as const;
 // Still /v1: the applicability, lineage and condition fields are additive and a
 // snapshot published before them keeps loading and revalidating unchanged.
 export const RESEARCH_MEMORY_REVISION = "research-memory/v1" as const;
@@ -38,6 +45,27 @@ export const RESEARCH_DECISION_PACKET_SCHEMA = "evok.research-decision-packet/v1
 export const RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION = "research-memory-retrieval/v1" as const;
 /** Hard retrieval bound; trusted policy may lower it, never trust an absent value. */
 export const RESEARCH_MEMORY_DEFAULT_MAX_CARDS = 8;
+
+/** The three trusted evaluation arms of Research Memory (M1-T9). */
+export const RESEARCH_MEMORY_EVALUATION_MODES = ["off", "sham", "real"] as const;
+export type ResearchMemoryEvaluationMode = (typeof RESEARCH_MEMORY_EVALUATION_MODES)[number];
+
+/**
+ * Normalizes the TRUSTED configuration value into one evaluation arm. `true`
+ * (or absent) keeps the product default, Real Memory; `false` stays the legacy
+ * off switch; an explicit arm name selects a comparison arm. An unknown value
+ * fails closed rather than silently choosing an arm.
+ */
+export function researchMemoryModeOf(value: unknown): ResearchMemoryEvaluationMode {
+  if (value === undefined || value === true) return "real";
+  if (value === false) return "off";
+  if (typeof value === "string" && RESEARCH_MEMORY_EVALUATION_MODES.includes(value as ResearchMemoryEvaluationMode)) {
+    return value as ResearchMemoryEvaluationMode;
+  }
+  throw new ResearchMemoryError(
+    `Research Memory evaluation mode must be one of ${RESEARCH_MEMORY_EVALUATION_MODES.join("/")}, not ${JSON.stringify(value)}`,
+  );
+}
 const MAX_CARDS_CEILING = 64;
 const MAX_SUMMARY_LENGTH = 240;
 
@@ -222,12 +250,28 @@ export interface ResearchPitfallCard extends SynthesisCardBase {
   readonly avoidance: string;
 }
 
+/** A Schema-only Sham slot: control input, never Memory content. */
+export interface ResearchControlCard {
+  readonly schema: typeof RESEARCH_CONTROL_CARD_SCHEMA;
+  readonly cardId: string;
+  readonly kind: "finding" | "hypothesis" | "pitfall";
+  /** Neutral placeholder text: it says what it is, and nothing about research. */
+  readonly summary: string;
+  /** Always empty: a control input declares no applicability. */
+  readonly applicability: readonly string[];
+  /** Always empty: a control input cites no Evidence or other refs. */
+  readonly sourceRefs: readonly string[];
+  readonly lifecycle: "provisional";
+  readonly control: "sham";
+}
+
 export type ResearchMemoryCard =
   | ResearchFindingCard
   | ResearchOperationalPitfallCard
   | ResearchHypothesisCard
   | ResearchSynthesisFindingCard
-  | ResearchPitfallCard;
+  | ResearchPitfallCard
+  | ResearchControlCard;
 
 export interface ResearchMemorySnapshot {
   readonly schema: typeof RESEARCH_MEMORY_SNAPSHOT_SCHEMA;
@@ -273,6 +317,8 @@ export interface ResearchDecisionPacket {
   /** True whenever anything is missing: a truncated packet is not the history. */
   readonly truncated: boolean;
   readonly omittedCardCount: number;
+  /** M1-T9: present only on a Schema-only Sham packet (a control input). */
+  readonly control?: "sham";
   readonly digest: string;
 }
 
@@ -299,6 +345,8 @@ export interface ResearchMemorySummary {
     readonly operationalPitfall?: number;
   };
   readonly omittedCards: number;
+  /** M1-T9: control (Sham) slots, counted apart from any real research card. */
+  readonly controlCards?: number;
 }
 
 /**
@@ -387,6 +435,7 @@ const HYPOTHESIS_CARD_KEYS = new Set([
 ]);
 const SYNTHESIS_FINDING_CARD_KEYS = new Set([...SYNTHESIS_CARD_BASE_KEYS, "limitations"]);
 const PITFALL_CARD_KEYS = new Set([...SYNTHESIS_CARD_BASE_KEYS, "conditions", "avoidance"]);
+const CONTROL_CARD_KEYS = new Set(["schema", "cardId", "kind", "summary", "applicability", "sourceRefs", "lifecycle", "control"]);
 const LIFECYCLES: readonly ResearchCardLifecycle[] = ["active", "provisional", "contested", "stale", "superseded", "withdrawn"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -718,7 +767,7 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
   // an overwrite: both positions are contested. Different conditions stay apart.
   const proposalCardsById = new Map(proposalCards.map((card) => [proposalIdOf(card.cardId), card]));
   for (const card of proposalCards) {
-    if (card.kind !== "hypothesis") continue;
+    if (card.schema !== SYNTHESIS_HYPOTHESIS_CARD_SCHEMA) continue;
     for (const competing of card.competingRefs) {
       const claimId = competingClaimId(competing);
       const target = claimId === undefined ? undefined : proposalCardsById.get(claimId);
@@ -912,6 +961,62 @@ export function projectResearchDecisionPacket(
   return deepFreeze({ ...body, digest: digestValue(body) });
 }
 
+/**
+ * Schema-only Sham slots (M1-T9): one control card per real card, in the same
+ * order and with the same kind, so the presentation structure and bounds match
+ * while no research fact, ref, applicability or directional advice survives.
+ */
+function controlCardsFor(cards: readonly ResearchMemoryCard[]): readonly ResearchControlCard[] {
+  return cards.map((card, index) => deepFreeze({
+    schema: RESEARCH_CONTROL_CARD_SCHEMA,
+    cardId: `control:${index + 1}:${card.kind}`,
+    kind: card.kind,
+    summary: `control input: schema-only placeholder ${index + 1} of ${cards.length} (no research content)`,
+    applicability: [] as string[],
+    sourceRefs: [] as string[],
+    lifecycle: "provisional" as const,
+    control: "sham" as const,
+  }));
+}
+
+/**
+ * The Schema-only Sham projection of one snapshot: identical card count, order,
+ * kinds, limits and omission counts; every card replaced by a control slot and
+ * nothing derived from Mission history except the structural shape.
+ */
+export function shamResearchMemorySnapshot(snapshot: ResearchMemorySnapshot): ResearchMemorySnapshot {
+  const verified = validateResearchMemorySnapshot(snapshot);
+  const { digest: _digest, snapshotId: _snapshotId, ...rest } = verified;
+  const body = { ...rest, cards: controlCardsFor(verified.cards) };
+  const digest = digestValue(body);
+  return deepFreeze({ ...body, snapshotId: snapshotIdFor(digest), digest });
+}
+
+/**
+ * The Schema-only Sham variant of one pinned packet. Card count, kinds, order,
+ * limits and omission counts keep the real packet's bounded presentation, but
+ * the reserved categories stay empty: naming WHICH cards contradict or compete
+ * would disclose directional research state, so a control input keeps only the
+ * counts. The packet is marked as a control input so no reader can mistake it
+ * for Research Memory.
+ */
+export function shamResearchDecisionPacket(packet: ResearchDecisionPacket): ResearchDecisionPacket {
+  const cards = controlCardsFor(packet.cards);
+  for (const id of [...packet.reserved.contradictingEvidence, ...packet.reserved.competingHypotheses]) {
+    if (!packet.cards.some((card) => card.cardId === id)) {
+      throw new ResearchMemoryError(`packet ref "${id}" is not one of its own cards`);
+    }
+  }
+  const { digest: _digest, ...rest } = packet;
+  const body = {
+    ...rest,
+    cards,
+    reserved: { contradictingEvidence: [] as string[], competingHypotheses: [] as string[] },
+    control: "sham" as const,
+  };
+  return deepFreeze({ ...body, digest: digestValue(body) });
+}
+
 /** A measured refutation is Evidence that contradicts a supporting position. */
 function isContradictingEvidenceCard(card: ResearchMemoryCard): boolean {
   if (card.kind !== "finding" || card.schema !== RESEARCH_MEMORY_FINDING_CARD_SCHEMA) return false;
@@ -922,7 +1027,8 @@ function isContradictingEvidenceCard(card: ResearchMemoryCard): boolean {
 
 /** A Hypothesis with a declared competitor, or one already contested by it. */
 function isCompetingHypothesisCard(card: ResearchMemoryCard): boolean {
-  return card.kind === "hypothesis" && (card.competingRefs.length > 0 || card.lifecycle === "contested");
+  return card.schema === SYNTHESIS_HYPOTHESIS_CARD_SCHEMA
+    && (card.competingRefs.length > 0 || card.lifecycle === "contested");
 }
 
 /** Used Memory refs must belong to the delivered packet, never another one. */
@@ -1091,6 +1197,25 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
       }
       continue;
     }
+    if (card.schema === RESEARCH_CONTROL_CARD_SCHEMA) {
+      assertSafeKeys("research memory control card field", Object.keys(card), CONTROL_CARD_KEYS);
+      if (card.kind !== "finding" && card.kind !== "hypothesis" && card.kind !== "pitfall") {
+        throw new ResearchMemoryError("research memory control card kind must be finding, hypothesis or pitfall");
+      }
+      assertMemorySafeText("research memory control card cardId", card.cardId);
+      assertMemorySafeText("research memory control card summary", card.summary);
+      // A control slot carries no fact, no ref and no advice: only an empty
+      // declared/applicability surface is a valid Schema-only Sham input.
+      if (!Array.isArray(card.applicability) || card.applicability.length !== 0) {
+        throw new ResearchMemoryError("a research memory control card declares no applicability");
+      }
+      if (!Array.isArray(card.sourceRefs) || card.sourceRefs.length !== 0) {
+        throw new ResearchMemoryError("a research memory control card carries no refs");
+      }
+      if (card.lifecycle !== "provisional") throw new ResearchMemoryError("a research memory control card stays provisional");
+      if (card.control !== "sham") throw new ResearchMemoryError("a research memory control card must be marked as control input");
+      continue;
+    }
     validateSynthesisCard(card);
   }
   const { digest, snapshotId, ...body } = raw;
@@ -1101,20 +1226,24 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
 }
 
 export function summarizeResearchMemorySnapshot(snapshot: ResearchMemorySnapshot): ResearchMemorySummary {
-  const hypothesis = snapshot.cards.filter((card) => card.kind === "hypothesis").length;
-  const pitfall = snapshot.cards.filter((card) => card.schema === SYNTHESIS_PITFALL_CARD_SCHEMA).length;
-  const operationalPitfall = snapshot.cards.filter((card) => card.schema === OPERATIONAL_PITFALL_CARD_SCHEMA).length;
+  const controlCards = snapshot.cards.filter((card) => card.schema === RESEARCH_CONTROL_CARD_SCHEMA).length;
+  // Control slots are presentation, not research cards; they are counted apart.
+  const cards = snapshot.cards.filter((card) => card.schema !== RESEARCH_CONTROL_CARD_SCHEMA);
+  const hypothesis = cards.filter((card) => card.kind === "hypothesis").length;
+  const pitfall = cards.filter((card) => card.schema === SYNTHESIS_PITFALL_CARD_SCHEMA).length;
+  const operationalPitfall = cards.filter((card) => card.schema === OPERATIONAL_PITFALL_CARD_SCHEMA).length;
   return deepFreeze({
     snapshotId: snapshot.snapshotId,
     snapshotDigest: snapshot.digest,
     ledgerRevision: snapshot.ledgerRevision,
     cards: {
-      finding: snapshot.cards.filter((card) => card.kind === "finding").length,
+      finding: cards.filter((card) => card.kind === "finding").length,
       ...(hypothesis > 0 ? { hypothesis } : {}),
       ...(pitfall > 0 ? { pitfall } : {}),
       ...(operationalPitfall > 0 ? { operationalPitfall } : {}),
     },
     omittedCards: snapshot.omittedCardCount,
+    ...(controlCards > 0 ? { controlCards } : {}),
   });
 }
 

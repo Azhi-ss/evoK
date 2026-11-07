@@ -209,7 +209,7 @@ describe("scientific and operational outcomes across the Mission lifecycle (#213
     expect(pitfall).toMatchObject({ schema: OPERATIONAL_PITFALL_CARD_SCHEMA, failure: "out-of-memory" });
     // The declared Task configuration that reproduced the failure travels with
     // the Pitfall, so a later Run can avoid the same operational mistake.
-    expect(pitfall.kind === "pitfall" && pitfall.conditions).toEqual([
+    expect(pitfall.schema === OPERATIONAL_PITFALL_CARD_SCHEMA && pitfall.conditions).toEqual([
       "failure:out-of-memory",
       "configuration:batch=64; device=single 24GB GPU",
       `observed:${oom}`,

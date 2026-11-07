@@ -240,6 +240,22 @@ _Avoid_: Memory veto, exploration quota, forced diversity target
 The controller-derived comparison of a Blind Proposal and its Revised Proposal: unchanged, reordered, replaced, withdrawn, or expanded-via-existing-search. It is computed from the proposals, never declared by the model.
 _Avoid_: Model-reported change, Memory score
 
+**Memory Evaluation Arm**:
+The trusted configuration value that selects which Memory projection a comparison Mission runs: Memory Off, Schema-only Sham, or Real Memory. It is durable on the Mission record, so a resume cannot silently switch arms, and it grants no authority beyond the existing no-Memory baseline.
+_Avoid_: Memory feature flag, per-Run toggle
+
+**Schema-only Sham**:
+A control input shaped like the real Research Decision Packet — same card count, order, kinds and bounds — whose slots are neutral placeholders explicitly marked as control, carrying no research fact, Evidence ref, applicability, or directional advice. It estimates format and extra-context effects; it is never Memory content and never a perfect causal control.
+_Avoid_: Fake Memory, synthetic evidence
+
+**Control Card**:
+One Schema-only Sham slot: it occupies the same position and kind as one real Memory card but is explicitly marked as a control input, with no research fact, Evidence ref, applicability, or directional advice. It is presentation structure, never Memory content.
+_Avoid_: Placeholder evidence, fake finding
+
+**Offline Memory Replay**:
+A deterministic re-projection that pins each Run to the Mission state, stored Proposals, and Memory snapshot that existed before that Run began, so Run N can never see information produced after it started. It compares arms without a live model provider or GPU.
+_Avoid_: Hindsight replay, transcript replay
+
 **Negative Evidence**:
 Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances. Only a real measurement creates it; an operational failure alone never does.
 _Avoid_: Error log

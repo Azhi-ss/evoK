@@ -56,6 +56,8 @@ import {
 } from "../execution/research-memory-provider";
 import {
   projectResearchMemorySnapshot,
+  researchMemoryModeOf,
+  shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   type ResearchMemorySnapshot,
 } from "../evidence/research-memory";
@@ -109,7 +111,12 @@ export async function reconcileResearchMemory(options: {
 
   let expected: ResearchMemorySnapshot;
   try {
-    expected = projectResearchMemorySnapshot(source);
+    // M1-T9: recovery rebuilds the arm the Mission actually ran, so a Sham arm
+    // is never silently republished as Real Memory (or the other way round).
+    const projected = projectResearchMemorySnapshot(source);
+    expected = researchMemoryModeOf(record.researchMemoryMode) === "sham"
+      ? shamResearchMemorySnapshot(projected)
+      : projected;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new ReconciliationBlockedError(

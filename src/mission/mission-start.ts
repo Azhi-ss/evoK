@@ -99,8 +99,12 @@ import {
   assertPacketCardRefs,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
+  researchMemoryModeOf,
+  shamResearchDecisionPacket,
+  shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   type ResearchDecisionPacket,
+  type ResearchMemoryEvaluationMode,
   type ResearchMemorySource,
   type ResearchMemorySummary,
   type ResearchRunFinding,
@@ -556,6 +560,12 @@ export interface MissionRecord {
   readonly experiments?: readonly ExperimentTrailEntry[];
   /** M1-T1: read-only facts about the active derived Research Memory snapshot. */
   readonly researchMemory?: ResearchMemorySummary;
+  /**
+   * M1-T9: the trusted evaluation arm this Mission ran under. Durable, so a
+   * resume can never silently switch arms; a legacy record without it ran the
+   * product default (Real Memory).
+   */
+  readonly researchMemoryMode?: ResearchMemoryEvaluationMode;
   /** M1-T3: stored Synthesis Proposals; integrity is never scientific status. */
   readonly synthesisProposals?: readonly SynthesisProposalRecord[];
   readonly history: readonly HistoryEvent[];
@@ -581,12 +591,13 @@ export interface StartMissionOptions {
    */
   readonly competitionContext?: MissionCompetitionContext;
   /**
-   * Trusted Mission-level Research Memory off switch (M1-T1). Only the
-   * controller/CLI supplies it; a Run or agent cannot set it. `false` writes no
-   * projection and injects none, but never displaces an explicitly supplied
-   * custom `MemoryProvider`.
+   * Trusted Mission-level Research Memory configuration (M1-T1/M1-T9). Only the
+   * controller/CLI supplies it; a Run or agent cannot set it. `false` (Memory
+   * Off) writes no projection and injects none, `"sham"` selects the
+   * Schema-only control arm, `true`/`"real"` the product default. It never
+   * displaces an explicitly supplied custom `MemoryProvider`.
    */
-  readonly researchMemory?: boolean;
+  readonly researchMemory?: boolean | ResearchMemoryEvaluationMode;
   /**
    * Test/broker seam: builds the runtime for one attempt (fresh workspace
    * root). Defaults to a PiAgentRuntime wired to `resolver`/`resources`.
@@ -708,10 +719,10 @@ function prepareCompetitionContext(context: MissionCompetitionContext | undefine
  * role-context/ContextBroker path. A legacy no-role-context Run keeps no broker
  * and therefore no injection; an explicit custom provider is never displaced.
  */
-function researchMemoryProviderFor(options: StartMissionOptions, missionId: string): MemoryProvider | undefined {
+function researchMemoryProviderFor(options: StartMissionOptions, missionId: string, mode: ResearchMemoryEvaluationMode): MemoryProvider | undefined {
   if (options.competitionContext === undefined) return undefined;
   if (options.competitionContext.memory) return options.competitionContext.memory;
-  if (options.researchMemory === false) return undefined;
+  if (mode === "off") return undefined;
   return createResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
 }
 
@@ -726,8 +737,15 @@ export function researchMemoryDir(projectRoot: string, missionId: string): strin
  * both produce the same deterministic snapshot; a projection failure surfaces
  * without ever rewriting authoritative history.
  */
-async function projectAndPublishResearchMemory(projectRoot: string, record: MissionRecord): Promise<MissionRecord> {
-  const snapshot = projectResearchMemorySnapshot(missionResearchSource(record));
+async function projectAndPublishResearchMemory(
+  projectRoot: string,
+  record: MissionRecord,
+  mode: ResearchMemoryEvaluationMode,
+): Promise<MissionRecord> {
+  const projected = projectResearchMemorySnapshot(missionResearchSource(record));
+  // M1-T9: the Sham arm publishes the SAME structural projection with control
+  // slots only, so no research content reaches a comparison arm by accident.
+  const snapshot = mode === "sham" ? shamResearchMemorySnapshot(projected) : projected;
   await publishResearchMemorySnapshot(researchMemoryDir(projectRoot, record.id), snapshot);
   const next: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
   await persist(projectRoot, next);
@@ -744,6 +762,22 @@ export interface ResumeAuthorization {
   readonly token: string;
   readonly missionSelector: string;
   readonly source?: "user" | "model";
+}
+
+/**
+ * M1-T9: a Mission's evaluation arm is captured at acceptance. A resume, or any
+ * later trusted write, may restate it but never switch it: mixing two arms in
+ * one Mission record would make every arm comparison unreadable.
+ */
+export function assertResearchMemoryArmUnchanged(accepted: unknown, requested: unknown): void {
+  if (requested === undefined) return;
+  const acceptedMode = researchMemoryModeOf(accepted);
+  const requestedMode = researchMemoryModeOf(requested);
+  if (requestedMode !== acceptedMode) {
+    throw new MissionResumeRejectedError(
+      `the accepted Mission ran the "${acceptedMode}" Research Memory arm; this operation requests "${requestedMode}"; changing the evaluation arm of an accepted Mission is rejected`,
+    );
+  }
 }
 
 export interface ResumeMissionOptions extends Omit<StartMissionOptions, "authorization"> {
@@ -893,7 +927,7 @@ export interface SubmitSynthesisProposalOptions {
   /** Untrusted agent/Director submission; the controller validates it. */
   readonly proposal: unknown;
   /** Trusted Mission-level switch, same as start: stores but projects nothing when false. */
-  readonly researchMemory?: boolean;
+  readonly researchMemory?: boolean | ResearchMemoryEvaluationMode;
 }
 
 export interface SynthesisProposalSubmission {
@@ -1046,10 +1080,20 @@ async function storeSynthesisProposal(
       },
     },
     { synthesisProposals: [...stored, entry], stateVersion: (record.stateVersion ?? 0) + 1 });
+  // M1-T9: the DURABLE arm wins, so a submission cannot publish Real Memory into
+  // a Sham arm (or the reverse). Fence BEFORE the write, so a refused request
+  // leaves no stored payload behind.
+  const recordedMode = record.researchMemoryMode === undefined ? undefined : researchMemoryModeOf(record.researchMemoryMode);
+  if (recordedMode !== undefined && options.researchMemory !== undefined && researchMemoryModeOf(options.researchMemory) !== recordedMode) {
+    throw new MissionStartRejectedError(
+      `mission ${record.id} runs the "${recordedMode}" Research Memory arm; a submission cannot switch it to "${researchMemoryModeOf(options.researchMemory)}"`,
+    );
+  }
+  const mode = recordedMode ?? researchMemoryModeOf(options.researchMemory);
   // Authoritative write FIRST: a refused projection can never lose the Proposal.
   await persist(options.projectRoot, next);
-  if (options.researchMemory !== false) {
-    next = await projectAndPublishResearchMemory(options.projectRoot, next);
+  if (mode !== "off") {
+    next = await projectAndPublishResearchMemory(options.projectRoot, next, mode);
   }
   return {
     outcome: "accepted_for_storage",
@@ -1226,7 +1270,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   }
   const draft = await loadMissionDraft(options.projectRoot, options.missionId);
   assertStartable(draft, options);
-  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id));
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id, researchMemoryModeOf(options.researchMemory)));
   const dir = missionDir(options.projectRoot, draft.id);
   await mkdir(dir, { recursive: true });
 
@@ -1316,6 +1360,9 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     permissions: draft.constraints.permissions ?? [],
     stopConditions: draft.stopConditions,
     modelTier: options.tier ?? "default",
+    // M1-T9: the trusted evaluation arm is captured at acceptance like the
+    // execution policy, so recovery preserves it.
+    researchMemoryMode: researchMemoryModeOf(options.researchMemory),
     decisions: [],
     experiments: [],
     createdAt: now(),
@@ -1404,10 +1451,12 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
   // competitions; each Run then gets its own role-scoped context.
   const { broker, resourceRequest: competitionResourceRequest } = competition;
 
-  // M1-T1: derived Mission-scoped Research Memory. Publication errors surface;
-  // the trusted switch writes nothing. Injection needs the role-context broker;
-  // the legacy no-role-context path projects but never injects.
-  const researchMemoryEnabled = options.researchMemory !== false;
+  // M1-T1/M1-T9: derived Mission-scoped Research Memory. Publication errors
+  // surface; Memory Off writes nothing. The evaluation arm is the DURABLE one,
+  // so a resume cannot silently switch arms. Injection needs the role-context
+  // broker; the legacy no-role-context path projects but never injects.
+  const researchMemoryMode = researchMemoryModeOf(record.researchMemoryMode);
+  const researchMemoryEnabled = researchMemoryMode !== "off";
   const memoryDir = researchMemoryDir(options.projectRoot, draft.id);
   const refreshResearchMemory = async (current: MissionRecord): Promise<MissionRecord> => {
     if (!researchMemoryEnabled) return current;
@@ -1416,7 +1465,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     // Derived projection never costs authoritative history: persist the record
     // FIRST, so a rejection or I/O failure here cannot lose a measured Run.
     await persist(options.projectRoot, current);
-    return projectAndPublishResearchMemory(options.projectRoot, current);
+    return projectAndPublishResearchMemory(options.projectRoot, current, researchMemoryMode);
   };
 
   // A single abort owner: an external user signal aborts every dispatch in
@@ -2228,7 +2277,12 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         if (researchMemoryEnabled) {
           try {
             const snapshot = await loadResearchMemorySnapshot(memoryDir);
-            if (snapshot !== undefined) pinnedPacket = projectResearchDecisionPacket(snapshot);
+            if (snapshot !== undefined) {
+              const projected = projectResearchDecisionPacket(snapshot);
+              // M1-T9: the Sham arm delivers the Schema-only control packet, not
+              // the research packet, with the same structure and bounds.
+              pinnedPacket = researchMemoryMode === "sham" ? shamResearchDecisionPacket(projected) : projected;
+            }
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: decisionGroupId, reason } }, {
@@ -2610,7 +2664,11 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
       `the accepted Mission was served by tier "${previous.modelTier}" but resume requests "${requestedTier}"; silent model rerouting is rejected (resume with the accepted tier)`,
     );
   }
-  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id));
+  // M1-T9: the evaluation arm is durable; resuming under another arm would mix
+  // two comparisons into one Mission record.
+  const acceptedMemoryMode = researchMemoryModeOf(previous.researchMemoryMode);
+  assertResearchMemoryArmUnchanged(previous.researchMemoryMode, options.researchMemory);
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id, acceptedMemoryMode));
 
   // A stale lock (dead process) is reclaimed atomically.
   await rm(lock, { force: true }).catch(() => {});
@@ -2652,7 +2710,7 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
     throw error;
   }
   let record = reconciliation.record;
-  if (options.researchMemory !== false) {
+  if (researchMemoryModeOf(previous.researchMemoryMode) !== "off") {
     // M1-T7: verify/rebuild the derived Memory projection BEFORE any recovered
     // state is written, so unrebuildable corruption fails closed without
     // rewriting the authoritative record or serving an empty history.

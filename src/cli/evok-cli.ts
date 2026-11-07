@@ -919,7 +919,8 @@ async function runMissionStatus(
   }
   // M1-T1: read-only Memory summary — ids and counts, never card bodies or refs.
   if (view.researchMemory) {
-    stdout.write(`   research memory: snapshot ${view.researchMemory.snapshotId} · finding cards ${view.researchMemory.cards.finding} · omitted ${view.researchMemory.omittedCards}\n`);
+    const control = view.researchMemory.controlCards ? ` · control cards ${view.researchMemory.controlCards}` : "";
+    stdout.write(`   research memory: snapshot ${view.researchMemory.snapshotId} · finding cards ${view.researchMemory.cards.finding}${control} · omitted ${view.researchMemory.omittedCards}\n`);
   }
   for (const experiment of record.experiments ?? []) {
     const score = typeof experiment.evaluation?.score === "number" ? ` score=${experiment.evaluation!.score}` : "";

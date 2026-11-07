@@ -14,6 +14,33 @@ export {
   DIRECTION_CONCENTRATION_MIN_REVISIONS,
   DIRECTION_CONCENTRATION_RECOMMENDATION,
 } from "./decision-accountability";
+export {
+  RESEARCH_MEMORY_CONTROL_CAVEAT,
+  RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
+  RESEARCH_MEMORY_EVALUATION_SCHEMA,
+  compareResearchMemoryArms,
+  evaluateResearchMemory,
+  initialStateDigestOf,
+  replayResearchMemory,
+  researchMemoryArmMetrics,
+} from "./memory-evaluation";
+export type {
+  ReplayedRunMemory,
+  ResearchMemoryArmMetrics,
+  ResearchMemoryComparison,
+  ResearchMemoryComparisonDelta,
+  ResearchMemoryComparisonReading,
+  ResearchMemoryControlCheck,
+  ResearchMemoryControlName,
+  ResearchMemoryEvaluationArm,
+  ResearchMemoryEvaluationMode,
+  ResearchMemoryEvaluationPlan,
+  ResearchMemoryEvaluationReplay,
+  ResearchMemoryEvaluationReport,
+  ResearchMemoryArmControls,
+  ResearchMemoryStageCalls,
+  ResearchMemoryStageCosts,
+} from "./memory-evaluation";
 export type {
   DecisionAccountability,
   DecisionAccountabilitySource,

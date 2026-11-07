@@ -25,8 +25,17 @@ import {
   isExplicitResumeRequest,
   listUnfinishedMissions,
   reconcileInterruptedMission,
+  reconcileResearchMemory,
   staleControllerLock,
 } from "./mission-resume";
+import { missionResearchSource, researchMemoryDir } from "./mission-start";
+import { loadResearchMemorySnapshot, publishResearchMemorySnapshot } from "../execution/research-memory-provider";
+import {
+  RESEARCH_CONTROL_CARD_SCHEMA,
+  projectResearchMemorySnapshot,
+  shamResearchMemorySnapshot,
+  summarizeResearchMemorySnapshot,
+} from "../evidence/research-memory";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -443,5 +452,41 @@ describe("listUnfinishedMissions (#114 AC2)", () => {
     const exhausted = view.missions.find((m) => m.id === "m-t6-list2")!;
     expect(exhausted.resumable).toBe(false);
     expect(view.drafts.map((d) => d.id)).toContain("m-t6-draftonly");
+  });
+});
+
+describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
+  test("a Sham arm is reconciled to its own control projection, never republished as Real Memory", async () => {
+    const project = await tempProject();
+    const record: MissionRecord = {
+      ...baseRecord("m-t9-sham", {
+        status: "interrupted",
+        baseline: {
+          runId: "m-t9-sham:baseline:1",
+          candidateId: "candidate-baseline",
+          snapshotDigest: "snapshot-baseline",
+          evaluator: { id: EVAL_ID, version: "1" },
+          evaluation: m04,
+          evidenceRefs: ["evidence:baseline"],
+          measuredAt: "2026-09-11T00:05:00.000Z",
+        },
+      }),
+      researchMemoryMode: "sham",
+    };
+    const dir = researchMemoryDir(project, record.id);
+    // A Real snapshot is what a pre-fix or tampered store would hold.
+    const real = projectResearchMemorySnapshot(missionResearchSource(record));
+    await publishResearchMemorySnapshot(dir, real);
+
+    const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
+    const served = await loadResearchMemorySnapshot(dir);
+    const expected = shamResearchMemorySnapshot(real);
+    expect(served?.digest).toBe(expected.digest);
+    expect(served?.cards.every((card) => card.schema === RESEARCH_CONTROL_CARD_SCHEMA)).toBe(true);
+    expect(recovered.researchMemory).toEqual(summarizeResearchMemorySnapshot(expected));
+    expect(recovered.researchMemory?.controlCards).toBe(1);
+    expect(recovered.researchMemory?.cards.finding).toBe(0);
+    // The arm itself is preserved, never silently switched to Real.
+    expect(recovered.researchMemoryMode).toBe("sham");
   });
 });

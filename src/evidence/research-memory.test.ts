@@ -433,7 +433,7 @@ describe("scientific vs operational outcomes (#213)", () => {
       lineage: { derivesFrom: ["finding:m-memory:exp:4"] },
     });
     const oomPitfall = snapshot.cards.find((card) => card.cardId === "pitfall:run:m-memory:exp:3")!;
-    expect(oomPitfall.kind === "pitfall" && oomPitfall.conditions[0]).toBe("failure:out-of-memory");
+    expect(oomPitfall.schema === OPERATIONAL_PITFALL_CARD_SCHEMA && oomPitfall.conditions[0]).toBe("failure:out-of-memory");
   });
 
   test("a measured rule failure stays scientific Negative Evidence and produces no Pitfall", () => {
