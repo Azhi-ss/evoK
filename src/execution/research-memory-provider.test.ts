@@ -68,6 +68,42 @@ describe("research memory store (#210)", () => {
   });
 });
 
+describe("snapshot commit and pointer switch atomicity (#216)", () => {
+  test("an orphaned or half-written snapshot is never served; the pointer names only a complete one", async () => {
+    const dir = await memoryDir();
+    const active = snapshot();
+    await publishResearchMemorySnapshot(dir, active);
+    // A newer snapshot fully written but never referenced (a crash before the
+    // pointer switch), plus a half-written temp file from a crashed writer.
+    const newer = projectResearchMemorySnapshot({
+      missionId: "m-memory",
+      ledgerRevision: 2,
+      runs: [{ runId: "m-memory:baseline:1", ok: true, score: 0.9, evidenceRefs: [] }],
+    });
+    await writeFile(join(dir, "snapshots", `${newer.digest}.json`), JSON.stringify(newer));
+    await writeFile(join(dir, "snapshots", `${newer.digest}.json.999.1.tmp`), '{"schema":');
+    // Readers still see the complete OLD snapshot, never the orphan.
+    expect(await loadResearchMemorySnapshot(dir)).toEqual(active);
+
+    // Only after publication does the pointer name the newer snapshot.
+    await publishResearchMemorySnapshot(dir, newer);
+    expect(await loadResearchMemorySnapshot(dir)).toEqual(newer);
+  });
+
+  test("a pointer whose snapshot artifact is gone fails closed instead of serving empty memory", async () => {
+    const dir = await memoryDir();
+    const published = snapshot();
+    await publishResearchMemorySnapshot(dir, published);
+    await rm(join(dir, "snapshots", `${published.digest}.json`));
+    await expect(loadResearchMemorySnapshot(dir)).rejects.toThrow(/missing snapshot/);
+    // A pointer that names another snapshot is equally refused.
+    await publishResearchMemorySnapshot(dir, published);
+    const pointer = JSON.parse(await readFile(join(dir, "active.json"), "utf8"));
+    await writeFile(join(dir, "active.json"), JSON.stringify({ ...pointer, digest: "f".repeat(64) }));
+    await expect(loadResearchMemorySnapshot(dir)).rejects.toThrow(/missing snapshot/);
+  });
+});
+
 describe("default research memory provider (#210)", () => {
   test("returns an additive v3 slice bound to this Run, with the pinned card and snapshot", async () => {
     const dir = await memoryDir();

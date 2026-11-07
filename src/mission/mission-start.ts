@@ -79,6 +79,7 @@ import { projectDecisionAccountability, type CounterfactualStatus, type Rejected
 import {
   RESUMABLE_STATUSES,
   reconcileInterruptedMission,
+  reconcileResearchMemory,
   staleControllerLock,
   MissionResumeRejectedError,
   isExplicitResumeRequest,
@@ -501,7 +502,9 @@ export type HistoryEventType =
   | "MISSION_RESUMED"
   | "RECOVERY_COMPLETED"
   | "RECOVERY_REMEASURED"
-  | "RECOVERY_ABANDONED_INTENT";
+  | "RECOVERY_ABANDONED_INTENT"
+  // M1-T7: a damaged or missing derived Memory snapshot was rebuilt
+  | "RECOVERY_MEMORY_REBUILT";
 
 export interface HistoryEvent {
   readonly type: HistoryEventType;
@@ -713,7 +716,7 @@ function researchMemoryProviderFor(options: StartMissionOptions, missionId: stri
 }
 
 /** Project-local derived-artifact namespace (under the git-ignored Mission dir). */
-function researchMemoryDir(projectRoot: string, missionId: string): string {
+export function researchMemoryDir(projectRoot: string, missionId: string): string {
   return join(missionDir(projectRoot, missionId), "memory");
 }
 
@@ -1858,8 +1861,9 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       // Resuming without a decision boundary would have nothing new to do.
       throw new MissionStartRejectedError("resuming a Mission without a Mission Director is not supported; the baseline path is not resumable work");
     } else {
-      // Recovery rebuilds the derived projection from reconciled history.
-      record = await refreshResearchMemory(record);
+      // A resume already verified/rebuilt the derived projection from
+      // authoritative history (#216) before entering the loop; a fresh start
+      // published it after the baseline above.
       await persist(options.projectRoot, record);
     }
 
@@ -1925,6 +1929,8 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       phase: DecisionPhase;
       decisionGroupId: string;
       decisionId: (attempt: number) => string;
+      /** First unused attempt: a resumed stage never re-charges completed attempts. */
+      startAttempt?: number;
       blindProposal?: DirectorProposal;
       packet?: ResearchDecisionPacket;
     }): Promise<{ record: MissionRecord; proposal?: DirectorProposal; blockedReason?: string }> => {
@@ -1985,7 +1991,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         };
       };
 
-      for (let decisionAttempt = 1; decisionAttempt <= MAX_DECISION_ATTEMPTS; decisionAttempt++) {
+      for (let decisionAttempt = args.startAttempt ?? 1; decisionAttempt <= MAX_DECISION_ATTEMPTS; decisionAttempt++) {
         const stateVersion = r.stateVersion ?? 0;
         const decisionId = args.decisionId(decisionAttempt);
         const reserved = reserveDecisionSlot(r);
@@ -2114,7 +2120,13 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         await persist(options.projectRoot, r);
         return { record: r, proposal: accepted };
       }
-      return { record: r, blockedReason };
+      return {
+        record: r,
+        ...(blockedReason === undefined && args.startAttempt !== undefined && args.startAttempt > MAX_DECISION_ATTEMPTS
+          // Every bounded attempt was already priced and persisted pre-crash.
+          ? { blockedReason: "all bounded attempts for this stage were already priced before the interruption; no new call was made" }
+          : { blockedReason }),
+      };
     };
 
     while (true) {
@@ -2153,84 +2165,116 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       // pinned Decision Packet, and ONLY its Revised Proposal can dispatch.
       const stateVersion = record.stateVersion ?? 0;
       const decisionGroupId = `${draft.id}:director:${stateVersion}`;
+      // M1-T7: a stage already durable for THIS state version is reused, never
+      // re-called or re-charged. A crash after the frozen Blind Proposal must
+      // not regenerate a purportedly blind decision, and a crash after the
+      // Revised Proposal must dispatch that exact validated action.
+      const recordedStages = (record.decisions ?? []).filter((decision) =>
+        decision.decisionGroupId === decisionGroupId && decision.stateVersion === stateVersion);
+      // A group that already recorded its stop has completed: resuming a
+      // cleanly stopped Mission asks again instead of replaying that same stop.
+      const groupStopped = (record.history ?? []).some((event) =>
+        event.type === "DIRECTOR_STOPPED" && isRecord(event.detail) && event.detail.stateVersion === stateVersion);
+      const frozenStage = (phase: DecisionPhase) => {
+        const stage = recordedStages.filter((decision) => decision.phase === phase);
+        const accepted = groupStopped ? [] : stage.filter((decision) => decision.accepted && decision.proposal);
+        return {
+          proposal: accepted.at(-1)?.proposal,
+          nextAttempt: stage.reduce((next, decision) => Math.max(next, decision.attempt), 0) + 1,
+        };
+      };
+      const frozenBlind = frozenStage("blind");
+      const frozenRevision = frozenStage("revision");
 
-      const blindStage = await decideStage({
-        current: record,
-        stageInput: directorInput,
-        phase: "blind",
-        decisionGroupId,
-        decisionId: (attempt) => `${decisionGroupId}:${attempt}`,
-      });
-      record = blindStage.record;
-      if (record.status === "budget-exhausted") {
-        await persist(options.projectRoot, record);
-        await releaseLock();
-        throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the next decision; no further dispatch");
-      }
-      if (!blindStage.proposal) {
-        const reason = blindStage.blockedReason ?? "the decision model returned no usable proposal";
-        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "blind" } }, {
-          status: "director-blocked",
-          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-blind stage (${reason}); stopping for an explicit decision instead of guessing`,
+      // The already-validated Revised Proposal of a resumed decision needs no
+      // second model call, no new snapshot pin, and no second charge.
+      let proposal = frozenRevision.proposal;
+      if (proposal === undefined) {
+        // The frozen Blind Proposal is reused as-is; only a decision group with
+        // no durable blind stage may call the Memory-blind stage again.
+        let blindProposal = frozenBlind.proposal;
+        if (blindProposal === undefined) {
+          const blindStage = await decideStage({
+            current: record,
+            stageInput: directorInput,
+            phase: "blind",
+            decisionGroupId,
+            decisionId: (attempt) => `${decisionGroupId}:${attempt}`,
+            startAttempt: frozenBlind.nextAttempt,
+          });
+          record = blindStage.record;
+          if (record.status === "budget-exhausted") {
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the next decision; no further dispatch");
+          }
+          if (!blindStage.proposal) {
+            const reason = blindStage.blockedReason ?? "the decision model returned no usable proposal";
+            record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "blind" } }, {
+              status: "director-blocked",
+              stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-blind stage (${reason}); stopping for an explicit decision instead of guessing`,
+            });
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw new DirectorBlockedError(record.stopReason!, reason);
+          }
+          blindProposal = blindStage.proposal;
+        }
+
+        // Stage 0/2 pin: one snapshot, loaded only after the blind proposal is
+        // durably frozen. Damaged Memory fails closed rather than deciding on an
+        // empty research history.
+        let pinnedPacket: ResearchDecisionPacket | undefined;
+        if (researchMemoryEnabled) {
+          try {
+            const snapshot = await loadResearchMemorySnapshot(memoryDir);
+            if (snapshot !== undefined) pinnedPacket = projectResearchDecisionPacket(snapshot);
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: decisionGroupId, reason } }, {
+              status: "director-blocked",
+              stopReason: `Research Memory could not be pinned for the revision stage (${reason}); refusing to decide on damaged memory`,
+            });
+            await persist(options.projectRoot, record);
+            await releaseLock();
+            throw new DirectorBlockedError(record.stopReason!, reason);
+          }
+        }
+
+        const revisionStage = await decideStage({
+          current: record,
+          stageInput: {
+            ...directorInput,
+            decisionPhase: {
+              blindProposal,
+              ...(pinnedPacket ? { memoryPacket: pinnedPacket } : {}),
+            },
+          },
+          phase: "revision",
+          decisionGroupId,
+          decisionId: (attempt) => `${decisionGroupId}:${attempt}:revision`,
+          startAttempt: frozenRevision.nextAttempt,
+          blindProposal,
+          ...(pinnedPacket ? { packet: pinnedPacket } : {}),
         });
-        await persist(options.projectRoot, record);
-        await releaseLock();
-        throw new DirectorBlockedError(record.stopReason!, reason);
-      }
-      const blindProposal = blindStage.proposal;
-
-      // Stage 0/2 pin: one snapshot, loaded only after the blind proposal is
-      // durably frozen. Damaged Memory fails closed rather than deciding on an
-      // empty research history.
-      let pinnedPacket: ResearchDecisionPacket | undefined;
-      if (researchMemoryEnabled) {
-        try {
-          const snapshot = await loadResearchMemorySnapshot(memoryDir);
-          if (snapshot !== undefined) pinnedPacket = projectResearchDecisionPacket(snapshot);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: decisionGroupId, reason } }, {
+        record = revisionStage.record;
+        if (record.status === "budget-exhausted") {
+          await persist(options.projectRoot, record);
+          await releaseLock();
+          throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the Memory-informed revision; no further dispatch");
+        }
+        if (!revisionStage.proposal) {
+          const reason = revisionStage.blockedReason ?? "the decision model returned no usable revised proposal";
+          record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "revision" } }, {
             status: "director-blocked",
-            stopReason: `Research Memory could not be pinned for the revision stage (${reason}); refusing to decide on damaged memory`,
+            stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-informed stage (${reason}); the frozen Blind Proposal was NOT dispatched`,
           });
           await persist(options.projectRoot, record);
           await releaseLock();
           throw new DirectorBlockedError(record.stopReason!, reason);
         }
+        proposal = revisionStage.proposal;
       }
-
-      const revisionStage = await decideStage({
-        current: record,
-        stageInput: {
-          ...directorInput,
-          decisionPhase: {
-            blindProposal,
-            ...(pinnedPacket ? { memoryPacket: pinnedPacket } : {}),
-          },
-        },
-        phase: "revision",
-        decisionGroupId,
-        decisionId: (attempt) => `${decisionGroupId}:${attempt}:revision`,
-        blindProposal,
-        ...(pinnedPacket ? { packet: pinnedPacket } : {}),
-      });
-      record = revisionStage.record;
-      if (record.status === "budget-exhausted") {
-        await persist(options.projectRoot, record);
-        await releaseLock();
-        throw new BudgetExhaustedError(record.stopReason ?? "budget exhausted before the Memory-informed revision; no further dispatch");
-      }
-      if (!revisionStage.proposal) {
-        const reason = revisionStage.blockedReason ?? "the decision model returned no usable revised proposal";
-        record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { exhausted: MAX_DECISION_ATTEMPTS, reason, phase: "revision" } }, {
-          status: "director-blocked",
-          stopReason: `decision model produced only invalid proposals after ${MAX_DECISION_ATTEMPTS} bounded attempts in the Memory-informed stage (${reason}); the frozen Blind Proposal was NOT dispatched`,
-        });
-        await persist(options.projectRoot, record);
-        await releaseLock();
-        throw new DirectorBlockedError(record.stopReason!, reason);
-      }
-      const proposal = revisionStage.proposal;
 
       if (proposal.action === "stop") {
         record = withEvent(record, { type: "DIRECTOR_STOPPED", at: now(), detail: { stateVersion: record.stateVersion, stopReason: proposal.stopReason, rationale: proposal.rationale } }, {
@@ -2242,22 +2286,39 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
 
       // Apply the bounded proposal THROUGH the existing operations: generate a
       // Task Contract entry, then dispatch a fresh Run and independently measure.
+      // M1-T7: an already-durable PROPOSAL_APPLIED for this state version keeps
+      // its Run identity, so recovery never creates a second Experiment for one
+      // validated action.
+      const appliedEvent = (record.history ?? []).findLast((event) =>
+        event.type === "PROPOSAL_APPLIED" && isRecord(event.detail)
+        && event.detail.stateVersion === record.stateVersion
+        && typeof event.detail.runId === "string");
       experimentCount += 1;
-      const expAttempt = nextAttemptNumber++; // baseline is attempt 1; resume climbs past every prior attempt
-      const expRunId = `${draft.id}:exp:${expAttempt}`;
-      const task: NonNullable<MissionRecord["tasks"]>[number] = {
-        taskId: `task-exp-${expAttempt}`,
-        objective: proposal.task!.objective,
-        ...(proposal.task!.expectedOutputs ? { expectedOutputs: proposal.task!.expectedOutputs } : {}),
-        ...(proposal.task!.constraints ? { constraints: proposal.task!.constraints } : {}),
-        ...(proposal.basedOn ? { dependencies: proposal.basedOn } : {}),
-        source: "director",
-      };
-      record = withEvent(record, {
-        type: "PROPOSAL_APPLIED",
-        at: now(),
-        detail: { runId: expRunId, action: proposal.action, stateVersion: record.stateVersion, taskId: task.taskId, basedOn: proposal.basedOn ?? [] },
-      }, { tasks: [...(record.tasks ?? []), task] });
+      // baseline is attempt 1; resume climbs past every prior attempt. A reused
+      // application keeps the attempt it was recorded with (a legacy record
+      // without one predates any recorded later attempt, so the climb matches).
+      const expAttempt = appliedEvent && typeof appliedEvent.detail!.attempt === "number"
+        ? appliedEvent.detail!.attempt
+        : nextAttemptNumber;
+      nextAttemptNumber = Math.max(nextAttemptNumber, expAttempt + 1);
+      const expRunId = appliedEvent ? String(appliedEvent.detail!.runId) : `${draft.id}:exp:${expAttempt}`;
+      const taskId = appliedEvent && typeof appliedEvent.detail!.taskId === "string" ? appliedEvent.detail!.taskId : `task-exp-${expAttempt}`;
+      let task = (record.tasks ?? []).find((entry) => entry.taskId === taskId);
+      if (task === undefined) {
+        task = {
+          taskId,
+          objective: proposal.task!.objective,
+          ...(proposal.task!.expectedOutputs ? { expectedOutputs: proposal.task!.expectedOutputs } : {}),
+          ...(proposal.task!.constraints ? { constraints: proposal.task!.constraints } : {}),
+          ...(proposal.basedOn ? { dependencies: proposal.basedOn } : {}),
+          source: "director",
+        };
+        record = withEvent(record, {
+          type: "PROPOSAL_APPLIED",
+          at: now(),
+          detail: { runId: expRunId, action: proposal.action, stateVersion: record.stateVersion, taskId: task.taskId, attempt: expAttempt, basedOn: proposal.basedOn ?? [] },
+        }, { tasks: [...(record.tasks ?? []), task] });
+      }
 
       const outputs = proposal.task!.expectedOutputs?.length ? proposal.task!.expectedOutputs! : draft.outputs;
       const expDispatched = await dispatchCandidateAttempt({
@@ -2395,7 +2456,7 @@ export function summarizeMission(record: MissionRecord): {
 }
 
 /** Maps authoritative Mission history into the projection's bounded source. */
-function missionResearchSource(record: MissionRecord): ResearchMemorySource {
+export function missionResearchSource(record: MissionRecord): ResearchMemorySource {
   const runs: ResearchRunFinding[] = [];
   const seen = new Set<string>();
   if (record.baseline) {
@@ -2591,6 +2652,17 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
     throw error;
   }
   let record = reconciliation.record;
+  if (options.researchMemory !== false) {
+    // M1-T7: verify/rebuild the derived Memory projection BEFORE any recovered
+    // state is written, so unrebuildable corruption fails closed without
+    // rewriting the authoritative record or serving an empty history.
+    try {
+      record = (await reconcileResearchMemory({ projectRoot: options.projectRoot, record, now })).record;
+    } catch (error) {
+      await releaseLock();
+      throw error;
+    }
+  }
   record = withEvent(record, {
     type: "MISSION_RESUMED",
     at: now(),

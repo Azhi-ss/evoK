@@ -8,8 +8,8 @@
  * new one. Serving fails closed on a damaged pointer/snapshot; it never treats
  * corruption as an empty research history.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
   validateResearchMemorySnapshot,
   type ResearchMemorySnapshot,
@@ -37,16 +37,36 @@ function snapshotPath(dir: string, digest: string): string {
   return join(dir, SNAPSHOTS_DIRNAME, `${digest}.json`);
 }
 
+/**
+ * Writes one file completely (fsync + atomic rename) before it can be seen.
+ * The temp name can never be a digest path, so a crashed write is never served.
+ */
 async function atomicWriteJson(file: string, value: unknown): Promise<void> {
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 2));
+  await mkdir(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const handle = await open(tmp, "w");
+  try {
+    await handle.writeFile(JSON.stringify(value, null, 2), "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await rename(tmp, file);
+  const directory = await open(dirname(file), "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
 }
 
-/** Publishes an immutable snapshot, then atomically switches the serving pointer. */
+/**
+ * Publishes an immutable snapshot, then atomically switches the serving
+ * pointer. The snapshot bytes are durable before the pointer can name them, so
+ * a crash leaves either the complete old pointer or the complete new one.
+ */
 export async function publishResearchMemorySnapshot(dir: string, snapshot: ResearchMemorySnapshot): Promise<void> {
   const validated = validateResearchMemorySnapshot(snapshot);
-  await mkdir(join(dir, SNAPSHOTS_DIRNAME), { recursive: true });
   await atomicWriteJson(snapshotPath(dir, validated.digest), validated);
   const pointer: ActivePointer = {
     schema: RESEARCH_MEMORY_POINTER_SCHEMA,

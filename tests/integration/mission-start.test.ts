@@ -23,6 +23,7 @@ import {
   EvaluatorFailureError,
   loadMissionRecord,
   missionRecordPath,
+  ReconciliationBlockedError,
   baselineResultPath,
   startAuthorizedMission,
   resumeAuthorizedMission,
@@ -1777,4 +1778,303 @@ describe("decision accountability and anti-collapse safeguards (#215)", () => {
     expect(revisions[0]!.memory?.cardRefs).toContain(H2_CARD);
     expect(revisions[0]!.memory?.cardRefs).toContain(`finding:${refutedRunId}`);
   });
+});
+
+// ── M1-T7 (#216): resume frozen decisions and rebuild Research Memory ───────
+describe("frozen Director decisions and Memory recovery on resume (#216)", () => {
+  const memoryDirOf = (project: string, missionId: string) => join(project, ".evok", "missions", missionId, "memory");
+  const deleteLock = (project: string, missionId: string) => rm(join(project, ".evok", "missions", missionId, "controller.lock"), { force: true });
+  const resumeAuth: ResumeAuthorization = { requested: true, token: "/resume", missionSelector: "displayed" };
+  const decisionSpend = (record: { usage: { decisions?: readonly { cost: { total: number } }[] } }) =>
+    (record.usage.decisions ?? []).reduce((sum, line) => sum + line.cost.total, 0);
+
+  const runtimeFactoryFor = (resolver: SessionModelResolver, resources: Awaited<ReturnType<typeof discoverEvokResources>>, writes: { prompts: string[]; answer: string }) =>
+    (workspaceRoot: string) => new PiAgentRuntime({
+      workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+      sessionFactory: brokerSession(writes),
+    });
+
+  /** The first durable two-stage crash: `crashPhase` is the stage that just committed. */
+  async function crashAfterStage(missionId: string, crashPhase: "blind" | "revision") {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft(missionId, {
+      budget: { total: 3, units: "model-USD", note: "T7 recovery slice" },
+    }));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const { director } = twoStageDirector((input, stage) => stage === "blind"
+      ? { proposal: investigateTask("frozen blind objective", input.stateVersion) }
+      : { proposal: { ...investigateTask("revised objective after Memory", input.stateVersion), basedOn: [input.observations[input.observations.length - 1]!.runId] } });
+    const crashed = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      onPersistedEvent: async (event) => {
+        if (event.type === "DIRECTOR_CALLED" && event.detail?.phase === crashPhase) throw new Error("simulated process crash");
+      },
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    }).catch((error) => error as Error);
+    expect(crashed).toBeInstanceOf(Error);
+    await deleteLock(project, draft.id);
+    return { project, draft, resolver, resources, writes };
+  }
+
+  test("a resume after the frozen Blind Proposal reuses that exact proposal and pinned snapshot", async () => {
+    const { project, draft, resolver, resources, writes } = await crashAfterStage("m-t7-blind", "blind");
+    const durable = await loadMissionRecord(project, draft.id);
+    const frozenBlind = durable.decisions!.find((decision) => decision.phase === "blind")!;
+    expect(frozenBlind.accepted).toBe(true);
+    const pinnedDigest = durable.researchMemory!.snapshotDigest;
+    expect(durable.experiments ?? []).toHaveLength(0);
+    const spendAtCrash = decisionSpend(durable);
+
+    // A fresh context (the only durable state is the record) resumes.
+    const { director, calls } = twoStageDirector((input, stage) => stage === "blind"
+      ? { proposal: investigateTask("REGENERATED blind objective", input.stateVersion) }
+      : { proposal: investigateTask("revised from the frozen blind proposal", input.stateVersion) });
+    const outcome = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+
+    // The blind stage is NEVER regenerated, and its frozen proposal is the
+    // one the revision stage received.
+    expect(calls.filter((call) => call.stage === "blind")).toHaveLength(0);
+    expect(calls.filter((call) => call.stage === "revision")).toHaveLength(1);
+    expect(calls[0]!.input.decisionPhase?.blindProposal).toEqual(frozenBlind.proposal);
+    // …pinned to the snapshot the Mission already served, not a newer one.
+    const revision = outcome.record.decisions!.filter((decision) => decision.phase === "revision").at(-1)!;
+    expect(revision.memory?.snapshotDigest).toBe(pinnedDigest);
+    expect(outcome.record.decisions!.filter((decision) => decision.phase === "blind")).toHaveLength(1);
+    // Exactly one Experiment; the completed blind stage is not charged twice.
+    expect(outcome.experiments).toHaveLength(1);
+    expect(outcome.experiments[0]!.taskObjective).toBe("revised from the frozen blind proposal");
+    expect(decisionSpend(outcome.record) - spendAtCrash).toBeCloseTo(DECISION_USAGE.cost.total, 6);
+  }, 60_000);
+
+  test("a resume after the Revised Proposal dispatches that validated action once, with no re-charge", async () => {
+    const { project, draft, resolver, resources, writes } = await crashAfterStage("m-t7-revision", "revision");
+    const durable = await loadMissionRecord(project, draft.id);
+    const frozenRevision = durable.decisions!.find((decision) => decision.phase === "revision")!;
+    expect(frozenRevision.accepted).toBe(true);
+    const spendAtCrash = decisionSpend(durable);
+    const runsBefore = Object.keys(durable.runs).sort();
+
+    const { director, calls } = twoStageDirector((input) => ({
+      proposal: investigateTask("a DIFFERENT action the resumed model would pick", input.stateVersion),
+    }));
+    const outcome = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+
+    // Both stages were already decided: no model call is repeated.
+    expect(calls).toHaveLength(0);
+    // The validated Revised Proposal's action is dispatched exactly once.
+    expect(outcome.experiments).toHaveLength(1);
+    expect(outcome.experiments[0]!.taskObjective).toBe(frozenRevision.proposal!.task!.objective);
+    expect(outcome.record.decisions).toHaveLength(durable.decisions!.length);
+    expect(decisionSpend(outcome.record)).toBeCloseTo(spendAtCrash, 9);
+    // A fresh Run identity is issued for the never-executed attempt; the
+    // recorded runs are preserved, none is duplicated.
+    const runsAfter = Object.keys(outcome.record.runs).sort();
+    expect(runsAfter).toHaveLength(runsBefore.length + 1);
+    for (const runId of runsBefore) expect(runsAfter).toContain(runId);
+  }, 60_000);
+
+  test("a cleanly stopped Mission asks again on resume instead of replaying the same stop", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t7-stopped", {
+      budget: { total: 3, units: "model-USD", note: "T7 stopped slice" },
+    }));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const stop = twoStageDirector((input) => ({
+      proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "nothing worth measuring yet", stopReason: "done" },
+    }));
+    const stopped = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: stop.director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+    expect(stopped.status).toBe("director-stopped");
+
+    // The user resumes explicitly; that is a NEW decision, not a replay of the stop.
+    const { director, calls } = twoStageDirector((input) => ({
+      proposal: { ...investigateTask("a direction the user resumed for", input.stateVersion), basedOn: [input.observations[0]!.runId] },
+    }));
+    const resumed = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+    expect(calls.filter((call) => call.stage === "blind")).toHaveLength(1);
+    expect(resumed.experiments.map((entry) => entry.taskObjective)).toEqual(["a direction the user resumed for"]);
+    expect(resumed.status).toBe("iteration-limit");
+  }, 60_000);
+
+  test("a damaged snapshot is rebuilt deterministically, kept competing records, and never served empty", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t7-rebuild", {
+      budget: { total: 3, units: "model-USD", note: "T7 rebuild slice" },
+    }));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-t7-rebuild");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const twoExperiments = twoStageDirector((input) => input.observations.length >= 3
+      ? { proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "enough observations", stopReason: "done" } }
+      : {
+          proposal: {
+            ...investigateTask(`competing branch objective ${input.observations.length}`, input.stateVersion),
+            basedOn: [input.observations[input.observations.length - 1]!.runId],
+          },
+        });
+    const started = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: twoExperiments.director, maxExperiments: 2,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+    expect(started.experiments).toHaveLength(2);
+    // A stored accepted Proposal is part of the authoritative rebuild input.
+    await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        agentId: `evok-experiment-investigate@${draft.id}:exp:2`,
+        runId: `${draft.id}:exp:2`,
+        supportingRefs: [{ kind: "run", ref: started.experiments[0]!.runId }],
+      }),
+    });
+    const published = await loadResearchMemorySnapshot(memoryDirOf(project, draft.id));
+    const authoritativeDigest = published!.digest;
+    const before = await loadMissionRecord(project, draft.id);
+    expect(before.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
+
+    // Crash-style damage: the pointer survives, its snapshot bytes do not.
+    await writeFile(join(memoryDirOf(project, draft.id), "snapshots", `${authoritativeDigest}.json`), "{ corrupted");
+    const { director } = twoStageDirector((input) => ({ proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "recovered", stopReason: "done" } }));
+    const resumed = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+    // Deterministic rebuild from Mission history + stored proposals: same digest.
+    expect(resumed.record.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
+    const rebuilt = await loadResearchMemorySnapshot(memoryDirOf(project, draft.id));
+    expect(rebuilt!.digest).toBe(authoritativeDigest);
+    expect(rebuilt!.cards.filter((card) => card.kind === "hypothesis")).toHaveLength(1);
+    // Both competing Branch outcomes and the stored Proposal survive recovery.
+    expect(resumed.record.experiments).toHaveLength(2);
+    expect(resumed.record.synthesisProposals).toHaveLength(1);
+    expect(rebuilt!.cards.filter((card) => card.kind === "finding")).toHaveLength(3);
+    expect(resumed.record.history.some((event) => event.type === "RECOVERY_MEMORY_REBUILT")).toBe(true);
+    // Consumed budget never shrinks on recovery.
+    expect(resumed.record.budget.consumed).toBeGreaterThanOrEqual(before.budget.consumed - 1e-12);
+    // An already executed Run keeps the snapshot/slice digests it consumed.
+    const consumingRunId = before.experiments![1]!.runId;
+    const consumed = before.runs[consumingRunId]!.researchMemory;
+    expect(consumed).toBeDefined();
+    // It was pinned to the snapshot of that moment, not to the active pointer.
+    expect(consumed!.snapshotDigest).not.toBe(authoritativeDigest);
+    expect(resumed.record.runs[consumingRunId]!.researchMemory).toEqual(consumed);
+
+    // Missing derived artifacts (no pointer, no snapshots) rebuild the same snapshot.
+    await rm(memoryDirOf(project, draft.id), { recursive: true, force: true });
+    const again = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director, maxExperiments: 1,
+      runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
+    });
+    expect(again.record.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
+    expect((await loadResearchMemorySnapshot(memoryDirOf(project, draft.id)))!.digest).toBe(authoritativeDigest);
+  }, 90_000);
+
+  test("a rebuild that would serve less history than the Mission committed to fails closed", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const id = "m-t7-shrunk";
+    const seeded = await seedDraft(project, completeDraft(id, { budget: { total: 2, units: "model-USD" } }));
+    const dir = join(project, ".evok", "missions", id);
+    await mkdir(dir, { recursive: true });
+    // Structurally valid, but the Experiment trail no longer supports the
+    // snapshot the Mission already committed to (a truncated sequence).
+    await writeFile(join(dir, "mission.json"), JSON.stringify({
+      schemaVersion: 1, id, status: "director-stopped", objective: seeded.objective,
+      contract: { objective: seeded.objective, expectedOutputs: ["answer.txt"], evaluationMethod: "file-answer-deterministic", hardRules: seeded.constraints.hardRules },
+      budget: { total: 2, units: "model-USD", consumed: 0.001, remaining: 1.999 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0.001, units: "model-USD" } }, runs: [] },
+      runs: {}, stateVersion: 4, tasks: [],
+      experiments: [{ runId: `${id}:exp:2`, attempt: 2, action: "investigate", ok: true, taskObjective: "kept", evidenceRefs: [], at: "2026-11-07T00:00:00.000Z" }],
+      researchMemory: { snapshotId: "research-memory:committed", snapshotDigest: "ab".repeat(32), ledgerRevision: 4, cards: { finding: 4, hypothesis: 2 }, omittedCards: 0 },
+      history: [], createdAt: "2026-11-07T00:00:00.000Z", updatedAt: "2026-11-07T00:00:00.000Z",
+    }, null, 2));
+    const { resolver, resources } = await controlledHarness(project);
+    const { director } = twoStageDirector((input) => ({ proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "no" } }));
+    const blocked = await resumeAuthorizedMission({
+      projectRoot: project, missionId: id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+    }).catch((error) => error as Error);
+    expect(blocked).toBeInstanceOf(ReconciliationBlockedError);
+    expect((blocked as Error).message).toMatch(/shrunken or empty/);
+    // The shrunken rebuild is never published over the committed snapshot.
+    expect(await loadResearchMemorySnapshot(memoryDirOf(project, id))).toBeUndefined();
+  }, 60_000);
+
+  test("unrebuildable Memory corruption fails closed instead of serving an empty snapshot", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const id = "m-t7-corrupt";
+    const seeded = await seedDraft(project, completeDraft(id, { budget: { total: 2, units: "model-USD" } }));
+    const dir = join(project, ".evok", "missions", id);
+    await mkdir(dir, { recursive: true });
+    // A structurally valid record whose derived input is damaged: the trail
+    // entry cannot be projected, so no snapshot can be verified or rebuilt.
+    await writeFile(join(dir, "mission.json"), JSON.stringify({
+      schemaVersion: 1, id, status: "director-stopped", objective: seeded.objective,
+      contract: { objective: seeded.objective, expectedOutputs: ["answer.txt"], evaluationMethod: "file-answer-deterministic", hardRules: seeded.constraints.hardRules },
+      budget: { total: 2, units: "model-USD", consumed: 0.001, remaining: 1.999 }, reserved: 0,
+      usage: { intake: { tokens: {}, cost: { total: 0.001, units: "model-USD" } }, runs: [] },
+      runs: {}, stateVersion: 1, tasks: [],
+      experiments: [{ runId: `${id}:exp:2`, attempt: 2, action: "investigate", ok: "maybe", taskObjective: "damaged", evidenceRefs: [], at: "2026-11-07T00:00:00.000Z" }],
+      researchMemory: { snapshotId: "research-memory:deadbeef", snapshotDigest: "deadbeef", ledgerRevision: 1, cards: { finding: 1 }, omittedCards: 0 },
+      history: [], createdAt: "2026-11-07T00:00:00.000Z", updatedAt: "2026-11-07T00:00:00.000Z",
+    }, null, 2));
+    const { resolver, resources } = await controlledHarness(project);
+    const { director } = twoStageDirector((input) => ({ proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "no" } }));
+    const blocked = await resumeAuthorizedMission({
+      projectRoot: project, missionId: id, authorization: resumeAuth,
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+    }).catch((error) => error as Error);
+    expect(blocked).toBeInstanceOf(ReconciliationBlockedError);
+    expect((blocked as Error).message).toMatch(/Research Memory|research memory/);
+    // Never an empty research history: no snapshot is published or served,
+    // and the damaged authoritative record is left untouched.
+    expect(await loadResearchMemorySnapshot(memoryDirOf(project, id))).toBeUndefined();
+    expect(JSON.parse(await readFile(join(dir, "mission.json"), "utf8")).status).toBe("director-stopped");
+  }, 60_000);
 });
