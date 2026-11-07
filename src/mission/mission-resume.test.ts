@@ -230,7 +230,7 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.record.reserved).toBe(0);
   });
 
-  test("an unconfirmed dispatched intent with no durable result is abandoned and surfaced as Negative Evidence, never silently replayed", async () => {
+  test("an unconfirmed dispatched intent with no durable result is abandoned and surfaced as an operational outcome, never silently replayed", async () => {
     const project = await tempProject();
     const id = "m-t6-noresult";
     await seedDraft(project, id);
@@ -257,8 +257,10 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.adoptedRunIds).toEqual([baselineRunId]);
     expect(evaluations).toBe(0);
     const neg = report.record.experiments!.find((e) => e.runId === lostRunId);
+    // The Run Outcome is preserved, but a protocol failure is not a scientific
+    // refutation (#213).
     expect(neg?.ok).toBe(false);
-    expect(neg?.negativeEvidence).toBe(true);
+    expect(neg?.negativeEvidence).toBeUndefined();
     expect(neg?.error).toMatch(/unconfirmed|interrupted/i);
     expect(report.record.reserved).toBe(0.01);
   });
@@ -360,7 +362,7 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect((error as ReconciliationBlockedError).reason).toMatch(/budget|ledger/i);
   });
 
-  test("an unconfirmed BASELINE intent with no evidence still becomes Negative Evidence the Director can see", async () => {
+  test("an unconfirmed BASELINE intent with no evidence still becomes an operational outcome the Director can see", async () => {
     const project = await tempProject();
     const id = "m-t6-lostbaseline";
     await seedDraft(project, id);
@@ -378,7 +380,8 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.adoptedRunIds).toHaveLength(0);
     expect(report.abandonedIntents.map((a) => a.runId)).toEqual([runId]);
     const neg = report.record.experiments!.find((e) => e.runId === runId);
-    expect(neg?.negativeEvidence).toBe(true);
+    expect(neg?.ok).toBe(false);
+    expect(neg?.negativeEvidence).toBeUndefined();
     expect(neg?.action).toBe("baseline");
   });
 

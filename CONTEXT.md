@@ -229,8 +229,20 @@ The controller-derived comparison of a Blind Proposal and its Revised Proposal: 
 _Avoid_: Model-reported change, Memory score
 
 **Negative Evidence**:
-Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances.
+Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances. Only a real measurement creates it; an operational failure alone never does.
 _Avoid_: Error log
+
+**Operational Outcome**:
+The non-scientific reading of one Run: an OOM, timeout, invalid measurement, or other infrastructure/protocol failure. It keeps its Run Outcome and may support an Operational Pitfall, but it is never Negative Evidence and cannot refute a Hypothesis.
+_Avoid_: Failed experiment, negative result, refutation
+
+**Operational Pitfall Card**:
+A reading card projected from one operational Run failure: its failure kind, reproducing conditions, and source Run refs. It is advisory and never a scientific claim.
+_Avoid_: Negative Evidence, refuted hypothesis
+
+**Replication Context**:
+Advisory context attached to a repeated Experiment objective: the prior Runs and their outcomes. A repeat may be seed replication or a critical ablation, so it is context, never an automatic rejection or a Memory-owned veto.
+_Avoid_: Duplicate rejection, Memory veto
 
 **Pitfall**:
 A reusable, answer-agnostic failure pattern that can warn future Tasks without asserting that a particular Candidate is always wrong.

@@ -142,6 +142,7 @@ export type {
   BudgetSpendKind,
 } from "./budget-gate";
 export {
+  OPERATIONAL_PITFALL_CARD_SCHEMA,
   RESEARCH_DECISION_PACKET_SCHEMA,
   RESEARCH_MEMORY_DEFAULT_MAX_CARDS,
   RESEARCH_MEMORY_FINDING_CARD_SCHEMA,
@@ -164,10 +165,14 @@ export type {
   ResearchMemorySnapshot,
   ResearchMemorySource,
   ResearchMemorySummary,
+  ResearchOperationalPitfallCard,
   ResearchPitfallCard,
+  ResearchReplicationContext,
   ResearchRunFinding,
   ResearchSynthesisFindingCard,
 } from "./research-memory";
+export { RUN_FAILURE_KINDS, classifyRunOutcome } from "./run-outcome";
+export type { RunFailureKind, RunOutcomeClassification, RunOutcomeInput, RunOutcomeState } from "./run-outcome";
 export { SYNTHESIS_FINDING_CARD_SCHEMA, SYNTHESIS_HYPOTHESIS_CARD_SCHEMA, SYNTHESIS_PITFALL_CARD_SCHEMA } from "./research-memory";
 export {
   SYNTHESIS_APPLICABILITY_DIMENSIONS,

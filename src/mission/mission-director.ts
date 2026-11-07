@@ -34,6 +34,8 @@ import type {
 import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
 import type { ResearchDecisionPacket } from "../evidence/research-memory";
+import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
+import { classifyTrailEntry } from "./mission-start";
 import type { EvokResources } from "../evok-resources";
 import { READ_ONLY_TOOLS } from "../pi-agent-runtime";
 
@@ -89,8 +91,16 @@ export interface DirectorObservation {
   readonly score?: number;
   readonly ruleViolations?: readonly string[];
   readonly facts?: readonly { readonly name: string; readonly value: string | number | boolean; readonly source?: string }[];
-  /** True for failed/inconclusive attempts retained as Negative Evidence. */
+  /**
+   * True ONLY for a measured scientific refutation. An operational failure
+   * (OOM, timeout, invalid measurement, protocol error) is never Negative
+   * Evidence and cannot refute a Hypothesis (#213).
+   */
   readonly negativeEvidence?: boolean;
+  /** Scientific reading vs operational failure, so the two stay distinct. */
+  readonly outcome?: RunOutcomeState;
+  /** Set only for an operational failure. */
+  readonly failure?: RunFailureKind;
   readonly error?: string;
   readonly evidenceRefs: readonly string[];
   readonly dispatchedAt: string;
@@ -493,8 +503,15 @@ function measuredObservation(args: {
     ...(evaluation.ruleViolations?.length ? { ruleViolations: [...evaluation.ruleViolations] } : {}),
     ...(evaluation.facts?.length ? { facts: evaluation.facts.map((fact) => ({ ...fact })) } : {}),
   };
-  // A measured rule failure is Negative Evidence, not a dropped observation.
-  return evaluation.ok ? base : { ...base, negativeEvidence: true };
+  // A measured rule failure is Negative Evidence, not a dropped observation; an
+  // invalid measurement is an operational outcome instead.
+  const classification = classifyRunOutcome(evaluation);
+  return {
+    ...base,
+    outcome: classification.state,
+    ...(classification.failure !== undefined ? { failure: classification.failure } : {}),
+    ...(classification.scientificNegativeEvidence ? { negativeEvidence: true } : {}),
+  };
 }
 
 /**
@@ -536,14 +553,17 @@ export function buildDirectorInput(
         dispatchedAt: run?.dispatchedAt ?? experiment.at,
       }));
     } else {
-      // A dispatch/run failure with no measurement: still Negative Evidence.
+      // A dispatch/run failure with no measurement keeps its Run Outcome but is
+      // an OPERATIONAL failure: it cannot refute the Hypothesis it was testing.
+      const classification = classifyTrailEntry(experiment);
       observations.push({
         runId: experiment.runId,
         attempt: experiment.attempt,
         kind: "experiment",
         action: experiment.action,
         ok: false,
-        negativeEvidence: true,
+        outcome: classification.state,
+        ...(classification.failure !== undefined ? { failure: classification.failure } : {}),
         ...(experiment.error ? { error: experiment.error } : {}),
         ...(experiment.ruleViolations?.length ? { ruleViolations: [...experiment.ruleViolations] } : {}),
         evidenceRefs: experiment.evidenceRefs,
@@ -577,7 +597,11 @@ JSON object: the human-owned objective and contract, immutable policy
 (permissions/hard rules), remaining budget in explicit units, already-generated
 tasks, and chronological observations. Each observation is an independent
 evaluator measurement (with score/facts/rule violations) or a retained failed
-attempt (negativeEvidence=true) with durable evidence references.
+attempt with durable evidence references. Each observation carries "outcome":
+"positive" | "negative" | "operational". Only a measured refutation sets
+negativeEvidence=true; an operational failure (OOM, timeout, invalid
+measurement, protocol error) is NOT scientific evidence and never refutes a
+hypothesis — treat it as a condition to work around.
 
 Choose the single most useful NEXT action within the authorized objective:
 - "investigate": inspect/understand before changing the candidate;

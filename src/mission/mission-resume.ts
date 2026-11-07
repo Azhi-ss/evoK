@@ -46,6 +46,7 @@ import {
   type MissionRunRecord,
   type MissionStatus,
   type MissionUsageLedger,
+  classifyTrailEntry,
 } from "./mission-start";
 
 const LOCK_FILENAME = "controller.lock";
@@ -273,7 +274,12 @@ function trailEntryFor(result: BaselineResultRecord, run: MissionRunRecord, reco
     attempt: run.attempt,
     action,
     ok: result.evaluation.ok,
-    ...(result.evaluation.ok ? {} : { negativeEvidence: true }),
+    // Only a real measured refutation is Negative Evidence; an invalid
+    // measurement stays an operational outcome (#213).
+    ...(classifyTrailEntry({ ok: result.evaluation.ok, evaluation: result.evaluation }).scientificNegativeEvidence
+      ? { negativeEvidence: true }
+      : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
     taskObjective,
     candidateId: result.candidateId,
     snapshotDigest: result.snapshotDigest,
@@ -384,8 +390,9 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     // conservatively held so the unknown spend cannot be dispatched twice.
     abandonedIntents.push({ runId: run.runId, attempt: run.attempt, reason: "dispatched before interruption with no durable result or snapshot" });
     runs[run.runId] = { ...run, status: "interrupted", finishedAt: run.finishedAt ?? new Date().toISOString() };
-    // The unconfirmed intent is ALWAYS surfaced as Negative Evidence — even a
-    // lost baseline — so the Director sees the attempt it must investigate.
+    // The unconfirmed intent is ALWAYS surfaced as an operational outcome — even
+    // a lost baseline — so the Director sees the attempt it must investigate.
+    // It produced no measurement, so it is never scientific Negative Evidence.
     if (!experiments.some((e) => e.runId === run.runId)) {
       const applied = [...record.history].reverse().find((h) =>
         h.type === "PROPOSAL_APPLIED" && isRecord(h.detail) && h.detail.runId === run.runId);
@@ -395,7 +402,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
       experiments.push({
         runId: run.runId, attempt: run.attempt,
         action,
-        ok: false, negativeEvidence: true,
+        ok: false,
         taskObjective: isBaselineRun ? (record.tasks?.[0]?.objective ?? run.intentId) : run.intentId,
         evidenceRefs: [], error: "unconfirmed pre-interrupt intent abandoned during recovery; retry requires a fresh Run",
         at: new Date().toISOString(),
@@ -503,7 +510,9 @@ export async function listUnfinishedMissions(projectRoot: string): Promise<Unfin
         status: r.status,
         ...(r.stopReason ? { stopReason: r.stopReason } : {}),
         experiments: experiments.length,
-        negativeEvidence: experiments.filter((e) => !e.ok).length,
+        // Scientific refutations only; OOM/timeout/invalid measurements are
+        // operational outcomes (#213).
+        negativeEvidence: experiments.filter((e) => classifyTrailEntry(e).scientificNegativeEvidence).length,
         hasBaseline: Boolean(r.baseline),
         totalBudget: r.budget.total,
         consumedBudget: r.budget.consumed,

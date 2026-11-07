@@ -23,7 +23,7 @@ function snapshot(missionId = "m-memory") {
     ledgerRevision: 1,
     runs: [
       { runId: `${missionId}:baseline:1`, ok: true, score: 0.75, evidenceRefs: [`runs/baseline/result.json`] },
-      { runId: `${missionId}:exp:2`, ok: false, negativeEvidence: true, ruleViolations: ["answer.txt is missing"], evidenceRefs: [] },
+      { runId: `${missionId}:exp:2`, ok: false, ruleViolations: ["answer.txt is missing"], evidenceRefs: [] },
     ],
   });
 }

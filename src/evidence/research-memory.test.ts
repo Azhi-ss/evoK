@@ -5,15 +5,19 @@ import {
   RESEARCH_DECISION_PACKET_SCHEMA,
   SYNTHESIS_FINDING_CARD_SCHEMA,
   SYNTHESIS_HYPOTHESIS_CARD_SCHEMA,
+  OPERATIONAL_PITFALL_CARD_SCHEMA,
+  RESEARCH_MEMORY_FINDING_CARD_SCHEMA,
   SYNTHESIS_PITFALL_CARD_SCHEMA,
   assertPacketCardRefs,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   validateResearchMemorySnapshot,
+  type ResearchFindingCard,
   type ResearchMemorySource,
 } from "./research-memory";
 import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal } from "./synthesis-proposal";
+import { digestValue } from "../security-boundary";
 
 function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
   return {
@@ -25,7 +29,6 @@ function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySo
         runId: "m-memory:exp:2",
         ok: false,
         ruleViolations: ["answer.txt is missing"],
-        negativeEvidence: true,
         evidenceRefs: ["runs/m-memory:exp:2/result.json"],
       },
     ],
@@ -87,7 +90,9 @@ describe("research memory projection (#210)", () => {
 
   test("cards carry bounded summaries and typed refs, never transcripts or bodies", () => {
     const card = projectResearchMemorySnapshot(source()).cards[0]!;
-    expect(Object.keys(card).sort()).toEqual(["applicability", "cardId", "kind", "lifecycle", "ok", "schema", "sourceRefs", "summary"]);
+    expect(Object.keys(card).sort()).toEqual([
+      "applicability", "cardId", "kind", "lifecycle", "ok", "outcome", "schema", "sourceRefs", "summary",
+    ]);
     expect(card.summary).toBe("run m-memory:baseline:1 measured ok=true score=0.75");
     expect(card.applicability).toEqual(["mission:m-memory"]);
     expect(card.sourceRefs).toEqual(["runs/m-memory:baseline:1/result.json"]);
@@ -350,5 +355,180 @@ describe("synthesis proposal cards (#212)", () => {
     expect(packet.cards.map((card) => card.kind)).toContain("hypothesis");
     expect(packet.cards.map((card) => card.cardId)).toEqual(snapshot.cards.map((card) => card.cardId));
     expect(() => assertPacketCardRefs(packet, ["hypothesis:synthesis:p-hypothesis"])).not.toThrow();
+  });
+});
+
+// ── M1-T4 (#213): scientific and operational outcomes stay distinct ─────────
+
+function outcomeSource(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
+  return source({
+    runs: [
+      { runId: "m-memory:baseline:1", ok: true, score: 0.75, evidenceRefs: ["runs/baseline/result.json"] },
+      {
+        runId: "m-memory:exp:2", taskId: "task-exp-2", taskObjective: "Materialize answer.txt with value 0.5",
+        ok: false, ruleViolations: ["answer.txt is missing"],
+        evidenceRefs: ["runs/exp-2/result.json"],
+      },
+      {
+        runId: "m-memory:exp:3", taskId: "task-exp-3", ok: false,
+        error: "CUDA error: out of memory while allocating 2.5 GiB",
+        evidenceRefs: [],
+      },
+      { runId: "m-memory:exp:4", taskId: "task-exp-4", ok: false, error: "Run timed out after 900000ms", evidenceRefs: [] },
+      { runId: "m-memory:exp:5", taskId: "task-exp-5", ok: false, evidenceRefs: ["runs/exp-5/result.json"] },
+      {
+        runId: "m-memory:exp:6", taskId: "task-exp-6", taskObjective: "materialize answer.txt with value 0.5",
+        ok: false, score: 0.2, evidenceRefs: ["runs/exp-6/result.json"],
+      },
+    ],
+    // Enough headroom that every fixture card (and derived Pitfall) is delivered.
+    maxCards: 16,
+    ...overrides,
+  });
+}
+
+describe("scientific vs operational outcomes (#213)", () => {
+  test("OOM and timeout keep their Run Outcome and project Operational Pitfalls with conditions", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource());
+    const oom = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:3")!;
+    expect(oom).toMatchObject({
+      kind: "finding",
+      ok: false,
+      outcome: "operational",
+      failure: "out-of-memory",
+      lifecycle: "provisional",
+    });
+    expect(oom.summary).toContain("operational");
+    expect(oom.summary).toContain("not scientific negative evidence");
+
+    const timeoutPitfall = snapshot.cards.find((card) => card.cardId === "pitfall:run:m-memory:exp:4")!;
+    expect(timeoutPitfall).toEqual({
+      schema: OPERATIONAL_PITFALL_CARD_SCHEMA,
+      cardId: "pitfall:run:m-memory:exp:4",
+      kind: "pitfall",
+      summary: timeoutPitfall.summary,
+      failure: "timeout",
+      conditions: ["failure:timeout", "observed:Run timed out after 900000ms"],
+      applicability: ["task:task-exp-4"],
+      sourceRefs: [],
+      lifecycle: "provisional",
+    });
+    const oomPitfall = snapshot.cards.find((card) => card.cardId === "pitfall:run:m-memory:exp:3")!;
+    expect(oomPitfall.kind === "pitfall" && oomPitfall.conditions[0]).toBe("failure:out-of-memory");
+  });
+
+  test("a measured rule failure stays scientific Negative Evidence and produces no Pitfall", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource());
+    const negative = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:2")!;
+    expect(negative).toMatchObject({ ok: false, outcome: "negative", lifecycle: "contested" });
+    expect(negative).not.toHaveProperty("failure");
+    expect(negative.summary).toContain("(negative evidence)");
+    expect(snapshot.cards.find((card) => card.cardId === "pitfall:run:m-memory:exp:2")).toBeUndefined();
+  });
+
+  test("an invalid measurement is operational and cannot become Negative Evidence", () => {
+    const invalid = projectResearchMemorySnapshot(outcomeSource()).cards
+      .find((card) => card.cardId === "finding:m-memory:exp:5")!;
+    expect(invalid).toMatchObject({ outcome: "operational", failure: "invalid-measurement" });
+    expect(invalid.summary).not.toContain("(negative evidence)");
+  });
+
+  test("a repeated Experiment match carries replication-value context instead of a veto", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource());
+    const first = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:2")!;
+    const repeat = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:6")!;
+    expect(first).not.toHaveProperty("replication");
+    expect(repeat).toMatchObject({
+      replication: {
+        objective: "materialize answer.txt with value 0.5",
+        priorRunIds: ["m-memory:exp:2"],
+        priorOutcomes: ["negative"],
+        advisory: true,
+      },
+    });
+    // Both conflicting measured outcomes survive with their own source conditions.
+    expect(first.applicability).toEqual(["task:task-exp-2"]);
+    expect(repeat.applicability).toEqual(["task:task-exp-6"]);
+    expect((first as { summary: string }).summary).toContain("rule");
+    expect((repeat as { summary: string }).summary).toContain("score=0.2");
+  });
+
+  test("Negative Evidence keeps its independent identity inside a Hypothesis Card", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource({
+      proposals: [acceptedProposal({ contradictingRefs: [{ kind: "negative-evidence", ref: "m-memory:exp:2" }] })],
+    }));
+    const hypothesis = snapshot.cards.find((card) => card.kind === "hypothesis")!;
+    expect(hypothesis.sourceRefs).toContain("negative-evidence:m-memory:exp:2");
+    // The authoritative Run reading is still projected as its own card.
+    const negative = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:2")!;
+    expect(negative).toMatchObject({ ok: false, outcome: "negative" });
+    expect(Object.keys(negative)).not.toContain("epistemicStatus");
+  });
+
+  test("operational and scientific cards are visibly distinct inside a Decision Packet", () => {
+    const packet = projectResearchDecisionPacket(projectResearchMemorySnapshot(outcomeSource()));
+    const findings = packet.cards.filter((card) => card.schema === RESEARCH_MEMORY_FINDING_CARD_SCHEMA);
+    const operational = findings.filter((card) => card.schema === RESEARCH_MEMORY_FINDING_CARD_SCHEMA && card.outcome === "operational");
+    const scientific = findings.filter((card) => card.schema === RESEARCH_MEMORY_FINDING_CARD_SCHEMA && card.outcome === "negative");
+    expect(operational.map((card) => card.cardId)).toEqual(["finding:m-memory:exp:3", "finding:m-memory:exp:4", "finding:m-memory:exp:5"]);
+    expect(scientific.map((card) => card.cardId)).toEqual(["finding:m-memory:exp:2", "finding:m-memory:exp:6"]);
+  });
+
+  test("snapshots with operational cards and Pitfalls round-trip and fail closed on tampering", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource());
+    expect(validateResearchMemorySnapshot(JSON.parse(JSON.stringify(snapshot)))).toEqual(snapshot);
+
+    const unknownOutcome = JSON.parse(JSON.stringify(snapshot));
+    unknownOutcome.cards.find((card: { cardId: string }) => card.cardId === "finding:m-memory:exp:3").outcome = "maybe";
+    expect(() => validateResearchMemorySnapshot(unknownOutcome)).toThrow(/outcome must be one of/);
+
+    const forgedPitfall = JSON.parse(JSON.stringify(snapshot));
+    forgedPitfall.cards.push({ ...forgedPitfall.cards[0], schema: OPERATIONAL_PITFALL_CARD_SCHEMA, cardId: "pitfall:run:x" });
+    expect(() => validateResearchMemorySnapshot(forgedPitfall)).toThrow();
+  });
+});
+
+describe("review hardening for #213", () => {
+  test("a snapshot persisted before #213 still loads instead of looking corrupt", () => {
+    const snapshot = projectResearchMemorySnapshot(source());
+    // Rebuild the exact bytes a pre-upgrade publish produced: cards that only
+    // ever carried `ok`, under their own content address.
+    const { digest: _digest, snapshotId: _snapshotId, ...snapshotBody } = snapshot;
+    const cards = JSON.parse(JSON.stringify(snapshotBody.cards)).map((card: Record<string, unknown>) => {
+      delete card.outcome;
+      return card;
+    });
+    const legacyBody = { ...snapshotBody, cards };
+    const legacyDigest = digestValue(legacyBody);
+    const legacy = { ...legacyBody, snapshotId: `research-memory:${legacyDigest}`, digest: legacyDigest };
+    const reloaded = validateResearchMemorySnapshot(legacy);
+    expect(reloaded.cards.find((card) => card.cardId === "finding:m-memory:baseline:1")).not.toHaveProperty("outcome");
+    // An unknown outcome value is still refused as corruption.
+    const corrupted = JSON.parse(JSON.stringify(snapshot));
+    corrupted.cards[0].outcome = "maybe";
+    expect(() => validateResearchMemorySnapshot(corrupted)).toThrow(/outcome must be one of/);
+  });
+
+  test("replication context follows Mission history order past a two-digit attempt", () => {
+    const runs = [
+      { runId: "m-memory:exp:2", taskObjective: "materialize answer.txt", ok: true, score: 0.4, evidenceRefs: [] },
+      { runId: "m-memory:exp:10", taskObjective: "materialize answer.txt", ok: true, score: 0.35, evidenceRefs: [] },
+    ];
+    const snapshot = projectResearchMemorySnapshot(source({ runs, maxCards: 8 }));
+    // `:exp:10` sorts BEFORE `:exp:2`, so a lexicographic comparison would
+    // attribute the later Run as the prior one.
+    const later = snapshot.cards.find((card): card is ResearchFindingCard => card.cardId === "finding:m-memory:exp:10")!;
+    expect(later.replication).toMatchObject({ priorRunIds: ["m-memory:exp:2"] });
+    const earlier = snapshot.cards.find((card) => card.cardId === "finding:m-memory:exp:2")!;
+    expect(earlier).not.toHaveProperty("replication");
+  });
+
+  test("operational pitfalls are counted apart from proposal-derived pitfalls", () => {
+    const snapshot = projectResearchMemorySnapshot(outcomeSource({ proposals: [pitfallProposal()] }));
+    expect(summarizeResearchMemorySnapshot(snapshot).cards).toEqual({
+      finding: 6,
+      pitfall: 1,
+      operationalPitfall: 3,
+    });
   });
 });

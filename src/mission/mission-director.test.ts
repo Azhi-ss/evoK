@@ -270,7 +270,7 @@ describe("buildDirectorInput (#113 AC2/AC5)", () => {
     expect(projected.stateVersion).toBe(2);
   });
 
-  test("a dispatch failure (no measurement) is still retained as Negative Evidence, never dropped", () => {
+  test("a dispatch failure (no measurement) keeps its Run Outcome as an OPERATIONAL observation, never a refutation", () => {
     const crashed: MissionRecord = {
       ...record(),
       stateVersion: 2,
@@ -283,15 +283,43 @@ describe("buildDirectorInput (#113 AC2/AC5)", () => {
         },
       },
       experiments: [{
-        runId: "m-t5:exp:2", attempt: 2, action: "retry", ok: false, negativeEvidence: true,
-        taskObjective: "retry", error: "model provider returned 500", evidenceRefs: [],
+        runId: "m-t5:exp:2", attempt: 2, action: "retry", ok: false,
+        taskObjective: "retry", error: "CUDA error: out of memory", evidenceRefs: [],
         at: "2026-09-11T00:00:02.000Z",
       }],
     };
     const projected = buildDirectorInput(crashed, { permissions: [], hardRules: [], stopConditions: [] });
-    const negative = projected.observations.find((o) => o.runId === "m-t5:exp:2")!;
-    expect(negative.ok).toBe(false);
-    expect(negative.error).toMatch(/500/);
+    const observation = projected.observations.find((o) => o.runId === "m-t5:exp:2")!;
+    expect(observation.ok).toBe(false);
+    expect(observation.error).toMatch(/out of memory/);
+    // Operational, visibly distinct, and never scientific Negative Evidence (#213).
+    expect(observation).toMatchObject({ outcome: "operational", failure: "out-of-memory" });
+    expect(observation.negativeEvidence).toBeUndefined();
+  });
+
+  test("replication and critical-ablation proposals stay eligible without a Memory veto (#213)", () => {
+    const projected = buildDirectorInput(record(), { permissions: [], hardRules: [], stopConditions: [] });
+    const priorRun = projected.observations[0]!.runId;
+    // Seed replication: the SAME objective again is a bounded retry, not a duplicate.
+    const replication = validateDirectorProposal({
+      stateVersion: projected.stateVersion,
+      action: "retry",
+      rationale: "replicate the baseline approach to measure seed variance",
+      task: { objective: "materialize answer.txt with value 0.4", expectedOutputs: ["answer.txt"] },
+      expectedCost: 0.01,
+      basedOn: [priorRun],
+    }, projected);
+    expect(replication.action).toBe("retry");
+    // Critical ablation: a materially different, narrower run referencing the prior one.
+    const ablation = validateDirectorProposal({
+      stateVersion: projected.stateVersion,
+      action: "change-direction",
+      rationale: "ablate the single dominant term to test whether it carries the measured result",
+      task: { objective: "materialize answer.txt with the dominant term removed", expectedOutputs: ["answer.txt"] },
+      expectedCost: 0.01,
+      basedOn: [priorRun],
+    }, projected);
+    expect(ablation.action).toBe("change-direction");
   });
 });
 

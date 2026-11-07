@@ -8,6 +8,13 @@
  * transcripts, artifact bodies, credentials, holdouts, or restricted content.
  */
 import { deepFreeze, digestValue } from "../security-boundary";
+import {
+  RUN_FAILURE_KINDS,
+  RUN_OUTCOME_STATES,
+  classifyRunOutcome,
+  type RunFailureKind,
+  type RunOutcomeState,
+} from "./run-outcome";
 import type { SynthesisProposal } from "./synthesis-proposal";
 
 export const RESEARCH_MEMORY_SNAPSHOT_SCHEMA = "evok.research-memory-snapshot/v1" as const;
@@ -16,6 +23,8 @@ export const RESEARCH_MEMORY_FINDING_CARD_SCHEMA = "evok.research-memory-finding
 export const SYNTHESIS_HYPOTHESIS_CARD_SCHEMA = "evok.research-memory-hypothesis-card/v1" as const;
 export const SYNTHESIS_FINDING_CARD_SCHEMA = "evok.research-memory-synthesis-finding-card/v1" as const;
 export const SYNTHESIS_PITFALL_CARD_SCHEMA = "evok.research-memory-pitfall-card/v1" as const;
+/** M1-T4: an operational failure projected from its Run, never a scientific claim. */
+export const OPERATIONAL_PITFALL_CARD_SCHEMA = "evok.research-memory-operational-pitfall-card/v1" as const;
 export const RESEARCH_MEMORY_REVISION = "research-memory/v1" as const;
 export const RESEARCH_DECISION_PACKET_SCHEMA = "evok.research-decision-packet/v1" as const;
 export const RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION = "research-memory-retrieval/v1" as const;
@@ -38,13 +47,16 @@ export type ResearchCardLifecycle = "active" | "provisional" | "contested" | "st
 export interface ResearchRunFinding {
   readonly runId: string;
   readonly taskId?: string;
+  /** The Experiment objective, the stable identity a repeat is matched on. */
+  readonly taskObjective?: string;
   readonly ok: boolean;
   readonly score?: number;
   readonly ruleViolations?: readonly string[];
-  readonly negativeEvidence?: boolean;
   readonly error?: string;
   readonly evidenceRefs: readonly string[];
   readonly snapshotDigest?: string;
+  /** The declared Task configuration that reproduced an operational failure. */
+  readonly configuration?: string;
 }
 
 /** The trusted Mission projection a snapshot is derived from. */
@@ -57,6 +69,17 @@ export interface ResearchMemorySource {
   readonly maxCards?: number;
 }
 
+/**
+ * A repeated Experiment match: the same objective was already measured. This is
+ * advisory context for replication/ablation value, never a rejection or veto.
+ */
+export interface ResearchReplicationContext {
+  readonly objective: string;
+  readonly priorRunIds: readonly string[];
+  readonly priorOutcomes: readonly RunOutcomeState[];
+  readonly advisory: true;
+}
+
 /** A presentation projection of one Finding; not a new authoritative entity. */
 export interface ResearchFindingCard {
   readonly schema: typeof RESEARCH_MEMORY_FINDING_CARD_SCHEMA;
@@ -64,6 +87,25 @@ export interface ResearchFindingCard {
   readonly kind: "finding";
   readonly summary: string;
   readonly ok: boolean;
+  /** Scientific reading vs operational failure: never conflated. */
+  readonly outcome: RunOutcomeState;
+  /** Set only for an operational failure (OOM, timeout, invalid measurement). */
+  readonly failure?: RunFailureKind;
+  readonly applicability: readonly string[];
+  readonly sourceRefs: readonly string[];
+  readonly lifecycle: ResearchCardLifecycle;
+  /** Present when this Run repeated an already-measured Task. */
+  readonly replication?: ResearchReplicationContext;
+}
+
+/** One operational failure pattern with the conditions that reproduced it. */
+export interface ResearchOperationalPitfallCard {
+  readonly schema: typeof OPERATIONAL_PITFALL_CARD_SCHEMA;
+  readonly cardId: string;
+  readonly kind: "pitfall";
+  readonly summary: string;
+  readonly failure: RunFailureKind;
+  readonly conditions: readonly string[];
   readonly applicability: readonly string[];
   readonly sourceRefs: readonly string[];
   readonly lifecycle: ResearchCardLifecycle;
@@ -108,6 +150,7 @@ export interface ResearchPitfallCard extends SynthesisCardBase {
 
 export type ResearchMemoryCard =
   | ResearchFindingCard
+  | ResearchOperationalPitfallCard
   | ResearchHypothesisCard
   | ResearchSynthesisFindingCard
   | ResearchPitfallCard;
@@ -149,7 +192,10 @@ export interface ResearchMemorySummary {
   readonly cards: {
     readonly finding: number;
     readonly hypothesis?: number;
+    /** Pitfall Cards from stored Proposals. */
     readonly pitfall?: number;
+    /** Derived Operational Pitfalls: a non-scientific reading, counted apart. */
+    readonly operationalPitfall?: number;
   };
   readonly omittedCards: number;
 }
@@ -173,7 +219,18 @@ const SNAPSHOT_KEYS = new Set([
   "schema", "missionId", "snapshotId", "ledgerRevision", "memoryRevision",
   "retrievalPolicyRevision", "maxCards", "cards", "omittedCardCount", "digest",
 ]);
-const CARD_KEYS = new Set(["schema", "cardId", "kind", "summary", "ok", "applicability", "sourceRefs", "lifecycle"]);
+const CARD_KEYS = new Set([
+  "schema", "cardId", "kind", "summary", "ok", "outcome", "failure", "applicability", "sourceRefs", "lifecycle", "replication",
+]);
+const OPERATIONAL_PITFALL_CARD_KEYS = new Set([
+  "schema", "cardId", "kind", "summary", "failure", "conditions", "applicability", "sourceRefs", "lifecycle",
+]);
+const REPLICATION_KEYS = new Set(["objective", "priorRunIds", "priorOutcomes", "advisory"]);
+const LIFECYCLE_FOR: Readonly<Record<RunOutcomeState, ResearchCardLifecycle>> = {
+  positive: "active",
+  negative: "contested",
+  operational: "provisional",
+};
 const SYNTHESIS_CARD_BASE_KEYS = [
   "schema", "cardId", "kind", "summary", "applicability", "sourceRefs", "lifecycle", "visibility", "epistemicStatus",
 ];
@@ -226,13 +283,16 @@ function bounded(text: string): string {
   return trimmed.length <= MAX_SUMMARY_LENGTH ? trimmed : `${trimmed.slice(0, MAX_SUMMARY_LENGTH - 1)}…`;
 }
 
-function cardFor(run: ResearchRunFinding, missionId: string): ResearchFindingCard {
+function cardFor(run: ResearchRunFinding, missionId: string, replication?: ResearchReplicationContext): ResearchFindingCard {
+  const classification = classifyRunOutcome(run);
   const outcome = run.error !== undefined
     ? `dispatch failed: ${bounded(run.error)}`
     : run.ok
       ? `measured ok=true${typeof run.score === "number" ? ` score=${run.score}` : ""}`
-      : `measured ok=false${run.ruleViolations?.length ? ` rules=${bounded(run.ruleViolations.join("; "))}` : ""}`;
-  const summary = bounded(`run ${run.runId} ${outcome}${run.negativeEvidence ? " (negative evidence)" : ""}`);
+      : `measured ok=false${typeof run.score === "number" ? ` score=${run.score}` : ""}${run.ruleViolations?.length ? ` rules=${bounded(run.ruleViolations.join("; "))}` : ""}`;
+  const summary = classification.state === "operational"
+    ? bounded(`run ${run.runId} operational failure ${classification.failure}; not scientific negative evidence: ${outcome}`)
+    : bounded(`run ${run.runId} ${outcome}${classification.scientificNegativeEvidence ? " (negative evidence)" : ""}`);
   const applicability = run.taskId ? `task:${run.taskId}` : `mission:${missionId}`;
   const body = {
     schema: RESEARCH_MEMORY_FINDING_CARD_SCHEMA,
@@ -240,13 +300,61 @@ function cardFor(run: ResearchRunFinding, missionId: string): ResearchFindingCar
     kind: "finding" as const,
     summary,
     ok: run.ok,
+    outcome: classification.state,
+    ...(classification.failure !== undefined ? { failure: classification.failure } : {}),
     applicability: [assertMemorySafeText("research memory applicability", applicability)],
     sourceRefs: [...run.evidenceRefs],
-    lifecycle: (run.ok ? "active" : "contested") as ResearchCardLifecycle,
+    // An operational failure is never a contested scientific claim.
+    lifecycle: LIFECYCLE_FOR[classification.state],
+    ...(replication !== undefined ? { replication } : {}),
   };
   // Sensitivity applies to the summary as well as to every label/ref.
   assertMemorySafeText("research memory card summary", body.summary);
   return deepFreeze(body);
+}
+
+/** Operational failures become Pitfalls; a Run Outcome is never rewritten. */
+function pitfallFor(run: ResearchRunFinding, card: ResearchFindingCard): ResearchOperationalPitfallCard | undefined {
+  if (card.outcome !== "operational" || card.failure === undefined) return undefined;
+  const classification = classifyRunOutcome(run);
+  return deepFreeze({
+    schema: OPERATIONAL_PITFALL_CARD_SCHEMA,
+    cardId: `pitfall:run:${run.runId}`,
+    kind: "pitfall" as const,
+    summary: bounded(`run ${run.runId} ${card.failure} under ${classification.conditions.join("; ")}`),
+    failure: card.failure,
+    conditions: classification.conditions.map((condition) => assertMemorySafeText("research memory pitfall condition", condition)),
+    applicability: [...card.applicability],
+    sourceRefs: [...run.evidenceRefs],
+    lifecycle: "provisional" as const,
+  });
+}
+
+function normalizedObjective(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return normalized === "" ? undefined : normalized;
+}
+
+/**
+ * The same Experiment objective measured before is a repeat, not a duplicate: the card carries
+ * replication-value context (a repeat may be seed replication or an ablation)
+ * and no code path here can reject a Run or veto a proposal.
+ */
+function replicationFor(run: ResearchRunFinding, runs: readonly ResearchRunFinding[]): ResearchReplicationContext | undefined {
+  const index = runs.indexOf(run);
+  const objective = normalizedObjective(run.taskObjective);
+  if (index <= 0 || objective === undefined) return undefined;
+  // Mission history order is chronological; run ids sort lexicographically and
+  // cannot order `:exp:10` after `:exp:2`.
+  const prior = runs.slice(0, index).filter((other) => normalizedObjective(other.taskObjective) === objective);
+  if (prior.length === 0) return undefined;
+  return deepFreeze({
+    objective,
+    priorRunIds: prior.map((other) => other.runId),
+    priorOutcomes: prior.map((other) => classifyRunOutcome(other).state),
+    advisory: true as const,
+  });
 }
 
 /**
@@ -270,7 +378,7 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
   for (const run of source.runs) {
     if (!isRecord(run)) throw new ResearchMemoryError("research memory run must be an object");
     assertSafeKeys("research memory run field", Object.keys(run),
-      new Set(["runId", "taskId", "ok", "score", "ruleViolations", "negativeEvidence", "error", "evidenceRefs", "snapshotDigest"]));
+      new Set(["runId", "taskId", "taskObjective", "ok", "score", "ruleViolations", "error", "evidenceRefs", "snapshotDigest", "configuration"]));
     const runId = assertMemorySafeText("research memory runId", run.runId);
     if (seen.has(runId)) continue; // first observation per Run wins; history stays append-only
     seen.add(runId);
@@ -281,16 +389,20 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     runs.push({
       runId,
       ...(run.taskId !== undefined ? { taskId: assertMemorySafeText("research memory taskId", run.taskId) } : {}),
+      ...(run.taskObjective !== undefined ? { taskObjective: assertMemorySafeText("research memory taskObjective", run.taskObjective) } : {}),
       ok: run.ok,
       ...(typeof run.score === "number" ? { score: run.score } : {}),
       ...(run.ruleViolations !== undefined ? { ruleViolations: textList("research memory ruleViolations", run.ruleViolations) } : {}),
-      ...(run.negativeEvidence === true ? { negativeEvidence: true } : {}),
       ...(run.error !== undefined ? { error: assertMemorySafeText("research memory error", run.error) } : {}),
       evidenceRefs: textList("research memory evidenceRefs", run.evidenceRefs),
       ...(run.snapshotDigest !== undefined ? { snapshotDigest: assertMemorySafeText("research memory snapshotDigest", run.snapshotDigest) } : {}),
+      ...(run.configuration !== undefined ? { configuration: assertMemorySafeText("research memory configuration", run.configuration) } : {}),
     });
   }
 
+  // Replication context is resolved in Mission history order, BEFORE the
+  // deterministic lexicographic sort below.
+  const replication = new Map(runs.map((run) => [run.runId, replicationFor(run, runs)]));
   runs.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
   const proposalCards = new Map<string, ResearchMemoryCard>();
   for (const proposal of source.proposals ?? []) {
@@ -300,7 +412,12 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
   const ordered = [...proposalCards.values()].sort((a, b) => (a.cardId < b.cardId ? -1 : a.cardId > b.cardId ? 1 : 0));
   // Synthesised reading cards are kept ahead of run summary cards: a bounded
   // packet must not lose the competing/contradicting position to sheer Run volume.
-  const cards = [...ordered, ...runs.map((run) => cardFor(run, missionId))].slice(0, maxCards);
+  const runCards = runs.flatMap((run) => {
+    const card = cardFor(run, missionId, replication.get(run.runId) ?? undefined);
+    const pitfall = pitfallFor(run, card);
+    return pitfall ? [card, pitfall] : [card];
+  });
+  const cards = [...ordered, ...runCards].slice(0, maxCards);
   const body = {
     schema: RESEARCH_MEMORY_SNAPSHOT_SCHEMA,
     missionId,
@@ -309,7 +426,7 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     retrievalPolicyRevision: RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION,
     maxCards,
     cards,
-    omittedCardCount: runs.length + ordered.length - cards.length,
+    omittedCardCount: runCards.length + ordered.length - cards.length,
   };
   const digest = digestValue(body);
   return deepFreeze({ ...body, snapshotId: snapshotIdFor(digest), digest });
@@ -437,6 +554,36 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
       assertMemorySafeText("research memory card cardId", card.cardId);
       assertMemorySafeText("research memory card summary", card.summary);
       if (typeof card.ok !== "boolean") throw new ResearchMemoryError("research memory card ok must be a boolean");
+      // A snapshot published before #213 carries no outcome; its `ok` is the
+      // only reading it ever had, and it is not corruption.
+      const outcome = card.outcome ?? (card.ok === true ? "positive" : "negative");
+      if (!RUN_OUTCOME_STATES.includes(outcome as RunOutcomeState)) {
+        throw new ResearchMemoryError(`research memory card outcome must be one of ${RUN_OUTCOME_STATES.join(", ")}`);
+      }
+      if (card.failure !== undefined) {
+        if (outcome !== "operational" || !RUN_FAILURE_KINDS.includes(card.failure as RunFailureKind)) {
+          throw new ResearchMemoryError("a research memory card failure belongs only to an operational outcome");
+        }
+      } else if (outcome === "operational") {
+        throw new ResearchMemoryError("an operational research memory card must name its failure kind");
+      }
+      textList("research memory card applicability", card.applicability);
+      textList("research memory card sourceRefs", card.sourceRefs);
+      if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
+        throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
+      }
+      if (card.replication !== undefined) validateReplication(card.replication);
+      continue;
+    }
+    if (card.schema === OPERATIONAL_PITFALL_CARD_SCHEMA) {
+      assertSafeKeys("research memory card field", Object.keys(card), OPERATIONAL_PITFALL_CARD_KEYS);
+      if (card.kind !== "pitfall") throw new ResearchMemoryError("research memory card schema/kind mismatch");
+      if (!RUN_FAILURE_KINDS.includes(card.failure as RunFailureKind)) {
+        throw new ResearchMemoryError(`research memory pitfall failure must be one of ${RUN_FAILURE_KINDS.join(", ")}`);
+      }
+      assertMemorySafeText("research memory card cardId", card.cardId);
+      assertMemorySafeText("research memory card summary", card.summary);
+      textList("research memory card conditions", card.conditions);
       textList("research memory card applicability", card.applicability);
       textList("research memory card sourceRefs", card.sourceRefs);
       if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
@@ -455,7 +602,8 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
 
 export function summarizeResearchMemorySnapshot(snapshot: ResearchMemorySnapshot): ResearchMemorySummary {
   const hypothesis = snapshot.cards.filter((card) => card.kind === "hypothesis").length;
-  const pitfall = snapshot.cards.filter((card) => card.kind === "pitfall").length;
+  const pitfall = snapshot.cards.filter((card) => card.schema === SYNTHESIS_PITFALL_CARD_SCHEMA).length;
+  const operationalPitfall = snapshot.cards.filter((card) => card.schema === OPERATIONAL_PITFALL_CARD_SCHEMA).length;
   return deepFreeze({
     snapshotId: snapshot.snapshotId,
     snapshotDigest: snapshot.digest,
@@ -464,9 +612,24 @@ export function summarizeResearchMemorySnapshot(snapshot: ResearchMemorySnapshot
       finding: snapshot.cards.filter((card) => card.kind === "finding").length,
       ...(hypothesis > 0 ? { hypothesis } : {}),
       ...(pitfall > 0 ? { pitfall } : {}),
+      ...(operationalPitfall > 0 ? { operationalPitfall } : {}),
     },
     omittedCards: snapshot.omittedCardCount,
   });
+}
+
+/** Replication context is advisory: it can never be a rejection or a veto. */
+function validateReplication(raw: unknown): void {
+  if (!isRecord(raw)) throw new ResearchMemoryError("research memory replication context must be an object");
+  assertSafeKeys("research memory replication field", Object.keys(raw), REPLICATION_KEYS);
+  assertMemorySafeText("research memory replication objective", raw.objective);
+  const priorRunIds = textList("research memory replication priorRunIds", raw.priorRunIds);
+  if (priorRunIds.length === 0) throw new ResearchMemoryError("replication context needs at least one prior Run");
+  const outcomes = textList("research memory replication priorOutcomes", raw.priorOutcomes);
+  if (outcomes.length !== priorRunIds.length || outcomes.some((outcome) => !RUN_OUTCOME_STATES.includes(outcome as RunOutcomeState))) {
+    throw new ResearchMemoryError("replication prior outcomes must match its prior Runs");
+  }
+  if (raw.advisory !== true) throw new ResearchMemoryError("replication context is advisory; it can never be a rejection");
 }
 
 /** Validates one card derived from a stored Proposal; it is never "verified". */

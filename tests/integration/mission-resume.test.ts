@@ -110,10 +110,13 @@ describe("separate-process interruption BEFORE result confirmation (#114 AC1/AC4
     expect(resume.json.adopted).toContain(`${MISSION_ID}:baseline:1`);
     expect(recovered.baseline.evaluation.score).toBe(0.4);
 
-    // the unconfirmed intent is explicitly present as Negative Evidence…
+    // the unconfirmed intent is explicitly present as an operational outcome,
+    // never as scientific Negative Evidence (#213)…
     const trail = recovered.experiments as any[];
-    const abandoned = trail.find((e) => e.negativeEvidence && /unconfirmed/i.test(e.error ?? ""));
+    const abandoned = trail.find((e) => /unconfirmed/i.test(e.error ?? ""));
     expect(abandoned).toBeDefined();
+    expect(abandoned.ok).toBe(false);
+    expect(abandoned.negativeEvidence).toBeUndefined();
     // …and the continuation used a FRESH attempt/run id (never the abandoned id)
     const fresh = trail.filter((e) => e.ok && typeof e.evaluation?.score === "number");
     expect(fresh.length).toBeGreaterThan(0);

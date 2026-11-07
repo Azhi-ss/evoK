@@ -93,6 +93,7 @@ import {
   publishResearchMemorySnapshot,
 } from "../execution/research-memory-provider";
 import {
+  assertMemorySafeText,
   assertPacketCardRefs,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
@@ -102,6 +103,7 @@ import {
   type ResearchMemorySummary,
   type ResearchRunFinding,
 } from "../evidence/research-memory";
+import { classifyRunOutcome, type RunOutcomeClassification } from "../evidence/run-outcome";
 import {
   validateSynthesisProposal,
   type SynthesisProposal,
@@ -320,16 +322,17 @@ export type MissionTaskRecord = DraftPlanTask & { readonly source?: "intake" | "
 
 /**
  * One attempt carried in the Mission's experiment trail. Holds a measured
- * result OR a dispatch failure, so failed/inconclusive attempts survive as
- * Negative Evidence instead of being silently dropped.
+ * result OR a dispatch failure, so failed/inconclusive attempts survive as a
+ * Run Outcome instead of being silently dropped.
  */
 export interface ExperimentTrailEntry {
   readonly runId: string;
   readonly attempt: number;
   readonly action: DirectorAction | "baseline";
   readonly ok: boolean;
+  readonly taskId?: string;
   readonly taskObjective: string;
-  /** True for failed/inconclusive attempts retained as Negative Evidence. */
+  /** True only for measured scientific Negative Evidence (never a Run failure). */
   readonly negativeEvidence?: boolean;
   readonly candidateId?: string;
   readonly snapshotDigest?: string;
@@ -338,7 +341,45 @@ export interface ExperimentTrailEntry {
   readonly evidenceRefs: readonly string[];
   readonly error?: string;
   readonly ruleViolations?: readonly string[];
+  /** Declared Task configuration under which the attempt ran, when bounded. */
+  readonly configuration?: string;
   readonly at: string;
+}
+
+/** The durable shape a trail entry re-read from disk may have. */
+type TrailOutcomeFields = Pick<ExperimentTrailEntry, "ok" | "evaluation" | "ruleViolations" | "error" | "configuration">;
+
+/**
+ * Reads ONE trail entry as a scientific/operational outcome (#213). Every
+ * producer and reader goes through here, so an OOM/timeout/invalid measurement
+ * can never be re-labelled as a refutation by a drifting copy.
+ */
+export function classifyTrailEntry(entry: TrailOutcomeFields): RunOutcomeClassification {
+  const ruleViolations = entry.ruleViolations ?? entry.evaluation?.ruleViolations;
+  return classifyRunOutcome({
+    ok: entry.ok === true,
+    ...(typeof entry.evaluation?.score === "number" ? { score: entry.evaluation.score } : {}),
+    ...(ruleViolations !== undefined ? { ruleViolations } : {}),
+    ...(entry.error !== undefined ? { error: entry.error } : {}),
+    ...(entry.configuration !== undefined ? { configuration: entry.configuration } : {}),
+  });
+}
+
+/**
+ * The declared Task configuration as one bounded, memory-safe label. A value
+ * that could not enter agent memory is dropped rather than failing a Run.
+ */
+function configurationLabel(constraints: Readonly<Record<string, unknown>> | undefined): string | undefined {
+  const entries = Object.entries(constraints ?? {}).filter(([, value]) =>
+    typeof value === "string" || typeof value === "number" || typeof value === "boolean");
+  if (entries.length === 0) return undefined;
+  const label = entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([key, value]) => `${key}=${value}`).join("; ");
+  try {
+    assertMemorySafeText("task configuration", label);
+  } catch {
+    return undefined;
+  }
+  return label;
 }
 
 /** One priced decision-model call, persisted for explicit-unit accounting. */
@@ -1754,14 +1795,16 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         }
       }
 
-      // A failed baseline DISPATCH (no measurement at all) is still Negative
-      // Evidence the director can act on; record the run failure and advance
-      // the state so the next decision sees it. A measured rule failure is
-      // already in record.baseline and projected by buildDirectorInput.
+      // A failed baseline DISPATCH (no measurement at all) is an OPERATIONAL
+      // outcome the director can act on; it is never scientific Negative
+      // Evidence, so the trail keeps the outcome (ok=false + error) and no
+      // scientific refutation marker (#213).
       if (dispatched.outcome.kind === "run-failed" && options.director) {
+        const configuration = configurationLabel(baselineTask.constraints);
         const entry: ExperimentTrailEntry = {
           runId: baselineRunId, attempt: 1, action: "baseline", ok: false,
-          negativeEvidence: true, taskObjective: baselineTask.objective, evidenceRefs: [],
+          taskId: baselineTask.taskId, taskObjective: baselineTask.objective, evidenceRefs: [],
+          ...(configuration !== undefined ? { configuration } : {}),
           error: dispatched.outcome.error, at: now(),
         };
         record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
@@ -2195,12 +2238,16 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       });
       record = expDispatched.record;
       const at = now();
+      const configuration = configurationLabel(task.constraints);
       const entry: ExperimentTrailEntry = expDispatched.outcome.kind === "measured"
         ? {
             runId: expRunId, attempt: expAttempt, action: proposal.action, ok: expDispatched.outcome.measurement.ok,
-            // A rule-failed measurement is Negative Evidence, not a drop.
-            ...(expDispatched.outcome.measurement.ok ? {} : { negativeEvidence: true }),
+            taskId: task.taskId,
+            // Only a real measured refutation is Negative Evidence; an invalid
+            // measurement or a failed dispatch is an operational outcome.
+            ...(classifyRunOutcome(expDispatched.outcome.measurement).scientificNegativeEvidence ? { negativeEvidence: true } : {}),
             taskObjective: proposal.task!.objective,
+            ...(configuration !== undefined ? { configuration } : {}),
             candidateId: expDispatched.outcome.candidateId, snapshotDigest: expDispatched.outcome.snapshotDigest,
             evaluator: expDispatched.outcome.evaluator, evaluation: expDispatched.outcome.measurement,
             evidenceRefs: expDispatched.outcome.evidenceRefs,
@@ -2208,8 +2255,10 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
             at,
           }
         : {
-            runId: expRunId, attempt: expAttempt, action: proposal.action, ok: false, negativeEvidence: true,
+            runId: expRunId, attempt: expAttempt, action: proposal.action, ok: false,
+            taskId: task.taskId,
             taskObjective: proposal.task!.objective, evidenceRefs: [],
+            ...(configuration !== undefined ? { configuration } : {}),
             error: expDispatched.outcome.error, at,
           };
       // New observation => authoritative state advances; the next decision
@@ -2258,7 +2307,9 @@ export function summarizeMission(record: MissionRecord): {
     // One logical two-stage decision per decisionGroupId (#211); legacy
     // records without a group id keep counting one price line per decision.
     decisions: new Set((record.decisions ?? []).map((decision) => decision.decisionGroupId ?? decision.decisionId)).size,
-    negativeEvidence: experiments.filter((entry) => !entry.ok).length,
+    // Scientific refutations only: an OOM/timeout/invalid measurement is an
+    // operational outcome, not Negative Evidence (#213).
+    negativeEvidence: experiments.filter((entry) => classifyTrailEntry(entry).scientificNegativeEvidence).length,
     ...(record.researchMemory ? { researchMemory: record.researchMemory } : {}),
   };
 }
@@ -2284,13 +2335,15 @@ function missionResearchSource(record: MissionRecord): ResearchMemorySource {
     seen.add(entry.runId);
     runs.push({
       runId: entry.runId,
+      ...(entry.taskId !== undefined ? { taskId: entry.taskId } : {}),
+      ...(entry.taskObjective !== "" ? { taskObjective: entry.taskObjective } : {}),
       ok: entry.ok,
       ...(typeof entry.evaluation?.score === "number" ? { score: entry.evaluation.score } : {}),
       ...(entry.ruleViolations?.length ? { ruleViolations: [...entry.ruleViolations] } : {}),
-      ...(entry.negativeEvidence ? { negativeEvidence: true } : {}),
       ...(entry.error !== undefined ? { error: entry.error } : {}),
       evidenceRefs: entry.evidenceRefs,
       ...(entry.snapshotDigest ? { snapshotDigest: entry.snapshotDigest } : {}),
+      ...(entry.configuration !== undefined ? { configuration: entry.configuration } : {}),
     });
   }
   const proposals = acceptedProposalsOf(record.synthesisProposals ?? []);

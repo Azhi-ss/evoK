@@ -74,6 +74,18 @@ Verified Claim, next-validation content is advisory-only, no background LLM
 synthesis runs, and a rejection record keeps a reason code plus a content
 address but never the refused payload.
 
+Amendment (M1-T4 / #213): `run-outcome` classifies one authoritative Run
+Outcome as `positive`, `negative` (a real measured refutation) or
+`operational` (OOM, timeout, invalid measurement, protocol failure). Only a
+measurement can create scientific Negative Evidence; an operational failure
+keeps its Run Outcome and projects an advisory Operational Pitfall card
+(`evok.research-memory-operational-pitfall-card/v1`) with its reproducing
+conditions, and can never refute a Hypothesis. Finding cards carry the
+outcome state so packets and persisted snapshots stay visibly distinct, and a
+repeated Experiment objective carries advisory replication context — never a
+rejection or a Memory-owned veto. Existing Experiment Validity, Promotion,
+Admission, Budget, hang/T48 and Broker predicates are untouched.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
