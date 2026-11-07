@@ -224,6 +224,10 @@ _Avoid_: Memory output, second opinion, Memory-approved action
 The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
 _Avoid_: Memory dump, second snapshot, full history
 
+**Delegated Memory Slice**:
+The Research Memory slice a delegated child agent receives: newly generated for the child's own Mission/Task/Run/targetAgent from the parent's pinned Research Memory snapshot. It is never the parent's, a sibling's, or a previous Run's slice, and it can never carry a wider packet than the parent was shown.
+_Avoid_: Inherited slice, parent memory, copied snapshot
+
 **Decision Regret**:
 The record that a direction a Memory-informed revision rejected was later measured as viable by a comparable Experiment. An unexecuted or never-compared direction stays `unobserved`; it is never a failure, Negative Evidence, or regret, and no numeric regret score is computed.
 _Avoid_: Rejected-answer penalty, counterfactual score

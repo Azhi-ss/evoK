@@ -3,8 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectResearchMemorySnapshot } from "../evidence/research-memory";
-import { MEMORY_SLICE_RESEARCH_SCHEMA, MemorySliceError, createMemorySlice, validateMemorySlice } from "./memory-slice";
 import {
+  MEMORY_SLICE_RESEARCH_SCHEMA, MemorySliceError, createMemorySlice, createResearchMemorySlice, validateMemorySlice,
+} from "./memory-slice";
+import {
+  createDelegatedResearchMemoryProvider,
   createResearchMemoryProvider,
   loadResearchMemorySnapshot,
   publishResearchMemorySnapshot,
@@ -167,5 +170,84 @@ describe("memory slice v2 compatibility (#210)", () => {
     expect(valid.schema).toBe("evok.memory-slice/v2");
     expect(valid.research).toBeUndefined();
     expect(validateMemorySlice(JSON.parse(JSON.stringify(valid)))).toEqual(valid);
+  });
+});
+
+describe("delegated child research memory (#217)", () => {
+  const parentSlice = () => createResearchMemorySlice({
+    sliceId: "slice-parent",
+    missionId: "m-memory",
+    taskId: "task-exp:2",
+    runId: "m-memory:exp:2",
+    targetAgentId: "researcher@m-memory:exp:2",
+    research: snapshot(),
+  });
+  const childRequest = {
+    missionId: "m-memory",
+    taskId: "task-exp:2:sub",
+    runId: "m-memory:exp:2:sub:1",
+    targetAgentId: "critic@m-memory:exp:2:sub:1",
+    role: "critic" as const,
+    evidenceRefs: [],
+  };
+
+  test("serves a fresh child-bound slice from the parent's pinned snapshot, not the active pointer", async () => {
+    const dir = await memoryDir();
+    // The active projection has already moved on to a newer snapshot.
+    await publishResearchMemorySnapshot(dir, projectResearchMemorySnapshot({
+      missionId: "m-memory",
+      ledgerRevision: 9,
+      runs: [
+        { runId: "m-memory:baseline:1", ok: true, score: 0.1, evidenceRefs: [] },
+        { runId: "m-memory:exp:2", ok: false, ruleViolations: ["answer.txt is missing"], evidenceRefs: [] },
+      ],
+    }));
+    const parent = parentSlice();
+    const provider = createDelegatedResearchMemoryProvider({
+      parent,
+      taskId: childRequest.taskId,
+      runId: childRequest.runId,
+      targetAgentId: childRequest.targetAgentId,
+    });
+    const slice = (await provider(childRequest))!;
+    expect(slice.schema).toBe(MEMORY_SLICE_RESEARCH_SCHEMA);
+    expect(slice.runId).toBe(childRequest.runId);
+    expect(slice.targetAgentId).toBe(childRequest.targetAgentId);
+    expect(slice.sliceId).not.toBe(parent.sliceId);
+    // Exactly the parent's pinned packet: never the newer active one.
+    expect(slice.research).toEqual(parent.research);
+    expect(slice.research!.ledgerRevision).toBe(1);
+    expect(validateMemorySlice(JSON.parse(JSON.stringify(slice)))).toEqual(slice);
+  });
+
+  test("a sibling or otherwise mismatched request is refused", async () => {
+    const provider = createDelegatedResearchMemoryProvider({
+      parent: parentSlice(),
+      taskId: childRequest.taskId,
+      runId: childRequest.runId,
+      targetAgentId: childRequest.targetAgentId,
+    });
+    for (const request of [
+      { ...childRequest, runId: "m-memory:exp:2:sub:2" },
+      { ...childRequest, targetAgentId: "critic@m-memory:exp:2:sub:2" },
+      { ...childRequest, taskId: "task-exp:9" },
+    ]) {
+      await expect(provider(request)).rejects.toThrow(/bound to child Task/);
+    }
+    await expect(provider({ ...childRequest, missionId: "m-other" })).rejects.toThrow(/parent memory slice belongs to Mission/);
+  });
+
+  test("a legacy v2 parent keeps the v2 contract for its child", async () => {
+    const parent = createMemorySlice({
+      sliceId: "slice-parent-legacy", missionId: "m-memory", taskId: "task-exp:2",
+      runId: "m-memory:exp:2", targetAgentId: "researcher@m-memory:exp:2",
+      findings: [{ findingId: "f-1", summary: "grouped split needed" }],
+    });
+    const slice = (await createDelegatedResearchMemoryProvider({
+      parent, taskId: childRequest.taskId, runId: childRequest.runId, targetAgentId: childRequest.targetAgentId,
+    })(childRequest))!;
+    expect(slice.schema).toBe("evok.memory-slice/v2");
+    expect(slice.research).toBeUndefined();
+    expect(slice.findings).toEqual(parent.findings);
   });
 });

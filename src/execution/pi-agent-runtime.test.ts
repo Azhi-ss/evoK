@@ -1189,6 +1189,20 @@ describe("PiAgentRuntime role-scoped context injection", () => {
       .toBe(computeInputDigest(request({ roleContext: context, role: { name: "researcher" } })));
   });
 
+  // M1-T8 (#217): a legacy no-role-context Run keeps its prompt AND its input
+  // digest. Memory/role-context fields are additive-only, so this golden value
+  // (captured from the pre-M1 runtime at 1401bfa) must never change.
+  test("a legacy no-role-context input keeps its pre-M1 input digest", () => {
+    const legacy: PiAgentRuntimeRequest = {
+      task: { objective: "inspect the repository" },
+      role: { name: "researcher", instructions: "report observations" },
+      workspace: workspace(),
+    };
+    expect(computeInputDigest(legacy)).toBe("7405be3edabcc9e1b331aee98006fac04feaf2c26e81d95eac55de8108c2d5c8");
+    // Same identity when only additive M1 fields are absent/present as undefined.
+    expect(computeInputDigest({ ...legacy, tier: "default" })).toBe(computeInputDigest(legacy));
+  });
+
   test("an agent without a role context receives none of it", async () => {
     const context = roleContext("researcher");
     const { runtime, prompts } = captureRuntime();

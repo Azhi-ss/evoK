@@ -15,7 +15,12 @@ import {
   type ResearchMemorySnapshot,
 } from "../evidence/research-memory";
 import type { MemoryProvider } from "./context-broker";
-import { MemorySliceError, createResearchMemorySlice, type MemorySlice } from "./memory-slice";
+import {
+  MemorySliceError,
+  createResearchMemorySlice,
+  deriveDelegatedMemorySlice,
+  type MemorySlice,
+} from "./memory-slice";
 
 export const RESEARCH_MEMORY_POINTER_SCHEMA = "evok.research-memory-pointer/v1" as const;
 const POINTER_FILENAME = "active.json";
@@ -143,6 +148,35 @@ export function createResearchMemoryProvider(dir: string): MemoryProvider {
       // them into the legacy `findings` block would duplicate the bounded payload.
       findings: [],
       research: snapshot,
+    });
+  };
+}
+
+/**
+ * Delegated-child provider (M1-T8): the child's slice comes from the PARENT's
+ * pinned snapshot, not from whatever the active pointer names by then. The
+ * provider is bound to exactly one child Run/agent, so a sibling requesting
+ * memory through it fails closed instead of inheriting the parent's packet.
+ */
+export function createDelegatedResearchMemoryProvider(args: {
+  /** The delegating parent's own pinned slice. */
+  readonly parent: MemorySlice;
+  readonly taskId: string;
+  readonly runId: string;
+  readonly targetAgentId: string;
+}): MemoryProvider {
+  return async (request): Promise<MemorySlice> => {
+    if (request.taskId !== args.taskId || request.runId !== args.runId || request.targetAgentId !== args.targetAgentId) {
+      throw new MemorySliceError(
+        `delegated research memory is bound to child Task "${args.taskId}"/Run "${args.runId}"/agent "${args.targetAgentId}", not "${request.taskId}"/"${request.runId}"/"${request.targetAgentId}"`,
+      );
+    }
+    return deriveDelegatedMemorySlice({
+      parent: args.parent,
+      missionId: request.missionId,
+      taskId: request.taskId,
+      runId: request.runId,
+      targetAgentId: request.targetAgentId,
     });
   };
 }

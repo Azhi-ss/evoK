@@ -110,6 +110,15 @@ export interface ResearchMemorySliceInput extends MemorySliceInput {
   readonly research: ResearchMemorySnapshot;
 }
 
+export interface DelegatedMemorySliceInput {
+  /** The delegating parent's own pinned slice; the child gets a new slice from its snapshot. */
+  readonly parent: MemorySlice;
+  readonly missionId: string;
+  readonly taskId: string;
+  readonly runId: string;
+  readonly targetAgentId: string;
+}
+
 export interface MemoryWriteProposalInput {
   readonly proposalId: string;
   readonly missionId: string;
@@ -298,6 +307,44 @@ export function createResearchMemorySlice(input: ResearchMemorySliceInput): Memo
     ...body,
     digest: digestValue({ schema: MEMORY_SLICE_RESEARCH_SCHEMA, ...body }),
   });
+}
+
+/**
+ * Delegation seam (M1-T8): a delegated child agent gets a NEWLY generated
+ * Delegated Memory Slice bound to its own Mission/Task/Run/targetAgent from the
+ * parent's pinned snapshot. It never reuses the parent's slice id or identity,
+ * and it carries exactly the parent's already-published packet, so a child can
+ * never see more of the Mission's Research Memory than its parent did. A v2
+ * parent keeps its v2 shape (no research packet is fabricated).
+ */
+export function deriveDelegatedMemorySlice(input: DelegatedMemorySliceInput): MemorySlice {
+  const parent = validateMemorySlice(input.parent);
+  const missionId = requireNonEmpty("delegated memory slice missionId", input.missionId);
+  const taskId = requireNonEmpty("delegated memory slice taskId", input.taskId);
+  const runId = requireNonEmpty("delegated memory slice runId", input.runId);
+  const targetAgentId = requireNonEmpty("delegated memory slice targetAgentId", input.targetAgentId);
+  if (parent.missionId !== missionId) {
+    throw new MemorySliceError(`parent memory slice belongs to Mission "${parent.missionId}", not "${missionId}"`);
+  }
+  if (parent.runId === runId) throw new MemorySliceError("a delegated child must not reuse its parent's Run id");
+  if (parent.targetAgentId === targetAgentId) {
+    throw new MemorySliceError("a delegated child must not reuse its parent's target agent id");
+  }
+  const body = {
+    sliceId: `${parent.sliceId}:child:${runId}`,
+    missionId,
+    taskId,
+    runId,
+    targetAgentId,
+    sourceRefs: parent.sourceRefs,
+    evidenceRefs: parent.evidenceRefs,
+    artifactRefs: parent.artifactRefs,
+    facts: parent.facts,
+    findings: parent.findings,
+  };
+  return parent.research !== undefined
+    ? createResearchMemorySlice({ ...body, research: parent.research })
+    : createMemorySlice(body);
 }
 
 function sliceBody(input: MemorySliceInput) {

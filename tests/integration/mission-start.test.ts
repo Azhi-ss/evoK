@@ -41,7 +41,18 @@ import { PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } f
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import { probeHostInventory } from "../../src/execution/host-inventory";
-import { createResearchMemoryProvider, loadResearchMemorySnapshot } from "../../src/execution/research-memory-provider";
+import {
+  createDelegatedResearchMemoryProvider,
+  createResearchMemoryProvider,
+  loadResearchMemorySnapshot,
+} from "../../src/execution/research-memory-provider";
+import { createMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "../../src/execution/memory-slice";
+import type { MemoryProvider, MemoryProviderRequest } from "../../src/execution/context-broker";
+import { ContextBroker, validateBrokeredContext } from "../../src/execution/context-broker";
+import { createPiSubagentsAdapter } from "../../src/execution/subagents-adapter";
+import { grantResourceLease } from "../../src/execution/resource-lease";
+import { buildResearcherContext } from "../../src/execution/researcher-context";
+import { researchMemoryDir } from "../../src/mission-start";
 import { SYNTHESIS_PROPOSAL_SCHEMA } from "../../src/evidence/synthesis-proposal";
 import { retrieveResearchMemory, validateResearchMemorySnapshot } from "../../src/evidence/research-memory";
 import { projectDecisionAccountability } from "../../src/mission/decision-accountability";
@@ -2077,4 +2088,294 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
     expect(await loadResearchMemorySnapshot(memoryDirOf(project, id))).toBeUndefined();
     expect(JSON.parse(await readFile(join(dir, "mission.json"), "utf8")).status).toBe("director-stopped");
   }, 60_000);
+});
+
+/**
+ * M1-T8 (#217): a delegated child agent gets a NEWLY generated slice bound to
+ * its own Mission/Task/Run/targetAgent from the PARENT's pinned Research
+ * Memory snapshot — never from the active pointer, the parent's slice, a
+ * sibling's, a previous Run's, or an Evaluator's context.
+ */
+describe("Research Memory delegation at the authorized lifecycle seam (#217)", () => {
+  async function runMemoryMission(missionId: string) {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft(missionId));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract(`toy-${missionId}`);
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    expect(outcome.status).toBe("iteration-limit");
+    return { project, draft, resolver, resources, contract, writes, outcome };
+  }
+
+  test("the child gets a fresh child-bound slice from the parent's pinned snapshot, never the active one", async () => {
+    const { project, draft, resolver, resources, contract, writes, outcome } = await runMemoryMission("m-sub-memory");
+    const parentSlice = validateMemorySlice(memorySliceFromPrompt(writes.prompts[1]!));
+    expect(parentSlice.schema).toBe("evok.memory-slice/v3");
+    // Pinned when the parent was dispatched: only the baseline card.
+    expect(parentSlice.research!.cards).toHaveLength(1);
+    // The active projection has already moved on to a wider snapshot.
+    const active = await loadResearchMemorySnapshot(researchMemoryDir(project, draft.id));
+    expect(active!.digest).not.toBe(parentSlice.research!.digest);
+    expect(active!.cards.length).toBeGreaterThan(parentSlice.research!.cards.length);
+
+    const childRunId = `${parentSlice.runId}:sub:1`;
+    const childAgentId = `critic@${childRunId}`;
+    const childTaskId = parentSlice.taskId;
+    // The child's role context is assembled by the SAME broker path, with a
+    // provider pinned to the parent's snapshot for exactly this child Run.
+    const childBroker = new ContextBroker({
+      contract,
+      policy: toyPolicy(contract),
+      memory: createDelegatedResearchMemoryProvider({
+        parent: parentSlice, taskId: childTaskId, runId: childRunId, targetAgentId: childAgentId,
+      }),
+      source: "team-coordinator",
+    });
+    const brokered = await childBroker.assemble({
+      missionId: draft.id,
+      taskId: childTaskId,
+      runId: childRunId,
+      targetAgentId: childAgentId,
+      role: "critic",
+      objective: "critique the candidate from the parent's pinned research state",
+    });
+    if (brokered.context.kind !== "role") throw new Error("expected a role context");
+    const childSlice = brokered.memorySlice!;
+
+    // Fresh child binding, same pinned packet: never wider than the parent's.
+    expect(childSlice.runId).toBe(childRunId);
+    expect(childSlice.targetAgentId).toBe(childAgentId);
+    expect(childSlice.sliceId).not.toBe(parentSlice.sliceId);
+    expect(childSlice.digest).not.toBe(parentSlice.digest);
+    expect(childSlice.research!.digest).toBe(parentSlice.research!.digest);
+    expect(validateBrokeredContext(JSON.parse(JSON.stringify(brokered)))).toEqual(brokered);
+
+    // Delegation: the guard accepts exactly this child's slice + pinned parent.
+    const delegated: typeof brokered[] = [];
+    const adapter = createPiSubagentsAdapter(async (delegation) => {
+      delegated.push(delegation as never);
+      return { agent: delegation.agent, value: "critique delivered" };
+    });
+    const result = await adapter.delegate({
+      agent: "critic-1",
+      capability: "critique",
+      task: "critique the candidate",
+      context: buildResearcherContext({ objective: "critique the candidate", tools: ["read"] }),
+      roleContext: brokered.context.roleContext,
+      memorySlice: childSlice,
+      parentMemorySlice: parentSlice,
+      runId: childRunId,
+      targetAgentId: childAgentId,
+      parentBinding: { runId: parentSlice.runId, targetAgentId: parentSlice.targetAgentId },
+      freshSession: true,
+    });
+    expect(result.value).toBe("critique delivered");
+    expect(delegated).toHaveLength(1);
+
+    // A caller may also hand over only the parent's pinned slice: the adapter
+    // derives the same Deterministic child slice the brokered provider served.
+    const derivedOnly: typeof brokered[] = [];
+    const derivingAdapter = createPiSubagentsAdapter(async (delegation) => {
+      derivedOnly.push(delegation as never);
+      return { agent: delegation.agent, value: "derived" };
+    });
+    await derivingAdapter.delegate({
+      agent: "critic-2",
+      capability: "review",
+      task: "review the candidate",
+      context: buildResearcherContext({ objective: "review the candidate", tools: ["read"] }),
+      roleContext: brokered.context.roleContext,
+      parentMemorySlice: parentSlice,
+      runId: childRunId,
+      targetAgentId: childAgentId,
+      parentBinding: { runId: parentSlice.runId, targetAgentId: parentSlice.targetAgentId },
+      freshSession: true,
+    });
+    expect((derivedOnly[0] as never as { memorySlice: { digest: string } }).memorySlice.digest).toBe(childSlice.digest);
+
+    // The child executes in its OWN fresh session: the pinned card is in its
+    // prompt, the newer active card is not, and no parent transcript travels.
+    const childWrites = { prompts: [] as string[], answer: "0.75" };
+    const childRuntime = new PiAgentRuntime({
+      workspaceRoot: join(project, "child-runtime"),
+      modelResolver: resolver,
+      resources,
+      sandbox: { allowBash: false },
+      sessionFactory: brokerSession(childWrites),
+    });
+    const childResult = await childRuntime.execute({
+      task: { objective: "critique the candidate", constraints: { missionId: draft.id, runId: childRunId, taskId: childTaskId }, expectedOutputs: ["critique.md"] },
+      role: { name: "critic", instructions: "critique the candidate", tools: ["read"], allowCodingTools: true, audience: "critic" },
+      targetAgentId: childAgentId,
+      roleContext: brokered.context.roleContext,
+      memorySlice: childSlice,
+      workspace: { path: join(project, "child-runtime", "child-ws"), isolated: true, approved: true },
+      tier: "default",
+      intentId: `${childRunId}:intent`,
+      identity: { branchId: "sub", runId: childRunId, attempt: 1, workspaceId: join(project, "child-ws"), fencingToken: 1 },
+    });
+    expect(childResult.sessionId).not.toBe(undefined);
+    expect(childWrites.prompts).toHaveLength(1);
+    const childPrompt = childWrites.prompts[0]!;
+    expect(childPrompt).toContain("=== ROLE CONTEXT BEGIN (role=critic");
+    expect(childPrompt).toContain(`"sliceId":"${childSlice.sliceId}"`);
+    expect(childPrompt).toContain(parentSlice.research!.cards[0]!.cardId);
+    // The active (wider) snapshot's later card never reached the child.
+    const newerCard = active!.cards.find((card) => !parentSlice.research!.cards.some((pinned) => pinned.cardId === card.cardId))!;
+    expect(childPrompt).not.toContain(newerCard.cardId);
+    expect(childPrompt).not.toContain("candidate materialized");
+    // Visibility is not widened by delegation: the critic's own policy yields
+    // no researcher-only rule fields, and the child packet is the pinned one.
+    expect(brokered.context.roleContext.rules).toEqual({});
+    expect(childPrompt).not.toContain('"dataSplit.folds":5');
+
+    // The Mission's own ledger never records the child as an executed Run.
+    expect(outcome.record.runs[childRunId]).toBeUndefined();
+  });
+
+  test("a legacy custom MemoryProvider and its v2 slice still execute under the previous contract", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-legacy-provider"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-legacy-provider");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const requests: MemoryProviderRequest[] = [];
+    const legacyProvider: MemoryProvider = (request) => {
+      requests.push(request);
+      return createMemorySlice({
+        sliceId: "legacy-slice",
+        missionId: request.missionId,
+        taskId: request.taskId,
+        runId: request.runId,
+        targetAgentId: request.targetAgentId,
+        facts: [{ name: "score", value: 0.5 }],
+      });
+    };
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      competitionContext: { contract, policy: toyPolicy(contract), memory: legacyProvider },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("baseline-complete");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.role).toBe("researcher");
+    // The custom provider is never displaced by the durable one: the Run gets
+    // exactly its legacy v2 slice, with no fabricated research packet.
+    const slice = memorySliceFromPrompt(writes.prompts[0]!);
+    expect(slice.schema).toBe("evok.memory-slice/v2");
+    expect(slice.research).toBeUndefined();
+    expect(slice.facts).toEqual([{ name: "score", value: 0.5 }]);
+    expect(outcome.record.runs[`${draft.id}:baseline:1`]!.researchMemory).toBeUndefined();
+  });
+
+  test("parent, sibling, previous-Run, and trusted-context slices are rejected before the child session starts", async () => {
+    const { project, draft, contract, writes } = await runMemoryMission("m-sub-reject");
+    const parentSlice = validateMemorySlice(memorySliceFromPrompt(writes.prompts[1]!));
+    const childRunId = `${parentSlice.runId}:sub:1`;
+    const childAgentId = `critic@${childRunId}`;
+    const childTaskId = parentSlice.taskId;
+    const broker = new ContextBroker({
+      contract,
+      policy: toyPolicy(contract),
+      memory: createDelegatedResearchMemoryProvider({
+        parent: parentSlice, taskId: childTaskId, runId: childRunId, targetAgentId: childAgentId,
+      }),
+      source: "team-coordinator",
+    });
+    const brokered = await broker.assemble({
+      missionId: draft.id, taskId: parentSlice.taskId, runId: childRunId,
+      targetAgentId: childAgentId, role: "critic", objective: "critique the candidate",
+    });
+    if (brokered.context.kind !== "role") throw new Error("expected a role context");
+    const roleContext = brokered.context.roleContext;
+    const childSlice = brokered.memorySlice!;
+
+    let transportCalls = 0;
+    const adapter = createPiSubagentsAdapter(async (delegation) => {
+      transportCalls += 1;
+      return { agent: delegation.agent, value: null };
+    });
+    const base = {
+      agent: "critic-1",
+      capability: "critique" as const,
+      task: "critique the candidate",
+      context: buildResearcherContext({ objective: "critique the candidate", tools: ["read"] }),
+      roleContext,
+      runId: childRunId,
+      targetAgentId: childAgentId,
+      parentBinding: { runId: parentSlice.runId, targetAgentId: parentSlice.targetAgentId },
+      freshSession: true,
+    };
+
+    // The parent's own slice, a sibling's, and a previous Run's all fail closed.
+    await expect(adapter.delegate({ ...base, memorySlice: parentSlice, parentMemorySlice: parentSlice }))
+      .rejects.toThrow(/another run/);
+    const sibling = createDelegatedResearchMemoryProvider({
+      parent: parentSlice, taskId: parentSlice.taskId,
+      runId: `${parentSlice.runId}:sub:2`, targetAgentId: `critic@${parentSlice.runId}:sub:2`,
+    });
+    await expect(sibling({
+      missionId: draft.id, taskId: parentSlice.taskId, runId: childRunId,
+      targetAgentId: childAgentId, role: "critic", evidenceRefs: [],
+    })).rejects.toThrow(/bound to child Task/);
+    // A well-formed slice for a previous Run of the same Mission is refused.
+    const previousRun = deriveDelegatedMemorySlice({
+      parent: parentSlice,
+      missionId: draft.id,
+      taskId: parentSlice.taskId,
+      runId: `${parentSlice.runId}:sub:0`,
+      targetAgentId: `critic@${parentSlice.runId}:sub:0`,
+    });
+    await expect(adapter.delegate({ ...base, memorySlice: previousRun, parentMemorySlice: parentSlice }))
+      .rejects.toThrow(/belongs to another run/);
+    // A tampered slice never reaches the transport either.
+    await expect(adapter.delegate({
+      ...base,
+      memorySlice: { ...childSlice, runId: `${childRunId}:9` },
+    })).rejects.toThrow(/digest mismatch/);
+    expect(transportCalls).toBe(0);
+
+    // An Evaluator (trusted) context is never injected with Research Memory.
+    const evaluatorBroker = new ContextBroker({
+      contract, policy: toyPolicy(contract),
+      memory: createResearchMemoryProvider(researchMemoryDir(project, draft.id)),
+      source: "mission-controller",
+    });
+    const evaluator = await evaluatorBroker.assemble({
+      missionId: draft.id, taskId: parentSlice.taskId, runId: `${draft.id}:eval:1`,
+      targetAgentId: `evaluator@${draft.id}:eval:1`, role: "evaluator",
+      objective: "measure the candidate independently",
+      evaluation: { entry: "evaluate" },
+      lease: await grantResourceLease({
+        inventory: await probeHostInventory(),
+        taskId: parentSlice.taskId,
+        request: { cpus: 1, memoryBytes: 1 },
+      }),
+      workspace: { root: join(project, "eval-ws") },
+    });
+    expect(evaluator.memorySlice).toBeUndefined();
+    expect(evaluator.digests.memory).toBeUndefined();
+    expect(JSON.stringify(evaluator)).not.toContain("research-memory-snapshot");
+  });
 });

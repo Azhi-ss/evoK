@@ -15,7 +15,7 @@
  */
 import { validateResearcherContext, type ResearcherContext } from "./researcher-context";
 import { validateRoleContext, type RoleTaskContext } from "./role-context";
-import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { deriveDelegatedMemorySlice, validateMemorySlice, type MemorySlice } from "./memory-slice";
 
 /** The only capabilities a delegated subagent may exercise. */
 export const DELEGATABLE_CAPABILITIES = ["research", "critique", "review"] as const;
@@ -53,6 +53,13 @@ export interface SubagentDelegation {
   readonly roleContext?: RoleTaskContext;
   /** Optional memory slice handed to the child; never inherited implicitly. */
   readonly memorySlice?: MemorySlice;
+  /**
+   * The delegating parent's OWN pinned slice (M1-T8). The child's Delegated
+   * Memory Slice is generated from it, so a child can never be handed the
+   * parent's slice or a wider snapshot. Required whenever the child's slice
+   * carries Research Memory.
+   */
+  readonly parentMemorySlice?: MemorySlice;
   /** The child's own identity; it must not reuse the parent's binding. */
   readonly targetAgentId?: string;
   readonly runId?: string;
@@ -131,8 +138,8 @@ function assertFreshChildIdentity(candidate: Record<string, unknown>): void {
     }
   }
 
+  let context: RoleTaskContext | undefined;
   if (candidate.roleContext !== undefined) {
-    let context: RoleTaskContext;
     try {
       context = validateRoleContext(candidate.roleContext);
     } catch (error) {
@@ -149,22 +156,83 @@ function assertFreshChildIdentity(candidate: Record<string, unknown>): void {
     }
   }
 
-  if (candidate.memorySlice !== undefined) {
-    if (candidate.roleContext === undefined) {
-      throw new SubagentAuthorityError("a delegated memory slice requires a bound role context");
+  const parentSlice = optionalSlice(candidate.parentMemorySlice, "the parent's memory slice");
+  const childSlice = optionalSlice(candidate.memorySlice, "delegated memory slice");
+  if (parentSlice === undefined && childSlice === undefined) return;
+  if (context === undefined) {
+    throw new SubagentAuthorityError("a delegated memory slice requires the child's own bound role context");
+  }
+  if (parentSlice !== undefined) {
+    if (parentSlice.runId === runId || parentSlice.targetAgentId === targetAgentId) {
+      throw new SubagentAuthorityError("a delegated child must not be handed its parent's own memory slice");
     }
-    let slice: MemorySlice;
-    try {
-      slice = validateMemorySlice(candidate.memorySlice);
-    } catch (error) {
-      throw new SubagentAuthorityError(`delegated memory slice is invalid: ${(error as Error).message}`);
-    }
-    if (slice.runId !== runId) {
-      throw new SubagentAuthorityError("delegated memory slice belongs to another run than the delegated child");
-    }
-    if (slice.targetAgentId !== targetAgentId) {
-      throw new SubagentAuthorityError("delegated memory slice belongs to another target agent than the delegated child");
-    }
+  }
+  if (childSlice === undefined) return;
+  if (childSlice.runId !== runId) {
+    throw new SubagentAuthorityError("delegated memory slice belongs to another run than the delegated child");
+  }
+  if (childSlice.targetAgentId !== targetAgentId) {
+    throw new SubagentAuthorityError("delegated memory slice belongs to another target agent than the delegated child");
+  }
+  if (context.audit.missionId !== undefined && childSlice.missionId !== context.audit.missionId) {
+    throw new SubagentAuthorityError("delegated memory slice belongs to another Mission than the delegated child");
+  }
+  if (context.audit.taskId !== undefined && childSlice.taskId !== context.audit.taskId) {
+    throw new SubagentAuthorityError("delegated memory slice belongs to another Task than the delegated child");
+  }
+  if (context.audit.memoryDigest !== undefined && context.audit.memoryDigest !== childSlice.digest) {
+    throw new SubagentAuthorityError("the child role context was assembled with another memory slice than the delegated one");
+  }
+  // A research packet is only ever the parent's pinned one: a child slice that
+  // carries Research Memory must name the parent slice it was derived from.
+  if (childSlice.research !== undefined && parentSlice === undefined) {
+    throw new SubagentAuthorityError("a child research memory slice must name the parent's pinned memory slice it was derived from");
+  }
+  if (parentSlice !== undefined && childSlice.research?.digest !== parentSlice.research?.digest) {
+    throw new SubagentAuthorityError("delegated memory slice is not from the parent's pinned snapshot");
+  }
+}
+
+function optionalSlice(raw: unknown, label: string): MemorySlice | undefined {
+  if (raw === undefined) return undefined;
+  try {
+    return validateMemorySlice(raw);
+  } catch (error) {
+    throw new SubagentAuthorityError(`${label} is invalid: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * A delegation that names the parent's pinned slice gets its child slice
+ * generated here, so the child never inherits the parent's own slice and no
+ * caller can substitute a wider snapshot. An explicit child slice is kept (the
+ * guard verifies it is the same pinned snapshot).
+ */
+function withDelegatedMemory(delegation: SubagentDelegation): SubagentDelegation {
+  const parent = delegation.parentMemorySlice;
+  if (parent === undefined || delegation.memorySlice !== undefined) return delegation;
+  const missionId = delegation.roleContext?.audit.missionId;
+  const taskId = delegation.roleContext?.audit.taskId;
+  if (missionId === undefined || taskId === undefined
+    || delegation.runId === undefined || delegation.targetAgentId === undefined) {
+    // Never drop memory silently: the child slice needs the child's own binding.
+    throw new SubagentAuthorityError(
+      "a delegated parent memory slice needs the child's own runId, targetAgentId, and a role context bound to its Mission and Task",
+    );
+  }
+  try {
+    return {
+      ...delegation,
+      memorySlice: deriveDelegatedMemorySlice({
+        parent,
+        missionId,
+        taskId,
+        runId: delegation.runId,
+        targetAgentId: delegation.targetAgentId,
+      }),
+    };
+  } catch (error) {
+    throw new SubagentAuthorityError(`delegated memory slice could not be derived: ${(error as Error).message}`);
   }
 }
 
@@ -176,12 +244,14 @@ function assertFreshChildIdentity(candidate: Record<string, unknown>): void {
 export function createPiSubagentsAdapter(transport: SubagentTransport) {
   return {
     async delegate(delegation: SubagentDelegation): Promise<SubagentDelegationResult> {
-      assertDelegationPermitted(delegation);
-      return transport(delegation);
+      const effective = withDelegatedMemory(delegation);
+      assertDelegationPermitted(effective);
+      return transport(effective);
     },
     fanOut(delegations: readonly SubagentDelegation[]): Promise<SubagentDelegationResult[]> {
-      for (const delegation of delegations) assertDelegationPermitted(delegation);
-      return Promise.all(delegations.map((delegation) => transport(delegation)));
+      const effective = delegations.map(withDelegatedMemory);
+      for (const delegation of effective) assertDelegationPermitted(delegation);
+      return Promise.all(effective.map((delegation) => transport(delegation)));
     },
   };
 }

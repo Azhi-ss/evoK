@@ -5,12 +5,15 @@
  * global budgets. Also covers MemoryWriteProposal and AgentResult binding.
  */
 import { describe, expect, test } from "bun:test";
+import { projectResearchMemorySnapshot } from "../evidence/research-memory";
 import {
   AGENT_RESULT_SCHEMA,
   MEMORY_SLICE_SCHEMA,
   MemorySliceError,
   createMemorySlice,
   createMemoryWriteProposal,
+  createResearchMemorySlice,
+  deriveDelegatedMemorySlice,
   validateAgentResult,
   validateMemorySlice,
   validateMemoryWriteProposal,
@@ -134,5 +137,59 @@ describe("AgentResult", () => {
         rationale: "x",
       }),
     })).toThrow(/memoryWrite must be bound to the same missionId/);
+  });
+});
+
+describe("delegated memory slice (M1-T8)", () => {
+  const snapshot = projectResearchMemorySnapshot({
+    missionId: "m-1",
+    ledgerRevision: 2,
+    runs: [{ runId: "m-1:baseline:1", ok: true, score: 0.5, evidenceRefs: ["runs/m-1:baseline:1/result.json"] }],
+  });
+  const parent = createResearchMemorySlice({
+    sliceId: "slice-parent",
+    missionId: "m-1",
+    taskId: "task-exp-2",
+    runId: "m-1:exp:2",
+    targetAgentId: "researcher@m-1:exp:2",
+    research: snapshot,
+  });
+  const child = () => deriveDelegatedMemorySlice({
+    parent, missionId: "m-1", taskId: "task-exp-3", runId: "m-1:exp:3:sub:1", targetAgentId: "critic@m-1:exp:3:sub:1",
+  });
+
+  test("mints a new slice for the child from the parent's pinned packet", () => {
+    const slice = child();
+    expect(slice.schema).toBe("evok.memory-slice/v3");
+    expect(slice.sliceId).not.toBe(parent.sliceId);
+    expect(slice.digest).not.toBe(parent.digest);
+    // Exactly the parent's already-published packet, never a wider one.
+    expect(slice.research).toEqual(parent.research);
+    expect(validateMemorySlice(JSON.parse(JSON.stringify(slice)))).toEqual(slice);
+  });
+
+  test("the child cannot reuse the parent's identity or Mission", () => {
+    expect(() => deriveDelegatedMemorySlice({
+      parent, missionId: "m-1", taskId: "task-exp-3", runId: parent.runId, targetAgentId: "critic@m-1:exp:3",
+    })).toThrow(MemorySliceError);
+    expect(() => deriveDelegatedMemorySlice({
+      parent, missionId: "m-1", taskId: "task-exp-3", runId: "m-1:exp:3", targetAgentId: parent.targetAgentId,
+    })).toThrow(/must not reuse/);
+    expect(() => deriveDelegatedMemorySlice({
+      parent, missionId: "m-2", taskId: "task-exp-3", runId: "m-1:exp:3", targetAgentId: "critic@m-1:exp:3",
+    })).toThrow(/belongs to Mission/);
+  });
+
+  test("a legacy v2 parent keeps the v2 contract (no fabricated research packet)", () => {
+    const v2 = createMemorySlice({
+      sliceId: "slice-parent-v2", missionId: "m-1", taskId: "task-exp-2", runId: "m-1:exp:2",
+      targetAgentId: "researcher@m-1:exp:2", findings: [{ findingId: "f-1", summary: "grouped split needed" }],
+    });
+    const slice = deriveDelegatedMemorySlice({
+      parent: v2, missionId: "m-1", taskId: "task-exp-3", runId: "m-1:exp:3:sub:1", targetAgentId: "critic@m-1:exp:3:sub:1",
+    });
+    expect(slice.schema).toBe(MEMORY_SLICE_SCHEMA);
+    expect(slice.research).toBeUndefined();
+    expect(slice.findings).toEqual(v2.findings);
   });
 });

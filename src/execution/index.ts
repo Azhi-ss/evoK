@@ -154,12 +154,14 @@ export {
   createMemorySlice,
   createMemoryWriteProposal,
   createResearchMemorySlice,
+  deriveDelegatedMemorySlice,
   validateAgentResult,
   validateMemorySlice,
   validateMemoryWriteProposal,
 } from "./memory-slice";
 export type {
   AgentResult,
+  DelegatedMemorySliceInput,
   MemoryFact,
   MemoryFinding,
   MemoryReadPolicy,
@@ -171,6 +173,7 @@ export type {
 } from "./memory-slice";
 export {
   RESEARCH_MEMORY_POINTER_SCHEMA,
+  createDelegatedResearchMemoryProvider,
   createResearchMemoryProvider,
   loadResearchMemorySnapshot,
   publishResearchMemorySnapshot,
