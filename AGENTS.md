@@ -13,6 +13,7 @@ Default five-label vocabulary kept as-is. See `docs/agents/triage-labels.md`.
 ### Domain docs
 
 Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Memory subsystem (projection, decision packet, Run injection, recovery, evaluation): `docs/agents/memory-map.md`.
 
 ## Source and test layout
 
@@ -25,6 +26,6 @@ Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/do
 
 - One fresh Pi context handles exactly one GitHub ticket: start it with `/implement` and a compact prompt naming the issue, its acceptance criteria, and stop conditions. Do not paste AGENTS.md or the full issue body.
 - Before editing, read the issue and comments, verify `ready-for-agent` and blockers, claim it with `gh issue edit <number> --add-assignee @me` as the first write, then read `CONTEXT.md` and relevant ADRs.
-- Use TDD for behavior changes. Preserve unrelated changes. Before completion, run `bun test --rerun-all-tests`, `bun run typecheck`, `git diff --check`, and `/code-review`; then commit, comment the result on the issue, and close it.
+- Use TDD for behavior changes. Preserve unrelated changes. Before completion, run `bun run check` (typecheck + whitespace + full suite vs the known-host-failure baseline) and `/code-review`; then commit, comment the result on the issue, and close it. Baseline rules: `docs/agents/known-failures.md`.
 - Only after the ticket is committed, closed, and the tracked worktree is clean, use the session-resolved Orca CLI to open a new fresh Pi in the active worktree and send it the next eligible ticket. Never implement the next ticket in the current session.
 - Stop on blockers, failed gates, ambiguity, unexplained dirty state, or when no eligible ticket remains.

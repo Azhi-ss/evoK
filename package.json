@@ -15,7 +15,11 @@
     "example:lifecycle": "bun examples/lifecycle/recovery-example.ts",
     "test": "bun test",
     "test:live": "bun test --path-ignore-patterns=\"\" ./src/newapi-live.live.test.ts",
-    "typecheck": "npx -p typescript@5.9.3 tsc -p tsconfig.json"
+    "typecheck": "npx -p typescript@5.9.3 tsc -p tsconfig.json",
+    "check": "bun scripts/check.ts",
+    "test:known-failures": "bun scripts/known-failures.ts",
+    "test:known-failures:check": "bun scripts/known-failures.ts --check",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@earendil-works/chord": "0.86.1",

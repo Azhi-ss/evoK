@@ -1,0 +1,42 @@
+# Memory subsystem map
+
+M1 Research Memory spans evidence, execution, and mission. Reading one module is
+usually not enough; this map is the index. Read it before changing the memory
+projection, the decision packet, Run injection, recovery, or the evaluation.
+
+## The seam, in order
+
+| Step | Module | Symbols |
+|---|---|---|
+| Projection (derived, no write authority) | `src/evidence/research-memory.ts` | `projectResearchMemorySnapshot`, `validateResearchMemorySnapshot`, `summarizeResearchMemorySnapshot`, card schemas, `researchMemoryModeOf` |
+| Bounded decision view | `src/evidence/research-memory.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
+| Sham control input | `src/evidence/research-memory.ts` | `RESEARCH_CONTROL_CARD_SCHEMA`, `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` |
+| Durable snapshot + provider | `src/execution/research-memory-provider.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
+| Run-bound slice | `src/execution/memory-slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice` |
+| Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
+| Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta` |
+| Recovery rebuild | `src/mission/mission-resume.ts` | `reconcileResearchMemory` |
+| Accountability / diversity / counterfactuals | `src/mission/decision-accountability.ts` | `projectDecisionAccountability`, `ResearchDiversity` |
+| Offline evaluation | `src/mission/memory-evaluation.ts` | `replayResearchMemory`, `evaluateResearchMemory`, `researchMemoryArmMetrics` |
+
+## Lookup by question
+
+- Which card schemas and fields exist? `src/evidence/research-memory.ts` (card interfaces near the top).
+- How are cards ordered, truncated, reserved, and omitted? `projectResearchMemorySnapshot` and `projectResearchDecisionPacket`.
+- What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `runMissionController`.
+- Why can't a Run see the future? `replayResearchMemory` (dispatch vs completion instants).
+- Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
+- What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
+
+## Tests
+
+- Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`
+- Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
+- Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218` blocks), `tests/integration/memory-evaluation.test.ts`
+
+## Boundaries
+
+`AGENTS.md` names the physical packs. Memory is evidence-owned for projection and
+policy, execution-owned for slice/provider publication, mission-owned for the
+lifecycle and evaluation reads. It is advisory: no evaluator, Promotion,
+Admission, Budget, hang/T48 or Broker predicate may read it.

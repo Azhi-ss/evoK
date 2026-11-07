@@ -1,0 +1,4 @@
+#!/bin/sh
+# Versioned completion gate: typecheck, whitespace, known-host-failure set.
+# Bypass a WIP commit with `git commit --no-verify`; a ticket's final commit must pass.
+exec bun scripts/check.ts
