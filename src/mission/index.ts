@@ -10,13 +10,59 @@ export {
   EvidenceMemory,
 } from "./research-loop";
 export {
+  projectDecisionAccountability,
+  DIRECTION_CONCENTRATION_MIN_REVISIONS,
+  DIRECTION_CONCENTRATION_RECOMMENDATION,
+} from "./decision-accountability";
+export {
+  RESEARCH_MEMORY_CONTROL_CAVEAT,
+  RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
+  RESEARCH_MEMORY_EVALUATION_SCHEMA,
+  compareResearchMemoryArms,
+  evaluateResearchMemory,
+  initialStateDigestOf,
+  replayResearchMemory,
+  researchMemoryArmMetrics,
+} from "./memory-evaluation";
+export type {
+  ReplayedRunMemory,
+  ResearchMemoryArmMetrics,
+  ResearchMemoryComparison,
+  ResearchMemoryComparisonDelta,
+  ResearchMemoryComparisonReading,
+  ResearchMemoryControlCheck,
+  ResearchMemoryControlName,
+  ResearchMemoryEvaluationArm,
+  ResearchMemoryEvaluationMode,
+  ResearchMemoryEvaluationPlan,
+  ResearchMemoryEvaluationReplay,
+  ResearchMemoryEvaluationReport,
+  ResearchMemoryArmControls,
+  ResearchMemoryStageCalls,
+  ResearchMemoryStageCosts,
+} from "./memory-evaluation";
+export type {
+  DecisionAccountability,
+  DecisionAccountabilitySource,
+  DecisionAccountabilityView,
+  DirectionConcentrationReview,
+  RejectedDirectionAccountability,
+  ResearchDiversity,
+} from "./decision-accountability";
+export {
   startAuthorizedMission,
   resumeAuthorizedMission,
+  submitSynthesisProposal,
   isExplicitStartRequest,
   isExplicitResumeRequest,
   listUnfinishedMissions,
   summarizeMission,
   loadMissionRecord,
+} from "./mission-start";
+export type {
+  SubmitSynthesisProposalOptions,
+  SynthesisProposalRecord,
+  SynthesisProposalSubmission,
 } from "./mission-start";
 export {
   DEMO_START_RELATIVE_PATH,
@@ -46,6 +92,15 @@ export type {
   DeployArenaOrchInput,
   DeployArenaOrchResult,
 } from "./deploy-arena-orch";
+export { Phase2Research, initPhase2Research, isPhase2Eligible } from "./phase2-research";
+export { createPhase2WorkspaceRunner } from "./phase2-workspace-runner";
+export type { Phase2WorkspaceRunnerOptions } from "./phase2-workspace-runner";
+export type {
+  Phase2DirectorView,
+  Phase2NextAction,
+  Phase2ResearcherView,
+  Phase2RevisionScore,
+} from "./phase2-research";
 export { assembleLlmCompArmSetup } from "./llm-propose-outer-min";
 export { assembleOuterMinPath } from "./outer-min-path";
 export { assembleOuterE2eMinPath } from "./outer-e2e-min-path";

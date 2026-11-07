@@ -20,6 +20,24 @@ Team / runtime / security modules live under `src/execution/`:
 - Optional empty-shell Pattern specs: `patterns/contest-loop.md`,
   `dual-arm.md`, `research-thin.md`
 
+Amendment (M1-T1 / #210): Research Memory serving lives here
+(`research-memory-provider`, `memory-slice` `evok.memory-slice/v3`). It
+stores and serves the evidence-pack projection under the Mission's
+git-ignored `memory/` namespace; v2 slices keep their exact shape and
+digest. It does not add a context assembler, a second ledger, or any
+gate authority.
+
+Amendment (M1-T8 / #217): delegation injection lives here too. A delegated
+child agent receives a **Delegated Memory Slice** (`deriveDelegatedMemorySlice`
+in `memory-slice`) generated for its own Mission/Task/Run/targetAgent from the
+parent's pinned snapshot, served by `createDelegatedResearchMemoryProvider`
+(pinned to one child Run, never the active pointer) and enforced by the
+`subagents-adapter` guard before any transport/session exists. The parent's own
+slice, a sibling's, a previous Run's, or a slice from another snapshot fails
+closed; a v2 parent keeps its v2 shape. Trusted Evaluator/Executor contexts stay
+uninjected, and nothing here assembles a second context or touches Mission
+dispatch.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

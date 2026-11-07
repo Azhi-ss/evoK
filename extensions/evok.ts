@@ -8,7 +8,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatEvokPluginStatus, loadEvokPlugin, type LoadedEvokPlugin } from "../src/cli/evok-plugin";
 
-export default async function evokExtension(pi: ExtensionAPI): Promise<void> {
+import { registerCampaignDirector, type PiCampaignHost } from "../src/cli/pi-campaign-director";
+
+export async function registerEvokExtension(
+  pi: ExtensionAPI, campaign?: PiCampaignHost,
+  renderStatus: (state: unknown) => string = state => JSON.stringify(state, null, 2),
+): Promise<void> {
+  if (campaign) registerCampaignDirector(pi, campaign);
   let plugin: LoadedEvokPlugin | undefined;
   let loadError: unknown;
 
@@ -21,6 +27,11 @@ export default async function evokExtension(pi: ExtensionAPI): Promise<void> {
   pi.registerCommand("evok", {
     description: "Show evoK status and internal platform/research/eval modules",
     handler: async (args, ctx) => {
+      const command = args.trim();
+      if (campaign && (command === "" || command === "status")) {
+        ctx.ui.notify(renderStatus(await campaign.status()), "info");
+        return;
+      }
       if (loadError !== undefined) {
         ctx.ui.notify(`evoK plugin failed to load: ${loadError instanceof Error ? loadError.message : String(loadError)}`, "error");
         return;
@@ -29,7 +40,6 @@ export default async function evokExtension(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify("evoK plugin is not loaded", "error");
         return;
       }
-      const command = args.trim();
       if (command !== "" && command !== "status") {
         ctx.ui.notify("Usage: /evok [status]", "warning");
         return;
@@ -44,3 +54,5 @@ export default async function evokExtension(pi: ExtensionAPI): Promise<void> {
     plugin = undefined;
   });
 }
+
+export default (pi: ExtensionAPI) => registerEvokExtension(pi);

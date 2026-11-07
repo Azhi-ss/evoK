@@ -25,8 +25,17 @@ import {
   isExplicitResumeRequest,
   listUnfinishedMissions,
   reconcileInterruptedMission,
+  reconcileResearchMemory,
   staleControllerLock,
 } from "./mission-resume";
+import { missionResearchSource, researchMemoryDir } from "./mission-start";
+import { loadResearchMemorySnapshot, publishResearchMemorySnapshot } from "../execution/research-memory-provider";
+import {
+  RESEARCH_CONTROL_CARD_SCHEMA,
+  projectResearchMemorySnapshot,
+  shamResearchMemorySnapshot,
+  summarizeResearchMemorySnapshot,
+} from "../evidence/research-memory";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -230,7 +239,7 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.record.reserved).toBe(0);
   });
 
-  test("an unconfirmed dispatched intent with no durable result is abandoned and surfaced as Negative Evidence, never silently replayed", async () => {
+  test("an unconfirmed dispatched intent with no durable result is abandoned and surfaced as an operational outcome, never silently replayed", async () => {
     const project = await tempProject();
     const id = "m-t6-noresult";
     await seedDraft(project, id);
@@ -257,8 +266,10 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.adoptedRunIds).toEqual([baselineRunId]);
     expect(evaluations).toBe(0);
     const neg = report.record.experiments!.find((e) => e.runId === lostRunId);
+    // The Run Outcome is preserved, but a protocol failure is not a scientific
+    // refutation (#213).
     expect(neg?.ok).toBe(false);
-    expect(neg?.negativeEvidence).toBe(true);
+    expect(neg?.negativeEvidence).toBeUndefined();
     expect(neg?.error).toMatch(/unconfirmed|interrupted/i);
     expect(report.record.reserved).toBe(0.01);
   });
@@ -360,7 +371,7 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect((error as ReconciliationBlockedError).reason).toMatch(/budget|ledger/i);
   });
 
-  test("an unconfirmed BASELINE intent with no evidence still becomes Negative Evidence the Director can see", async () => {
+  test("an unconfirmed BASELINE intent with no evidence still becomes an operational outcome the Director can see", async () => {
     const project = await tempProject();
     const id = "m-t6-lostbaseline";
     await seedDraft(project, id);
@@ -378,7 +389,8 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.adoptedRunIds).toHaveLength(0);
     expect(report.abandonedIntents.map((a) => a.runId)).toEqual([runId]);
     const neg = report.record.experiments!.find((e) => e.runId === runId);
-    expect(neg?.negativeEvidence).toBe(true);
+    expect(neg?.ok).toBe(false);
+    expect(neg?.negativeEvidence).toBeUndefined();
     expect(neg?.action).toBe("baseline");
   });
 
@@ -440,5 +452,41 @@ describe("listUnfinishedMissions (#114 AC2)", () => {
     const exhausted = view.missions.find((m) => m.id === "m-t6-list2")!;
     expect(exhausted.resumable).toBe(false);
     expect(view.drafts.map((d) => d.id)).toContain("m-t6-draftonly");
+  });
+});
+
+describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
+  test("a Sham arm is reconciled to its own control projection, never republished as Real Memory", async () => {
+    const project = await tempProject();
+    const record: MissionRecord = {
+      ...baseRecord("m-t9-sham", {
+        status: "interrupted",
+        baseline: {
+          runId: "m-t9-sham:baseline:1",
+          candidateId: "candidate-baseline",
+          snapshotDigest: "snapshot-baseline",
+          evaluator: { id: EVAL_ID, version: "1" },
+          evaluation: m04,
+          evidenceRefs: ["evidence:baseline"],
+          measuredAt: "2026-09-11T00:05:00.000Z",
+        },
+      }),
+      researchMemoryMode: "sham",
+    };
+    const dir = researchMemoryDir(project, record.id);
+    // A Real snapshot is what a pre-fix or tampered store would hold.
+    const real = projectResearchMemorySnapshot(missionResearchSource(record));
+    await publishResearchMemorySnapshot(dir, real);
+
+    const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
+    const served = await loadResearchMemorySnapshot(dir);
+    const expected = shamResearchMemorySnapshot(real);
+    expect(served?.digest).toBe(expected.digest);
+    expect(served?.cards.every((card) => card.schema === RESEARCH_CONTROL_CARD_SCHEMA)).toBe(true);
+    expect(recovered.researchMemory).toEqual(summarizeResearchMemorySnapshot(expected));
+    expect(recovered.researchMemory?.controlCards).toBe(1);
+    expect(recovered.researchMemory?.cards.finding).toBe(0);
+    // The arm itself is preserved, never silently switched to Real.
+    expect(recovered.researchMemoryMode).toBe("sham");
   });
 });

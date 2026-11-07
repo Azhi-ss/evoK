@@ -145,7 +145,10 @@ function auth(overrides: Partial<StartAuthorization> = {}): StartAuthorization {
 /** Records every trusted projection the decision boundary actually receives. */
 class RecordingDirector implements MissionDirector {
   readonly id: string;
+  /** Every stage call, in order (blind then revision for each decision). */
   readonly inputs: DirectorInput[] = [];
+  /** Only the Memory-blind stage calls, in decision order. */
+  readonly blindInputs: DirectorInput[] = [];
   private calls = 0;
   constructor(private readonly script: (input: DirectorInput, call: number) => ReturnType<MissionDirector["decide"]> extends Promise<infer P> ? P : never) {
     this.id = "scripted-director";
@@ -153,6 +156,7 @@ class RecordingDirector implements MissionDirector {
   async decide(input: DirectorInput) {
     this.calls += 1;
     this.inputs.push(structuredClone(input));
+    if (input.decisionPhase === undefined) this.blindInputs.push(structuredClone(input));
     return this.script(input, this.calls);
   }
 }
@@ -385,7 +389,9 @@ describe("bounded proposals; invalid proposals never execute (#113 AC4)", () => 
     };
     const harness = await controlledHarness(project, [{ value: 0.4 }, { value: 0.88 }]);
     const outcome = await startWith(project, draft, harness, director);
-    expect(attempts).toBe(3); // invalid, corrected experiment proposal, post-experiment stop
+    // Two stages per decision (#211): malformed blind + corrected blind +
+    // revision, then the post-experiment blind stop + its revision.
+    expect(attempts).toBe(5);
     expect(outcome.status).toBe("director-stopped");
     expect(outcome.experiments).toHaveLength(1);
     const rejections = outcome.record.decisions!.filter((d) => !d.accepted);
@@ -527,7 +533,7 @@ describe("failures become Negative Evidence; model claims never become results (
     expect(experiments[1]?.ok).toBe(true);
     expect(experiments[1]?.evaluation?.score).toBe(0.9);
     // the failed attempt was carried into the boundary, not dropped
-    const atSecondDecision = director.inputs[1]!;
+    const atSecondDecision = director.blindInputs[1]!;
     expect(atSecondDecision.observations.some((o) => o.negativeEvidence)).toBe(true);
     expect(outcome.status).toBe("director-stopped");
   });
@@ -712,10 +718,13 @@ describe("fresh Runs/sessions, durable evidence, no submission/human acceptance 
     const draft = await saveMissionDraft(project, completeDraft("m-t5-fresh"));
     const harness = await controlledHarness(project, [{ value: 0.4 }, { value: 0.8 }, { value: 0.9 }]);
     const seenBases: string[] = [];
+    // Record only the Memory-blind stage so the accumulated-evidence chain is
+    // still measured once per decision (the revision re-reads the same base).
+    const blindBase = (input: DirectorInput) => { if (input.decisionPhase === undefined) seenBases.push(input.observations.map((o) => o.runId).join(",")); };
     const director: MissionDirector = {
       id: "chain",
       async decide(input) {
-        seenBases.push(input.observations.map((o) => o.runId).join(","));
+        blindBase(input);
         if (input.observations.length >= 3) {
           return decide({ stateVersion: input.stateVersion, action: "stop", rationale: "done", stopReason: "complete" });
         }

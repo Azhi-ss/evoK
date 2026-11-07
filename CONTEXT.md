@@ -188,9 +188,105 @@ _Avoid_: Live workspace, current files
 A conclusion drawn from one or more Evidence items within stated conditions and scope.
 _Avoid_: Claim (a Claim may communicate a Finding externally)
 
+**Research Memory**:
+A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it.
+_Avoid_: Transcript memory, second evidence ledger, session memory
+
+**Finding Card**:
+A bounded presentation projection of one Finding: a short summary, applicability label, lifecycle, and typed source refs. It is not an authoritative Evidence record.
+_Avoid_: Evidence, claim, full history
+
+**Synthesis Proposal**:
+A structured, reference-first interpretation (Hypothesis, Finding, or Pitfall) an authorized Agent or Director submits for storage. The controller validates its identity, schema, sensitive content, typed refs, visibility, applicability, and idempotency; storage outcomes are `accepted_for_storage` or `rejected`, and neither is a Verified Claim or scientific approval.
+_Avoid_: Memory write, model insight, verified claim
+
+**Synthesis Finding Card**:
+A reading card projected from an accepted Finding Proposal: a conditional conclusion with applicability, its known limitations, and typed source refs. It is unverified and provisional, unlike a measured Finding Card.
+_Avoid_: Measured finding, Evidence
+
+**Hypothesis Card**:
+A reading card projected from one accepted Synthesis Proposal: a conditional claim with supporting refs, contradicting refs, competing Hypothesis refs, unknowns, applicability, and an optional advisory next-validation suggestion.
+_Avoid_: Verified hypothesis, second Evidence ledger
+
+**Pitfall Card**:
+A reading card projected from an accepted operational/protocol Pitfall Proposal: the reproducible conditions, source Run refs, and an avoidance suggestion.
+_Avoid_: Rejected answer, error log
+
+**Blind Proposal**:
+The Mission Director's bounded next action formed from the trusted Mission state and measured Evidence BEFORE any Research Memory is visible. It is validated, durably frozen, and kept as the counterfactual baseline for the later revision.
+_Avoid_: Draft decision, first guess, history-blind proposal
+
+**Revised Proposal**:
+The Memory-informed revision of one Blind Proposal, formed from the same frozen base state plus one pinned Research Decision Packet. Only the Revised Proposal can dispatch; Research Memory adds context, never authority.
+_Avoid_: Memory output, second opinion, Memory-approved action
+
+**Research Decision Packet**:
+The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
+_Avoid_: Memory dump, second snapshot, full history
+
+**Delegated Memory Slice**:
+The Research Memory slice a delegated child agent receives: newly generated for the child's own Mission/Task/Run/targetAgent from the parent's pinned Research Memory snapshot. It is never the parent's, a sibling's, or a previous Run's slice, and it can never carry a wider packet than the parent was shown.
+_Avoid_: Inherited slice, parent memory, copied snapshot
+
+**Decision Regret**:
+The record that a direction a Memory-informed revision rejected was later measured as viable by a comparable Experiment. An unexecuted or never-compared direction stays `unobserved`; it is never a failure, Negative Evidence, or regret, and no numeric regret score is computed.
+_Avoid_: Rejected-answer penalty, counterfactual score
+
+**Direction-Concentration Review**:
+A durable, advisory recommendation written when Memory repeatedly changed decisions toward the same direction without new discriminating (refuting) Evidence. It recommends reevaluating that direction; it cannot force an action, impose an exploration quota, alter Search math, or consume execution authority.
+_Avoid_: Memory veto, exploration quota, forced diversity target
+
+**Decision Delta**:
+The controller-derived comparison of a Blind Proposal and its Revised Proposal: unchanged, reordered, replaced, withdrawn, or expanded-via-existing-search. It is computed from the proposals, never declared by the model.
+_Avoid_: Model-reported change, Memory score
+
+**Memory Evaluation Arm**:
+The trusted configuration value that selects which Memory projection a comparison Mission runs: Memory Off, Schema-only Sham, or Real Memory. It is durable on the Mission record, so a resume cannot silently switch arms, and it grants no authority beyond the existing no-Memory baseline.
+_Avoid_: Memory feature flag, per-Run toggle
+
+**Schema-only Sham**:
+A control input shaped like the real Research Decision Packet — same card count, order, kinds and bounds — whose slots are neutral placeholders explicitly marked as control, carrying no research fact, Evidence ref, applicability, or directional advice. It estimates format and extra-context effects; it is never Memory content and never a perfect causal control.
+_Avoid_: Fake Memory, synthetic evidence
+
+**Control Card**:
+One Schema-only Sham slot: it occupies the same position and kind as one real Memory card but is explicitly marked as a control input, with no research fact, Evidence ref, applicability, or directional advice. It is presentation structure, never Memory content.
+_Avoid_: Placeholder evidence, fake finding
+
+**Offline Memory Replay**:
+A deterministic re-projection that pins each Run to the Mission state, stored Proposals, and Memory snapshot that existed before that Run began, so Run N can never see information produced after it started. It compares arms without a live model provider or GPU.
+_Avoid_: Hindsight replay, transcript replay
+
 **Negative Evidence**:
-Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances.
+Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances. Only a real measurement creates it; an operational failure alone never does.
 _Avoid_: Error log
+
+**Operational Outcome**:
+The non-scientific reading of one Run: an OOM, timeout, invalid measurement, or other infrastructure/protocol failure. It keeps its Run Outcome and may support an Operational Pitfall, but it is never Negative Evidence and cannot refute a Hypothesis.
+_Avoid_: Failed experiment, negative result, refutation
+
+**Operational Pitfall Card**:
+A reading card projected from one operational Run failure: its failure kind, reproducing conditions, and source Run refs. It is advisory and never a scientific claim.
+_Avoid_: Negative Evidence, refuted hypothesis
+
+**Replication Context**:
+Advisory context attached to a repeated Experiment objective: the prior Runs and their outcomes. A repeat may be seed replication or a critical ablation, so it is context, never an automatic rejection or a Memory-owned veto.
+_Avoid_: Duplicate rejection, Memory veto
+
+**Applicability**:
+The claim-specific conditions a Memory card states it is true under, as `dimension:value` pairs over Mission scope, Task scope, Objective, Evaluation protocol, Dataset version, Method/configuration, Runtime, and Contract digest. No card must declare every dimension; an undeclared dimension stays unknown, and Contract digest equality alone never establishes scientific compatibility.
+_Avoid_: Universal fingerprint, compatibility score, metadata tag
+
+**Direct Prior**:
+A Memory card that may be reused as an authoritative starting point for the current retrieval: every critical dimension is declared and matches, every declared dimension has a supplied current value, the card is active, and it is visible. A declared difference, a declared dimension the retrieval cannot compare, an undeclared critical dimension, a retired lifecycle, or a stale/revalidation marker all deny direct-prior use while the card stays visible as context.
+_Avoid_: Applicable record, visible record, matching contract
+
+**Revalidation Required**:
+The marker on a card whose declared critical condition (Objective, Evaluation, Dataset, Method, Runtime, Contract) changed since the card was derived. It is downgraded to `stale` in the next deterministic Snapshot, never silently reused, and the previously published Snapshot stays historical. Only a condition the authoritative record publishes mission-wide (the Evaluation protocol) is derived today; the Objective dimension is a Task/experiment objective, never the Mission research objective.
+_Avoid_: Auto-update, silent compatibility, expiry
+
+**Card Lineage**:
+The explicit derived-from and supersedes relations of a Memory card, plus its revision number. Equivalent Hypotheses become revisions with `supersededBy`/`supersedes` instead of last-write-wins, same-condition conflicts coexist as contested, and withdrawal retires future reads without rewriting Evidence or old snapshots.
+_Avoid_: Overwrite, dedupe by name, History rewrite
 
 **Pitfall**:
 A reusable, answer-agnostic failure pattern that can warn future Tasks without asserting that a particular Candidate is always wrong.

@@ -33,6 +33,9 @@ import type {
 } from "./mission-start";
 import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
+import type { ResearchDecisionPacket } from "../evidence/research-memory";
+import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
+import { classifyTrailEntry } from "./mission-start";
 import type { EvokResources } from "../evok-resources";
 import { READ_ONLY_TOOLS } from "../pi-agent-runtime";
 
@@ -47,6 +50,20 @@ export const DIRECTOR_ACTIONS = [
 
 export type DirectorAction = (typeof DIRECTOR_ACTIONS)[number];
 
+/** Bounded further actions one proposal may declare as considered alternates. */
+export const MAX_DIRECTOR_ALTERNATIVES = 4;
+
+/** One further bounded next action the model also considered, in priority order.
+ *  This is a decision alternative, NOT a Branch: it shares this decision's Task
+ *  Contract and only matters when the revision promotes it to the head. */
+export interface DirectorAlternative {
+  readonly action: Exclude<DirectorAction, "stop">;
+  readonly objective: string;
+  readonly expectedOutputs?: readonly string[];
+  readonly constraints?: Readonly<Record<string, string | number | boolean>>;
+  readonly expectedCost?: number;
+}
+
 /** A proposal that survives runtime bounding; ready to apply via existing ops. */
 export interface DirectorProposal {
   readonly stateVersion: number;
@@ -60,6 +77,8 @@ export interface DirectorProposal {
   };
   readonly expectedCost?: number;
   readonly basedOn?: readonly string[];
+  /** Ordered alternates the model also considered; only the head dispatches. */
+  readonly alternatives?: readonly DirectorAlternative[];
 }
 
 /** One real observation: a measured result or a retained failed attempt. */
@@ -72,8 +91,16 @@ export interface DirectorObservation {
   readonly score?: number;
   readonly ruleViolations?: readonly string[];
   readonly facts?: readonly { readonly name: string; readonly value: string | number | boolean; readonly source?: string }[];
-  /** True for failed/inconclusive attempts retained as Negative Evidence. */
+  /**
+   * True ONLY for a measured scientific refutation. An operational failure
+   * (OOM, timeout, invalid measurement, protocol error) is never Negative
+   * Evidence and cannot refute a Hypothesis (#213).
+   */
   readonly negativeEvidence?: boolean;
+  /** Scientific reading vs operational failure, so the two stay distinct. */
+  readonly outcome?: RunOutcomeState;
+  /** Set only for an operational failure. */
+  readonly failure?: RunFailureKind;
   readonly error?: string;
   readonly evidenceRefs: readonly string[];
   readonly dispatchedAt: string;
@@ -101,7 +128,30 @@ export interface DirectorInput {
   readonly tasks: readonly DraftPlanTask[];
   /** Chronological Positive and Negative Evidence with durable references. */
   readonly observations: readonly DirectorObservation[];
+  /**
+   * M1-T2: absent for the Memory-blind stage (the prompt then carries only the
+   * trusted state, exactly as before); present only for the revision stage,
+   * where it names the frozen Blind Proposal and one pinned Memory packet.
+   */
+  readonly decisionPhase?: DirectorDecisionPhase;
 }
+
+/** The Memory-informed half of a two-stage decision (M1-T2 / #211); its mere
+ *  presence marks the revision stage, so absence is the Memory-blind stage. */
+export interface DirectorDecisionPhase {
+  /** The Blind Proposal frozen and persisted before any Memory was visible. */
+  readonly blindProposal: DirectorProposal;
+  /** Cards from exactly one pinned snapshot; absent when none is pinned. */
+  readonly memoryPacket?: ResearchDecisionPacket;
+}
+
+/** Controller-derived comparison of the blind and revised proposals. */
+export type DecisionDelta =
+  | "unchanged"
+  | "reordered"
+  | "replaced"
+  | "withdrawn"
+  | "expanded_via_existing_search";
 
 /** What one bounded decision call actually consumed. */
 export interface DirectorDecision {
@@ -110,6 +160,8 @@ export interface DirectorDecision {
   readonly usage: RuntimeUsage;
   /** Actual model that served the decision (for trusted-side pricing). */
   readonly model?: ModelConfigView;
+  /** Revision only: Memory card refs the model says it used (validated ⊆ packet). */
+  readonly usedMemoryRefs?: readonly string[];
 }
 
 /**
@@ -171,6 +223,9 @@ const ALLOWED_TASK_KEYS = new Set(["objective", "expectedOutputs", "constraints"
 const FORBIDDEN_TASK_KEYS = new Set([
   "score", "success", "succeeded", "result", "verified", "ok", "pass", "passed",
 ]);
+
+/** Keys one ordered alternative may declare; anything else is refused. */
+const ALTERNATIVE_KEYS = new Set(["action", "objective", "expectedOutputs", "constraints", "expectedCost"]);
 
 /**
  * Validate and bound a raw model proposal against the current trusted state.
@@ -247,6 +302,9 @@ export function validateDirectorProposal(raw: unknown, input: DirectorInput): Di
     if (proposal.expectedCost !== undefined && proposal.expectedCost > 0) {
       throw new DirectorProposalRejectedError("a stop proposal must not reserve experiment cost");
     }
+    if (raw.alternatives !== undefined) {
+      throw new DirectorProposalRejectedError("a stop proposal must not also carry alternative actions");
+    }
     return proposal;
   }
 
@@ -254,7 +312,38 @@ export function validateDirectorProposal(raw: unknown, input: DirectorInput): Di
   if (!isRecord(raw.task)) {
     throw new DirectorProposalRejectedError(`a ${action} proposal must include a task {objective, expectedOutputs?} to execute`);
   }
-  const taskRaw = raw.task;
+  const task = boundedTask(raw.task);
+
+  // A retry/repair acts ON a prior attempt; it must name the real reference.
+  if (action === "retry" || action === "repair") {
+    const refs = proposal.basedOn;
+    if (!refs || refs.length === 0) {
+      throw new DirectorProposalRejectedError(`a ${action} proposal must reference the prior attempt in basedOn`);
+    }
+    if (!refs.every((ref) => knownRefs.has(ref))) {
+      throw new DirectorProposalRejectedError(`a ${action} proposal references an unknown run/evidence reference`);
+    }
+  }
+  if (proposal.basedOn) {
+    for (const ref of proposal.basedOn) {
+      if (!knownRefs.has(ref)) throw new DirectorProposalRejectedError(`basedOn references an unknown run/evidence: ${ref}`);
+    }
+  }
+
+  const available = input.budget.remaining - input.budget.reserved;
+  const requested = proposal.expectedCost ?? 0;
+  if (requested > available + 1e-12) {
+    throw new DirectorProposalRejectedError(
+      `over-budget proposal: it expects ${requested} ${input.budget.units} but only ${available} is available; propose within the remaining budget or stop`,
+    );
+  }
+
+  const alternatives = raw.alternatives === undefined ? undefined : boundedAlternatives(raw.alternatives, available, input.budget.units);
+  return { ...proposal, task, ...(alternatives ? { alternatives } : {}) };
+}
+
+/** Bound one task subobject; shared by the proposal head and each alternative. */
+function boundedTask(taskRaw: Record<string, unknown>): NonNullable<DirectorProposal["task"]> {
   for (const key of Object.keys(taskRaw)) {
     if (FORBIDDEN_TASK_KEYS.has(key)) {
       throw new DirectorProposalRejectedError(`a proposed task cannot assert "${key}": only the independent evaluator establishes results`);
@@ -293,38 +382,102 @@ export function validateDirectorProposal(raw: unknown, input: DirectorInput): Di
       constraints[key] = value;
     }
   }
-
-  const task: DirectorProposal["task"] = {
-    objective: taskRaw.objective.trim(),
-    ...(Array.isArray(taskRaw.expectedOutputs) ? { expectedOutputs: [...taskRaw.expectedOutputs] } : {}),
+  return {
+    objective: (taskRaw.objective as string).trim(),
+    ...(Array.isArray(taskRaw.expectedOutputs) ? { expectedOutputs: [...taskRaw.expectedOutputs] as string[] } : {}),
     ...(constraints ? { constraints } : {}),
   };
+}
 
-  // A retry/repair acts ON a prior attempt; it must name the real reference.
-  if (action === "retry" || action === "repair") {
-    const refs = proposal.basedOn;
-    if (!refs || refs.length === 0) {
-      throw new DirectorProposalRejectedError(`a ${action} proposal must reference the prior attempt in basedOn`);
-    }
-    if (!refs.every((ref) => knownRefs.has(ref))) {
-      throw new DirectorProposalRejectedError(`a ${action} proposal references an unknown run/evidence reference`);
-    }
+/** Ordered alternates are bounded and held to the same authority/budget rules. */
+function boundedAlternatives(raw: unknown, available: number, units: string): DirectorAlternative[] {
+  if (!Array.isArray(raw)) {
+    throw new DirectorProposalRejectedError("alternatives must be a list of bounded actions when present");
   }
-  if (proposal.basedOn) {
-    for (const ref of proposal.basedOn) {
-      if (!knownRefs.has(ref)) throw new DirectorProposalRejectedError(`basedOn references an unknown run/evidence: ${ref}`);
-    }
+  if (raw.length > MAX_DIRECTOR_ALTERNATIVES) {
+    throw new DirectorProposalRejectedError(`at most ${MAX_DIRECTOR_ALTERNATIVES} alternatives may accompany one proposal`);
   }
+  return raw.map((entry) => {
+    if (!isRecord(entry)) throw new DirectorProposalRejectedError("each alternative must be an object");
+    const action = entry.action;
+    if (typeof action !== "string" || action === "stop" || !(DIRECTOR_ACTIONS as readonly string[]).includes(action)) {
+      throw new DirectorProposalRejectedError(`an alternative action must be one of ${DIRECTOR_ACTIONS.filter((a) => a !== "stop").join(", ")}`);
+    }
+    for (const key of Object.keys(entry)) {
+      if (!ALTERNATIVE_KEYS.has(key)) throw new DirectorProposalRejectedError(`unsupported alternative field "${key}"`);
+    }
+    const alternative: DirectorAlternative = {
+      action: action as Exclude<DirectorAction, "stop">,
+      ...boundedTask({
+        objective: entry.objective,
+        ...(entry.expectedOutputs !== undefined ? { expectedOutputs: entry.expectedOutputs } : {}),
+        ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
+      }),
+    };
+    if (entry.expectedCost !== undefined) {
+      if (typeof entry.expectedCost !== "number" || !Number.isFinite(entry.expectedCost) || entry.expectedCost < 0) {
+        throw new DirectorProposalRejectedError("an alternative expectedCost must be a finite non-negative number in the declared budget unit");
+      }
+      if (entry.expectedCost > available + 1e-12) {
+        throw new DirectorProposalRejectedError(
+          `over-budget alternative: it expects ${entry.expectedCost} ${units} but only ${available} is available`,
+        );
+      }
+      return { ...alternative, expectedCost: entry.expectedCost };
+    }
+    return alternative;
+  });
+}
 
-  const available = input.budget.remaining - input.budget.reserved;
-  const requested = proposal.expectedCost ?? 0;
-  if (requested > available + 1e-12) {
-    throw new DirectorProposalRejectedError(
-      `over-budget proposal: it expects ${requested} ${input.budget.units} but only ${available} is available; propose within the remaining budget or stop`,
-    );
-  }
+/** Stable comparison key for one proposed action (the head or an alternate). */
+function actionKey(option: { readonly action: string; readonly objective: string; readonly expectedOutputs?: readonly string[]; readonly constraints?: Readonly<Record<string, unknown>> }): string {
+  const constraints = option.constraints
+    ? Object.keys(option.constraints).sort().map((key) => `${key}=${String(option.constraints![key])}`).join(",")
+    : "";
+  return [option.action, option.objective.trim(), (option.expectedOutputs ?? []).join("\u0000"), constraints].join("\u0001");
+}
 
-  return { ...proposal, task };
+/** Ordered action set of one proposal: the head first, then its alternates. */
+function optionKeys(proposal: DirectorProposal): string[] {
+  if (proposal.action === "stop") return [];
+  return [
+    actionKey({ action: proposal.action, objective: proposal.task?.objective ?? "", expectedOutputs: proposal.task?.expectedOutputs, constraints: proposal.task?.constraints }),
+    ...(proposal.alternatives ?? []).map((alternative) => actionKey(alternative)),
+  ];
+}
+
+/**
+ * Derives the decision delta from the two proposals themselves (#211 AC5). A
+ * model-declared delta is never trusted: this compares the controller-validated
+ * actions, so the audit shows what Memory actually changed. The delta describes
+ * the action that would DISPATCH, so a tail-only change to undispatched
+ * alternatives is `unchanged`; those alternatives are audited separately.
+ * expectedCost and basedOn are sizing/provenance, not direction, so they are
+ * excluded from action identity.
+ */
+export function deriveDecisionDelta(blind: DirectorProposal, revised: DirectorProposal): DecisionDelta {
+  const blindKeys = optionKeys(blind);
+  const revisedKeys = optionKeys(revised);
+  if (blindKeys.length === 0 && revisedKeys.length === 0) return "unchanged";
+  if (revisedKeys.length === 0) return "withdrawn";
+  if (blindKeys.length === 0) return "replaced";
+  if (blindKeys.join("\u0002") === revisedKeys.join("\u0002")) return "unchanged";
+  if (blindKeys[0] === revisedKeys[0]) return "unchanged";
+  const sortedBlind = [...blindKeys].sort();
+  const sortedRevised = [...revisedKeys].sort();
+  const sameSet = sortedBlind.length === sortedRevised.length
+    && sortedBlind.every((key, index) => key === sortedRevised[index]);
+  // The dispatched action changed but the considered set did not: a reorder.
+  if (sameSet) return "reordered";
+  // The same action/objective with a wider declared output set is an expansion
+  // that still has to pass the existing action/Task validation.
+  if (blind.task && revised.task && blind.action === revised.action && blind.task.objective === revised.task.objective) {
+    const blindOutputs = new Set(blind.task.expectedOutputs ?? []);
+    const revisedOutputs = new Set(revised.task.expectedOutputs ?? []);
+    const wider = revisedOutputs.size > blindOutputs.size && [...blindOutputs].every((output) => revisedOutputs.has(output));
+    if (wider) return "expanded_via_existing_search";
+  }
+  return "replaced";
 }
 
 /** Map one independent measurement to its trusted observation projection. */
@@ -350,8 +503,15 @@ function measuredObservation(args: {
     ...(evaluation.ruleViolations?.length ? { ruleViolations: [...evaluation.ruleViolations] } : {}),
     ...(evaluation.facts?.length ? { facts: evaluation.facts.map((fact) => ({ ...fact })) } : {}),
   };
-  // A measured rule failure is Negative Evidence, not a dropped observation.
-  return evaluation.ok ? base : { ...base, negativeEvidence: true };
+  // A measured rule failure is Negative Evidence, not a dropped observation; an
+  // invalid measurement is an operational outcome instead.
+  const classification = classifyRunOutcome(evaluation);
+  return {
+    ...base,
+    outcome: classification.state,
+    ...(classification.failure !== undefined ? { failure: classification.failure } : {}),
+    ...(classification.scientificNegativeEvidence ? { negativeEvidence: true } : {}),
+  };
 }
 
 /**
@@ -393,14 +553,17 @@ export function buildDirectorInput(
         dispatchedAt: run?.dispatchedAt ?? experiment.at,
       }));
     } else {
-      // A dispatch/run failure with no measurement: still Negative Evidence.
+      // A dispatch/run failure with no measurement keeps its Run Outcome but is
+      // an OPERATIONAL failure: it cannot refute the Hypothesis it was testing.
+      const classification = classifyTrailEntry(experiment);
       observations.push({
         runId: experiment.runId,
         attempt: experiment.attempt,
         kind: "experiment",
         action: experiment.action,
         ok: false,
-        negativeEvidence: true,
+        outcome: classification.state,
+        ...(classification.failure !== undefined ? { failure: classification.failure } : {}),
         ...(experiment.error ? { error: experiment.error } : {}),
         ...(experiment.ruleViolations?.length ? { ruleViolations: [...experiment.ruleViolations] } : {}),
         evidenceRefs: experiment.evidenceRefs,
@@ -434,7 +597,11 @@ JSON object: the human-owned objective and contract, immutable policy
 (permissions/hard rules), remaining budget in explicit units, already-generated
 tasks, and chronological observations. Each observation is an independent
 evaluator measurement (with score/facts/rule violations) or a retained failed
-attempt (negativeEvidence=true) with durable evidence references.
+attempt with durable evidence references. Each observation carries "outcome":
+"positive" | "negative" | "operational". Only a measured refutation sets
+negativeEvidence=true; an operational failure (OOM, timeout, invalid
+measurement, protocol error) is NOT scientific evidence and never refutes a
+hypothesis — treat it as a condition to work around.
 
 Choose the single most useful NEXT action within the authorized objective:
 - "investigate": inspect/understand before changing the candidate;
@@ -448,6 +615,7 @@ Choose the single most useful NEXT action within the authorized objective:
 Respond with ONE minified JSON object and nothing else:
 {"stateVersion":<echo the input stateVersion exactly>,"action":<one of the actions>,"rationale":<short evidence-based reason>,"task":{"objective":<bounded task objective>,"expectedOutputs":[<required artifact names>]},"expectedCost":<finite non-negative number in the budget unit>,"basedOn":[<existing run ids/evidence refs>] }
 For action "stop" omit task/expectedCost and provide "stopReason" instead.
+You may add "alternatives":[{"action":<a non-stop action>,"objective":<bounded objective>,"expectedOutputs":[<names>]}] (at most ${MAX_DIRECTOR_ALTERNATIVES}) for bounded work you also considered; only your chosen action is executed.
 
 Hard boundaries you cannot cross in a proposal:
 - Do not change the objective, policy, permissions, or budget. Do not request
@@ -467,6 +635,45 @@ export interface PiMissionDirectorOptions {
   readonly tier?: string;
   /** Parent for disposable decision workspaces (default: OS temp dir). */
   readonly workspaceRoot?: string;
+}
+
+/**
+ * Assembles the one prompt a decision Run sees. The Memory-blind stage's prompt
+ * is exactly the trusted-state prompt; a revision prompt is that SAME prompt
+ * plus one segment carrying only the frozen Blind Proposal and the pinned
+ * Memory packet, so no other input can differ between the two stages (#211).
+ */
+export function buildDirectorPrompt(input: DirectorInput): string {
+  const stateJson = JSON.stringify({
+    missionId: input.missionId,
+    stateVersion: input.stateVersion,
+    objective: input.objective,
+    contract: input.contract,
+    policy: input.policy,
+    budget: input.budget,
+    stopConditions: input.stopConditions,
+    tasks: input.tasks,
+    observations: input.observations,
+  });
+  const base = `${DIRECTOR_INSTRUCTIONS}\n\nCURRENT AUTHORITATIVE MISSION STATE (JSON):\n${stateJson}`;
+  const phase = input.decisionPhase;
+  if (phase === undefined) return base;
+  const packet = phase.memoryPacket;
+  return [
+    base,
+    "",
+    "REVISION STAGE (Memory-informed). Your Blind Proposal below was frozen from the state above BEFORE any Research Memory was visible. Keep it, reorder it, replace it, withdraw it (action \"stop\"), or expand it with bounded work, and say why in rationale. Research Memory is advisory: it grants no objective, permission, budget, or submission authority.",
+    "BLIND PROPOSAL (frozen, JSON):",
+    JSON.stringify(phase.blindProposal),
+    packet === undefined
+      ? "RESEARCH DECISION PACKET: none pinned (no Research Memory snapshot is pinned for this Mission yet)."
+      : `RESEARCH DECISION PACKET (one pinned snapshot, JSON):\n${JSON.stringify(packet)}`,
+    // #215: a bounded packet must never read as the complete research history.
+    ...(packet?.truncated
+      ? ["The packet above is TRUNCATED: its omissions/omittedCardCount fields count the cards it does not carry, so it is not the complete history."]
+      : []),
+    "Respond with the same JSON shape; you may add \"alternatives\" (bounded actions only) and \"usedMemoryRefs\" (card ids from this packet only).",
+  ].join("\n");
 }
 
 /** Extract the first JSON object/array from a model response. */
@@ -500,17 +707,7 @@ export function createPiMissionDirector(options: PiMissionDirectorOptions): Miss
         `evok-director-${input.missionId.replace(/[^a-z0-9._-]/gi, "_")}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       );
       const runtime = options.runtimeFactory(workspaceParent);
-      const stateJson = JSON.stringify({
-        missionId: input.missionId,
-        stateVersion: input.stateVersion,
-        objective: input.objective,
-        contract: input.contract,
-        policy: input.policy,
-        budget: input.budget,
-        stopConditions: input.stopConditions,
-        tasks: input.tasks,
-        observations: input.observations,
-      });
+      const prompt = buildDirectorPrompt(input);
       let result;
       try {
         result = await runtime.execute(
@@ -521,9 +718,10 @@ export function createPiMissionDirector(options: PiMissionDirectorOptions): Miss
             },
             role: {
               name: "evok-mission-director",
-              // The trusted projection is embedded verbatim after the role
-              // instructions; this is the ONLY state the decision Run sees.
-              instructions: `${DIRECTOR_INSTRUCTIONS}\n\nCURRENT AUTHORITATIVE MISSION STATE (JSON):\n${stateJson}`,
+              // The trusted projection (plus, in the revision stage only, the
+              // frozen proposal and pinned packet) is the ONLY state this
+              // decision Run sees; the model never reads Mission records.
+              instructions: prompt,
               // READ-ONLY decision boundary: the prompt carries the trusted
               // projection; the role may inspect the project but can never
               // write a candidate, a score, or a controller record.
@@ -591,7 +789,15 @@ export function createPiMissionDirector(options: PiMissionDirectorOptions): Miss
         }
         throw error;
       }
-      return { proposal, sessionId: result.sessionId, usage: result.usage, model: result.model };
+      return {
+        proposal,
+        sessionId: result.sessionId,
+        usage: result.usage,
+        model: result.model,
+        ...(Array.isArray(parsed.usedMemoryRefs)
+          ? { usedMemoryRefs: parsed.usedMemoryRefs.filter((ref): ref is string => typeof ref === "string" && ref.trim() !== "") }
+          : {}),
+      };
     },
   };
 }

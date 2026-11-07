@@ -17,10 +17,13 @@ import { describe, expect, test } from "bun:test";
 import {
   DirectorProposalRejectedError,
   buildDirectorInput,
+  buildDirectorPrompt,
+  deriveDecisionDelta,
   validateDirectorProposal,
   type DirectorInput,
   type DirectorProposal,
 } from "./mission-director";
+import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../evidence/research-memory";
 import type { MissionRecord } from "./mission-start";
 
 function input(overrides: Partial<DirectorInput> = {}): DirectorInput {
@@ -267,7 +270,7 @@ describe("buildDirectorInput (#113 AC2/AC5)", () => {
     expect(projected.stateVersion).toBe(2);
   });
 
-  test("a dispatch failure (no measurement) is still retained as Negative Evidence, never dropped", () => {
+  test("a dispatch failure (no measurement) keeps its Run Outcome as an OPERATIONAL observation, never a refutation", () => {
     const crashed: MissionRecord = {
       ...record(),
       stateVersion: 2,
@@ -280,14 +283,192 @@ describe("buildDirectorInput (#113 AC2/AC5)", () => {
         },
       },
       experiments: [{
-        runId: "m-t5:exp:2", attempt: 2, action: "retry", ok: false, negativeEvidence: true,
-        taskObjective: "retry", error: "model provider returned 500", evidenceRefs: [],
+        runId: "m-t5:exp:2", attempt: 2, action: "retry", ok: false,
+        taskObjective: "retry", error: "CUDA error: out of memory", evidenceRefs: [],
         at: "2026-09-11T00:00:02.000Z",
       }],
     };
     const projected = buildDirectorInput(crashed, { permissions: [], hardRules: [], stopConditions: [] });
-    const negative = projected.observations.find((o) => o.runId === "m-t5:exp:2")!;
-    expect(negative.ok).toBe(false);
-    expect(negative.error).toMatch(/500/);
+    const observation = projected.observations.find((o) => o.runId === "m-t5:exp:2")!;
+    expect(observation.ok).toBe(false);
+    expect(observation.error).toMatch(/out of memory/);
+    // Operational, visibly distinct, and never scientific Negative Evidence (#213).
+    expect(observation).toMatchObject({ outcome: "operational", failure: "out-of-memory" });
+    expect(observation.negativeEvidence).toBeUndefined();
+  });
+
+  test("replication and critical-ablation proposals stay eligible without a Memory veto (#213)", () => {
+    const projected = buildDirectorInput(record(), { permissions: [], hardRules: [], stopConditions: [] });
+    const priorRun = projected.observations[0]!.runId;
+    // Seed replication: the SAME objective again is a bounded retry, not a duplicate.
+    const replication = validateDirectorProposal({
+      stateVersion: projected.stateVersion,
+      action: "retry",
+      rationale: "replicate the baseline approach to measure seed variance",
+      task: { objective: "materialize answer.txt with value 0.4", expectedOutputs: ["answer.txt"] },
+      expectedCost: 0.01,
+      basedOn: [priorRun],
+    }, projected);
+    expect(replication.action).toBe("retry");
+    // Critical ablation: a materially different, narrower run referencing the prior one.
+    const ablation = validateDirectorProposal({
+      stateVersion: projected.stateVersion,
+      action: "change-direction",
+      rationale: "ablate the single dominant term to test whether it carries the measured result",
+      task: { objective: "materialize answer.txt with the dominant term removed", expectedOutputs: ["answer.txt"] },
+      expectedCost: 0.01,
+      basedOn: [priorRun],
+    }, projected);
+    expect(ablation.action).toBe("change-direction");
+  });
+});
+
+// ── M1-T2 (#211): Memory-blind Proposal → Memory-informed Revision ──────────
+
+const task = (objective: string, outputs: readonly string[] = ["answer.txt"]) => ({ objective, expectedOutputs: [...outputs] });
+
+const proposal = (action: DirectorProposal["action"], objective: string, rest: Partial<DirectorProposal> = {}): DirectorProposal => ({
+  stateVersion: 1,
+  action,
+  rationale: "measured evidence drives this action",
+  ...(action === "stop" ? { stopReason: "bounded demo complete" } : { task: task(objective) }),
+  ...rest,
+});
+
+describe("controller-derived decision delta (#211)", () => {
+  test("an identical revised proposal is unchanged", () => {
+    const blind = proposal("investigate", "materialize answer.txt with value 0.8");
+    expect(deriveDecisionDelta(blind, structuredClone(blind))).toBe("unchanged");
+  });
+
+  test("keeping the same options but choosing a different head is reordered", () => {
+    const alternate = { action: "repair" as const, objective: "fix answer.txt parsing", expectedOutputs: ["answer.txt"] };
+    const blind = proposal("investigate", "materialize answer.txt with value 0.8", { alternatives: [alternate] });
+    const revised = proposal("repair", "fix answer.txt parsing", {
+      alternatives: [{ action: "investigate", objective: "materialize answer.txt with value 0.8", expectedOutputs: ["answer.txt"] }],
+    });
+    expect(deriveDecisionDelta(blind, revised)).toBe("reordered");
+  });
+
+  test("a different action or task is a replacement", () => {
+    expect(deriveDecisionDelta(
+      proposal("investigate", "materialize answer.txt with value 0.8"),
+      proposal("change-direction", "materialize answer.txt with value 0.9"),
+    )).toBe("replaced");
+  });
+
+  test("a revised stop withdraws the blind action instead of replacing it", () => {
+    expect(deriveDecisionDelta(
+      proposal("investigate", "materialize answer.txt with value 0.8"),
+      proposal("stop", "unused"),
+    )).toBe("withdrawn");
+    expect(deriveDecisionDelta(proposal("stop", "unused"), proposal("stop", "unused"))).toBe("unchanged");
+    expect(deriveDecisionDelta(proposal("stop", "unused"), proposal("investigate", "materialize answer.txt"))).toBe("replaced");
+  });
+
+  test("widening the dispatched action is an expansion; adding an undispatched alternative is not", () => {
+    const added = { action: "repair" as const, objective: "fix answer.txt parsing", expectedOutputs: ["answer.txt"] };
+    const blind = proposal("investigate", "materialize answer.txt with value 0.8");
+    // The dispatched action did not change, so the delta is unchanged; the
+    // extra alternative is audited as a rejected alternative instead.
+    const withAlternative = proposal("investigate", "materialize answer.txt with value 0.8", { alternatives: [added] });
+    expect(deriveDecisionDelta(blind, withAlternative)).toBe("unchanged");
+    // The same action/objective with a wider declared output set is an
+    // expansion that still has to pass the existing action/Task validation.
+    const wider = proposal("investigate", "materialize answer.txt with value 0.8", { task: task("materialize answer.txt with value 0.8", ["answer.txt", "notes.md"]) });
+    expect(deriveDecisionDelta(blind, wider)).toBe("expanded_via_existing_search");
+  });
+
+  test("a model-declared delta field is ignored: the controller compares proposals", () => {
+    const blind = proposal("investigate", "materialize answer.txt with value 0.8");
+    const revised = { ...proposal("change-direction", "materialize answer.txt with value 0.9"), delta: "unchanged" } as unknown as DirectorProposal;
+    expect(deriveDecisionDelta(blind, revised)).toBe("replaced");
+  });
+
+  test("alternatives are bounded and validated by the same rules as the head", () => {
+    expect(() => validateDirectorProposal({
+      stateVersion: 1,
+      action: "investigate",
+      rationale: "with a malformed alternative",
+      task: task("materialize answer.txt"),
+      alternatives: [{ action: "submission", objective: "submit externally" }],
+    }, input())).toThrow(/alternative/);
+    expect(() => validateDirectorProposal({
+      stateVersion: 1,
+      action: "investigate",
+      rationale: "too many",
+      task: task("materialize answer.txt"),
+      alternatives: Array.from({ length: 5 }, (_, index) => ({ action: "investigate", objective: `option ${index}` })),
+    }, input())).toThrow(/alternatives/);
+    const accepted = validateDirectorProposal({
+      stateVersion: 1,
+      action: "investigate",
+      rationale: "one bounded alternative",
+      task: task("materialize answer.txt"),
+      alternatives: [{ action: "repair", objective: "fix the parsing path" }],
+    }, input());
+    expect(accepted.alternatives).toEqual([{ action: "repair", objective: "fix the parsing path" }]);
+  });
+});
+
+describe("two-stage decision prompt (#211)", () => {
+  const packet = projectResearchDecisionPacket(projectResearchMemorySnapshot({
+    missionId: "m-t5",
+    ledgerRevision: 1,
+    runs: [{ runId: "m-t5:baseline:1", ok: true, score: 0.4, evidenceRefs: ["runs/m-t5:baseline:1/result.json"] }],
+  }));
+
+  test("the blind prompt carries the trusted state and no Research Memory projection", () => {
+    const blind = buildDirectorPrompt(input());
+    expect(blind).toContain("CURRENT AUTHORITATIVE MISSION STATE (JSON):");
+    expect(blind).not.toContain("RESEARCH DECISION PACKET");
+    expect(blind).not.toContain("BLIND PROPOSAL");
+  });
+
+  test("the revision prompt adds ONLY the frozen proposal and the pinned packet", () => {
+    const blind = buildDirectorPrompt(input());
+    const blindProposal = proposal("investigate", "materialize answer.txt with value 0.8");
+    const revision = buildDirectorPrompt(input({
+      decisionPhase: { blindProposal, memoryPacket: packet },
+    }));
+    expect(revision.startsWith(blind)).toBe(true);
+    const added = revision.slice(blind.length);
+    expect(added).toContain("RESEARCH DECISION PACKET");
+    expect(added).toContain(packet.cards[0]!.cardId);
+    expect(added).toContain(JSON.stringify(blindProposal));
+    // nothing else about the trusted state changed between the two stages
+    expect(added).not.toContain('"observations"');
+    expect(added).not.toContain('"stopConditions"');
+    expect(added).not.toContain('"budget"');
+    expect(added).not.toContain('"contract"');
+  });
+
+  test("a truncated packet is disclosed as incomplete, a complete one is not (#215)", () => {
+    const revisionFor = (memoryPacket: typeof packet) => buildDirectorPrompt(input({
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), memoryPacket },
+    }));
+    const whole = revisionFor(packet);
+    expect(whole).not.toContain("TRUNCATED");
+    // Two runs at a one-card limit: the packet carries less than the snapshot.
+    const truncated = projectResearchDecisionPacket(projectResearchMemorySnapshot({
+      missionId: "m-t5",
+      ledgerRevision: 1,
+      runs: [
+        { runId: "m-t5:baseline:1", ok: true, score: 0.4, evidenceRefs: ["runs/b/result.json"] },
+        { runId: "m-t5:exp:2", ok: false, ruleViolations: ["rmse regressed"], evidenceRefs: ["runs/e/result.json"] },
+      ],
+    }), { maxCards: 1 });
+    expect(truncated.truncated).toBe(true);
+    const cut = revisionFor(truncated);
+    expect(cut).toContain("TRUNCATED");
+    expect(cut).toContain("omissions");
+  });
+
+  test("a revision without a pinned packet still freezes and re-reads the blind proposal", () => {
+    const revision = buildDirectorPrompt(input({
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt") },
+    }));
+    expect(revision).toContain("BLIND PROPOSAL");
+    expect(revision).toContain("no Research Memory snapshot is pinned");
   });
 });

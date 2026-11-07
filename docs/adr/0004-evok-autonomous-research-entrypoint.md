@@ -50,3 +50,21 @@ The interactive surface is Pi native TUI via SDK `InteractiveMode`
 intervention and is not the driver of each research iteration. Product
 baseline and six-pack mapping are recorded in
 [ADR-0014](0014-prd-rsi-baseline.md).
+
+## Amendment (M1-T2 / #211): two-stage Memory-informed decisions
+
+A Mission decision is now two priced stages under the same authority
+(ADR-0014 Research Memory, parent spec #209). Stage 1 is Memory-blind:
+it receives the same trusted projection the Director already used and no
+persistent Research Memory. Its validated proposal is persisted (frozen)
+before any Memory card is loaded, and blind correction attempts stay
+blind. Stage 2 receives that same frozen base state, the frozen Blind
+Proposal, and one pinned Research Decision Packet; only its Revised
+Proposal can dispatch, and any new or expanded action still passes the
+existing action/permission/Budget validation. The controller derives the
+decision delta (unchanged / reordered / replaced / withdrawn /
+expanded-via-existing-search) by comparing the two proposals instead of
+trusting a model-declared delta, and both stages, their Memory refs,
+rejected alternatives, validation results, model identity, and usage are
+durable on the Mission record. No numeric Memory utility, exploration
+quota, parent-selection formula, or Memory-owned veto is introduced.

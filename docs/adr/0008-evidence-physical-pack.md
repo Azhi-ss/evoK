@@ -45,6 +45,60 @@ Amendment (ET-DEPLOY-ORCH / #182): DeployArena COI reuses
 and the playground seam; this pack still owns the gate colors and
 ledger. Predicates are not loosened.
 
+Amendment (M1-T1 / #210): the Mission Research Memory projection model
+(`research-memory`) lives here: deterministic, bounded reading cards
+projected from authoritative Mission history, with content-addressed
+snapshots validated on load. It is derived and advisory; Mission history
+stays the only write log, and no gate / T48 / hang / Broker predicate
+changes.
+
+Amendment (M1-T2 / #211): the pinned Research Decision Packet
+(`projectResearchDecisionPacket`, `evok.research-decision-packet/v1`)
+lives here. It is a bounded, content-addressed presentation view of ONE
+validated Research Memory snapshot, and `assertPacketCardRefs` refuses a
+decision that claims a card outside it. The packet is advisory: the
+mission controller still derives decision deltas, validates both proposal
+stages, and keeps every budget / permission / gate predicate unchanged.
+
+Amendment (M1-T3 / #212): stored Synthesis Proposals (`synthesis-proposal` module,
+`evok.synthesis-proposal/v1`) and their reading cards
+(`evok.research-memory-hypothesis-card/v1`,
+`evok.research-memory-synthesis-finding-card/v1`,
+`evok.research-memory-pitfall-card/v1`) live here. The controller validates identity,
+schema, sensitive content, typed refs, visibility, applicability and
+idempotency before storage; an accepted Proposal is `accepted_for_storage`
+while staying epistemically unverified, and reads as a provisional
+Hypothesis / Finding / Pitfall card in the next deterministic snapshot.
+Proposal integrity is never scientific approval, refs alone cannot create a
+Verified Claim, next-validation content is advisory-only, no background LLM
+synthesis runs, and a rejection record keeps a reason code plus a content
+address but never the refused payload.
+
+Amendment (M1-T4 / #213): `run-outcome` classifies one authoritative Run
+Outcome as `positive`, `negative` (a real measured refutation) or
+`operational` (OOM, timeout, invalid measurement, protocol failure). Only a
+measurement can create scientific Negative Evidence; an operational failure
+keeps its Run Outcome and projects an advisory Operational Pitfall card
+(`evok.research-memory-operational-pitfall-card/v1`) with its reproducing
+conditions, and can never refute a Hypothesis. Finding cards carry the
+outcome state so packets and persisted snapshots stay visibly distinct, and a
+repeated Experiment objective carries advisory replication context — never a
+rejection or a Memory-owned veto. Existing Experiment Validity, Promotion,
+Admission, Budget, hang/T48 and Broker predicates are untouched.
+
+Amendment (M1-T9 / #218): the evaluation arms live here too. A trusted
+configuration value selects `off` / `sham` / `real` (`researchMemoryModeOf`,
+durable on the Mission record so a resume cannot switch arms), and the
+Schema-only Sham is a projection, not a second store: `shamResearchMemorySnapshot`
+and `shamResearchDecisionPacket` keep the real card count, order, kinds, limits,
+reserved categories and omission counts while replacing every card with an
+`evok.research-memory-control-card/v1` slot — no research fact, ref,
+applicability or directional advice, explicitly marked `control: "sham"`, and
+validated to fail closed otherwise. The three-arm report and its offline replay
+(`src/mission/memory-evaluation.ts`) are pure reads over authoritative durable
+records: they pin each Run to the state visible before it began and change no
+evaluator, Promotion, Admission, Budget, hang/T48 or Broker predicate.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

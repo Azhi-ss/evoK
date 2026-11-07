@@ -1,0 +1,2 @@
+# Unified patch context includes single-space blank lines; check its source diff separately.
+docs/phase2-supervisor-workspace.patch -whitespace

@@ -37,6 +37,8 @@ import {
   MISSION_SCHEMA_VERSION,
   atomicWriteJson,
   baselineResultPath,
+  missionResearchSource,
+  researchMemoryDir,
   type BaselineEvaluator,
   type BaselineMeasurement,
   type BaselineResultRecord,
@@ -46,12 +48,135 @@ import {
   type MissionRunRecord,
   type MissionStatus,
   type MissionUsageLedger,
+  classifyTrailEntry,
 } from "./mission-start";
+import {
+  loadResearchMemorySnapshot,
+  publishResearchMemorySnapshot,
+} from "../execution/research-memory-provider";
+import {
+  projectResearchMemorySnapshot,
+  researchMemoryModeOf,
+  shamResearchMemorySnapshot,
+  summarizeResearchMemorySnapshot,
+  type ResearchMemorySnapshot,
+} from "../evidence/research-memory";
 
 const LOCK_FILENAME = "controller.lock";
 const RUNS_DIRNAME = "runs";
 const SNAPSHOT_DIRNAME = "snapshot";
 const RESULT_FILENAME = "result.json";
+
+/**
+ * M1-T7: recovery of the derived Research Memory projection (#216).
+ *
+ * A snapshot is derived, so recovery rebuilds it from authoritative Mission
+ * history plus stored accepted Proposals. A missing, stale, or damaged
+ * snapshot is rebuilt deterministically and the replacement is recorded
+ * visibly (RECOVERY_MEMORY_REBUILT); a stale record-level summary whose served
+ * snapshot is already correct is adopted without rewriting the store. A
+ * snapshot whose authoritative inputs cannot be projected, or that would serve
+ * less history than the Mission already committed to, FAILS CLOSED rather than
+ * being served as a shrunken or empty research history. The active pointer is
+ * only switched after the rebuilt snapshot is completely written.
+ */
+export interface ResearchMemoryRecovery {
+  readonly record: MissionRecord;
+}
+
+export async function reconcileResearchMemory(options: {
+  readonly projectRoot: string;
+  readonly record: MissionRecord;
+  readonly now?: () => string;
+}): Promise<ResearchMemoryRecovery> {
+  if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
+  const record = options.record;
+  const dir = researchMemoryDir(options.projectRoot, record.id);
+  const declared = record.researchMemory;
+  let served: ResearchMemorySnapshot | undefined;
+  let damage: string | undefined;
+  try {
+    served = await loadResearchMemorySnapshot(dir);
+  } catch (error) {
+    // Damaged pointer/snapshot bytes: rebuild is the sanctioned repair, and the
+    // damage stays visible in the RECOVERY_MEMORY_REBUILT event below.
+    damage = error instanceof Error ? error.message : String(error);
+  }
+
+  const source = missionResearchSource(record);
+  // Nothing derived yet and nothing damaged: a first Run keeps the legacy prompt.
+  if (source.runs.length === 0 && declared === undefined && served === undefined && damage === undefined) {
+    return { record };
+  }
+
+  let expected: ResearchMemorySnapshot;
+  try {
+    // M1-T9: recovery rebuilds the arm the Mission actually ran, so a Sham arm
+    // is never silently republished as Real Memory (or the other way round).
+    const projected = projectResearchMemorySnapshot(source);
+    expected = researchMemoryModeOf(record.researchMemoryMode) === "sham"
+      ? shamResearchMemorySnapshot(projected)
+      : projected;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ReconciliationBlockedError(
+      `recovery blocked for ${record.id}: Research Memory cannot be rebuilt from authoritative Mission history and stored Proposals (${reason}); refusing to serve an empty research history`,
+      "unrebuildable research memory",
+    );
+  }
+
+  const rebuiltSummary = summarizeResearchMemorySnapshot(expected);
+  // Authoritative history can only GROW: a rebuild that would serve fewer cards
+  // or an older ledger revision than the Mission already committed to is
+  // lineage/sequence corruption, never a shrunken research history.
+  if (declared !== undefined) {
+    const regressedKind = Object.entries(declared.cards).find(([kind, count]) =>
+      ((rebuiltSummary.cards as Record<string, number | undefined>)[kind] ?? 0) < count);
+    if (expected.ledgerRevision < declared.ledgerRevision || regressedKind !== undefined) {
+      throw new ReconciliationBlockedError(
+        `recovery blocked for ${record.id}: authoritative Mission history no longer reproduces the committed Research Memory (declared revision ${declared.ledgerRevision}, rebuilt ${expected.ledgerRevision}${regressedKind ? `; ${regressedKind[0]} cards ${regressedKind[1]} -> ${(rebuiltSummary.cards as Record<string, number | undefined>)[regressedKind[0]] ?? 0}` : ""}); refusing to serve a shrunken or empty history`,
+        "research memory lineage regression",
+      );
+    }
+  }
+
+  // A served snapshot that already equals the deterministic projection needs no
+  // rewrite; only its record-level summary may still be stale (a crash between
+  // publishing and persisting the record).
+  if (damage === undefined && served?.digest === expected.digest) {
+    return declared?.snapshotDigest === expected.digest
+      ? { record }
+      : { record: { ...record, researchMemory: rebuiltSummary } };
+  }
+
+  await publishResearchMemorySnapshot(dir, expected);
+  const verified = await loadResearchMemorySnapshot(dir);
+  if (verified === undefined || verified.digest !== expected.digest) {
+    throw new ReconciliationBlockedError(
+      `recovery blocked for ${record.id}: the rebuilt Research Memory snapshot could not be verified after publication`,
+      "unverified research memory",
+    );
+  }
+
+  const at = (options.now ?? (() => new Date().toISOString()))();
+  const replacedDigest = served?.digest ?? declared?.snapshotDigest;
+  return {
+    record: {
+      ...record,
+      researchMemory: rebuiltSummary,
+      history: [...record.history, {
+        type: "RECOVERY_MEMORY_REBUILT",
+        at,
+        detail: {
+          snapshotDigest: verified.digest,
+          ...(replacedDigest !== undefined ? { replacedDigest } : {}),
+          ...(damage !== undefined ? { reason: damage } : {}),
+        },
+      }],
+      updatedAt: at,
+    },
+  };
+}
 
 /** Statuses a human may explicitly resume; terminal states are not in this set. */
 export const RESUMABLE_STATUSES: ReadonlySet<MissionStatus> = new Set<MissionStatus>([
@@ -273,7 +398,12 @@ function trailEntryFor(result: BaselineResultRecord, run: MissionRunRecord, reco
     attempt: run.attempt,
     action,
     ok: result.evaluation.ok,
-    ...(result.evaluation.ok ? {} : { negativeEvidence: true }),
+    // Only a real measured refutation is Negative Evidence; an invalid
+    // measurement stays an operational outcome (#213).
+    ...(classifyTrailEntry({ ok: result.evaluation.ok, evaluation: result.evaluation }).scientificNegativeEvidence
+      ? { negativeEvidence: true }
+      : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
     taskObjective,
     candidateId: result.candidateId,
     snapshotDigest: result.snapshotDigest,
@@ -384,8 +514,9 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     // conservatively held so the unknown spend cannot be dispatched twice.
     abandonedIntents.push({ runId: run.runId, attempt: run.attempt, reason: "dispatched before interruption with no durable result or snapshot" });
     runs[run.runId] = { ...run, status: "interrupted", finishedAt: run.finishedAt ?? new Date().toISOString() };
-    // The unconfirmed intent is ALWAYS surfaced as Negative Evidence — even a
-    // lost baseline — so the Director sees the attempt it must investigate.
+    // The unconfirmed intent is ALWAYS surfaced as an operational outcome — even
+    // a lost baseline — so the Director sees the attempt it must investigate.
+    // It produced no measurement, so it is never scientific Negative Evidence.
     if (!experiments.some((e) => e.runId === run.runId)) {
       const applied = [...record.history].reverse().find((h) =>
         h.type === "PROPOSAL_APPLIED" && isRecord(h.detail) && h.detail.runId === run.runId);
@@ -395,7 +526,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
       experiments.push({
         runId: run.runId, attempt: run.attempt,
         action,
-        ok: false, negativeEvidence: true,
+        ok: false,
         taskObjective: isBaselineRun ? (record.tasks?.[0]?.objective ?? run.intentId) : run.intentId,
         evidenceRefs: [], error: "unconfirmed pre-interrupt intent abandoned during recovery; retry requires a fresh Run",
         at: new Date().toISOString(),
@@ -503,7 +634,9 @@ export async function listUnfinishedMissions(projectRoot: string): Promise<Unfin
         status: r.status,
         ...(r.stopReason ? { stopReason: r.stopReason } : {}),
         experiments: experiments.length,
-        negativeEvidence: experiments.filter((e) => !e.ok).length,
+        // Scientific refutations only; OOM/timeout/invalid measurements are
+        // operational outcomes (#213).
+        negativeEvidence: experiments.filter((e) => classifyTrailEntry(e).scientificNegativeEvidence).length,
         hasBaseline: Boolean(r.baseline),
         totalBudget: r.budget.total,
         consumedBudget: r.budget.consumed,
