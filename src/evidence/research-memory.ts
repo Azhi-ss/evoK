@@ -6,6 +6,12 @@
  * and a snapshot can be rebuilt from it at any time. Cards carry identities,
  * bounded summaries, applicability labels and typed source refs — never
  * transcripts, artifact bodies, credentials, holdouts, or restricted content.
+ *
+ * Two reads are deliberately different (#214): a Decision Packet is bounded
+ * research CONTEXT and keeps competing/contradicting history even when it is
+ * not directly applicable, while `retrieveResearchMemory` answers "which card
+ * may be REUSED as a direct prior under these conditions". Neither read grants
+ * authority, and neither can widen visibility.
  */
 import { deepFreeze, digestValue } from "../security-boundary";
 import {
@@ -25,6 +31,8 @@ export const SYNTHESIS_FINDING_CARD_SCHEMA = "evok.research-memory-synthesis-fin
 export const SYNTHESIS_PITFALL_CARD_SCHEMA = "evok.research-memory-pitfall-card/v1" as const;
 /** M1-T4: an operational failure projected from its Run, never a scientific claim. */
 export const OPERATIONAL_PITFALL_CARD_SCHEMA = "evok.research-memory-operational-pitfall-card/v1" as const;
+// Still /v1: the applicability, lineage and condition fields are additive and a
+// snapshot published before them keeps loading and revalidating unchanged.
 export const RESEARCH_MEMORY_REVISION = "research-memory/v1" as const;
 export const RESEARCH_DECISION_PACKET_SCHEMA = "evok.research-decision-packet/v1" as const;
 export const RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION = "research-memory-retrieval/v1" as const;
@@ -42,6 +50,51 @@ export class ResearchMemoryError extends Error {
 }
 
 export type ResearchCardLifecycle = "active" | "provisional" | "contested" | "stale" | "superseded" | "withdrawn";
+
+/**
+ * Claim-specific applicability dimensions. A card declares only the
+ * dimensions it actually knows: a GPU Pitfall needs runtime/configuration
+ * without an Objective, a generalization Finding needs dataset/evaluation/
+ * method without hardware. A dimension nobody declared stays unknown.
+ */
+export const RESEARCH_APPLICABILITY_DIMENSIONS = [
+  "mission", "task", "objective", "evaluation", "dataset", "method", "runtime", "contract",
+] as const;
+export type ResearchApplicabilityDimension = (typeof RESEARCH_APPLICABILITY_DIMENSIONS)[number];
+
+/** Scope dimensions answer "is this about my Task at all", not a scientific conflict. */
+const SCOPE_DIMENSIONS: ReadonlySet<ResearchApplicabilityDimension> = new Set(["mission", "task"]);
+
+/** A changed value here invalidates an earlier conclusion: stale, revalidation required. */
+export const RESEARCH_REVALIDATION_DIMENSIONS: readonly ResearchApplicabilityDimension[] = [
+  "objective", "evaluation", "dataset", "method", "runtime", "contract",
+];
+
+/** A lifecycle only ever moves forward within one projection: retirement always wins. */
+const LIFECYCLE_RANK: Readonly<Record<ResearchCardLifecycle, number>> = {
+  active: 0, provisional: 1, contested: 2, stale: 3, superseded: 4, withdrawn: 5,
+};
+
+/** A per-card lifecycle draft; only the final card is frozen and published. */
+interface CardOverlay {
+  lifecycle: ResearchCardLifecycle;
+  lineage?: ResearchCardLineage;
+  revalidationRequired?: true;
+}
+
+/** Card-level lineage: an explicit revision chain, never an overwrite. */
+export interface ResearchCardLineage {
+  readonly revision?: number;
+  readonly derivesFrom?: readonly string[];
+  readonly supersedes?: readonly string[];
+  readonly supersededBy?: string;
+}
+
+/** An authoritative retirement of one card; historical Evidence stays untouched. */
+export interface ResearchCardWithdrawal {
+  readonly cardId: string;
+  readonly reason?: string;
+}
 
 /** One measured (or failed) Mission Run as the projection sees it. */
 export interface ResearchRunFinding {
@@ -66,6 +119,20 @@ export interface ResearchMemorySource {
   readonly runs: readonly ResearchRunFinding[];
   /** Already validated, `accepted_for_storage` proposals from Mission history. */
   readonly proposals?: readonly SynthesisProposal[];
+  /**
+   * Current Mission conditions as `dimension:value` (trusted, from the Mission
+   * record). A card that declared an older value of a critical dimension is
+   * projected stale instead of being reused under changed conditions.
+   */
+  readonly conditions?: readonly string[];
+  /**
+   * Withdrawal records replayed from authoritative Mission history, keyed by
+   * card id. They only retire future reads: the stored Evidence and every
+   * already published snapshot keep their exact bytes, and no projection
+   * writes history back. The withdrawal write path is a separate slice, so no
+   * producer exists yet; until then this projection seam stays inert.
+   */
+  readonly withdrawals?: readonly ResearchCardWithdrawal[];
   readonly maxCards?: number;
 }
 
@@ -96,6 +163,9 @@ export interface ResearchFindingCard {
   readonly lifecycle: ResearchCardLifecycle;
   /** Present when this Run repeated an already-measured Task. */
   readonly replication?: ResearchReplicationContext;
+  /** Present only when a critical condition changed: revalidate before reuse. */
+  readonly revalidationRequired?: true;
+  readonly lineage?: ResearchCardLineage;
 }
 
 /** One operational failure pattern with the conditions that reproduced it. */
@@ -109,6 +179,8 @@ export interface ResearchOperationalPitfallCard {
   readonly applicability: readonly string[];
   readonly sourceRefs: readonly string[];
   readonly lifecycle: ResearchCardLifecycle;
+  readonly revalidationRequired?: true;
+  readonly lineage?: ResearchCardLineage;
 }
 
 /** Shared shape of a card derived from a stored Proposal; always unverified. */
@@ -120,6 +192,8 @@ interface SynthesisCardBase {
   readonly lifecycle: ResearchCardLifecycle;
   readonly visibility: "mission";
   readonly epistemicStatus: "unverified";
+  readonly revalidationRequired?: true;
+  readonly lineage?: ResearchCardLineage;
 }
 
 /** Competing Hypotheses, contradicting refs, unknowns, next-validation suggestion. */
@@ -162,6 +236,11 @@ export interface ResearchMemorySnapshot {
   readonly ledgerRevision: number;
   readonly memoryRevision: typeof RESEARCH_MEMORY_REVISION;
   readonly retrievalPolicyRevision: typeof RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION;
+  /**
+   * The trusted Mission conditions this snapshot was projected under, so a
+   * stale/revalidation projection stays explainable from the record itself.
+   */
+  readonly conditions?: readonly string[];
   readonly maxCards: number;
   readonly cards: readonly ResearchMemoryCard[];
   readonly omittedCardCount: number;
@@ -200,6 +279,48 @@ export interface ResearchMemorySummary {
   readonly omittedCards: number;
 }
 
+/**
+ * The conditions a retrieval runs under. `conditions` lists only what the
+ * caller knows; `critical` names the dimensions it needs declared, so an
+ * undeclared dimension is unknown rather than compatible. Contract digest is
+ * one dimension like any other: its equality never establishes applicability.
+ */
+export interface ResearchPriorQuery {
+  readonly missionId?: string;
+  readonly conditions?: readonly string[];
+  readonly critical?: readonly ResearchApplicabilityDimension[];
+}
+
+export type ResearchPriorState =
+  /** Every critical dimension is declared and matches; the card may be reused. */
+  | "direct-prior"
+  /** A declared dimension differs under the current conditions. */
+  | "conflict"
+  /** A critical dimension was never declared, on either side. */
+  | "unknown"
+  /** Another Task/Mission scope: not about this retrieval at all. */
+  | "not-applicable";
+
+export interface ResearchPriorVerdict {
+  readonly card: ResearchMemoryCard;
+  readonly state: ResearchPriorState;
+  readonly conflicts: readonly ResearchApplicabilityDimension[];
+  readonly unknowns: readonly ResearchApplicabilityDimension[];
+  /** Visibility is its own filter: an inapplicable card is still visible. */
+  readonly visible: boolean;
+  /** True only for an active, matching, visible card. */
+  readonly directPrior: boolean;
+}
+
+/** One deterministic retrieval over ONE pinned snapshot. */
+export interface ResearchRetrieval {
+  readonly missionId: string;
+  readonly snapshotId: string;
+  readonly snapshotDigest: string;
+  readonly ledgerRevision: number;
+  readonly verdicts: readonly ResearchPriorVerdict[];
+}
+
 const SENSITIVE_KEYS = new Set(
   [
     "credentials", "credential", "secrets", "secret", "apiKeys", "apiKey", "token", "password",
@@ -217,14 +338,18 @@ const SECRET_LIKE = /(?:api[_-]?key|token|password|secret)\s*[:=]|\b(?:sk|ghp|gi
 
 const SNAPSHOT_KEYS = new Set([
   "schema", "missionId", "snapshotId", "ledgerRevision", "memoryRevision",
-  "retrievalPolicyRevision", "maxCards", "cards", "omittedCardCount", "digest",
+  "retrievalPolicyRevision", "conditions", "maxCards", "cards", "omittedCardCount", "digest",
 ]);
 const CARD_KEYS = new Set([
   "schema", "cardId", "kind", "summary", "ok", "outcome", "failure", "applicability", "sourceRefs", "lifecycle", "replication",
+  "revalidationRequired", "lineage",
 ]);
 const OPERATIONAL_PITFALL_CARD_KEYS = new Set([
   "schema", "cardId", "kind", "summary", "failure", "conditions", "applicability", "sourceRefs", "lifecycle",
+  "revalidationRequired", "lineage",
 ]);
+const LINEAGE_KEYS = new Set(["revision", "derivesFrom", "supersedes", "supersededBy"]);
+const WITHDRAWAL_KEYS = new Set(["cardId", "reason"]);
 const REPLICATION_KEYS = new Set(["objective", "priorRunIds", "priorOutcomes", "advisory"]);
 const LIFECYCLE_FOR: Readonly<Record<RunOutcomeState, ResearchCardLifecycle>> = {
   positive: "active",
@@ -233,6 +358,7 @@ const LIFECYCLE_FOR: Readonly<Record<RunOutcomeState, ResearchCardLifecycle>> = 
 };
 const SYNTHESIS_CARD_BASE_KEYS = [
   "schema", "cardId", "kind", "summary", "applicability", "sourceRefs", "lifecycle", "visibility", "epistemicStatus",
+  "revalidationRequired", "lineage",
 ];
 const HYPOTHESIS_CARD_KEYS = new Set([
   ...SYNTHESIS_CARD_BASE_KEYS, "supportingRefs", "contradictingRefs", "competingRefs", "unknowns", "nextValidation",
@@ -252,7 +378,6 @@ export function assertMemorySafeText(label: string, value: unknown): string {
   return value;
 }
 
-
 function textList(label: string, value: unknown): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
@@ -268,6 +393,118 @@ function assertSafeKeys(label: string, keys: readonly string[], allowed?: Readon
     }
     if (allowed && !allowed.has(key)) throw new ResearchMemoryError(`${label} has unsupported field "${key}"`);
   }
+}
+
+/** Applicability values compare normalized; the stored text is kept verbatim. */
+function normalizedApplicability(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** The one comparison rule for every declared-versus-current decision. */
+function sameApplicabilityValue(left: string, right: string): boolean {
+  return normalizedApplicability(left) === normalizedApplicability(right);
+}
+
+/** Parses `dimension:value` pairs; an unknown dimension fails closed. */
+function applicabilityMap(
+  label: string,
+  entries: readonly string[],
+): Map<ResearchApplicabilityDimension, string> {
+  const declared = new Map<ResearchApplicabilityDimension, string>();
+  for (const entry of entries) {
+    const separator = entry.indexOf(":");
+    if (separator <= 0) throw new ResearchMemoryError(`${label} must be "<dimension>:<value>"`);
+    const dimension = entry.slice(0, separator);
+    const value = entry.slice(separator + 1).trim();
+    if (!RESEARCH_APPLICABILITY_DIMENSIONS.includes(dimension as ResearchApplicabilityDimension)) {
+      throw new ResearchMemoryError(`${label} has unsupported dimension "${dimension}"`);
+    }
+    if (value === "") throw new ResearchMemoryError(`${label} ${dimension} needs a value`);
+    assertMemorySafeText(label, entry);
+    const key = dimension as ResearchApplicabilityDimension;
+    const existing = declared.get(key);
+    if (existing !== undefined && normalizedApplicability(existing) !== normalizedApplicability(value)) {
+      throw new ResearchMemoryError(`${label} declares ${dimension} twice with different values`);
+    }
+    declared.set(key, existing ?? value);
+  }
+  return declared;
+}
+
+/** A stored card's applicability must be a well-formed, supported declaration. */
+function assertApplicability(label: string, value: unknown): void {
+  applicabilityMap(label, textList(label, value));
+}
+
+function laterLifecycle(base: ResearchCardLifecycle, next: ResearchCardLifecycle): ResearchCardLifecycle {
+  return LIFECYCLE_RANK[next] > LIFECYCLE_RANK[base] ? next : base;
+}
+
+/**
+ * A changed critical condition makes an earlier conclusion need revalidation.
+ * Scope dimensions (Mission/Task) are not condition changes: a card measured
+ * under another Task is simply not applicable, not stale.
+ */
+function staleDimensions(
+  applicability: readonly string[],
+  conditions: ReadonlyMap<ResearchApplicabilityDimension, string>,
+): ResearchApplicabilityDimension[] {
+  const declared = applicabilityMap("research memory card applicability", applicability);
+  return RESEARCH_REVALIDATION_DIMENSIONS.filter((dimension) => {
+    const declaredValue = declared.get(dimension);
+    const current = conditions.get(dimension);
+    return declaredValue !== undefined && current !== undefined && !sameApplicabilityValue(declaredValue, current);
+  });
+}
+
+function withdrawalsOf(value: unknown): Map<string, string | undefined> {
+  const withdrawals = new Map<string, string | undefined>();
+  if (value === undefined) return withdrawals;
+  if (!Array.isArray(value)) throw new ResearchMemoryError("research memory withdrawals must be an array");
+  for (const entry of value) {
+    if (!isRecord(entry)) throw new ResearchMemoryError("research memory withdrawal must be an object");
+    assertSafeKeys("research memory withdrawal field", Object.keys(entry), WITHDRAWAL_KEYS);
+    withdrawals.set(
+      assertMemorySafeText("research memory withdrawal cardId", entry.cardId),
+      entry.reason === undefined ? undefined : assertMemorySafeText("research memory withdrawal reason", entry.reason),
+    );
+  }
+  return withdrawals;
+}
+
+/** Equivalent Hypotheses share a claim kind, normalized statement and scope. */
+function equivalenceKey(proposal: SynthesisProposal): string {
+  return digestValue({
+    kind: proposal.kind,
+    statement: normalizedApplicability(proposal.statement),
+    scope: scopeKey(proposal),
+  });
+}
+
+/** The conditions a claim was made under: a conflict is same-scope or nothing. */
+function scopeKey(proposal: SynthesisProposal): string {
+  return digestValue({
+    kind: proposal.kind,
+    applicability: proposal.applicability.map(normalizedApplicability).sort(),
+  });
+}
+
+/** A Proposal card id always carries its proposal id; anything else is corruption. */
+function proposalIdOf(cardId: string): string {
+  const marker = ":synthesis:";
+  const at = cardId.indexOf(marker);
+  if (at < 0) throw new ResearchMemoryError(`research memory card "${cardId}" is not a Proposal card`);
+  return cardId.slice(at + marker.length);
+}
+
+/** A competing ref is a stored `claim:<proposalId>`; other ref kinds are not claims. */
+function competingClaimId(ref: string): string | undefined {
+  return ref.startsWith("claim:") ? ref.slice("claim:".length) : undefined;
+}
+
+/** Every card carries the Mission's visibility; nothing can be wider. */
+function cardVisibility(card: ResearchMemoryCard): string {
+  return "visibility" in card ? card.visibility : "mission";
 }
 
 function maxCardsOf(value: unknown): number {
@@ -310,14 +547,14 @@ function cardFor(run: ResearchRunFinding, missionId: string, replication?: Resea
   };
   // Sensitivity applies to the summary as well as to every label/ref.
   assertMemorySafeText("research memory card summary", body.summary);
-  return deepFreeze(body);
+  return body;
 }
 
 /** Operational failures become Pitfalls; a Run Outcome is never rewritten. */
 function pitfallFor(run: ResearchRunFinding, card: ResearchFindingCard): ResearchOperationalPitfallCard | undefined {
   if (card.outcome !== "operational" || card.failure === undefined) return undefined;
   const classification = classifyRunOutcome(run);
-  return deepFreeze({
+  return {
     schema: OPERATIONAL_PITFALL_CARD_SCHEMA,
     cardId: `pitfall:run:${run.runId}`,
     kind: "pitfall" as const,
@@ -327,7 +564,9 @@ function pitfallFor(run: ResearchRunFinding, card: ResearchFindingCard): Researc
     applicability: [...card.applicability],
     sourceRefs: [...run.evidenceRefs],
     lifecycle: "provisional" as const,
-  });
+    // Derived-from lineage: the Pitfall is a reading of that Run's own card.
+    lineage: { derivesFrom: [card.cardId] },
+  };
 }
 
 function normalizedObjective(value: string | undefined): string | undefined {
@@ -364,8 +603,11 @@ function replicationFor(run: ResearchRunFinding, runs: readonly ResearchRunFindi
  */
 export function projectResearchMemorySnapshot(source: ResearchMemorySource): ResearchMemorySnapshot {
   if (!isRecord(source)) throw new ResearchMemoryError("research memory source must be an object");
-  assertSafeKeys("research memory source field", Object.keys(source), new Set(["missionId", "ledgerRevision", "runs", "proposals", "maxCards"]));
+  assertSafeKeys("research memory source field", Object.keys(source),
+    new Set(["missionId", "ledgerRevision", "runs", "proposals", "conditions", "withdrawals", "maxCards"]));
   const missionId = assertMemorySafeText("research memory missionId", source.missionId);
+  const conditions = applicabilityMap("research memory condition", source.conditions ?? []);
+  const withdrawals = withdrawalsOf(source.withdrawals);
   const ledgerRevision = source.ledgerRevision;
   if (typeof ledgerRevision !== "number" || !Number.isInteger(ledgerRevision) || ledgerRevision < 0) {
     throw new ResearchMemoryError("research memory ledgerRevision must be a non-negative integer");
@@ -404,12 +646,67 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
   // deterministic lexicographic sort below.
   const replication = new Map(runs.map((run) => [run.runId, replicationFor(run, runs)]));
   runs.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
-  const proposalCards = new Map<string, ResearchMemoryCard>();
+
+  // One card per stored Proposal (operation idempotency), grouped by claim
+  // equivalence so equivalent Hypotheses become an explicit revision chain.
+  const proposalCards: ResearchMemoryCard[] = [];
+  const seenProposalIdentities = new Set<string>();
+  const groups = new Map<string, ResearchMemoryCard[]>();
+  const scopeOf = new Map<string, string>();
   for (const proposal of source.proposals ?? []) {
+    // Proposal commits and projection are idempotent by operation id: a replay
+    // never mints a second card or another revision. The writer already refuses
+    // a different payload under one operation, so this seam only deduplicates.
+    const identities = [`proposal:${proposal.proposalId}`, `operation:${proposal.operationId}`];
+    if (identities.some((identity) => seenProposalIdentities.has(identity))) continue;
+    for (const identity of identities) seenProposalIdentities.add(identity);
     const card = synthesisCardFor(proposal);
-    if (!proposalCards.has(card.cardId)) proposalCards.set(card.cardId, card);
+    const key = equivalenceKey(proposal);
+    scopeOf.set(proposal.proposalId, scopeKey(proposal));
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [card]);
+    else group.push(card);
+    proposalCards.push(card);
   }
-  const ordered = [...proposalCards.values()].sort((a, b) => (a.cardId < b.cardId ? -1 : a.cardId > b.cardId ? 1 : 0));
+
+  const overlays = new Map<string, CardOverlay>(
+    proposalCards.map((card) => [card.cardId, { lifecycle: card.lifecycle }]),
+  );
+  const promoteLifecycle = (card: ResearchMemoryCard, lifecycle: ResearchCardLifecycle): void => {
+    const overlay = overlays.get(card.cardId)!;
+    overlay.lifecycle = laterLifecycle(overlay.lifecycle, lifecycle);
+  };
+
+  // Equivalent Hypotheses are revised, never last-write-win: every earlier
+  // revision stays visible as superseded with explicit lineage.
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const latest = group[group.length - 1]!;
+    group.slice(0, -1).forEach((earlier, index) => {
+      promoteLifecycle(earlier, "superseded");
+      overlays.get(earlier.cardId)!.lineage = { revision: index + 1, supersededBy: latest.cardId };
+    });
+    overlays.get(latest.cardId)!.lineage = {
+      revision: group.length,
+      supersedes: group.slice(0, -1).map((card) => card.cardId),
+    };
+  }
+
+  // A declared competing claim under the SAME conditions is a coexistence, not
+  // an overwrite: both positions are contested. Different conditions stay apart.
+  const proposalCardsById = new Map(proposalCards.map((card) => [proposalIdOf(card.cardId), card]));
+  for (const card of proposalCards) {
+    if (card.kind !== "hypothesis") continue;
+    for (const competing of card.competingRefs) {
+      const claimId = competingClaimId(competing);
+      const target = claimId === undefined ? undefined : proposalCardsById.get(claimId);
+      if (target === undefined || target.cardId === card.cardId || target.kind !== "hypothesis") continue;
+      if (scopeOf.get(proposalIdOf(card.cardId)) !== scopeOf.get(proposalIdOf(target.cardId))) continue;
+      promoteLifecycle(card, "contested");
+      promoteLifecycle(target, "contested");
+    }
+  }
+
   // Synthesised reading cards are kept ahead of run summary cards: a bounded
   // packet must not lose the competing/contradicting position to sheer Run volume.
   const runCards = runs.flatMap((run) => {
@@ -417,16 +714,57 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     const pitfall = pitfallFor(run, card);
     return pitfall ? [card, pitfall] : [card];
   });
-  const cards = [...ordered, ...runCards].slice(0, maxCards);
+
+  // A changed critical condition downgrades the earlier conclusion in the NEXT
+  // deterministic Snapshot; the previously published one is never rewritten.
+  const considered = [...proposalCards, ...runCards];
+  for (const card of considered) {
+    if (!overlays.has(card.cardId)) overlays.set(card.cardId, { lifecycle: card.lifecycle });
+    if (staleDimensions(card.applicability, conditions).length === 0) continue;
+    const overlay = overlays.get(card.cardId)!;
+    overlay.lifecycle = laterLifecycle(overlay.lifecycle, "stale");
+    overlay.revalidationRequired = true;
+  }
+
+  // Withdrawal retires a card for future reads only.
+  for (const [cardId] of withdrawals) {
+    const overlay = overlays.get(cardId);
+    if (overlay === undefined) continue; // a withdrawal can grant nothing new
+    overlay.lifecycle = "withdrawn";
+    delete overlay.revalidationRequired;
+  }
+
+  const finalized = new Map<string, ResearchMemoryCard>(considered.map((card) => {
+    const overlay = overlays.get(card.cardId)!;
+    return [card.cardId, deepFreeze({
+      ...card,
+      lifecycle: overlay.lifecycle,
+      // The marker belongs to exactly one reading: a stale card awaiting revalidation.
+      ...(overlay.revalidationRequired === true && overlay.lifecycle === "stale" ? { revalidationRequired: true as const } : {}),
+      ...(overlay.lineage !== undefined ? { lineage: overlay.lineage } : {}),
+    }) as ResearchMemoryCard];
+  }));
+  const orderedProposals = [...proposalCards]
+    .map((card) => finalized.get(card.cardId)!)
+    .sort((a, b) => {
+      const rank = LIFECYCLE_RANK[a.lifecycle] - LIFECYCLE_RANK[b.lifecycle];
+      return rank !== 0 ? rank : (a.cardId < b.cardId ? -1 : a.cardId > b.cardId ? 1 : 0);
+    });
+  const orderedRuns = runCards.map((card) => finalized.get(card.cardId)!);
+  const cards = [...orderedProposals, ...orderedRuns].slice(0, maxCards);
   const body = {
     schema: RESEARCH_MEMORY_SNAPSHOT_SCHEMA,
     missionId,
     ledgerRevision,
     memoryRevision: RESEARCH_MEMORY_REVISION,
     retrievalPolicyRevision: RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION,
+    // Canonical dimension order, so the explained conditions are deterministic.
+    ...(conditions.size > 0
+      ? { conditions: RESEARCH_APPLICABILITY_DIMENSIONS.filter((dimension) => conditions.has(dimension)).map((dimension) => `${dimension}:${conditions.get(dimension)!}`) }
+      : {}),
     maxCards,
     cards,
-    omittedCardCount: runCards.length + ordered.length - cards.length,
+    omittedCardCount: considered.length - cards.length,
   };
   const digest = digestValue(body);
   return deepFreeze({ ...body, snapshotId: snapshotIdFor(digest), digest });
@@ -459,7 +797,7 @@ function synthesisCardFor(proposal: SynthesisProposal): ResearchMemoryCard {
   };
   switch (proposal.kind) {
     case "hypothesis":
-      return deepFreeze({
+      return {
         ...base,
         schema: SYNTHESIS_HYPOTHESIS_CARD_SCHEMA,
         kind: "hypothesis" as const,
@@ -468,29 +806,30 @@ function synthesisCardFor(proposal: SynthesisProposal): ResearchMemoryCard {
         competingRefs: proposal.competingRefs.map(refKey),
         unknowns: [...proposal.unknowns],
         ...(proposal.nextValidation !== undefined ? { nextValidation: { ...proposal.nextValidation } } : {}),
-      });
+      };
     case "finding":
-      return deepFreeze({
+      return {
         ...base,
         schema: SYNTHESIS_FINDING_CARD_SCHEMA,
         kind: "finding" as const,
         limitations: [...proposal.limitations],
-      });
+      };
     case "pitfall":
-      return deepFreeze({
+      return {
         ...base,
         schema: SYNTHESIS_PITFALL_CARD_SCHEMA,
         kind: "pitfall" as const,
         conditions: [...proposal.conditions],
         avoidance: bounded(assertMemorySafeText("research memory card avoidance", proposal.rationale)),
-      });
+      };
   }
 }
 
 /**
  * Projects the decision packet from ONE verified snapshot. The packet is
  * deterministic for the same snapshot and card limit, and can only ever carry
- * cards that snapshot already published.
+ * cards that snapshot already published. It is bounded CONTEXT, not a
+ * direct-prior gate: `retrieveResearchMemory` is the reuse read (#214).
  */
 export function projectResearchDecisionPacket(
   snapshot: ResearchMemorySnapshot,
@@ -523,6 +862,91 @@ export function assertPacketCardRefs(packet: ResearchDecisionPacket, usedRefs: r
   }
 }
 
+/**
+ * Classifies ONE card against the conditions a retrieval runs under. A declared
+ * difference on a scientific dimension is a conflict even when the Contract
+ * digest matches; an undeclared critical dimension is unknown, never compatible;
+ * Task/Mission scope mismatch is simply not applicable. Visibility is reported
+ * separately and is never widened by an applicability match.
+ */
+export function evaluateResearchApplicability(
+  card: ResearchMemoryCard,
+  query: ResearchPriorQuery = {},
+): ResearchPriorVerdict {
+  const declared = applicabilityMap("research memory card applicability", card.applicability);
+  const conditions = applicabilityMap("research prior condition", query.conditions ?? []);
+  // Fail closed: every supplied critical-condition dimension must be declared,
+  // unless the caller explicitly names the dimensions it needs.
+  const critical = query.critical ?? [...conditions.keys()].filter((dimension) => RESEARCH_REVALIDATION_DIMENSIONS.includes(dimension));
+  for (const dimension of critical) {
+    if (!RESEARCH_APPLICABILITY_DIMENSIONS.includes(dimension)) {
+      throw new ResearchMemoryError(`research prior critical dimension "${dimension}" is unsupported`);
+    }
+  }
+  const conflicts: ResearchApplicabilityDimension[] = [];
+  const unknowns: ResearchApplicabilityDimension[] = [];
+  let outOfScope = false;
+  for (const [dimension, value] of declared) {
+    if (dimension === "mission") {
+      if (query.missionId !== undefined && !sameApplicabilityValue(value, query.missionId)) {
+        outOfScope = true;
+      }
+      continue;
+    }
+    const current = conditions.get(dimension);
+    if (current === undefined) {
+      unknowns.push(dimension);
+    } else if (!sameApplicabilityValue(current, value)) {
+      if (SCOPE_DIMENSIONS.has(dimension)) outOfScope = true;
+      else conflicts.push(dimension);
+    }
+  }
+  for (const dimension of critical) if (!declared.has(dimension)) unknowns.push(dimension);
+  const unique = (dimensions: readonly ResearchApplicabilityDimension[]) =>
+    RESEARCH_APPLICABILITY_DIMENSIONS.filter((dimension) => dimensions.includes(dimension));
+  const state: ResearchPriorState = outOfScope
+    ? "not-applicable"
+    : conflicts.length > 0
+      ? "conflict"
+      : unknowns.length > 0 || declared.size === 0
+        ? "unknown"
+        : "direct-prior";
+  const visible = cardVisibility(card) === "mission";
+  return deepFreeze({
+    card,
+    state,
+    conflicts: unique(conflicts),
+    unknowns: unique(unknowns),
+    visible,
+    // Only an active card is reusable: stale/superseded/withdrawn/provisional
+    // and contested readings are context, never an authoritative prior.
+    directPrior: state === "direct-prior" && card.lifecycle === "active" && visible,
+  });
+}
+
+/**
+ * One deterministic applicability read over ONE verified snapshot. The snapshot's
+ * recorded conditions are the history of how it was projected; `query.conditions`
+ * are the conditions the CURRENT retrieval runs under.
+ */
+export function retrieveResearchMemory(
+  snapshot: ResearchMemorySnapshot,
+  query: ResearchPriorQuery = {},
+): ResearchRetrieval {
+  const verified = validateResearchMemorySnapshot(snapshot);
+  const missionId = verified.missionId;
+  return deepFreeze({
+    missionId,
+    snapshotId: verified.snapshotId,
+    snapshotDigest: verified.digest,
+    ledgerRevision: verified.ledgerRevision,
+    verdicts: verified.cards.map((card) => evaluateResearchApplicability(card, {
+      ...query,
+      missionId: query.missionId ?? missionId,
+    })),
+  });
+}
+
 /** Rebuilds a persisted/loaded snapshot and fails closed on any corruption. */
 export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnapshot {
   if (!isRecord(raw)) throw new ResearchMemoryError("research memory snapshot must be an object");
@@ -540,6 +964,7 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
   if (typeof raw.ledgerRevision !== "number" || !Number.isInteger(raw.ledgerRevision) || raw.ledgerRevision < 0) {
     throw new ResearchMemoryError("research memory snapshot ledgerRevision must be a non-negative integer");
   }
+  if (raw.conditions !== undefined) assertApplicability("research memory snapshot conditions", raw.conditions);
   const maxCards = maxCardsOf(raw.maxCards);
   if (!Array.isArray(raw.cards)) throw new ResearchMemoryError("research memory snapshot cards must be an array");
   if (raw.cards.length > maxCards) throw new ResearchMemoryError("research memory snapshot exceeds its declared card limit");
@@ -567,7 +992,8 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
       } else if (outcome === "operational") {
         throw new ResearchMemoryError("an operational research memory card must name its failure kind");
       }
-      textList("research memory card applicability", card.applicability);
+      assertApplicability("research memory card applicability", card.applicability);
+      applyCardLifecycleFields(card);
       textList("research memory card sourceRefs", card.sourceRefs);
       if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
         throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
@@ -581,10 +1007,11 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
       if (!RUN_FAILURE_KINDS.includes(card.failure as RunFailureKind)) {
         throw new ResearchMemoryError(`research memory pitfall failure must be one of ${RUN_FAILURE_KINDS.join(", ")}`);
       }
+      textList("research memory card conditions", card.conditions);
       assertMemorySafeText("research memory card cardId", card.cardId);
       assertMemorySafeText("research memory card summary", card.summary);
-      textList("research memory card conditions", card.conditions);
-      textList("research memory card applicability", card.applicability);
+      assertApplicability("research memory card applicability", card.applicability);
+      applyCardLifecycleFields(card);
       textList("research memory card sourceRefs", card.sourceRefs);
       if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
         throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
@@ -632,6 +1059,26 @@ function validateReplication(raw: unknown): void {
   if (raw.advisory !== true) throw new ResearchMemoryError("replication context is advisory; it can never be a rejection");
 }
 
+/** Lineage and the revalidation marker are read-only facts, never authority. */
+function applyCardLifecycleFields(card: Record<string, unknown>): void {
+  if (card.revalidationRequired !== undefined && card.revalidationRequired !== true) {
+    throw new ResearchMemoryError("research memory revalidationRequired is a fixed marker");
+  }
+  if (card.lineage === undefined) return;
+  if (!isRecord(card.lineage)) throw new ResearchMemoryError("research memory card lineage must be an object");
+  assertSafeKeys("research memory card lineage field", Object.keys(card.lineage), LINEAGE_KEYS);
+  const { revision, derivesFrom, supersedes, supersededBy } = card.lineage;
+  if (revision !== undefined && (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1)) {
+    throw new ResearchMemoryError("research memory card lineage revision must be a positive integer");
+  }
+  if (derivesFrom !== undefined) textList("research memory card lineage derivesFrom", derivesFrom);
+  if (supersedes !== undefined) textList("research memory card lineage supersedes", supersedes);
+  if (supersededBy !== undefined) {
+    assertMemorySafeText("research memory card lineage supersededBy", supersededBy);
+    if (supersededBy === card.cardId) throw new ResearchMemoryError("a card can never supersede itself");
+  }
+}
+
 /** Validates one card derived from a stored Proposal; it is never "verified". */
 function validateSynthesisCard(card: Record<string, unknown>): void {
   let keys: ReadonlySet<string>;
@@ -652,7 +1099,8 @@ function validateSynthesisCard(card: Record<string, unknown>): void {
   if (card.kind !== kind) throw new ResearchMemoryError("research memory card schema/kind mismatch");
   assertMemorySafeText("research memory card cardId", card.cardId);
   assertMemorySafeText("research memory card summary", card.summary);
-  textList("research memory card applicability", card.applicability);
+  assertApplicability("research memory card applicability", card.applicability);
+  applyCardLifecycleFields(card);
   textList("research memory card sourceRefs", card.sourceRefs);
   if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
     throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);

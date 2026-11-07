@@ -244,6 +244,22 @@ _Avoid_: Negative Evidence, refuted hypothesis
 Advisory context attached to a repeated Experiment objective: the prior Runs and their outcomes. A repeat may be seed replication or a critical ablation, so it is context, never an automatic rejection or a Memory-owned veto.
 _Avoid_: Duplicate rejection, Memory veto
 
+**Applicability**:
+The claim-specific conditions a Memory card states it is true under, as `dimension:value` pairs over Mission scope, Task scope, Objective, Evaluation protocol, Dataset version, Method/configuration, Runtime, and Contract digest. No card must declare every dimension; an undeclared dimension stays unknown, and Contract digest equality alone never establishes scientific compatibility.
+_Avoid_: Universal fingerprint, compatibility score, metadata tag
+
+**Direct Prior**:
+A Memory card that may be reused as an authoritative starting point for the current retrieval: every critical dimension is declared and matches, every declared dimension has a supplied current value, the card is active, and it is visible. A declared difference, a declared dimension the retrieval cannot compare, an undeclared critical dimension, a retired lifecycle, or a stale/revalidation marker all deny direct-prior use while the card stays visible as context.
+_Avoid_: Applicable record, visible record, matching contract
+
+**Revalidation Required**:
+The marker on a card whose declared critical condition (Objective, Evaluation, Dataset, Method, Runtime, Contract) changed since the card was derived. It is downgraded to `stale` in the next deterministic Snapshot, never silently reused, and the previously published Snapshot stays historical. Only a condition the authoritative record publishes mission-wide (the Evaluation protocol) is derived today; the Objective dimension is a Task/experiment objective, never the Mission research objective.
+_Avoid_: Auto-update, silent compatibility, expiry
+
+**Card Lineage**:
+The explicit derived-from and supersedes relations of a Memory card, plus its revision number. Equivalent Hypotheses become revisions with `supersededBy`/`supersedes` instead of last-write-wins, same-condition conflicts coexist as contested, and withdrawal retires future reads without rewriting Evidence or old snapshots.
+_Avoid_: Overwrite, dedupe by name, History rewrite
+
 **Pitfall**:
 A reusable, answer-agnostic failure pattern that can warn future Tasks without asserting that a particular Candidate is always wrong.
 _Avoid_: Rejected answer

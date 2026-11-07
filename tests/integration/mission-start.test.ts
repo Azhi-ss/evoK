@@ -41,6 +41,7 @@ import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibilit
 import { probeHostInventory } from "../../src/execution/host-inventory";
 import { createResearchMemoryProvider, loadResearchMemorySnapshot } from "../../src/execution/research-memory-provider";
 import { SYNTHESIS_PROPOSAL_SCHEMA } from "../../src/evidence/synthesis-proposal";
+import { retrieveResearchMemory, validateResearchMemorySnapshot } from "../../src/evidence/research-memory";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -1576,5 +1577,60 @@ describe("Synthesis Proposals at the authorized lifecycle seam (#212)", () => {
       }),
     })).rejects.toThrow(/submission in progress/);
     await rm(join(project, ".evok", "missions", draft.id, "synthesis.lock"));
+  });
+});
+
+// ── M1-T5 (#214): condition drift downgrades a card, never silently reuses it ──
+
+describe("Research Memory applicability and lifecycle at the mission seam (#214)", () => {
+  test("a Proposal declared under another Evaluation protocol is projected stale and is not a direct prior", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-lifecycle-drift"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-lifecycle");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    expect(outcome.status).toBe("iteration-limit");
+    const memoryDir = join(project, ".evok", "missions", draft.id, "memory");
+    const before = await loadResearchMemorySnapshot(memoryDir);
+    const evidenceBefore = outcome.record.experiments!.map((entry) => entry.evidenceRefs);
+
+    // The card declares a condition the Mission record does not hold.
+    await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        supportingRefs: [{ kind: "run", ref: outcome.record.baseline!.runId }],
+        applicability: ["evaluation:an unrelated evaluation protocol"],
+      }),
+    });
+
+    const record = await loadMissionRecord(project, draft.id);
+    const after = await loadResearchMemorySnapshot(memoryDir);
+    const stale = after!.cards.find((card) => card.kind === "hypothesis")!;
+    expect(stale).toMatchObject({ lifecycle: "stale", revalidationRequired: true });
+    expect(after!.digest).not.toBe(before!.digest);
+    // The snapshot explains itself: the condition it was projected under is recorded.
+    expect(after!.conditions?.some((condition) => condition.startsWith("evaluation:"))).toBe(true);
+    // The earlier published snapshot and the authoritative history are untouched.
+    expect(validateResearchMemorySnapshot(JSON.parse(JSON.stringify(before)))).toEqual(before);
+    expect(record.experiments!.map((entry) => entry.evidenceRefs)).toEqual(evidenceBefore);
+
+    // Declaring the mismatching protocol makes the card answer the query but it
+    // is not an active direct prior until it is revalidated.
+    const verdict = retrieveResearchMemory(after!, { conditions: ["evaluation:an unrelated evaluation protocol"] })
+      .verdicts.find((entry) => entry.card.cardId === stale.cardId)!;
+    expect(verdict).toMatchObject({ state: "direct-prior", directPrior: false });
   });
 });

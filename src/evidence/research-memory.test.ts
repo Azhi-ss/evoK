@@ -412,6 +412,8 @@ describe("scientific vs operational outcomes (#213)", () => {
       applicability: ["task:task-exp-4"],
       sourceRefs: [],
       lifecycle: "provisional",
+      // M1-T5: derived-from lineage names the Run card it reads.
+      lineage: { derivesFrom: ["finding:m-memory:exp:4"] },
     });
     const oomPitfall = snapshot.cards.find((card) => card.cardId === "pitfall:run:m-memory:exp:3")!;
     expect(oomPitfall.kind === "pitfall" && oomPitfall.conditions[0]).toBe("failure:out-of-memory");

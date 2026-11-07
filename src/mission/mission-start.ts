@@ -2351,8 +2351,22 @@ function missionResearchSource(record: MissionRecord): ResearchMemorySource {
     missionId: record.id,
     ledgerRevision: record.stateVersion ?? 0,
     runs,
+    conditions: missionConditions(record),
     ...(proposals.length > 0 ? { proposals } : {}),
   };
+}
+
+/**
+ * The Mission-level conditions (#214), as applicability values: a card that
+ * declared another Evaluation protocol is projected stale for revalidation in
+ * the next deterministic snapshot, never reused as a direct prior. Only a
+ * condition the record really publishes mission-wide is declared; the Objective
+ * dimension belongs to a Task/experiment objective (not the Mission objective),
+ * so dataset, method, runtime, objective and Contract digest stay unknown until
+ * a Task declares them.
+ */
+function missionConditions(record: MissionRecord): string[] {
+  return [`evaluation:${record.contract.evaluationMethod}`];
 }
 
 // ── #114 explicit resume into the SAME autonomous controller ────────────────
