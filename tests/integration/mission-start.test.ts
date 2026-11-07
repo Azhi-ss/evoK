@@ -25,6 +25,7 @@ import {
   missionRecordPath,
   baselineResultPath,
   startAuthorizedMission,
+  submitSynthesisProposal,
   summarizeMission,
   type BaselineEvaluator,
   type StartAuthorization,
@@ -38,6 +39,8 @@ import { PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } f
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import { probeHostInventory } from "../../src/execution/host-inventory";
+import { createResearchMemoryProvider, loadResearchMemorySnapshot } from "../../src/execution/research-memory-provider";
+import { SYNTHESIS_PROPOSAL_SCHEMA } from "../../src/evidence/synthesis-proposal";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -1360,5 +1363,218 @@ describe("Memory-blind and Memory-informed Director decisions (#211)", () => {
     expect(accounted).toBeCloseTo(outcome.record.budget.consumed, 6);
     // Every decision line above is a settled reservation, not a free call.
     expect(outcome.record.budget.remaining).toBeCloseTo(outcome.record.budget.total - outcome.record.budget.consumed, 6);
+  });
+});
+
+// ── M1-T3 (#212): accepted Synthesis Proposals stay unverified cards ────────
+
+function synthesisPayload(missionId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: SYNTHESIS_PROPOSAL_SCHEMA,
+    proposalId: "proposal-1",
+    operationId: "op-proposal-1",
+    missionId,
+    agentId: `evok-experiment-investigate@${missionId}:exp:2`,
+    taskId: "task-exp-2",
+    runId: `${missionId}:exp:2`,
+    kind: "hypothesis",
+    statement: "the second Run repeats the baseline outcome",
+    rationale: "both measured Runs agree",
+    supportingRefs: [{ kind: "run", ref: `${missionId}:baseline:1` }],
+    contradictingRefs: [],
+    competingRefs: [],
+    unknowns: ["holdout effect unknown"],
+    applicability: ["dataset:train-v1"],
+    visibility: "mission",
+    limitations: [],
+    conditions: [],
+    nextValidation: { objective: "ablate the fold window in one fresh Experiment", advisory: true },
+    ...overrides,
+  };
+}
+
+describe("Synthesis Proposals at the authorized lifecycle seam (#212)", () => {
+  test("Proposal → validation → deterministic Snapshot → later bounded read", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-synthesis"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-synthesis");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    expect(outcome.status).toBe("iteration-limit");
+    const baselineRunId = outcome.record.baseline!.runId;
+    const runsBefore = Object.keys(outcome.record.runs).length;
+    const promptsBefore = writes.prompts.length;
+
+    const submission = await submitSynthesisProposal({
+      projectRoot: project,
+      missionId: draft.id,
+      proposal: synthesisPayload(draft.id, { supportingRefs: [{ kind: "run", ref: baselineRunId }] }),
+    });
+    expect(submission.outcome).toBe("accepted_for_storage");
+    expect(submission.epistemicStatus).toBe("unverified");
+
+    // Durable and unverified: no extra Run is dispatched and no model is called.
+    const stored = await loadMissionRecord(project, draft.id);
+    expect(stored.synthesisProposals).toHaveLength(1);
+    expect(stored.synthesisProposals![0]).toMatchObject({ outcome: "accepted_for_storage", epistemicStatus: "unverified" });
+    expect(stored.history[stored.history.length - 1]!.type).toBe("SYNTHESIS_PROPOSAL_RECORDED");
+    expect(Object.keys(stored.runs)).toHaveLength(runsBefore);
+    expect(writes.prompts).toHaveLength(promptsBefore);
+
+    // The next deterministic snapshot carries the unverified hypothesis card.
+    const memoryDir = join(project, ".evok", "missions", draft.id, "memory");
+    const snapshot = await loadResearchMemorySnapshot(memoryDir);
+    expect(snapshot).toBeDefined();
+    const card = snapshot!.cards.find((entry) => entry.kind === "hypothesis")!;
+    expect(card).toMatchObject({
+      cardId: "hypothesis:synthesis:proposal-1",
+      epistemicStatus: "unverified",
+      lifecycle: "provisional",
+      visibility: "mission",
+      supportingRefs: [`run:${baselineRunId}`],
+      contradictingRefs: [],
+      unknowns: ["holdout effect unknown"],
+      nextValidation: { objective: "ablate the fold window in one fresh Experiment", advisory: true },
+    });
+    expect(stored.researchMemory?.cards).toEqual({ finding: 2, hypothesis: 1 });
+    expect(stored.researchMemory?.snapshotDigest).toBe(snapshot!.digest);
+
+    // Identical replay is idempotent: one record, one card, same content address.
+    const replay = await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, { supportingRefs: [{ kind: "run", ref: baselineRunId }] }),
+    });
+    expect(replay.outcome).toBe("accepted_for_storage");
+    const replayed = await loadMissionRecord(project, draft.id);
+    expect(replayed.synthesisProposals).toHaveLength(1);
+    expect(replayed.researchMemory?.snapshotDigest).toBe(stored.researchMemory?.snapshotDigest);
+
+    // A Pitfall keeps its operational conditions in the same projection.
+    await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        proposalId: "proposal-pitfall",
+        operationId: "op-proposal-pitfall",
+        kind: "pitfall",
+        statement: "the workspace runs out of memory above batch 32",
+        rationale: "keep the batch small on this host",
+        applicability: ["runtime:cuda-12"],
+        conditions: ["batch size >= 32"],
+        unknowns: ["whether other hosts share the limit"],
+      }),
+    });
+    const withPitfall = await loadResearchMemorySnapshot(memoryDir);
+    expect(withPitfall!.cards.find((entry) => entry.kind === "pitfall")).toMatchObject({
+      cardId: "pitfall:synthesis:proposal-pitfall",
+      conditions: ["batch size >= 32"],
+      epistemicStatus: "unverified",
+    });
+
+    // Later bounded read: a fresh Run-bound slice from the pinned snapshot.
+    const provider = createResearchMemoryProvider(memoryDir);
+    const slice = await provider({
+      missionId: draft.id,
+      taskId: "task-exp-2",
+      runId: `${draft.id}:exp:3`,
+      targetAgentId: `researcher@${draft.id}:exp:3`,
+      role: "researcher",
+      evidenceRefs: [],
+    });
+    expect(slice?.research?.snapshotId).toBe(withPitfall!.snapshotId);
+    expect(slice?.research?.cards.map((entry) => entry.kind)).toContain("hypothesis");
+    // The suggestion stayed advisory: nothing was dispatched by it.
+    expect(Object.keys((await loadMissionRecord(project, draft.id)).runs)).toHaveLength(runsBefore);
+    await expect(provider({
+      missionId: "m-foreign",
+      taskId: "task-exp-2",
+      runId: "m-foreign:exp:1",
+      targetAgentId: "researcher@m-foreign:exp:1",
+      role: "researcher",
+      evidenceRefs: [],
+    })).rejects.toThrow(/belongs to Mission/);
+  });
+
+  test("a rejected Proposal is auditable without storing the sensitive payload", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-synthesis-rejected"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    expect(outcome.status).toBe("baseline-complete");
+    const baselineRunId = outcome.record.baseline!.runId;
+    const runsBefore = Object.keys(outcome.record.runs).length;
+    const digestBefore = outcome.record.researchMemory?.snapshotDigest;
+    const baselineIdentity = {
+      agentId: `evok-baseline-candidate@${baselineRunId}`,
+      runId: baselineRunId,
+      taskId: undefined,
+      supportingRefs: [{ kind: "run", ref: baselineRunId }],
+    };
+
+    const rejected = await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        ...baselineIdentity,
+        rationale: "the trick is api_key=sk-live-123456",
+      }),
+    });
+    expect(rejected).toMatchObject({ outcome: "rejected", reason: "sensitive-content" });
+
+    const record = await loadMissionRecord(project, draft.id);
+    const entry = record.synthesisProposals![record.synthesisProposals!.length - 1]!;
+    expect(entry).toMatchObject({ outcome: "rejected", reason: "sensitive-content" });
+    expect(Object.keys(entry).sort()).toEqual(["at", "explanation", "outcome", "payloadDigest", "reason"]);
+    // Only a reason code and a content address are kept, never the payload.
+    expect(JSON.stringify(record)).not.toContain("sk-live-123456");
+    expect(JSON.stringify(record)).not.toContain("api_key");
+    // A refused Proposal cannot change the published research state.
+    expect(record.researchMemory?.snapshotDigest).toBe(digestBefore);
+    expect(Object.keys(record.runs)).toHaveLength(runsBefore);
+
+    const foreign = await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        ...baselineIdentity,
+        proposalId: "proposal-foreign",
+        operationId: "op-proposal-foreign",
+        supportingRefs: [{ kind: "run", ref: "m-somewhere-else:baseline:1" }],
+      }),
+    });
+    expect(foreign).toMatchObject({ outcome: "rejected", reason: "refs" });
+
+    // Two submissions never race the same record: the second is refused, not
+    // allowed to overwrite the first one's durable write.
+    await writeFile(join(project, ".evok", "missions", draft.id, "synthesis.lock"), "{}");
+    await expect(submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        ...baselineIdentity,
+        proposalId: "proposal-during-lock",
+        operationId: "op-proposal-during-lock",
+      }),
+    })).rejects.toThrow(/submission in progress/);
+    await rm(join(project, ".evok", "missions", draft.id, "synthesis.lock"));
   });
 });

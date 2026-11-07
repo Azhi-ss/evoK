@@ -8,9 +8,14 @@
  * transcripts, artifact bodies, credentials, holdouts, or restricted content.
  */
 import { deepFreeze, digestValue } from "../security-boundary";
+import type { SynthesisProposal } from "./synthesis-proposal";
 
 export const RESEARCH_MEMORY_SNAPSHOT_SCHEMA = "evok.research-memory-snapshot/v1" as const;
 export const RESEARCH_MEMORY_FINDING_CARD_SCHEMA = "evok.research-memory-finding-card/v1" as const;
+/** M1-T3: reading cards projected from accepted (unverified) Synthesis Proposals. */
+export const SYNTHESIS_HYPOTHESIS_CARD_SCHEMA = "evok.research-memory-hypothesis-card/v1" as const;
+export const SYNTHESIS_FINDING_CARD_SCHEMA = "evok.research-memory-synthesis-finding-card/v1" as const;
+export const SYNTHESIS_PITFALL_CARD_SCHEMA = "evok.research-memory-pitfall-card/v1" as const;
 export const RESEARCH_MEMORY_REVISION = "research-memory/v1" as const;
 export const RESEARCH_DECISION_PACKET_SCHEMA = "evok.research-decision-packet/v1" as const;
 export const RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION = "research-memory-retrieval/v1" as const;
@@ -47,6 +52,8 @@ export interface ResearchMemorySource {
   readonly missionId: string;
   readonly ledgerRevision: number;
   readonly runs: readonly ResearchRunFinding[];
+  /** Already validated, `accepted_for_storage` proposals from Mission history. */
+  readonly proposals?: readonly SynthesisProposal[];
   readonly maxCards?: number;
 }
 
@@ -62,6 +69,49 @@ export interface ResearchFindingCard {
   readonly lifecycle: ResearchCardLifecycle;
 }
 
+/** Shared shape of a card derived from a stored Proposal; always unverified. */
+interface SynthesisCardBase {
+  readonly cardId: string;
+  readonly summary: string;
+  readonly applicability: readonly string[];
+  readonly sourceRefs: readonly string[];
+  readonly lifecycle: ResearchCardLifecycle;
+  readonly visibility: "mission";
+  readonly epistemicStatus: "unverified";
+}
+
+/** Competing Hypotheses, contradicting refs, unknowns, next-validation suggestion. */
+export interface ResearchHypothesisCard extends SynthesisCardBase {
+  readonly schema: typeof SYNTHESIS_HYPOTHESIS_CARD_SCHEMA;
+  readonly kind: "hypothesis";
+  readonly supportingRefs: readonly string[];
+  readonly contradictingRefs: readonly string[];
+  readonly competingRefs: readonly string[];
+  readonly unknowns: readonly string[];
+  readonly nextValidation?: { readonly objective: string; readonly advisory: true };
+}
+
+/** One conditional Finding with its known limitations; refs stay authoritative. */
+export interface ResearchSynthesisFindingCard extends SynthesisCardBase {
+  readonly schema: typeof SYNTHESIS_FINDING_CARD_SCHEMA;
+  readonly kind: "finding";
+  readonly limitations: readonly string[];
+}
+
+/** Operational/protocol failure pattern with the conditions that reproduce it. */
+export interface ResearchPitfallCard extends SynthesisCardBase {
+  readonly schema: typeof SYNTHESIS_PITFALL_CARD_SCHEMA;
+  readonly kind: "pitfall";
+  readonly conditions: readonly string[];
+  readonly avoidance: string;
+}
+
+export type ResearchMemoryCard =
+  | ResearchFindingCard
+  | ResearchHypothesisCard
+  | ResearchSynthesisFindingCard
+  | ResearchPitfallCard;
+
 export interface ResearchMemorySnapshot {
   readonly schema: typeof RESEARCH_MEMORY_SNAPSHOT_SCHEMA;
   readonly missionId: string;
@@ -70,7 +120,7 @@ export interface ResearchMemorySnapshot {
   readonly memoryRevision: typeof RESEARCH_MEMORY_REVISION;
   readonly retrievalPolicyRevision: typeof RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION;
   readonly maxCards: number;
-  readonly cards: readonly ResearchFindingCard[];
+  readonly cards: readonly ResearchMemoryCard[];
   readonly omittedCardCount: number;
   readonly digest: string;
 }
@@ -86,7 +136,7 @@ export interface ResearchDecisionPacket {
   readonly snapshotId: string;
   readonly snapshotDigest: string;
   readonly ledgerRevision: number;
-  readonly cards: readonly ResearchFindingCard[];
+  readonly cards: readonly ResearchMemoryCard[];
   readonly omittedCardCount: number;
   readonly digest: string;
 }
@@ -96,7 +146,11 @@ export interface ResearchMemorySummary {
   readonly snapshotId: string;
   readonly snapshotDigest: string;
   readonly ledgerRevision: number;
-  readonly cards: { readonly finding: number };
+  readonly cards: {
+    readonly finding: number;
+    readonly hypothesis?: number;
+    readonly pitfall?: number;
+  };
   readonly omittedCards: number;
 }
 
@@ -120,24 +174,34 @@ const SNAPSHOT_KEYS = new Set([
   "retrievalPolicyRevision", "maxCards", "cards", "omittedCardCount", "digest",
 ]);
 const CARD_KEYS = new Set(["schema", "cardId", "kind", "summary", "ok", "applicability", "sourceRefs", "lifecycle"]);
+const SYNTHESIS_CARD_BASE_KEYS = [
+  "schema", "cardId", "kind", "summary", "applicability", "sourceRefs", "lifecycle", "visibility", "epistemicStatus",
+];
+const HYPOTHESIS_CARD_KEYS = new Set([
+  ...SYNTHESIS_CARD_BASE_KEYS, "supportingRefs", "contradictingRefs", "competingRefs", "unknowns", "nextValidation",
+]);
+const SYNTHESIS_FINDING_CARD_KEYS = new Set([...SYNTHESIS_CARD_BASE_KEYS, "limitations"]);
+const PITFALL_CARD_KEYS = new Set([...SYNTHESIS_CARD_BASE_KEYS, "conditions", "avoidance"]);
 const LIFECYCLES: readonly ResearchCardLifecycle[] = ["active", "provisional", "contested", "stale", "superseded", "withdrawn"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function requireText(label: string, value: unknown): string {
+/** Shared boundary for any evidence-layer text that can reach agent memory. */
+export function assertMemorySafeText(label: string, value: unknown): string {
   if (typeof value !== "string" || value.trim() === "") throw new ResearchMemoryError(`${label} is required`);
   if (SECRET_LIKE.test(value)) throw new ResearchMemoryError(`${label} contains a secret-like value and can never enter agent memory`);
   return value;
 }
+
 
 function textList(label: string, value: unknown): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
     throw new ResearchMemoryError(`${label} must be an array of non-empty strings`);
   }
-  return value.map((entry) => requireText(label, entry));
+  return value.map((entry) => assertMemorySafeText(label, entry));
 }
 
 function assertSafeKeys(label: string, keys: readonly string[], allowed?: ReadonlySet<string>): void {
@@ -176,12 +240,12 @@ function cardFor(run: ResearchRunFinding, missionId: string): ResearchFindingCar
     kind: "finding" as const,
     summary,
     ok: run.ok,
-    applicability: [requireText("research memory applicability", applicability)],
+    applicability: [assertMemorySafeText("research memory applicability", applicability)],
     sourceRefs: [...run.evidenceRefs],
     lifecycle: (run.ok ? "active" : "contested") as ResearchCardLifecycle,
   };
   // Sensitivity applies to the summary as well as to every label/ref.
-  requireText("research memory card summary", body.summary);
+  assertMemorySafeText("research memory card summary", body.summary);
   return deepFreeze(body);
 }
 
@@ -192,8 +256,8 @@ function cardFor(run: ResearchRunFinding, missionId: string): ResearchFindingCar
  */
 export function projectResearchMemorySnapshot(source: ResearchMemorySource): ResearchMemorySnapshot {
   if (!isRecord(source)) throw new ResearchMemoryError("research memory source must be an object");
-  assertSafeKeys("research memory source field", Object.keys(source), new Set(["missionId", "ledgerRevision", "runs", "maxCards"]));
-  const missionId = requireText("research memory missionId", source.missionId);
+  assertSafeKeys("research memory source field", Object.keys(source), new Set(["missionId", "ledgerRevision", "runs", "proposals", "maxCards"]));
+  const missionId = assertMemorySafeText("research memory missionId", source.missionId);
   const ledgerRevision = source.ledgerRevision;
   if (typeof ledgerRevision !== "number" || !Number.isInteger(ledgerRevision) || ledgerRevision < 0) {
     throw new ResearchMemoryError("research memory ledgerRevision must be a non-negative integer");
@@ -207,7 +271,7 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     if (!isRecord(run)) throw new ResearchMemoryError("research memory run must be an object");
     assertSafeKeys("research memory run field", Object.keys(run),
       new Set(["runId", "taskId", "ok", "score", "ruleViolations", "negativeEvidence", "error", "evidenceRefs", "snapshotDigest"]));
-    const runId = requireText("research memory runId", run.runId);
+    const runId = assertMemorySafeText("research memory runId", run.runId);
     if (seen.has(runId)) continue; // first observation per Run wins; history stays append-only
     seen.add(runId);
     if (typeof run.ok !== "boolean") throw new ResearchMemoryError(`research memory run ${runId} needs a boolean ok`);
@@ -216,19 +280,27 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     }
     runs.push({
       runId,
-      ...(run.taskId !== undefined ? { taskId: requireText("research memory taskId", run.taskId) } : {}),
+      ...(run.taskId !== undefined ? { taskId: assertMemorySafeText("research memory taskId", run.taskId) } : {}),
       ok: run.ok,
       ...(typeof run.score === "number" ? { score: run.score } : {}),
       ...(run.ruleViolations !== undefined ? { ruleViolations: textList("research memory ruleViolations", run.ruleViolations) } : {}),
       ...(run.negativeEvidence === true ? { negativeEvidence: true } : {}),
-      ...(run.error !== undefined ? { error: requireText("research memory error", run.error) } : {}),
+      ...(run.error !== undefined ? { error: assertMemorySafeText("research memory error", run.error) } : {}),
       evidenceRefs: textList("research memory evidenceRefs", run.evidenceRefs),
-      ...(run.snapshotDigest !== undefined ? { snapshotDigest: requireText("research memory snapshotDigest", run.snapshotDigest) } : {}),
+      ...(run.snapshotDigest !== undefined ? { snapshotDigest: assertMemorySafeText("research memory snapshotDigest", run.snapshotDigest) } : {}),
     });
   }
 
   runs.sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
-  const cards = runs.slice(0, maxCards).map((run) => cardFor(run, missionId));
+  const proposalCards = new Map<string, ResearchMemoryCard>();
+  for (const proposal of source.proposals ?? []) {
+    const card = synthesisCardFor(proposal);
+    if (!proposalCards.has(card.cardId)) proposalCards.set(card.cardId, card);
+  }
+  const ordered = [...proposalCards.values()].sort((a, b) => (a.cardId < b.cardId ? -1 : a.cardId > b.cardId ? 1 : 0));
+  // Synthesised reading cards are kept ahead of run summary cards: a bounded
+  // packet must not lose the competing/contradicting position to sheer Run volume.
+  const cards = [...ordered, ...runs.map((run) => cardFor(run, missionId))].slice(0, maxCards);
   const body = {
     schema: RESEARCH_MEMORY_SNAPSHOT_SCHEMA,
     missionId,
@@ -237,7 +309,7 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
     retrievalPolicyRevision: RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION,
     maxCards,
     cards,
-    omittedCardCount: runs.length - cards.length,
+    omittedCardCount: runs.length + ordered.length - cards.length,
   };
   const digest = digestValue(body);
   return deepFreeze({ ...body, snapshotId: snapshotIdFor(digest), digest });
@@ -245,6 +317,57 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
 
 function snapshotIdFor(digest: string): string {
   return `research-memory:${digest}`;
+}
+
+/** A typed ref renders as `<kind>:<ref>`: authoritative objects stay referenced. */
+function refKey(ref: { readonly kind: string; readonly ref: string }): string {
+  return `${ref.kind}:${ref.ref}`;
+}
+
+/**
+ * Projects one accepted Proposal into a reading card. The card carries only
+ * bounded text, typed refs, applicability and the unverified epistemic label;
+ * the stored Proposal remains the authoritative record.
+ */
+function synthesisCardFor(proposal: SynthesisProposal): ResearchMemoryCard {
+  const refs = [...proposal.supportingRefs, ...proposal.contradictingRefs, ...proposal.competingRefs].map(refKey);
+  const base = {
+    cardId: `${proposal.kind}:synthesis:${proposal.proposalId}`,
+    summary: bounded(assertMemorySafeText("research memory card summary", proposal.statement)),
+    applicability: [...proposal.applicability],
+    sourceRefs: [...new Set(refs)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    lifecycle: "provisional" as const,
+    visibility: "mission" as const,
+    epistemicStatus: "unverified" as const,
+  };
+  switch (proposal.kind) {
+    case "hypothesis":
+      return deepFreeze({
+        ...base,
+        schema: SYNTHESIS_HYPOTHESIS_CARD_SCHEMA,
+        kind: "hypothesis" as const,
+        supportingRefs: proposal.supportingRefs.map(refKey),
+        contradictingRefs: proposal.contradictingRefs.map(refKey),
+        competingRefs: proposal.competingRefs.map(refKey),
+        unknowns: [...proposal.unknowns],
+        ...(proposal.nextValidation !== undefined ? { nextValidation: { ...proposal.nextValidation } } : {}),
+      });
+    case "finding":
+      return deepFreeze({
+        ...base,
+        schema: SYNTHESIS_FINDING_CARD_SCHEMA,
+        kind: "finding" as const,
+        limitations: [...proposal.limitations],
+      });
+    case "pitfall":
+      return deepFreeze({
+        ...base,
+        schema: SYNTHESIS_PITFALL_CARD_SCHEMA,
+        kind: "pitfall" as const,
+        conditions: [...proposal.conditions],
+        avoidance: bounded(assertMemorySafeText("research memory card avoidance", proposal.rationale)),
+      });
+  }
 }
 
 /**
@@ -296,7 +419,7 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
   if (raw.retrievalPolicyRevision !== RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION) {
     throw new ResearchMemoryError(`research memory retrieval policy revision must be ${RESEARCH_MEMORY_RETRIEVAL_POLICY_REVISION}`);
   }
-  const missionId = requireText("research memory snapshot missionId", raw.missionId);
+  const missionId = assertMemorySafeText("research memory snapshot missionId", raw.missionId);
   if (typeof raw.ledgerRevision !== "number" || !Number.isInteger(raw.ledgerRevision) || raw.ledgerRevision < 0) {
     throw new ResearchMemoryError("research memory snapshot ledgerRevision must be a non-negative integer");
   }
@@ -308,18 +431,20 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
   }
   for (const card of raw.cards) {
     if (!isRecord(card)) throw new ResearchMemoryError("research memory card must be an object");
-    assertSafeKeys("research memory card field", Object.keys(card), CARD_KEYS);
-    if (card.schema !== RESEARCH_MEMORY_FINDING_CARD_SCHEMA || card.kind !== "finding") {
-      throw new ResearchMemoryError("research memory card schema/kind mismatch");
+    if (card.schema === RESEARCH_MEMORY_FINDING_CARD_SCHEMA) {
+      assertSafeKeys("research memory card field", Object.keys(card), CARD_KEYS);
+      if (card.kind !== "finding") throw new ResearchMemoryError("research memory card schema/kind mismatch");
+      assertMemorySafeText("research memory card cardId", card.cardId);
+      assertMemorySafeText("research memory card summary", card.summary);
+      if (typeof card.ok !== "boolean") throw new ResearchMemoryError("research memory card ok must be a boolean");
+      textList("research memory card applicability", card.applicability);
+      textList("research memory card sourceRefs", card.sourceRefs);
+      if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
+        throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
+      }
+      continue;
     }
-    requireText("research memory card cardId", card.cardId);
-    requireText("research memory card summary", card.summary);
-    if (typeof card.ok !== "boolean") throw new ResearchMemoryError("research memory card ok must be a boolean");
-    textList("research memory card applicability", card.applicability);
-    textList("research memory card sourceRefs", card.sourceRefs);
-    if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
-      throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
-    }
+    validateSynthesisCard(card);
   }
   const { digest, snapshotId, ...body } = raw;
   const expected = digestValue(body);
@@ -329,11 +454,71 @@ export function validateResearchMemorySnapshot(raw: unknown): ResearchMemorySnap
 }
 
 export function summarizeResearchMemorySnapshot(snapshot: ResearchMemorySnapshot): ResearchMemorySummary {
+  const hypothesis = snapshot.cards.filter((card) => card.kind === "hypothesis").length;
+  const pitfall = snapshot.cards.filter((card) => card.kind === "pitfall").length;
   return deepFreeze({
     snapshotId: snapshot.snapshotId,
     snapshotDigest: snapshot.digest,
     ledgerRevision: snapshot.ledgerRevision,
-    cards: { finding: snapshot.cards.length },
+    cards: {
+      finding: snapshot.cards.filter((card) => card.kind === "finding").length,
+      ...(hypothesis > 0 ? { hypothesis } : {}),
+      ...(pitfall > 0 ? { pitfall } : {}),
+    },
     omittedCards: snapshot.omittedCardCount,
   });
+}
+
+/** Validates one card derived from a stored Proposal; it is never "verified". */
+function validateSynthesisCard(card: Record<string, unknown>): void {
+  let keys: ReadonlySet<string>;
+  let kind: string;
+  if (card.schema === SYNTHESIS_HYPOTHESIS_CARD_SCHEMA) {
+    keys = HYPOTHESIS_CARD_KEYS;
+    kind = "hypothesis";
+  } else if (card.schema === SYNTHESIS_FINDING_CARD_SCHEMA) {
+    keys = SYNTHESIS_FINDING_CARD_KEYS;
+    kind = "finding";
+  } else if (card.schema === SYNTHESIS_PITFALL_CARD_SCHEMA) {
+    keys = PITFALL_CARD_KEYS;
+    kind = "pitfall";
+  } else {
+    throw new ResearchMemoryError("research memory card schema/kind mismatch");
+  }
+  assertSafeKeys("research memory card field", Object.keys(card), keys);
+  if (card.kind !== kind) throw new ResearchMemoryError("research memory card schema/kind mismatch");
+  assertMemorySafeText("research memory card cardId", card.cardId);
+  assertMemorySafeText("research memory card summary", card.summary);
+  textList("research memory card applicability", card.applicability);
+  textList("research memory card sourceRefs", card.sourceRefs);
+  if (!LIFECYCLES.includes(card.lifecycle as ResearchCardLifecycle)) {
+    throw new ResearchMemoryError(`research memory card lifecycle must be one of ${LIFECYCLES.join(", ")}`);
+  }
+  if (card.visibility !== "mission") {
+    throw new ResearchMemoryError("research memory card visibility can never exceed its Mission");
+  }
+  if (card.epistemicStatus !== "unverified") {
+    throw new ResearchMemoryError("research memory synthesis card must stay unverified; storage never verifies a Proposal");
+  }
+  if (kind === "hypothesis") {
+    textList("research memory card supportingRefs", card.supportingRefs);
+    textList("research memory card contradictingRefs", card.contradictingRefs);
+    textList("research memory card competingRefs", card.competingRefs);
+    textList("research memory card unknowns", card.unknowns);
+    if (card.nextValidation !== undefined) {
+      if (!isRecord(card.nextValidation)
+        || Object.keys(card.nextValidation).sort().join(",") !== "advisory,objective"
+        || card.nextValidation.advisory !== true) {
+        throw new ResearchMemoryError("research memory next-validation suggestion must be advisory-only");
+      }
+      assertMemorySafeText("research memory card nextValidation objective", card.nextValidation.objective);
+    }
+    return;
+  }
+  if (kind === "finding") {
+    textList("research memory card limitations", card.limitations);
+    return;
+  }
+  textList("research memory card conditions", card.conditions);
+  assertMemorySafeText("research memory card avoidance", card.avoidance);
 }

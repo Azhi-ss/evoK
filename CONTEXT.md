@@ -196,6 +196,22 @@ _Avoid_: Transcript memory, second evidence ledger, session memory
 A bounded presentation projection of one Finding: a short summary, applicability label, lifecycle, and typed source refs. It is not an authoritative Evidence record.
 _Avoid_: Evidence, claim, full history
 
+**Synthesis Proposal**:
+A structured, reference-first interpretation (Hypothesis, Finding, or Pitfall) an authorized Agent or Director submits for storage. The controller validates its identity, schema, sensitive content, typed refs, visibility, applicability, and idempotency; storage outcomes are `accepted_for_storage` or `rejected`, and neither is a Verified Claim or scientific approval.
+_Avoid_: Memory write, model insight, verified claim
+
+**Synthesis Finding Card**:
+A reading card projected from an accepted Finding Proposal: a conditional conclusion with applicability, its known limitations, and typed source refs. It is unverified and provisional, unlike a measured Finding Card.
+_Avoid_: Measured finding, Evidence
+
+**Hypothesis Card**:
+A reading card projected from one accepted Synthesis Proposal: a conditional claim with supporting refs, contradicting refs, competing Hypothesis refs, unknowns, applicability, and an optional advisory next-validation suggestion.
+_Avoid_: Verified hypothesis, second Evidence ledger
+
+**Pitfall Card**:
+A reading card projected from an accepted operational/protocol Pitfall Proposal: the reproducible conditions, source Run refs, and an avoidance suggestion.
+_Avoid_: Rejected answer, error log
+
 **Blind Proposal**:
 The Mission Director's bounded next action formed from the trusted Mission state and measured Evidence BEFORE any Research Memory is visible. It is validated, durably frozen, and kept as the counterfactual baseline for the later revision.
 _Avoid_: Draft decision, first guess, history-blind proposal

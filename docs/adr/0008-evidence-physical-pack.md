@@ -60,6 +60,20 @@ decision that claims a card outside it. The packet is advisory: the
 mission controller still derives decision deltas, validates both proposal
 stages, and keeps every budget / permission / gate predicate unchanged.
 
+Amendment (M1-T3 / #212): stored Synthesis Proposals (`synthesis-proposal` module,
+`evok.synthesis-proposal/v1`) and their reading cards
+(`evok.research-memory-hypothesis-card/v1`,
+`evok.research-memory-synthesis-finding-card/v1`,
+`evok.research-memory-pitfall-card/v1`) live here. The controller validates identity,
+schema, sensitive content, typed refs, visibility, applicability and
+idempotency before storage; an accepted Proposal is `accepted_for_storage`
+while staying epistemically unverified, and reads as a provisional
+Hypothesis / Finding / Pitfall card in the next deterministic snapshot.
+Proposal integrity is never scientific approval, refs alone cannot create a
+Verified Claim, next-validation content is advisory-only, no background LLM
+synthesis runs, and a rejection record keeps a reason code plus a content
+address but never the refused payload.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

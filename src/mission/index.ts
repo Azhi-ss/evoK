@@ -12,11 +12,17 @@ export {
 export {
   startAuthorizedMission,
   resumeAuthorizedMission,
+  submitSynthesisProposal,
   isExplicitStartRequest,
   isExplicitResumeRequest,
   listUnfinishedMissions,
   summarizeMission,
   loadMissionRecord,
+} from "./mission-start";
+export type {
+  SubmitSynthesisProposalOptions,
+  SynthesisProposalRecord,
+  SynthesisProposalSubmission,
 } from "./mission-start";
 export {
   DEMO_START_RELATIVE_PATH,

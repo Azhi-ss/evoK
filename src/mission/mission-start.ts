@@ -102,12 +102,21 @@ import {
   type ResearchMemorySummary,
   type ResearchRunFinding,
 } from "../evidence/research-memory";
+import {
+  validateSynthesisProposal,
+  type SynthesisProposal,
+  type SynthesisProposalContext,
+  type SynthesisRejectionReason,
+} from "../evidence/synthesis-proposal";
+import { digestValue } from "../security-boundary";
 import type { CompetitionContract } from "../competition/competition-contract";
 import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
 export const MISSION_SCHEMA_VERSION = 1 as const;
 const MISSION_FILENAME = "mission.json";
 const LOCK_FILENAME = "controller.lock";
+/** Serializes Synthesis Proposal read-modify-write (never a data-losing race). */
+const SUBMISSION_LOCK_FILENAME = "synthesis.lock";
 const RUNS_DIRNAME = "runs";
 const SNAPSHOT_DIRNAME = "snapshot";
 const RESULT_FILENAME = "result.json";
@@ -420,6 +429,9 @@ export type HistoryEventType =
   | "PROPOSAL_APPLIED"
   | "DIRECTOR_STOPPED"
   | "ITERATION_LIMIT"
+  // M1-T3 stored Synthesis Proposals (accepted unverified / refused)
+  | "SYNTHESIS_PROPOSAL_RECORDED"
+  | "SYNTHESIS_PROPOSAL_REJECTED"
   // #114 recovery
   | "MISSION_RESUMED"
   | "RECOVERY_COMPLETED"
@@ -431,6 +443,26 @@ export interface HistoryEvent {
   readonly at: string;
   readonly detail?: Readonly<Record<string, unknown>>;
 }
+
+/**
+ * One stored submission decision. An accepted Proposal is durable but stays
+ * epistemically unverified; a rejection keeps only a reason code and a content
+ * address, never the refused payload.
+ */
+export type SynthesisProposalRecord =
+  | {
+    readonly outcome: "accepted_for_storage";
+    readonly at: string;
+    readonly epistemicStatus: "unverified";
+    readonly proposal: SynthesisProposal;
+  }
+  | {
+    readonly outcome: "rejected";
+    readonly at: string;
+    readonly reason: SynthesisRejectionReason;
+    readonly explanation: string;
+    readonly payloadDigest: string;
+  };
 
 export interface MissionRecord {
   readonly schemaVersion: typeof MISSION_SCHEMA_VERSION;
@@ -456,6 +488,8 @@ export interface MissionRecord {
   readonly experiments?: readonly ExperimentTrailEntry[];
   /** M1-T1: read-only facts about the active derived Research Memory snapshot. */
   readonly researchMemory?: ResearchMemorySummary;
+  /** M1-T3: stored Synthesis Proposals; integrity is never scientific status. */
+  readonly synthesisProposals?: readonly SynthesisProposalRecord[];
   readonly history: readonly HistoryEvent[];
   readonly stopReason?: string;
   readonly createdAt: string;
@@ -619,6 +653,20 @@ function researchMemoryDir(projectRoot: string, missionId: string): string {
 }
 
 /**
+ * Publishes the derived projection for an already-persisted durable record and
+ * persists its status summary. Shared by the Run loop and Proposal submission so
+ * both produce the same deterministic snapshot; a projection failure surfaces
+ * without ever rewriting authoritative history.
+ */
+async function projectAndPublishResearchMemory(projectRoot: string, record: MissionRecord): Promise<MissionRecord> {
+  const snapshot = projectResearchMemorySnapshot(missionResearchSource(record));
+  await publishResearchMemorySnapshot(researchMemoryDir(projectRoot, record.id), snapshot);
+  const next: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
+  await persist(projectRoot, next);
+  return next;
+}
+
+/**
  * #114: explicit, user-sourced authorization to RESUME an existing Mission.
  * Distinct from a start: it names the durable Mission, never repeats intake,
  * and never restores spent budget. `source: "model"` is rejected.
@@ -657,6 +705,10 @@ export function missionRecordPath(projectRoot: string, missionId: string): strin
 
 function lockPath(projectRoot: string, missionId: string): string {
   return join(missionDir(projectRoot, missionId), LOCK_FILENAME);
+}
+
+function submissionLockPath(projectRoot: string, missionId: string): string {
+  return join(missionDir(projectRoot, missionId), SUBMISSION_LOCK_FILENAME);
 }
 
 function runDir(projectRoot: string, missionId: string, runId: string): string {
@@ -754,6 +806,190 @@ export async function loadMissionRecord(projectRoot: string, missionId: string):
     throw new MissionRecordCorruptionError(`mission.json for ${missionId} is not valid JSON: ${(error as Error).message}`);
   }
   return validateRecord(parsed, missionId);
+}
+
+/** Trusted, static explanations for a refused Proposal (never the payload). */
+const SYNTHESIS_REJECTION_EXPLANATIONS: Readonly<Record<SynthesisRejectionReason, string>> = {
+  schema: "the submission is not a well-formed evok.synthesis-proposal/v1 payload",
+  identity: "the submission does not match this Mission, its Tasks/Runs, or its bound agent",
+  "sensitive-content": "the submission carries sensitive content and can never enter agent memory",
+  refs: "a cited ref is untyped or does not resolve to an authoritative Mission object",
+  visibility: "a Proposal cannot be more visible than its source Mission",
+  applicability: "applicability must be claim-specific dimension:value entries, and a Pitfall needs conditions",
+  idempotency: "that operation or proposal id was already used for a different payload",
+};
+
+export interface SubmitSynthesisProposalOptions {
+  readonly projectRoot: string;
+  readonly missionId: string;
+  /** Untrusted agent/Director submission; the controller validates it. */
+  readonly proposal: unknown;
+  /** Trusted Mission-level switch, same as start: stores but projects nothing when false. */
+  readonly researchMemory?: boolean;
+}
+
+export interface SynthesisProposalSubmission {
+  readonly outcome: "accepted_for_storage" | "rejected";
+  readonly reason?: SynthesisRejectionReason;
+  readonly explanation: string;
+  /** Present only for an accepted Proposal: storage never verifies it. */
+  readonly epistemicStatus?: "unverified";
+  /** Content address of the submission, kept even when the payload is refused. */
+  readonly payloadDigest: string;
+  readonly record: MissionRecord;
+}
+
+function acceptedProposalsOf(entries: readonly SynthesisProposalRecord[]): SynthesisProposal[] {
+  return entries.flatMap((entry) => (entry.outcome === "accepted_for_storage" ? [entry.proposal] : []));
+}
+
+/** The trusted Mission facts a Proposal is validated against. */
+function synthesisContextFor(record: MissionRecord): SynthesisProposalContext {
+  const runIds = Object.keys(record.runs);
+  return {
+    missionId: record.id,
+    taskIds: (record.tasks ?? []).map((task) => task.taskId),
+    runIds,
+    negativeEvidenceRunIds: (record.experiments ?? [])
+      .filter((entry) => entry.negativeEvidence === true && runIds.includes(entry.runId))
+      .map((entry) => entry.runId),
+    evidenceRefs: [...new Set([
+      ...(record.baseline?.evidenceRefs ?? []),
+      ...(record.experiments ?? []).flatMap((entry) => entry.evidenceRefs),
+    ])],
+    accepted: acceptedProposalsOf(record.synthesisProposals ?? []),
+  };
+}
+
+function payloadDigestOf(value: unknown): string {
+  try {
+    return digestValue(value);
+  } catch {
+    // A non-JSON submission is still auditable by address, never by content.
+    return digestValue(JSON.stringify(value) ?? "unserializable");
+  }
+}
+
+/**
+ * Stores ONE Synthesis Proposal submitted by an authorized Agent or Director.
+ *
+ * Deterministic and offline: no model is called and nothing is dispatched. A
+ * structurally valid Proposal becomes `accepted_for_storage` while staying
+ * epistemically unverified and is projected as a reading card into the next
+ * snapshot. A refused submission keeps an auditable reason code and content
+ * address only. A live controller owns the record, so submission is refused
+ * while its lock exists rather than racing a lost write.
+ */
+export async function submitSynthesisProposal(options: SubmitSynthesisProposalOptions): Promise<SynthesisProposalSubmission> {
+  if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
+  if (!isMissionId(options.missionId)) throw new MissionStartRejectedError(`malformed mission id: ${options.missionId}`);
+  // Same fence as resume: reclaim only a STALE controller lock, and fail closed
+  // when the lock state itself cannot be verified.
+  let lockIsStale: boolean;
+  try {
+    lockIsStale = await staleControllerLock(options.projectRoot, options.missionId);
+  } catch {
+    throw new MissionControllerConflictError(
+      `mission ${options.missionId} has an unverifiable controller lock; refusing to write a Proposal over it`,
+      "unverifiable-controller-lock",
+    );
+  }
+  if (!lockIsStale) {
+    throw new MissionControllerConflictError(
+      `mission ${options.missionId} has an active controller; a Synthesis Proposal cannot be written into a live controller's record`,
+      "active-controller-lock",
+    );
+  }
+
+  // One writer at a time: a second submission is refused rather than overwriting
+  // the first one's just-persisted Proposal.
+  const submissionLock = submissionLockPath(options.projectRoot, options.missionId);
+  try {
+    await writeFile(submissionLock, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }, null, 2), { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new MissionControllerConflictError(
+        `mission ${options.missionId} already has a Synthesis Proposal submission in progress`,
+        "active-submission-lock",
+      );
+    }
+    throw error;
+  }
+  try {
+    // Read INSIDE the lock: a stale read would let the second writer drop the
+    // first one's just-persisted Proposal.
+    const record = await loadMissionRecord(options.projectRoot, options.missionId);
+    return await storeSynthesisProposal(options, record);
+  } finally {
+    await rm(submissionLock, { force: true }).catch(() => {});
+  }
+}
+
+/** Read-modify-write of one validated submission, under the submission lock. */
+async function storeSynthesisProposal(
+  options: SubmitSynthesisProposalOptions,
+  record: MissionRecord,
+): Promise<SynthesisProposalSubmission> {
+  const at = new Date().toISOString();
+  const payloadDigest = payloadDigestOf(options.proposal);
+  const stored = record.synthesisProposals ?? [];
+  const validation = validateSynthesisProposal(options.proposal, synthesisContextFor(record));
+
+  if (validation.outcome === "rejected") {
+    const entry: SynthesisProposalRecord = {
+      outcome: "rejected",
+      at,
+      reason: validation.reason,
+      explanation: SYNTHESIS_REJECTION_EXPLANATIONS[validation.reason],
+      payloadDigest,
+    };
+    const next = withEvent(record,
+      { type: "SYNTHESIS_PROPOSAL_REJECTED", at, detail: { reason: validation.reason, payloadDigest } },
+      { synthesisProposals: [...stored, entry] });
+    await persist(options.projectRoot, next);
+    return { outcome: "rejected", reason: validation.reason, explanation: entry.explanation, payloadDigest, record: next };
+  }
+
+  const proposal = validation.proposal;
+  const alreadyStored = stored.some((entry) =>
+    entry.outcome === "accepted_for_storage" && entry.proposal.digest === proposal.digest);
+  if (alreadyStored) {
+    // Idempotent replay: the durable record and its snapshot stay untouched.
+    return {
+      outcome: "accepted_for_storage",
+      epistemicStatus: "unverified",
+      explanation: "the identical Proposal is already stored",
+      payloadDigest,
+      record,
+    };
+  }
+
+  const entry: SynthesisProposalRecord = { outcome: "accepted_for_storage", at, epistemicStatus: "unverified", proposal };
+  let next = withEvent(record,
+    {
+      type: "SYNTHESIS_PROPOSAL_RECORDED",
+      at,
+      detail: {
+        proposalId: proposal.proposalId,
+        operationId: proposal.operationId,
+        kind: proposal.kind,
+        digest: proposal.digest,
+        epistemicStatus: "unverified",
+      },
+    },
+    { synthesisProposals: [...stored, entry], stateVersion: (record.stateVersion ?? 0) + 1 });
+  // Authoritative write FIRST: a refused projection can never lose the Proposal.
+  await persist(options.projectRoot, next);
+  if (options.researchMemory !== false) {
+    next = await projectAndPublishResearchMemory(options.projectRoot, next);
+  }
+  return {
+    outcome: "accepted_for_storage",
+    epistemicStatus: "unverified",
+    explanation: "stored as an unverified research-state card; storage is not scientific approval",
+    payloadDigest,
+    record: next,
+  };
 }
 
 /**
@@ -1112,11 +1348,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     // Derived projection never costs authoritative history: persist the record
     // FIRST, so a rejection or I/O failure here cannot lose a measured Run.
     await persist(options.projectRoot, current);
-    const snapshot = projectResearchMemorySnapshot(source);
-    await publishResearchMemorySnapshot(memoryDir, snapshot);
-    const next: MissionRecord = { ...current, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
-    await persist(options.projectRoot, next);
-    return next;
+    return projectAndPublishResearchMemory(options.projectRoot, current);
   };
 
   // A single abort owner: an external user signal aborts every dispatch in
@@ -2061,7 +2293,13 @@ function missionResearchSource(record: MissionRecord): ResearchMemorySource {
       ...(entry.snapshotDigest ? { snapshotDigest: entry.snapshotDigest } : {}),
     });
   }
-  return { missionId: record.id, ledgerRevision: record.stateVersion ?? 0, runs };
+  const proposals = acceptedProposalsOf(record.synthesisProposals ?? []);
+  return {
+    missionId: record.id,
+    ledgerRevision: record.stateVersion ?? 0,
+    runs,
+    ...(proposals.length > 0 ? { proposals } : {}),
+  };
 }
 
 // ── #114 explicit resume into the SAME autonomous controller ────────────────

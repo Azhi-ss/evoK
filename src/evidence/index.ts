@@ -159,8 +159,28 @@ export type {
   ResearchCardLifecycle,
   ResearchDecisionPacket,
   ResearchFindingCard,
+  ResearchHypothesisCard,
+  ResearchMemoryCard,
   ResearchMemorySnapshot,
   ResearchMemorySource,
   ResearchMemorySummary,
+  ResearchPitfallCard,
   ResearchRunFinding,
+  ResearchSynthesisFindingCard,
 } from "./research-memory";
+export { SYNTHESIS_FINDING_CARD_SCHEMA, SYNTHESIS_HYPOTHESIS_CARD_SCHEMA, SYNTHESIS_PITFALL_CARD_SCHEMA } from "./research-memory";
+export {
+  SYNTHESIS_APPLICABILITY_DIMENSIONS,
+  SYNTHESIS_PROPOSAL_SCHEMA,
+  validateSynthesisProposal,
+} from "./synthesis-proposal";
+export type {
+  SynthesisNextValidation,
+  SynthesisProposal,
+  SynthesisProposalContext,
+  SynthesisProposalKind,
+  SynthesisProposalValidation,
+  SynthesisRef,
+  SynthesisRefKind,
+  SynthesisRejectionReason,
+} from "./synthesis-proposal";

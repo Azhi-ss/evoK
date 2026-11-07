@@ -3,6 +3,9 @@ import {
   RESEARCH_MEMORY_DEFAULT_MAX_CARDS,
   ResearchMemoryError,
   RESEARCH_DECISION_PACKET_SCHEMA,
+  SYNTHESIS_FINDING_CARD_SCHEMA,
+  SYNTHESIS_HYPOTHESIS_CARD_SCHEMA,
+  SYNTHESIS_PITFALL_CARD_SCHEMA,
   assertPacketCardRefs,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
@@ -10,6 +13,7 @@ import {
   validateResearchMemorySnapshot,
   type ResearchMemorySource,
 } from "./research-memory";
+import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal } from "./synthesis-proposal";
 
 function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
   return {
@@ -170,5 +174,181 @@ describe("research decision packet (#211)", () => {
     const snapshot = projectResearchMemorySnapshot(source());
     const tampered = { ...snapshot, cards: [...snapshot.cards, snapshot.cards[0]!] };
     expect(() => projectResearchDecisionPacket(tampered)).toThrow();
+  });
+});
+
+// ── M1-T3 (#212): accepted Synthesis Proposals become unverified cards ──────
+
+const SYNTHESIS_CONTEXT = {
+  missionId: "m-memory",
+  taskIds: [],
+  runIds: ["m-memory:baseline:1", "m-memory:exp:2"],
+  negativeEvidenceRunIds: ["m-memory:exp:2"],
+  evidenceRefs: ["runs/m-memory:baseline:1/result.json", "runs/m-memory:exp:2/result.json"],
+  accepted: [] as const,
+};
+
+function acceptedProposal(overrides: Record<string, unknown> = {}) {
+  const decision = validateSynthesisProposal({
+    schema: SYNTHESIS_PROPOSAL_SCHEMA,
+    proposalId: "p-hypothesis",
+    operationId: "op-hypothesis",
+    missionId: "m-memory",
+    agentId: "researcher@m-memory:exp:2",
+    runId: "m-memory:exp:2",
+    kind: "hypothesis",
+    statement: "a shorter fold window lowers rmse under the same split",
+    rationale: "the measured Runs agree",
+    supportingRefs: [{ kind: "run", ref: "m-memory:baseline:1" }],
+    contradictingRefs: [{ kind: "negative-evidence", ref: "m-memory:exp:2" }],
+    competingRefs: [],
+    unknowns: ["holdout effect unknown"],
+    applicability: ["dataset:train-v1"],
+    visibility: "mission",
+    limitations: [],
+    conditions: [],
+    nextValidation: { objective: "ablate the fold window once", advisory: true },
+    ...overrides,
+  }, SYNTHESIS_CONTEXT);
+  if (decision.outcome !== "accepted_for_storage") throw new Error(`fixture rejected: ${decision.reason}`);
+  return decision.proposal;
+}
+
+function pitfallProposal() {
+  return acceptedProposal({
+    proposalId: "p-pitfall",
+    operationId: "op-pitfall",
+    kind: "pitfall",
+    statement: "the workspace OOMs above batch 32",
+    rationale: "keep the batch small on a 24GB card",
+    applicability: ["runtime:cuda-12"],
+    conditions: ["batch size >= 32", "single 24GB GPU"],
+    unknowns: [],
+  });
+}
+
+function findingProposal() {
+  return acceptedProposal({
+    proposalId: "p-finding",
+    operationId: "op-finding",
+    kind: "finding",
+    statement: "the fold window is the dominant cost term",
+    limitations: ["measured on one dataset version"],
+  });
+}
+
+describe("synthesis proposal cards (#212)", () => {
+  test("accepted proposals project into unverified hypothesis/finding/pitfall cards", () => {
+    const snapshot = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal(), pitfallProposal(), findingProposal()] }));
+    expect(snapshot.cards).toHaveLength(5);
+    const hypothesis = snapshot.cards.find((card) => card.kind === "hypothesis")!;
+    expect(hypothesis).toEqual({
+      schema: SYNTHESIS_HYPOTHESIS_CARD_SCHEMA,
+      cardId: "hypothesis:synthesis:p-hypothesis",
+      kind: "hypothesis",
+      summary: "a shorter fold window lowers rmse under the same split",
+      applicability: ["dataset:train-v1"],
+      sourceRefs: [
+        "negative-evidence:m-memory:exp:2",
+        "run:m-memory:baseline:1",
+      ],
+      lifecycle: "provisional",
+      visibility: "mission",
+      epistemicStatus: "unverified",
+      supportingRefs: ["run:m-memory:baseline:1"],
+      contradictingRefs: ["negative-evidence:m-memory:exp:2"],
+      competingRefs: [],
+      unknowns: ["holdout effect unknown"],
+      nextValidation: { objective: "ablate the fold window once", advisory: true },
+    });
+    // The authoritative Run/Evidence payloads are referenced, never copied in.
+    expect(JSON.stringify(hypothesis)).not.toContain("runs/m-memory");
+    expect(hypothesis).not.toHaveProperty("rationale");
+
+    const pitfall = snapshot.cards.find((card) => card.kind === "pitfall")!;
+    expect(pitfall).toMatchObject({
+      schema: SYNTHESIS_PITFALL_CARD_SCHEMA,
+      cardId: "pitfall:synthesis:p-pitfall",
+      conditions: ["batch size >= 32", "single 24GB GPU"],
+      avoidance: "keep the batch small on a 24GB card",
+      epistemicStatus: "unverified",
+    });
+
+    const finding = snapshot.cards.find((card) => card.kind === "finding" && card.schema === SYNTHESIS_FINDING_CARD_SCHEMA)!;
+    expect(finding).toMatchObject({
+      schema: SYNTHESIS_FINDING_CARD_SCHEMA,
+      cardId: "finding:synthesis:p-finding",
+      limitations: ["measured on one dataset version"],
+    });
+
+    expect(snapshot.cards.map((card) => card.cardId).sort()).toEqual([
+      "finding:m-memory:baseline:1",
+      "finding:m-memory:exp:2",
+      "finding:synthesis:p-finding",
+      "hypothesis:synthesis:p-hypothesis",
+      "pitfall:synthesis:p-pitfall",
+    ]);
+  });
+
+  test("projection is deterministic regardless of proposal order or repetition", () => {
+    const first = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal(), pitfallProposal(), findingProposal()] }));
+    const reordered = projectResearchMemorySnapshot(source({ proposals: [findingProposal(), pitfallProposal(), acceptedProposal(), acceptedProposal()] }));
+    expect(reordered.digest).toBe(first.digest);
+    expect(reordered.snapshotId).toBe(first.snapshotId);
+    expect(first.digest).not.toBe(projectResearchMemorySnapshot(source()).digest);
+  });
+
+  test("synthesis cards are not crowded out, and dropped cards are counted", () => {
+    const proposals = [acceptedProposal(), pitfallProposal(), findingProposal()];
+    const all = projectResearchMemorySnapshot(source({ proposals }));
+    const bounded = projectResearchMemorySnapshot(source({ proposals, maxCards: 2 }));
+    expect(bounded.cards).toHaveLength(2);
+    expect(bounded.cards.every((card) => card.cardId.includes(":synthesis:"))).toBe(true);
+    expect(bounded.omittedCardCount).toBe(all.cards.length - 2);
+  });
+
+  test("status summary counts synthesis cards by kind", () => {
+    const snapshot = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal(), pitfallProposal()] }));
+    expect(summarizeResearchMemorySnapshot(snapshot)).toEqual({
+      snapshotId: snapshot.snapshotId,
+      snapshotDigest: snapshot.digest,
+      ledgerRevision: 3,
+      cards: { finding: 2, hypothesis: 1, pitfall: 1 },
+      omittedCards: 0,
+    });
+  });
+
+  test("a run-only snapshot keeps its previous shape and digest (v1 back-compat)", () => {
+    const snapshot = projectResearchMemorySnapshot(source());
+    expect(Object.keys(snapshot).sort()).toEqual([
+      "cards", "digest", "ledgerRevision", "maxCards", "memoryRevision", "missionId", "omittedCardCount",
+      "retrievalPolicyRevision", "schema", "snapshotId",
+    ]);
+    expect(validateResearchMemorySnapshot(JSON.parse(JSON.stringify(snapshot)))).toEqual(snapshot);
+  });
+
+  test("snapshot validation accepts synthesis cards and fails closed on tampering", () => {
+    const snapshot = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal(), pitfallProposal(), findingProposal()] }));
+    expect(validateResearchMemorySnapshot(JSON.parse(JSON.stringify(snapshot)))).toEqual(snapshot);
+
+    const tampered = JSON.parse(JSON.stringify(snapshot));
+    tampered.cards.find((card: { kind: string }) => card.kind === "hypothesis").summary = "a shorter fold window raises rmse";
+    expect(() => validateResearchMemorySnapshot(tampered)).toThrow(/digest mismatch/);
+
+    const verified = JSON.parse(JSON.stringify(snapshot));
+    verified.cards.find((card: { kind: string }) => card.kind === "hypothesis").epistemicStatus = "verified";
+    expect(() => validateResearchMemorySnapshot(verified)).toThrow(/unverified/);
+
+    const unknownKind = JSON.parse(JSON.stringify(snapshot));
+    unknownKind.cards.push({ ...unknownKind.cards[0], cardId: "hypothesis:synthesis:p-x", kind: "claim" });
+    expect(() => validateResearchMemorySnapshot(unknownKind)).toThrow();
+  });
+
+  test("the decision packet carries synthesis cards from the pinned snapshot only", () => {
+    const snapshot = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal()] }));
+    const packet = projectResearchDecisionPacket(snapshot);
+    expect(packet.cards.map((card) => card.kind)).toContain("hypothesis");
+    expect(packet.cards.map((card) => card.cardId)).toEqual(snapshot.cards.map((card) => card.cardId));
+    expect(() => assertPacketCardRefs(packet, ["hypothesis:synthesis:p-hypothesis"])).not.toThrow();
   });
 });
