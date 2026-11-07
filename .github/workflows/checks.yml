@@ -1,11 +1,12 @@
 name: checks
 
-# Deterministic gates on a clean runner. Staged rollout: this workflow runs only
-# what cannot depend on the host — types and whitespace. The test suite is NOT
-# wired yet: `bun test --rerun-all-tests` has a host/SDK failure set that must be
-# confirmed on this runner before it can gate a merge (see
-# docs/agents/known-failures.md). Until then the full gate stays local
-# (`bun run check`, also installed as the pre-commit hook).
+# Deterministic gates on a clean runner.
+#
+# The suite gate is `--check` against `docs/agents/known-failures.txt`, which is
+# a UNION across hosts: this runner reproduces only 2 of the 44 failures the
+# macOS host sees, and both are in the accepted set. A host that reproduces
+# fewer failures passes; only a failure outside the union fails (see
+# docs/agents/known-failures.md).
 
 on:
   push:
@@ -43,14 +44,11 @@ jobs:
             git show --check --format= HEAD
           fi
 
-  suite-baseline:
-    # DIAGNOSTIC, not a gate yet. It answers one question: does this runner
-    # reproduce the local host/SDK failure set (`docs/agents/known-failures.txt`)?
-    # The step is non-gating on purpose; once the two sets agree, drop
-    # `continue-on-error` and this job becomes the merge gate.
+  suite:
+    # Merge gate: no failure outside the accepted union. Measured at 2m4s for
+    # the full suite on this runner.
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
