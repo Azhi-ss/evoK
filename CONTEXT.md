@@ -188,6 +188,14 @@ _Avoid_: Live workspace, current files
 A conclusion drawn from one or more Evidence items within stated conditions and scope.
 _Avoid_: Claim (a Claim may communicate a Finding externally)
 
+**Research Memory**:
+A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it.
+_Avoid_: Transcript memory, second evidence ledger, session memory
+
+**Finding Card**:
+A bounded presentation projection of one Finding: a short summary, applicability label, lifecycle, and typed source refs. It is not an authoritative Evidence record.
+_Avoid_: Evidence, claim, full history
+
 **Negative Evidence**:
 Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances.
 _Avoid_: Error log

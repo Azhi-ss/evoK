@@ -45,6 +45,13 @@ Amendment (ET-DEPLOY-ORCH / #182): DeployArena COI reuses
 and the playground seam; this pack still owns the gate colors and
 ledger. Predicates are not loosened.
 
+Amendment (M1-T1 / #210): the Mission Research Memory projection model
+(`research-memory`) lives here: deterministic, bounded reading cards
+projected from authoritative Mission history, with content-addressed
+snapshots validated on load. It is derived and advisory; Mission history
+stays the only write log, and no gate / T48 / hang / Broker predicate
+changes.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 

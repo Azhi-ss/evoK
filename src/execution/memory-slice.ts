@@ -14,10 +14,15 @@
  * only, validated against the same sensitivity rule and never applied here.
  * `AgentResult` is the structured return a short-lived agent produces; the
  * coordinator (not the agent) decides what becomes the next slice.
+ *
+ * `evok.memory-slice/v3` additively carries a pinned Research Memory snapshot
+ * (M1-T1); v2 payloads keep their exact shape and digest and stay valid.
  */
 import { deepFreeze, digestValue } from "./security-boundary";
+import { validateResearchMemorySnapshot, type ResearchMemorySnapshot } from "../evidence/research-memory";
 
 export const MEMORY_SLICE_SCHEMA = "evok.memory-slice/v2" as const;
+export const MEMORY_SLICE_RESEARCH_SCHEMA = "evok.memory-slice/v3" as const;
 export const MEMORY_WRITE_PROPOSAL_SCHEMA = "evok.memory-write-proposal/v1" as const;
 export const AGENT_RESULT_SCHEMA = "evok.agent-result/v1" as const;
 
@@ -83,7 +88,7 @@ export interface MemorySliceInput {
 
 /** A frozen, digest-addressed memory slice bound to one Mission Task Run and agent. */
 export interface MemorySlice {
-  readonly schema: typeof MEMORY_SLICE_SCHEMA;
+  readonly schema: typeof MEMORY_SLICE_SCHEMA | typeof MEMORY_SLICE_RESEARCH_SCHEMA;
   readonly sliceId: string;
   readonly missionId: string;
   readonly taskId: string;
@@ -96,7 +101,13 @@ export interface MemorySlice {
   readonly findings: readonly MemoryFinding[];
   readonly readPolicy: MemoryReadPolicy;
   readonly issuedAt?: string;
+  /** v3 only: the pinned Research Memory snapshot this Run consumed. */
+  readonly research?: ResearchMemorySnapshot;
   readonly digest: string;
+}
+
+export interface ResearchMemorySliceInput extends MemorySliceInput {
+  readonly research: ResearchMemorySnapshot;
 }
 
 export interface MemoryWriteProposalInput {
@@ -263,7 +274,34 @@ function assertSafeInput(label: string, raw: unknown): asserts raw is Record<str
 /** Creates a frozen, content-addressed memory slice bound to one Run. */
 export function createMemorySlice(input: MemorySliceInput): MemorySlice {
   assertSafeInput("memory slice", input);
-  const body = {
+  const body = sliceBody(input);
+  return deepFreeze({
+    schema: MEMORY_SLICE_SCHEMA,
+    ...body,
+    digest: digestValue({ schema: MEMORY_SLICE_SCHEMA, ...body }),
+  });
+}
+
+/** v3: additively carries one pinned Research Memory snapshot for this Run. */
+export function createResearchMemorySlice(input: ResearchMemorySliceInput): MemorySlice {
+  assertSafeInput("memory slice", input);
+  if (input.research === undefined) {
+    throw new MemorySliceError(`memory slice schema ${MEMORY_SLICE_RESEARCH_SCHEMA} requires a pinned research memory packet`);
+  }
+  const research = validateResearchMemorySnapshot(input.research);
+  if (research.missionId !== input.missionId) {
+    throw new MemorySliceError(`research memory snapshot belongs to Mission "${research.missionId}", not "${input.missionId}"`);
+  }
+  const body = { ...sliceBody(input), research };
+  return deepFreeze({
+    schema: MEMORY_SLICE_RESEARCH_SCHEMA,
+    ...body,
+    digest: digestValue({ schema: MEMORY_SLICE_RESEARCH_SCHEMA, ...body }),
+  });
+}
+
+function sliceBody(input: MemorySliceInput) {
+  return {
     sliceId: requireNonEmpty("memory slice sliceId", input.sliceId),
     missionId: requireNonEmpty("memory slice missionId", input.missionId),
     taskId: requireNonEmpty("memory slice taskId", input.taskId),
@@ -277,17 +315,20 @@ export function createMemorySlice(input: MemorySliceInput): MemorySlice {
     readPolicy: readPolicyOf(input.readPolicy),
     ...(input.issuedAt !== undefined ? { issuedAt: requireNonEmpty("memory slice issuedAt", input.issuedAt) } : {}),
   };
-  return deepFreeze({
-    schema: MEMORY_SLICE_SCHEMA,
-    ...body,
-    digest: digestValue({ schema: MEMORY_SLICE_SCHEMA, ...body }),
-  });
 }
 
 /** Validates a persisted slice: sensitivity, shape, Run binding, and digest. */
 export function validateMemorySlice(raw: unknown): MemorySlice {
   assertSafeInput("memory slice", raw);
-  if (raw.schema !== MEMORY_SLICE_SCHEMA) throw new MemorySliceError(`memory slice schema must be ${MEMORY_SLICE_SCHEMA}`);
+  if (raw.schema === MEMORY_SLICE_RESEARCH_SCHEMA) {
+    const { schema: _schema, digest, ...body } = raw;
+    const rebuilt = createResearchMemorySlice(body as unknown as ResearchMemorySliceInput);
+    if (rebuilt.digest !== digest) throw new MemorySliceError("memory slice digest mismatch");
+    return rebuilt;
+  }
+  if (raw.schema !== MEMORY_SLICE_SCHEMA) {
+    throw new MemorySliceError(`memory slice schema must be ${MEMORY_SLICE_SCHEMA} or ${MEMORY_SLICE_RESEARCH_SCHEMA}`);
+  }
   const { schema: _schema, digest, ...body } = raw;
   const rebuilt = createMemorySlice(body as unknown as MemorySliceInput);
   if (rebuilt.digest !== digest) throw new MemorySliceError("memory slice digest mismatch");

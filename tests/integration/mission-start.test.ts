@@ -25,9 +25,11 @@ import {
   missionRecordPath,
   baselineResultPath,
   startAuthorizedMission,
+  summarizeMission,
   type BaselineEvaluator,
   type StartAuthorization,
 } from "../../src/mission-start";
+import type { DirectorInput, MissionDirector } from "../../src/mission-director";
 import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
@@ -709,20 +711,8 @@ describe("broker-assembled context at the Mission Run seam", () => {
     tempDirs.push(project);
     const draft = await seedDraft(project, completeDraft("m-broker-ctx"));
     const { resolver, resources } = await controlledHarness(project);
-    const contract = createCompetitionContract({
-      version: "2026.1",
-      competitionId: "toy-challenge",
-      objective: "Predict the target within the split discipline.",
-      scoring: { metric: "rmse", direction: "minimize" },
-      dataSplit: { kind: "kfold", folds: 5, holdout: "protected" },
-      submission: { format: "csv:id,prediction", maxPerDay: 5 },
-      limits: { timeLimitMs: 3_600_000, network: "none" },
-    });
-    const policy = createRuleVisibilityPolicy({
-      competitionId: "toy-challenge",
-      contractDigest: contract.digest,
-      allow: { researcher: ["scoring.metric", "scoring.direction", "dataSplit.folds"] },
-    });
+    const contract = toyContract("toy-challenge");
+    const policy = toyPolicy(contract);
     const writes = { prompts: [] as string[], answer: "0.75" };
     const outcome = await startAuthorizedMission({
       projectRoot: project, missionId: draft.id, authorization: auth(),
@@ -782,7 +772,11 @@ describe("broker-assembled context at the Mission Run seam", () => {
     expect(outcome.status).toBe("baseline-complete");
     const prompt = writes.prompts[0]!;
     expect(prompt).not.toContain("ROLE CONTEXT");
+    expect(prompt).not.toContain("MEMORY SLICE");
     expect(prompt).not.toContain("hardRules");
+    // No role-context path means no injection and no synthetic Competition
+    // Contract; the legacy prompt is byte-identical.
+    expect(outcome.record.researchMemory).toBeDefined();
     expect(Object.keys(constraintsFromPrompt(prompt)).sort()).toEqual(["missionId", "runId", "taskId"]);
   });
 
@@ -823,5 +817,198 @@ describe("broker-assembled context at the Mission Run seam", () => {
     });
     expect(outcome.status).toBe("baseline-complete");
     expect(writes.prompts[0]).toContain('"resources":{"cpus":1,"memoryBytes":1,"gpuCount":0,"gpuNames":[]');
+  });
+});
+
+/** A bounded decision port: one discriminating Experiment, then the loop bound stops. */
+function oneExperimentDirector(): MissionDirector {
+  return {
+    id: "stub-research-memory-director",
+    async decide(input: DirectorInput) {
+      return {
+        proposal: {
+          stateVersion: input.stateVersion,
+          action: "investigate",
+          rationale: "follow the measured baseline with one fresh Experiment",
+          task: { objective: "materialize answer.txt again in a fresh isolated workspace" },
+        },
+        sessionId: `director-session-${input.stateVersion}`,
+        usage: {
+          tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      };
+    },
+  };
+}
+
+function toyContract(competitionId: string) {
+  return createCompetitionContract({
+    version: "2026.1",
+    competitionId,
+    objective: "Predict the target within the split discipline.",
+    scoring: { metric: "rmse", direction: "minimize" },
+    dataSplit: { kind: "kfold", folds: 5, holdout: "protected" },
+    submission: { format: "csv:id,prediction", maxPerDay: 5 },
+    limits: { timeLimitMs: 3_600_000, network: "none" },
+  });
+}
+
+function toyPolicy(contract: ReturnType<typeof toyContract>) {
+  return createRuleVisibilityPolicy({
+    competitionId: contract.competitionId,
+    contractDigest: contract.digest,
+    allow: { researcher: ["scoring.metric", "scoring.direction", "dataSplit.folds"] },
+  });
+}
+
+function memorySliceFromPrompt(prompt: string): Record<string, any> {
+  const begin = prompt.indexOf("=== MEMORY SLICE BEGIN");
+  if (begin < 0) throw new Error("prompt carried no memory slice");
+  const jsonStart = prompt.indexOf("\n", begin) + 1;
+  const end = prompt.indexOf("\n=== MEMORY SLICE END ===", jsonStart);
+  return JSON.parse(prompt.slice(jsonStart, end)) as Record<string, any>;
+}
+
+describe("Mission Research Memory at the authorized lifecycle seam (#210)", () => {
+  test("a later fresh Researcher Run receives the bounded finding card from the pinned snapshot", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-memory-loop"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-memory");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("iteration-limit");
+    expect(writes.prompts).toHaveLength(2);
+    // The first Run has no prior history, so it keeps the legacy prompt.
+    expect(writes.prompts[0]).not.toContain("MEMORY SLICE");
+
+    const slice = memorySliceFromPrompt(writes.prompts[1]!);
+    expect(slice.schema).toBe("evok.memory-slice/v3");
+    expect(slice.missionId).toBe(draft.id);
+    expect(slice.taskId).toBe("task-exp-2");
+    expect(slice.runId).toBe(`${draft.id}:exp:2`);
+    expect(slice.targetAgentId).toBe(`evok-experiment-investigate@${draft.id}:exp:2`);
+    expect(slice.research.missionId).toBe(draft.id);
+    expect(slice.research.cards).toHaveLength(1);
+    expect(slice.research.cards[0]).toMatchObject({
+      cardId: `finding:${draft.id}:baseline:1`,
+      kind: "finding",
+      ok: true,
+      sourceRefs: [`runs/${draft.id}:baseline:1/snapshot`, `runs/${draft.id}:baseline:1/result.json`],
+    });
+    expect(slice.research.omittedCardCount).toBe(0);
+
+    // The consumed snapshot/slice digests are durable on the executed Run, and
+    // the slice carries no prior transcript.
+    const expRun = outcome.record.runs[`${draft.id}:exp:2`]!;
+    expect(expRun.researchMemory?.snapshotId).toBe(slice.research.snapshotId);
+    expect(expRun.researchMemory?.snapshotDigest).toBe(slice.research.digest);
+    expect(expRun.researchMemory?.sliceDigest).toBe(slice.digest);
+    expect(writes.prompts[1]).not.toContain("candidate materialized");
+    expect(JSON.stringify(slice)).not.toContain("transcript");
+    expect(JSON.stringify(slice)).not.toContain("messages");
+
+    // The active projection now covers both measured Runs and is persisted.
+    const active = outcome.record.researchMemory!;
+    expect(active.cards.finding).toBe(2);
+    expect(active.ledgerRevision).toBe(outcome.record.stateVersion);
+    const pointer = JSON.parse(await readFile(
+      join(project, ".evok", "missions", draft.id, "memory", "active.json"),
+      "utf8",
+    ));
+    expect(pointer.snapshotId).toBe(active.snapshotId);
+    expect(pointer.digest).toBe(active.snapshotDigest);
+    expect(await readdir(join(project, ".evok", "missions", draft.id, "memory", "snapshots"))).toContain(`${active.snapshotDigest}.json`);
+
+    // Status is read-only: ids and counts only, no card body or restricted refs.
+    const summary = summarizeMission(outcome.record);
+    expect(summary.researchMemory).toEqual({
+      snapshotId: active.snapshotId,
+      snapshotDigest: active.snapshotDigest,
+      ledgerRevision: active.ledgerRevision,
+      cards: { finding: 2 },
+      omittedCards: 0,
+    });
+    expect(JSON.stringify(summary.researchMemory)).not.toContain(draft.id);
+  });
+
+  test("the trusted switch disables projection and injection while keeping legacy behavior", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-memory-off"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-memory-off");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      researchMemory: false,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+
+    expect(outcome.status).toBe("iteration-limit");
+    expect(writes.prompts).toHaveLength(2);
+    expect(writes.prompts[1]).not.toContain("MEMORY SLICE");
+    expect(outcome.record.researchMemory).toBeUndefined();
+    expect(outcome.record.runs[`${draft.id}:exp:2`]!.researchMemory).toBeUndefined();
+    await expect(readdir(join(project, ".evok", "missions", draft.id, "memory"))).rejects.toThrow();
+  });
+});
+
+describe("Research Memory rejection never costs authoritative history (#210)", () => {
+  test("a secret-like measured value is refused before storage and the Run stays durable", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-memory-secret"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const secretEvaluator: BaselineEvaluator = {
+      id: "secret-refusing-evaluator",
+      version: "1",
+      async evaluate() {
+        return { ok: false, ruleViolations: ["api_key=sk-live-123456"] };
+      },
+    };
+
+    await expect(startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: secretEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    })).rejects.toThrow(/secret-like/);
+
+    // The derived projection was refused, but the measured Run and its
+    // authoritative record were already persisted.
+    const record = await loadMissionRecord(project, draft.id);
+    expect(record.baseline?.runId).toBe(`${draft.id}:baseline:1`);
+    expect(record.baseline?.evaluation.ruleViolations).toEqual(["api_key=sk-live-123456"]);
+    expect(record.runs[`${draft.id}:baseline:1`]?.status).toBe("measured");
+    expect(record.researchMemory).toBeUndefined();
   });
 });

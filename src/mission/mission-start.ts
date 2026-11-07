@@ -83,6 +83,17 @@ import { ContextBroker, type MemoryProvider } from "../execution/context-broker"
 import { checkHostCapabilities } from "../execution/host-capabilities";
 import type { HostInventory } from "../execution/host-inventory";
 import type { ResourceRequest } from "../execution/resource-lease";
+import {
+  createResearchMemoryProvider,
+  publishResearchMemorySnapshot,
+} from "../execution/research-memory-provider";
+import {
+  projectResearchMemorySnapshot,
+  summarizeResearchMemorySnapshot,
+  type ResearchMemorySource,
+  type ResearchMemorySummary,
+  type ResearchRunFinding,
+} from "../evidence/research-memory";
 import type { CompetitionContract } from "../competition/competition-contract";
 import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
@@ -263,6 +274,12 @@ export interface MissionRunRecord {
   readonly workspace: string;
   readonly snapshotRef?: string;
   readonly resultRef?: string;
+  /** M1-T1: the Research Memory snapshot/slice this Run actually consumed. */
+  readonly researchMemory?: {
+    readonly snapshotId: string;
+    readonly snapshotDigest: string;
+    readonly sliceDigest: string;
+  };
   readonly error?: string;
   readonly dispatchedAt: string;
   readonly finishedAt?: string;
@@ -389,6 +406,8 @@ export interface MissionRecord {
   readonly modelTier?: string;
   readonly decisions?: readonly DecisionRecord[];
   readonly experiments?: readonly ExperimentTrailEntry[];
+  /** M1-T1: read-only facts about the active derived Research Memory snapshot. */
+  readonly researchMemory?: ResearchMemorySummary;
   readonly history: readonly HistoryEvent[];
   readonly stopReason?: string;
   readonly createdAt: string;
@@ -411,6 +430,13 @@ export interface StartMissionOptions {
    * absent, the Run keeps the legacy prompt and no role context.
    */
   readonly competitionContext?: MissionCompetitionContext;
+  /**
+   * Trusted Mission-level Research Memory off switch (M1-T1). Only the
+   * controller/CLI supplies it; a Run or agent cannot set it. `false` writes no
+   * projection and injects none, but never displaces an explicitly supplied
+   * custom `MemoryProvider`.
+   */
+  readonly researchMemory?: boolean;
   /**
    * Test/broker seam: builds the runtime for one attempt (fresh workspace
    * root). Defaults to a PiAgentRuntime wired to `resolver`/`resources`.
@@ -502,7 +528,7 @@ interface PreparedCompetitionContext {
   readonly resourceRequest?: ResourceRequest;
 }
 
-function prepareCompetitionContext(context: MissionCompetitionContext | undefined): PreparedCompetitionContext {
+function prepareCompetitionContext(context: MissionCompetitionContext | undefined, memory?: MemoryProvider): PreparedCompetitionContext {
   if (context === undefined) return {};
   const resourceRequest = resourceRequestForCompetition(context);
   if (resourceRequest !== undefined && context.inventory === undefined) {
@@ -521,10 +547,27 @@ function prepareCompetitionContext(context: MissionCompetitionContext | undefine
       contract: context.contract,
       policy: context.policy,
       ...(context.inventory ? { inventory: context.inventory } : {}),
-      ...(context.memory ? { memory: context.memory } : {}),
+      ...(memory ? { memory } : {}),
       source: "mission-controller",
     }),
   };
+}
+
+/**
+ * The default durable Research Memory provider for a Run that already uses the
+ * role-context/ContextBroker path. A legacy no-role-context Run keeps no broker
+ * and therefore no injection; an explicit custom provider is never displaced.
+ */
+function researchMemoryProviderFor(options: StartMissionOptions, missionId: string): MemoryProvider | undefined {
+  if (options.competitionContext === undefined) return undefined;
+  if (options.competitionContext.memory) return options.competitionContext.memory;
+  if (options.researchMemory === false) return undefined;
+  return createResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
+}
+
+/** Project-local derived-artifact namespace (under the git-ignored Mission dir). */
+function researchMemoryDir(projectRoot: string, missionId: string): string {
+  return join(missionDir(projectRoot, missionId), "memory");
 }
 
 /**
@@ -831,7 +874,7 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   }
   const draft = await loadMissionDraft(options.projectRoot, options.missionId);
   assertStartable(draft, options);
-  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext);
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id));
   const dir = missionDir(options.projectRoot, draft.id);
   await mkdir(dir, { recursive: true });
 
@@ -1009,6 +1052,25 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
   // competitions; each Run then gets its own role-scoped context.
   const { broker, resourceRequest: competitionResourceRequest } = competition;
 
+  // M1-T1: derived Mission-scoped Research Memory. Publication errors surface;
+  // the trusted switch writes nothing. Injection needs the role-context broker;
+  // the legacy no-role-context path projects but never injects.
+  const researchMemoryEnabled = options.researchMemory !== false;
+  const memoryDir = researchMemoryDir(options.projectRoot, draft.id);
+  const refreshResearchMemory = async (current: MissionRecord): Promise<MissionRecord> => {
+    if (!researchMemoryEnabled) return current;
+    const source = missionResearchSource(current);
+    if (source.runs.length === 0) return current;
+    // Derived projection never costs authoritative history: persist the record
+    // FIRST, so a rejection or I/O failure here cannot lose a measured Run.
+    await persist(options.projectRoot, current);
+    const snapshot = projectResearchMemorySnapshot(source);
+    await publishResearchMemorySnapshot(memoryDir, snapshot);
+    const next: MissionRecord = { ...current, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
+    await persist(options.projectRoot, next);
+    return next;
+  };
+
   // A single abort owner: an external user signal aborts every dispatch in
   // this start (baseline + loop + decisions).
   const runController = new AbortController();
@@ -1094,11 +1156,21 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         })
       : undefined;
     const roleContext = brokered?.context.kind === "role" ? brokered.context.roleContext : undefined;
+    const consumedResearchMemory = brokered?.memorySlice?.research
+      ? {
+          snapshotId: brokered.memorySlice.research.snapshotId,
+          snapshotDigest: brokered.memorySlice.research.digest,
+          sliceDigest: brokered.memorySlice.digest,
+        }
+      : undefined;
 
     r = { ...r, reserved: r.reserved + args.reserve };
     const intentId = `${args.runId}:intent`;
     r = withEvent(r, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: args.runId, intentId, attempt: args.attempt } }, {
-      runs: { ...r.runs, [args.runId]: { runId: args.runId, intentId, attempt: args.attempt, status: "dispatched", workspace: "", dispatchedAt: now() } },
+      runs: { ...r.runs, [args.runId]: {
+        runId: args.runId, intentId, attempt: args.attempt, status: "dispatched", workspace: "", dispatchedAt: now(),
+        ...(consumedResearchMemory ? { researchMemory: consumedResearchMemory } : {}),
+      } },
     });
     await persist(options.projectRoot, r);
 
@@ -1413,6 +1485,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       }
 
       // ── T4 path: one baseline, then a truthful terminal status ──────────
+      record = await refreshResearchMemory(record);
       if (!options.director) {
         if (dispatched.outcome.kind === "run-failed") {
           // T4: a baseline dispatch failure is terminal (RUN_FAILED is already
@@ -1434,6 +1507,10 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     } else if (!options.director) {
       // Resuming without a decision boundary would have nothing new to do.
       throw new MissionStartRejectedError("resuming a Mission without a Mission Director is not supported; the baseline path is not resumable work");
+    } else {
+      // Recovery rebuilds the derived projection from reconciled history.
+      record = await refreshResearchMemory(record);
+      await persist(options.projectRoot, record);
     }
 
     // ── #113 autonomous Research Loop ─────────────────────────────────────
@@ -1710,6 +1787,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       // New observation => authoritative state advances; the next decision
       // must echo this new stateVersion (stale proposals are rejected).
       record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
+      record = await refreshResearchMemory(record);
       await persist(options.projectRoot, record);
       if (record.status === "budget-exhausted") break;
     }
@@ -1735,6 +1813,7 @@ export function summarizeMission(record: MissionRecord): {
   readonly experiments: number;
   readonly decisions: number;
   readonly negativeEvidence: number;
+  readonly researchMemory?: ResearchMemorySummary;
 } {
   const experiments = record.experiments ?? [];
   return {
@@ -1750,7 +1829,41 @@ export function summarizeMission(record: MissionRecord): {
     experiments: experiments.length,
     decisions: record.decisions?.length ?? 0,
     negativeEvidence: experiments.filter((entry) => !entry.ok).length,
+    ...(record.researchMemory ? { researchMemory: record.researchMemory } : {}),
   };
+}
+
+/** Maps authoritative Mission history into the projection's bounded source. */
+function missionResearchSource(record: MissionRecord): ResearchMemorySource {
+  const runs: ResearchRunFinding[] = [];
+  const seen = new Set<string>();
+  if (record.baseline) {
+    const evaluation = record.baseline.evaluation;
+    seen.add(record.baseline.runId);
+    runs.push({
+      runId: record.baseline.runId,
+      ok: evaluation.ok,
+      ...(typeof evaluation.score === "number" ? { score: evaluation.score } : {}),
+      ...(evaluation.ruleViolations?.length ? { ruleViolations: [...evaluation.ruleViolations] } : {}),
+      evidenceRefs: record.baseline.evidenceRefs,
+      snapshotDigest: record.baseline.snapshotDigest,
+    });
+  }
+  for (const entry of record.experiments ?? []) {
+    if (seen.has(entry.runId)) continue;
+    seen.add(entry.runId);
+    runs.push({
+      runId: entry.runId,
+      ok: entry.ok,
+      ...(typeof entry.evaluation?.score === "number" ? { score: entry.evaluation.score } : {}),
+      ...(entry.ruleViolations?.length ? { ruleViolations: [...entry.ruleViolations] } : {}),
+      ...(entry.negativeEvidence ? { negativeEvidence: true } : {}),
+      ...(entry.error !== undefined ? { error: entry.error } : {}),
+      evidenceRefs: entry.evidenceRefs,
+      ...(entry.snapshotDigest ? { snapshotDigest: entry.snapshotDigest } : {}),
+    });
+  }
+  return { missionId: record.id, ledgerRevision: record.stateVersion ?? 0, runs };
 }
 
 // ── #114 explicit resume into the SAME autonomous controller ────────────────
@@ -1853,7 +1966,7 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
       `the accepted Mission was served by tier "${previous.modelTier}" but resume requests "${requestedTier}"; silent model rerouting is rejected (resume with the accepted tier)`,
     );
   }
-  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext);
+  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id));
 
   // A stale lock (dead process) is reclaimed atomically.
   await rm(lock, { force: true }).catch(() => {});

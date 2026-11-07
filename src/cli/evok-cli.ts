@@ -913,6 +913,10 @@ async function runMissionStatus(
   if (view.experiments > 0) {
     stdout.write(`   experiments after baseline: ${view.experiments} · negative evidence: ${view.negativeEvidence} · director decisions: ${view.decisions}\n`);
   }
+  // M1-T1: read-only Memory summary — ids and counts, never card bodies or refs.
+  if (view.researchMemory) {
+    stdout.write(`   research memory: snapshot ${view.researchMemory.snapshotId} · finding cards ${view.researchMemory.cards.finding} · omitted ${view.researchMemory.omittedCards}\n`);
+  }
   for (const experiment of record.experiments ?? []) {
     const score = typeof experiment.evaluation?.score === "number" ? ` score=${experiment.evaluation!.score}` : "";
     const why = experiment.error ? ` error=${experiment.error}` : experiment.ruleViolations?.length ? ` rules=${experiment.ruleViolations.join(";")}` : "";
