@@ -443,6 +443,27 @@ describe("two-stage decision prompt (#211)", () => {
     expect(added).not.toContain('"contract"');
   });
 
+  test("a truncated packet is disclosed as incomplete, a complete one is not (#215)", () => {
+    const revisionFor = (memoryPacket: typeof packet) => buildDirectorPrompt(input({
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), memoryPacket },
+    }));
+    const whole = revisionFor(packet);
+    expect(whole).not.toContain("TRUNCATED");
+    // Two runs at a one-card limit: the packet carries less than the snapshot.
+    const truncated = projectResearchDecisionPacket(projectResearchMemorySnapshot({
+      missionId: "m-t5",
+      ledgerRevision: 1,
+      runs: [
+        { runId: "m-t5:baseline:1", ok: true, score: 0.4, evidenceRefs: ["runs/b/result.json"] },
+        { runId: "m-t5:exp:2", ok: false, ruleViolations: ["rmse regressed"], evidenceRefs: ["runs/e/result.json"] },
+      ],
+    }), { maxCards: 1 });
+    expect(truncated.truncated).toBe(true);
+    const cut = revisionFor(truncated);
+    expect(cut).toContain("TRUNCATED");
+    expect(cut).toContain("omissions");
+  });
+
   test("a revision without a pinned packet still freezes and re-reads the blind proposal", () => {
     const revision = buildDirectorPrompt(input({
       decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt") },

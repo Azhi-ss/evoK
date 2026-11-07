@@ -224,6 +224,14 @@ _Avoid_: Memory output, second opinion, Memory-approved action
 The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
 _Avoid_: Memory dump, second snapshot, full history
 
+**Decision Regret**:
+The record that a direction a Memory-informed revision rejected was later measured as viable by a comparable Experiment. An unexecuted or never-compared direction stays `unobserved`; it is never a failure, Negative Evidence, or regret, and no numeric regret score is computed.
+_Avoid_: Rejected-answer penalty, counterfactual score
+
+**Direction-Concentration Review**:
+A durable, advisory recommendation written when Memory repeatedly changed decisions toward the same direction without new discriminating (refuting) Evidence. It recommends reevaluating that direction; it cannot force an action, impose an exploration quota, alter Search math, or consume execution authority.
+_Avoid_: Memory veto, exploration quota, forced diversity target
+
 **Decision Delta**:
 The controller-derived comparison of a Blind Proposal and its Revised Proposal: unchanged, reordered, replaced, withdrawn, or expanded-via-existing-search. It is computed from the proposals, never declared by the model.
 _Avoid_: Model-reported change, Memory score

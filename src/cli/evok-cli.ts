@@ -913,6 +913,10 @@ async function runMissionStatus(
   if (view.experiments > 0) {
     stdout.write(`   experiments after baseline: ${view.experiments} · negative evidence: ${view.negativeEvidence} · director decisions: ${view.decisions}\n`);
   }
+  // M1-T6: read-only anchoring measurement, never card bodies or refs.
+  if (view.diversity) {
+    stdout.write(`   diversity: ${view.diversity.objectives.length} objective(s) across ${view.diversity.runs} branch run(s) · memory changed ${view.diversity.memoryChangedDecisions}/${view.diversity.memoryInformedDecisions} revision(s)\n`);
+  }
   // M1-T1: read-only Memory summary — ids and counts, never card bodies or refs.
   if (view.researchMemory) {
     stdout.write(`   research memory: snapshot ${view.researchMemory.snapshotId} · finding cards ${view.researchMemory.cards.finding} · omitted ${view.researchMemory.omittedCards}\n`);

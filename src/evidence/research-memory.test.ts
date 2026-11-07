@@ -15,8 +15,9 @@ import {
   validateResearchMemorySnapshot,
   type ResearchFindingCard,
   type ResearchMemorySource,
+  type ResearchRunFinding,
 } from "./research-memory";
-import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal } from "./synthesis-proposal";
+import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal, type SynthesisProposal } from "./synthesis-proposal";
 import { digestValue } from "../security-boundary";
 
 function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
@@ -46,8 +47,9 @@ describe("research memory projection (#210)", () => {
     expect(reordered.digest).toBe(first.digest);
     expect(reordered.snapshotId).toBe(first.snapshotId);
     expect(first.snapshotId).toBe(`research-memory:${first.digest}`);
-    // Sorted by runId, not input order.
-    expect(first.cards.map((card) => card.cardId)).toEqual(["finding:m-memory:baseline:1", "finding:m-memory:exp:2"]);
+    // Deterministic: the measured refutation is reserved ahead of support (#215)
+    // and cards are otherwise sorted by id, never by input order.
+    expect(first.cards.map((card) => card.cardId)).toEqual(["finding:m-memory:exp:2", "finding:m-memory:baseline:1"]);
   });
 
   test("a changed ledger revision or observation changes the content address", () => {
@@ -89,7 +91,8 @@ describe("research memory projection (#210)", () => {
   });
 
   test("cards carry bounded summaries and typed refs, never transcripts or bodies", () => {
-    const card = projectResearchMemorySnapshot(source()).cards[0]!;
+    const card = projectResearchMemorySnapshot(source()).cards
+      .find((entry) => entry.cardId === "finding:m-memory:baseline:1")!;
     expect(Object.keys(card).sort()).toEqual([
       "applicability", "cardId", "kind", "lifecycle", "ok", "outcome", "schema", "sourceRefs", "summary",
     ]);
@@ -156,7 +159,12 @@ describe("research decision packet (#211)", () => {
     expect(packet.schema).toBe(RESEARCH_DECISION_PACKET_SCHEMA);
     expect(packet.snapshotId).toBe(snapshot.snapshotId);
     expect(packet.snapshotDigest).toBe(snapshot.digest);
-    expect(packet.cards.map((card) => card.cardId)).toEqual(snapshot.cards.map((card) => card.cardId));
+    // Reserved categories are delivered first (#215), so the measured refutation
+    // precedes the supporting baseline card.
+    expect(packet.cards.map((card) => card.cardId)).toEqual([
+      "finding:m-memory:exp:2",
+      "finding:m-memory:baseline:1",
+    ]);
     expect(packet.digest).toBe(projectResearchDecisionPacket(snapshot).digest);
   });
 
@@ -308,7 +316,10 @@ describe("synthesis proposal cards (#212)", () => {
     const all = projectResearchMemorySnapshot(source({ proposals }));
     const bounded = projectResearchMemorySnapshot(source({ proposals, maxCards: 2 }));
     expect(bounded.cards).toHaveLength(2);
-    expect(bounded.cards.every((card) => card.cardId.includes(":synthesis:"))).toBe(true);
+    // The measured refutation keeps its reserved slot (#215); the remaining slot
+    // still goes to a stored Proposal rather than to a supporting run summary.
+    expect(bounded.cards[0]!.cardId).toBe("finding:m-memory:exp:2");
+    expect(bounded.cards[1]!.cardId).toContain(":synthesis:");
     expect(bounded.omittedCardCount).toBe(all.cards.length - 2);
   });
 
@@ -353,7 +364,13 @@ describe("synthesis proposal cards (#212)", () => {
     const snapshot = projectResearchMemorySnapshot(source({ proposals: [acceptedProposal()] }));
     const packet = projectResearchDecisionPacket(snapshot);
     expect(packet.cards.map((card) => card.kind)).toContain("hypothesis");
-    expect(packet.cards.map((card) => card.cardId)).toEqual(snapshot.cards.map((card) => card.cardId));
+    // Reserved Evidence first (#215), then the stored Proposal, then the
+    // supporting run summary (#212 keeps Proposals ahead of run cards).
+    expect(packet.cards.map((card) => card.cardId)).toEqual([
+      "finding:m-memory:exp:2",
+      "hypothesis:synthesis:p-hypothesis",
+      "finding:m-memory:baseline:1",
+    ]);
     expect(() => assertPacketCardRefs(packet, ["hypothesis:synthesis:p-hypothesis"])).not.toThrow();
   });
 });
@@ -532,5 +549,158 @@ describe("review hardening for #213", () => {
       pitfall: 1,
       operationalPitfall: 3,
     });
+  });
+});
+
+// ── M1-T6 (#215): reserved categories and visible omissions ────────────────
+
+/** The same fixture seam as above, but a competing claim cites a stored proposal. */
+function anchorProposal(overrides: Record<string, unknown> = {}, accepted: readonly SynthesisProposal[] = []) {
+  const decision = validateSynthesisProposal({
+    schema: SYNTHESIS_PROPOSAL_SCHEMA,
+    proposalId: "p-h1",
+    operationId: "op-h1",
+    missionId: "m-memory",
+    agentId: "researcher@m-memory:exp:2",
+    runId: "m-memory:exp:2",
+    kind: "hypothesis",
+    statement: "a shorter fold window lowers rmse under the same split",
+    rationale: "the measured Runs agree",
+    supportingRefs: [{ kind: "run", ref: "m-memory:baseline:1" }],
+    contradictingRefs: [{ kind: "negative-evidence", ref: "m-memory:exp:2" }],
+    competingRefs: [],
+    unknowns: ["holdout effect unknown"],
+    applicability: ["dataset:train-v1"],
+    visibility: "mission",
+    limitations: [],
+    conditions: [],
+    ...overrides,
+  }, { ...SYNTHESIS_CONTEXT, accepted });
+  if (decision.outcome !== "accepted_for_storage") throw new Error(`fixture rejected: ${decision.reason}`);
+  return decision.proposal;
+}
+
+/** Six supporting Findings, one measured refutation, and a competing pair. */
+function anchoringSource(): ResearchMemorySource {
+  const supporting = Array.from({ length: 6 }, (_, index) => ({
+    runId: `m-memory:exp:1${index}`,
+    taskObjective: "h1 fold window",
+    ok: true,
+    score: 0.7 + index / 100,
+    evidenceRefs: [`runs/supporting-${index}/result.json`],
+  }));
+  const h1 = anchorProposal({ proposalId: "p-h1", operationId: "op-h1" });
+  const h2 = anchorProposal({
+    proposalId: "p-h2",
+    operationId: "op-h2",
+    statement: "the fold window is irrelevant once the split is purged",
+    competingRefs: [{ kind: "claim", ref: "p-h1" }],
+  }, [h1]);
+  return source({
+    runs: [
+      ...supporting,
+      { runId: "m-memory:exp:20", taskObjective: "h1 fold window", ok: false, ruleViolations: ["rmse regressed"], evidenceRefs: ["runs/negative/result.json"] },
+    ],
+    maxCards: 16,
+    proposals: [h1, h2],
+  });
+}
+
+describe("reserved decision packet categories (#215 AC1/AC2)", () => {
+  test("supporting cards cannot displace contradicting Evidence or a competing Hypothesis", () => {
+    const snapshot = projectResearchMemorySnapshot(anchoringSource());
+    expect(snapshot.cards.filter((card) => card.cardId.startsWith("finding:m-memory:exp:1")).length).toBe(6);
+    const packet = projectResearchDecisionPacket(snapshot, { maxCards: 3 });
+    expect(packet.cards.map((card) => card.cardId)).toEqual([
+      "finding:m-memory:exp:20",
+      "hypothesis:synthesis:p-h1",
+      "hypothesis:synthesis:p-h2",
+    ]);
+    expect(packet.reserved.contradictingEvidence).toEqual(["finding:m-memory:exp:20"]);
+    expect(packet.reserved.competingHypotheses).toEqual([
+      "hypothesis:synthesis:p-h1",
+      "hypothesis:synthesis:p-h2",
+    ]);
+  });
+
+  test("omission counts are per category and a truncated packet never claims the complete history", () => {
+    const snapshot = projectResearchMemorySnapshot(anchoringSource());
+    const packet = projectResearchDecisionPacket(snapshot, { maxCards: 3 });
+    expect(packet.truncated).toBe(true);
+    expect(packet.omissions).toMatchObject({
+      contradictingEvidence: 0,
+      competingHypotheses: 0,
+      supporting: snapshot.cards.length - 3,
+    });
+    expect(packet.omittedCardCount).toBe(snapshot.omittedCardCount + snapshot.cards.length - 3);
+    const { contradictingEvidence, competingHypotheses, supporting, snapshotOmitted } = packet.omissions;
+    expect(contradictingEvidence + competingHypotheses + supporting + snapshotOmitted).toBe(packet.omittedCardCount);
+
+    const whole = projectResearchDecisionPacket(snapshot);
+    expect(whole.truncated).toBe(false);
+    expect(whole.omittedCardCount).toBe(0);
+    expect(whole.omissions.contradictingEvidence).toBe(0);
+
+    // Truncation is part of the content address, so a cut packet is never
+    // mistaken for a complete one.
+    expect(packet.digest).not.toBe(whole.digest);
+  });
+
+  test("the snapshot itself keeps a late refutation instead of dropping it before the packet exists", () => {
+    // The failure mode is upstream of the packet: with the default card limit,
+    // trail-order slicing would drop the highest-id run (here the refutation)
+    // and no packet could reserve a card the snapshot no longer holds.
+    const runs: ResearchRunFinding[] = Array.from({ length: 10 }, (_, index) => ({
+      runId: `m-memory:exp:${index + 1}`,
+      taskObjective: "h1 fold window",
+      ok: true,
+      score: 0.7,
+      evidenceRefs: [`runs/supporting-${index}/result.json`],
+    }));
+    runs.push({
+      runId: "m-memory:exp:99",
+      taskObjective: "h1 fold window",
+      ok: false,
+      ruleViolations: ["rmse regressed"],
+      evidenceRefs: ["runs/negative/result.json"],
+    });
+    const snapshot = projectResearchMemorySnapshot(source({ runs }));
+    expect(snapshot.cards).toHaveLength(RESEARCH_MEMORY_DEFAULT_MAX_CARDS);
+    expect(snapshot.cards[0]!.cardId).toBe("finding:m-memory:exp:99");
+    const packet = projectResearchDecisionPacket(snapshot);
+    expect(packet.reserved.contradictingEvidence).toEqual(["finding:m-memory:exp:99"]);
+    expect(packet.omissions.snapshotOmitted).toBe(runs.length - snapshot.cards.length);
+  });
+
+  test("a packet rebuilt from an older published snapshot order still delivers the reserved cards first", () => {
+    const snapshot = projectResearchMemorySnapshot(anchoringSource());
+    // Rebuild a pre-#215 publish: snapshot-order cards, supporting first, under
+    // their own valid content address.
+    const { digest: _d, snapshotId: _s, ...body } = JSON.parse(JSON.stringify(snapshot));
+    const reserved = body.cards.filter((card: { cardId: string }) =>
+      card.cardId === "finding:m-memory:exp:20" || card.cardId.startsWith("hypothesis:synthesis:"));
+    body.cards = [...body.cards.filter((card: { cardId: string }) => !reserved.includes(card)), ...reserved];
+    const legacyDigest = digestValue(body);
+    const legacy = validateResearchMemorySnapshot({ ...body, snapshotId: `research-memory:${legacyDigest}`, digest: legacyDigest });
+    expect(legacy.cards[0]!.cardId.startsWith("finding:m-memory:exp:1")).toBe(true);
+
+    const packet = projectResearchDecisionPacket(legacy, { maxCards: 3 });
+    expect(packet.cards.map((card) => card.cardId)).toEqual([
+      "finding:m-memory:exp:20",
+      "hypothesis:synthesis:p-h1",
+      "hypothesis:synthesis:p-h2",
+    ]);
+  });
+
+  test("a hard limit below the reserved count still truncates deterministically and reports it", () => {
+    const snapshot = projectResearchMemorySnapshot(anchoringSource());
+    const packet = projectResearchDecisionPacket(snapshot, { maxCards: 1 });
+    expect(packet.cards.map((card) => card.cardId)).toEqual(["finding:m-memory:exp:20"]);
+    // A reserved category cut by the hard limit is counted, not silently named.
+    expect(packet.reserved.competingHypotheses).toEqual([]);
+    expect(packet.omissions.competingHypotheses).toBe(2);
+    expect(packet.omissions.supporting).toBe(snapshot.cards.length - 3);
+    expect(packet.truncated).toBe(true);
+    expect(projectResearchDecisionPacket(snapshot, { maxCards: 1 }).digest).toBe(packet.digest);
   });
 });

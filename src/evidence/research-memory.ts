@@ -259,8 +259,30 @@ export interface ResearchDecisionPacket {
   readonly snapshotDigest: string;
   readonly ledgerRevision: number;
   readonly cards: readonly ResearchMemoryCard[];
+  /**
+   * Reserved presentation categories (#215): cards delivered in this order
+   * first, so supporting material can never crowd out the contradicting
+   * Evidence or the competing Hypothesis.
+   */
+  readonly reserved: {
+    readonly contradictingEvidence: readonly string[];
+    readonly competingHypotheses: readonly string[];
+  };
+  /** Per-category omission counts, so a cut packet is explainable. */
+  readonly omissions: ResearchPacketOmissions;
+  /** True whenever anything is missing: a truncated packet is not the history. */
+  readonly truncated: boolean;
   readonly omittedCardCount: number;
   readonly digest: string;
+}
+
+/** Where a packet's omissions are, category by category. */
+export interface ResearchPacketOmissions {
+  readonly contradictingEvidence: number;
+  readonly competingHypotheses: number;
+  readonly supporting: number;
+  /** Cards the snapshot had already dropped before any packet existed. */
+  readonly snapshotOmitted: number;
 }
 
 /** Read-only Mission status projection: no card bodies, no restricted refs. */
@@ -751,7 +773,18 @@ export function projectResearchMemorySnapshot(source: ResearchMemorySource): Res
       return rank !== 0 ? rank : (a.cardId < b.cardId ? -1 : a.cardId > b.cardId ? 1 : 0);
     });
   const orderedRuns = runCards.map((card) => finalized.get(card.cardId)!);
-  const cards = [...orderedProposals, ...orderedRuns].slice(0, maxCards);
+  // #215: a bounded projection must not lose the contradicting Evidence or the
+  // competing position to supporting volume. #212's rule still holds inside a
+  // tier: stored Proposals stay ahead of run summary cards.
+  const reserved = [
+    ...orderedRuns.filter(isContradictingEvidenceCard),
+    ...orderedProposals.filter(isCompetingHypothesisCard),
+  ];
+  const reservedIds = new Set(reserved.map((card) => card.cardId));
+  const cards = [
+    ...reserved,
+    ...[...orderedProposals, ...orderedRuns].filter((card) => !reservedIds.has(card.cardId)),
+  ].slice(0, maxCards);
   const body = {
     schema: RESEARCH_MEMORY_SNAPSHOT_SCHEMA,
     missionId,
@@ -839,7 +872,22 @@ export function projectResearchDecisionPacket(
   const limit = options.maxCards === undefined
     ? verified.maxCards
     : Math.min(maxCardsOf(options.maxCards), verified.maxCards);
-  const cards = verified.cards.slice(0, limit);
+  const contradicting = verified.cards.filter(isContradictingEvidenceCard);
+  const competing = verified.cards.filter(isCompetingHypothesisCard);
+  const reservedIds = new Set([...contradicting, ...competing].map((card) => card.cardId));
+  const supporting = verified.cards.filter((card) => !reservedIds.has(card.cardId));
+  // A fresh snapshot already delivers the reserved categories first, but a
+  // packet may be rebuilt from an older published snapshot (#215): re-assert the
+  // reserved-first order here so the guarantee does not depend on snapshot vintage.
+  const reservedFirst = [
+    ...contradicting,
+    ...competing,
+    ...verified.cards.filter((card) => !reservedIds.has(card.cardId)),
+  ];
+  const cards = reservedFirst.slice(0, limit);
+  const delivered = new Set(cards.map((card) => card.cardId));
+  const dropped = (of: readonly ResearchMemoryCard[]) => of.filter((card) => !delivered.has(card.cardId)).length;
+  const omittedCardCount = verified.omittedCardCount + (verified.cards.length - cards.length);
   const body = {
     schema: RESEARCH_DECISION_PACKET_SCHEMA,
     missionId: verified.missionId,
@@ -847,9 +895,34 @@ export function projectResearchDecisionPacket(
     snapshotDigest: verified.digest,
     ledgerRevision: verified.ledgerRevision,
     cards,
-    omittedCardCount: verified.omittedCardCount + (verified.cards.length - cards.length),
+    // Only DELIVERED reserved cards are named; the omissions explain the rest.
+    reserved: {
+      contradictingEvidence: contradicting.filter((card) => delivered.has(card.cardId)).map((card) => card.cardId),
+      competingHypotheses: competing.filter((card) => delivered.has(card.cardId)).map((card) => card.cardId),
+    },
+    omissions: {
+      contradictingEvidence: dropped(contradicting),
+      competingHypotheses: dropped(competing),
+      supporting: dropped(supporting),
+      snapshotOmitted: verified.omittedCardCount,
+    },
+    truncated: omittedCardCount > 0,
+    omittedCardCount,
   };
   return deepFreeze({ ...body, digest: digestValue(body) });
+}
+
+/** A measured refutation is Evidence that contradicts a supporting position. */
+function isContradictingEvidenceCard(card: ResearchMemoryCard): boolean {
+  if (card.kind !== "finding" || card.schema !== RESEARCH_MEMORY_FINDING_CARD_SCHEMA) return false;
+  // A card published before #213 carries no outcome; validation reads its `ok`
+  // as the only outcome it ever had, so the same reading applies here.
+  return (card.outcome ?? (card.ok ? "positive" : "negative")) === "negative";
+}
+
+/** A Hypothesis with a declared competitor, or one already contested by it. */
+function isCompetingHypothesisCard(card: ResearchMemoryCard): boolean {
+  return card.kind === "hypothesis" && (card.competingRefs.length > 0 || card.lifecycle === "contested");
 }
 
 /** Used Memory refs must belong to the delivered packet, never another one. */

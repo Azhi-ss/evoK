@@ -25,6 +25,7 @@ import {
   missionRecordPath,
   baselineResultPath,
   startAuthorizedMission,
+  resumeAuthorizedMission,
   submitSynthesisProposal,
   summarizeMission,
   type BaselineEvaluator,
@@ -42,6 +43,8 @@ import { probeHostInventory } from "../../src/execution/host-inventory";
 import { createResearchMemoryProvider, loadResearchMemorySnapshot } from "../../src/execution/research-memory-provider";
 import { SYNTHESIS_PROPOSAL_SCHEMA } from "../../src/evidence/synthesis-proposal";
 import { retrieveResearchMemory, validateResearchMemorySnapshot } from "../../src/evidence/research-memory";
+import { projectDecisionAccountability } from "../../src/mission/decision-accountability";
+import type { ResumeAuthorization } from "../../src/mission-start";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -1632,5 +1635,146 @@ describe("Research Memory applicability and lifecycle at the mission seam (#214)
     const verdict = retrieveResearchMemory(after!, { conditions: ["evaluation:an unrelated evaluation protocol"] })
       .verdicts.find((entry) => entry.card.cardId === stale.cardId)!;
     expect(verdict).toMatchObject({ state: "direct-prior", directPrior: false });
+  });
+});
+
+// ── M1-T6 (#215): anchoring accountability at the authorized lifecycle seam ──
+
+const resumeAuth = (): ResumeAuthorization => ({ requested: true, token: "/resume", missionSelector: "displayed" });
+
+describe("decision accountability and anti-collapse safeguards (#215)", () => {
+  test("an H1/H2 anchoring revision keeps H2 with its contradicting refs and leaves H1's outcome unobserved", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-t6-anchor"));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.75" };
+    const runtimeFactory = (workspaceRoot: string) => new PiAgentRuntime({
+      workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+      sessionFactory: brokerSession(writes),
+    });
+
+    // Phase 1: a measured baseline, then ONE measured refutation. The refutation
+    // is what a later Hypothesis cites as contradicting Evidence.
+    const refuting: MissionDirector = {
+      id: "refuting-experiment-director",
+      async decide(input: DirectorInput) {
+        writes.answer = "not-a-number";
+        return {
+          proposal: investigateTask("H1 fold window direction", input.stateVersion) as never,
+          sessionId: "phase-1",
+          usage: DECISION_USAGE,
+        };
+      },
+    };
+    const started = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: refuting,
+      maxExperiments: 1,
+      runtimeFactory,
+    });
+    expect(started.status).toBe("iteration-limit");
+    const refutedRunId = started.record.experiments![0]!.runId;
+    expect(started.record.experiments![0]!.negativeEvidence).toBe(true);
+
+    // Two competing Hypotheses under the same conditions: H1 restates the blind
+    // direction, H2 survives by citing the measured refutation.
+    await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        proposalId: "p-h1", operationId: "op-h1",
+        statement: "a shorter fold window lowers rmse under the same split",
+        supportingRefs: [{ kind: "run", ref: started.record.baseline!.runId }],
+        contradictingRefs: [],
+      }),
+    });
+    await submitSynthesisProposal({
+      projectRoot: project, missionId: draft.id,
+      proposal: synthesisPayload(draft.id, {
+        proposalId: "p-h2", operationId: "op-h2",
+        statement: "the fold window is irrelevant once the split is purged",
+        supportingRefs: [{ kind: "run", ref: started.record.baseline!.runId }],
+        contradictingRefs: [{ kind: "negative-evidence", ref: refutedRunId }],
+        competingRefs: [{ kind: "claim", ref: "p-h1" }],
+      }),
+    });
+
+    // Phase 2: Memory repeatedly replaces the blind H1 direction with H2. Both
+    // resumed Runs measure fine, so no new discriminating Evidence appears.
+    const H2_CARD = "hypothesis:synthesis:p-h2";
+    const { director } = twoStageDirector((input, stage) => {
+      writes.answer = "0.8";
+      if (stage === "blind") return { proposal: investigateTask("H1 fold window direction", input.stateVersion) };
+      return {
+        proposal: investigateTask("H2 purged-split direction", input.stateVersion),
+        usedMemoryRefs: [H2_CARD],
+      };
+    });
+    const resumed = await resumeAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: resumeAuth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 3,
+      runtimeFactory,
+    });
+
+    // Review cannot force an action: the authorized bound still governs, and
+    // the durable trail keeps every Experiment (the phase-1 refutation too).
+    expect(resumed.status).toBe("iteration-limit");
+    expect(resumed.experiments).toHaveLength(4);
+
+    // AC3/AC4: every rejected direction keeps its Memory refs, applicability,
+    // reason and an UNOBSERVED outcome — never a failure and never a regret.
+    const revisions = resumed.record.decisions!.filter((decision) => decision.phase === "revision" && decision.accepted && decision.delta === "replaced");
+    expect(revisions).toHaveLength(3);
+    const rejected = revisions[0]!.rejectedAlternatives!;
+    expect(rejected[0]).toMatchObject({
+      objective: "H1 fold window direction",
+      counterfactualStatus: "unobserved",
+      influencingMemoryRefs: [H2_CARD],
+      applicability: { declared: ["dataset:train-v1"], status: "declared" },
+    });
+    expect(rejected[0]!.reason).toMatch(/superseded/);
+
+    const accountability = projectDecisionAccountability(resumed.record);
+    expect(accountability.decisions).toHaveLength(4);
+    const h1Rejection = accountability.decisions
+      .flatMap((decision) => decision.rejected)
+      .find((rejected) => rejected.objective === "H1 fold window direction")!;
+    expect(h1Rejection.counterfactualStatus).toBe("unobserved");
+    expect(h1Rejection.counterfactualRunIds).toEqual([]);
+    expect(h1Rejection.decisionRegret).toBeUndefined();
+
+    // AC9: H2 survives in Memory with its contradicting refs intact.
+    const snapshot = await loadResearchMemorySnapshot(join(project, ".evok", "missions", draft.id, "memory"));
+    const h2 = snapshot!.cards.find((card) => card.cardId === H2_CARD)!;
+    expect(h2).toMatchObject({
+      kind: "hypothesis",
+      lifecycle: "contested",
+      contradictingRefs: [`negative-evidence:${refutedRunId}`],
+      competingRefs: ["claim:p-h1"],
+    });
+    expect(snapshot!.cards.find((card) => card.cardId === "hypothesis:synthesis:p-h1")!.lifecycle).toBe("contested");
+
+    // AC6/AC7: repeated Memory-driven concentration toward one direction, with
+    // no new discriminating Evidence, is durably recorded ONCE as advisory.
+    const reviews = resumed.record.history.filter((event) => event.type === "DIRECTION_CONCENTRATION_REVIEW");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.detail).toMatchObject({ objective: "h2 purged-split direction", advisory: true });
+    // A third change re-states the same concentration; it must not re-fire.
+    expect(accountability.diversity.memoryChangedDecisions).toBe(3);
+    expect(accountability.diversity.branches).toContainEqual({
+      objective: "h2 purged-split direction",
+      runIds: resumed.record.experiments!.filter((entry) => entry.taskObjective === "H2 purged-split direction").map((entry) => entry.runId),
+    });
+    expect(summarizeMission(resumed.record).diversity?.memoryChangedDecisions).toBe(3);
+
+    // AC1/AC2: the packet that revision saw reserved the competitor and the
+    // measured refutation ahead of the (more numerous) supporting cards.
+    expect(revisions[0]!.memory?.cardRefs).toContain(H2_CARD);
+    expect(revisions[0]!.memory?.cardRefs).toContain(`finding:${refutedRunId}`);
   });
 });

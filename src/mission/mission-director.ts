@@ -668,6 +668,10 @@ export function buildDirectorPrompt(input: DirectorInput): string {
     packet === undefined
       ? "RESEARCH DECISION PACKET: none pinned (no Research Memory snapshot is pinned for this Mission yet)."
       : `RESEARCH DECISION PACKET (one pinned snapshot, JSON):\n${JSON.stringify(packet)}`,
+    // #215: a bounded packet must never read as the complete research history.
+    ...(packet?.truncated
+      ? ["The packet above is TRUNCATED: its omissions/omittedCardCount fields count the cards it does not carry, so it is not the complete history."]
+      : []),
     "Respond with the same JSON shape; you may add \"alternatives\" (bounded actions only) and \"usedMemoryRefs\" (card ids from this packet only).",
   ].join("\n");
 }

@@ -10,6 +10,19 @@ export {
   EvidenceMemory,
 } from "./research-loop";
 export {
+  projectDecisionAccountability,
+  DIRECTION_CONCENTRATION_MIN_REVISIONS,
+  DIRECTION_CONCENTRATION_RECOMMENDATION,
+} from "./decision-accountability";
+export type {
+  DecisionAccountability,
+  DecisionAccountabilitySource,
+  DecisionAccountabilityView,
+  DirectionConcentrationReview,
+  RejectedDirectionAccountability,
+  ResearchDiversity,
+} from "./decision-accountability";
+export {
   startAuthorizedMission,
   resumeAuthorizedMission,
   submitSynthesisProposal,

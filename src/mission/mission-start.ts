@@ -75,6 +75,7 @@ import {
   type DirectorProposal,
   type MissionDirector,
 } from "./mission-director";
+import { projectDecisionAccountability, type CounterfactualStatus, type RejectedDirectionApplicability, type ResearchDiversity } from "./decision-accountability";
 import {
   RESUMABLE_STATUSES,
   reconcileInterruptedMission,
@@ -369,7 +370,7 @@ export function classifyTrailEntry(entry: TrailOutcomeFields): RunOutcomeClassif
  * The declared Task configuration as one bounded, memory-safe label. A value
  * that could not enter agent memory is dropped rather than failing a Run.
  */
-function configurationLabel(constraints: Readonly<Record<string, unknown>> | undefined): string | undefined {
+export function configurationLabel(constraints: Readonly<Record<string, unknown>> | undefined): string | undefined {
   const entries = Object.entries(constraints ?? {}).filter(([, value]) =>
     typeof value === "string" || typeof value === "number" || typeof value === "boolean");
   if (entries.length === 0) return undefined;
@@ -435,6 +436,27 @@ export interface RejectedAlternative {
   /** Set only when a real (frozen or declared) proposal is being audited. */
   readonly proposal?: DirectorProposal;
   readonly reason: string;
+  /** M1-T6: the Memory cards that informed the revision which rejected it. */
+  readonly influencingMemoryRefs?: readonly string[];
+  /** M1-T6: the applicability those cards declared, as the revision saw it. */
+  readonly applicability?: RejectedDirectionApplicability;
+  /**
+   * M1-T6: an unexecuted direction has an UNOBSERVED outcome. It is never a
+   * failure, Negative Evidence, or Decision Regret; observed regret is recorded
+   * later only when a comparable Experiment actually measured the direction.
+   */
+  readonly counterfactualStatus?: CounterfactualStatus;
+}
+
+/** The applicability the delivered, actually-used cards declared (#215 AC3). */
+function applicabilityOf(
+  packet: ResearchDecisionPacket | undefined,
+  usedCardRefs: readonly string[],
+): RejectedDirectionApplicability {
+  const cards = packet?.cards.filter((card) => usedCardRefs.includes(card.cardId)) ?? [];
+  const declared = [...new Set(cards.flatMap((card) => card.applicability))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  // Undeclared is unknown, never silently compatible.
+  return { declared, status: declared.length > 0 ? "declared" : "unknown" };
 }
 
 export type MissionStatus =
@@ -473,6 +495,8 @@ export type HistoryEventType =
   // M1-T3 stored Synthesis Proposals (accepted unverified / refused)
   | "SYNTHESIS_PROPOSAL_RECORDED"
   | "SYNTHESIS_PROPOSAL_REJECTED"
+  // M1-T6 advisory anti-collapse review (never a gate, never a quota)
+  | "DIRECTION_CONCENTRATION_REVIEW"
   // #114 recovery
   | "MISSION_RESUMED"
   | "RECOVERY_COMPLETED"
@@ -1913,11 +1937,26 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         const usedCardRefs = [...new Set(call.usedMemoryRefs ?? [])];
         const base = { ...stageExtra, ...(call.model ? { model: call.model } : {}) };
         if (args.phase === "blind") return base;
-        const rejectedAlternatives: RejectedAlternative[] = (proposal.alternatives ?? []).map((alternative) => ({
+        // M1-T6: every rejected direction keeps the Memory refs that informed the
+        // revision, their applicability, and an UNOBSERVED counterfactual. Nothing
+        // in this record can call an unexecuted direction a failure or a regret.
+        const influencingMemoryRefs = usedCardRefs;
+        const applicability = applicabilityOf(args.packet, influencingMemoryRefs);
+        const rejectedAlternative = (
+          alternative: { action: DirectorAction; objective?: string },
+          reason: string,
+          extra: Partial<RejectedAlternative> = {},
+        ): RejectedAlternative => ({
           action: alternative.action,
-          objective: alternative.objective,
-          reason: "not selected: only the head action dispatches",
-        }));
+          ...(alternative.objective !== undefined ? { objective: alternative.objective } : {}),
+          reason,
+          influencingMemoryRefs,
+          applicability,
+          counterfactualStatus: "unobserved",
+          ...extra,
+        });
+        const rejectedAlternatives: RejectedAlternative[] = (proposal.alternatives ?? []).map((alternative) =>
+          rejectedAlternative(alternative, "not selected: only the head action dispatches"));
         // A delta only exists when Memory was actually delivered; an Off or
         // unpinned Mission must never attribute a change to Memory it never saw.
         if (args.packet === undefined || args.blindProposal === undefined) {
@@ -1925,12 +1964,11 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         }
         const delta = deriveDecisionDelta(args.blindProposal, proposal);
         if (delta !== "unchanged") {
-          rejectedAlternatives.push({
-            action: args.blindProposal.action,
-            ...(args.blindProposal.task ? { objective: args.blindProposal.task.objective } : {}),
-            proposal: args.blindProposal,
-            reason: `superseded by the Memory-informed revision (delta ${delta})`,
-          });
+          rejectedAlternatives.push(rejectedAlternative(
+            { action: args.blindProposal.action, ...(args.blindProposal.task ? { objective: args.blindProposal.task.objective } : {}) },
+            `superseded by the Memory-informed revision (delta ${delta})`,
+            { proposal: args.blindProposal },
+          ));
         }
         return {
           ...base,
@@ -2264,6 +2302,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       // New observation => authoritative state advances; the next decision
       // must echo this new stateVersion (stale proposals are rejected).
       record = { ...record, experiments: [...(record.experiments ?? []), entry], stateVersion: (record.stateVersion ?? 0) + 1 };
+      record = withConcentrationReview(record, now());
       record = await refreshResearchMemory(record);
       await persist(options.projectRoot, record);
       if (record.status === "budget-exhausted") break;
@@ -2278,6 +2317,42 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
 }
 
 
+/**
+ * M1-T6: records ONE durable, advisory direction-concentration review when
+ * Memory has repeatedly funnelled this Mission into the same direction without
+ * new discriminating Evidence. It only writes an event: it cannot force an
+ * action, impose an exploration quota, alter Search math, or reserve/freeze any
+ * budget or execution authority.
+ */
+function withConcentrationReview(record: MissionRecord, at: string): MissionRecord {
+  const recorded = (record.history ?? [])
+    .filter((event) => event.type === "DIRECTION_CONCENTRATION_REVIEW")
+    .map((event) => ({
+      objective: event.detail?.objective,
+      decisionGroupIds: (event.detail?.decisionGroupIds as string[] | undefined) ?? [],
+    }));
+  // One review per concentration episode: an already-reviewed window that only
+  // grows (same objective, no new discriminating Evidence) re-states the same
+  // recommendation, so it must not emit a second event.
+  const due = projectDecisionAccountability(record).concentration.find((review) =>
+    !recorded.some((event) => event.objective === review.objective
+      && event.decisionGroupIds.length > 0
+      && event.decisionGroupIds.every((decisionGroupId) => review.decisionGroupIds.includes(decisionGroupId))));
+  if (due === undefined) return record;
+  return withEvent(record, {
+    type: "DIRECTION_CONCENTRATION_REVIEW",
+    at,
+    detail: {
+      kind: due.kind,
+      objective: due.objective,
+      decisionGroupIds: [...due.decisionGroupIds],
+      memoryChangedDecisions: due.memoryChangedDecisions,
+      advisory: due.advisory,
+      recommendation: due.recommendation,
+    },
+  });
+}
+
 /** Build the minimal "display + reopen" projection over a durable record. */
 export function summarizeMission(record: MissionRecord): {
   readonly id: string;
@@ -2291,8 +2366,12 @@ export function summarizeMission(record: MissionRecord): {
   readonly decisions: number;
   readonly negativeEvidence: number;
   readonly researchMemory?: ResearchMemorySummary;
+  /** M1-T6 read-only anchoring measurement: objectives, Branch coverage, changes. */
+  readonly diversity?: ResearchDiversity;
 } {
   const experiments = record.experiments ?? [];
+  const memoryInformedRevisions = (record.decisions ?? [])
+    .filter((decision) => decision.phase === "revision" && decision.memory !== undefined).length;
   return {
     id: record.id,
     status: record.status,
@@ -2311,6 +2390,7 @@ export function summarizeMission(record: MissionRecord): {
     // operational outcome, not Negative Evidence (#213).
     negativeEvidence: experiments.filter((entry) => classifyTrailEntry(entry).scientificNegativeEvidence).length,
     ...(record.researchMemory ? { researchMemory: record.researchMemory } : {}),
+    ...(memoryInformedRevisions > 0 ? { diversity: projectDecisionAccountability(record).diversity } : {}),
   };
 }
 
