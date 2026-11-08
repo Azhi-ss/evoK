@@ -3,8 +3,8 @@
  * Known host-failure gate.
  *
  * This suite has a fixed set of failures that come from the host/SDK environment
- * (symlinked temp dirs, a missing `python` shim, the plugin barrel), not from the
- * code under review. `docs/agents/known-failures.txt` records the accepted set, so
+ * (symlinked temp dirs, a missing `python` shim, Pi SDK session fixtures), not
+ * from the code under review. `docs/agents/known-failures.txt` records the accepted set, so
  * "no failure outside the accepted set" is either proven or refused instead of
  * being eyeballed from a 280KB log with an ad-hoc grep/sed/diff.
  *

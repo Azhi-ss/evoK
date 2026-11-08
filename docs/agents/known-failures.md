@@ -2,7 +2,7 @@
 
 `bun test --rerun-all-tests` has a set of failures that come from the environment
 and the SDK, not from the change under review: symlinked temp dirs, a missing
-`python` shim, the plugin barrel, Pi SDK session fixtures.
+`python` shim, and Pi SDK session fixtures.
 `docs/agents/known-failures.txt` records the accepted set as a **union across
 hosts**, so "no failure outside the accepted set" is a command, not an eyeballed
 grep over a 280KB log.
@@ -23,17 +23,20 @@ these run the same `--check`:
 
 | Host | Observed | Verdict |
 |---|---|---|
-| macOS dev machine | 44 failures, all accepted | pass |
-| Ubuntu runner (GitHub Actions) | 2 failures, both accepted, 42 accepted names did not reproduce | pass |
+| macOS dev machine | 42 failures, all accepted | pass |
+| Ubuntu runner (GitHub Actions) | 0 failures; the 42 accepted names are macOS-only and do not reproduce there | pass |
 
 A host that reproduces **fewer** failures passes: "no-longer-failing" is
 informational, because a fix must never turn a gate red. A failure **outside** the
 union fails the gate — fix it, or park the ticket; never add it to the baseline to
 make the gate green.
 
-The two runner failures (2026-11-08) are `cli pack re-export isomorphism` and
-`mission intake (#111)`; both also fail on macOS, so they are environment-independent
-and are the first candidates for a real fix.
+The two failures the runner used to reproduce were fixed on 2026-11-08
+(`3add2af`, `48a764f`): both were **stale test expectations**, not product
+defects — the `src/cli` barrel legitimately also re-exports the unified
+`evok-plugin`, and intake reads the skill from its discovered project copy
+instead of the packaged source. Both names were removed from the union after the
+fix, and the runner now reproduces zero failures.
 
 ## Updating
 

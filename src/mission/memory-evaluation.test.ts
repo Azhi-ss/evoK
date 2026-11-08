@@ -126,6 +126,9 @@ describe("offline replay (M1-T9 AC4)", () => {
     expect(replay[1]!.visibleRunIds).not.toContain("m-arm:exp:2");
   });
 
+  // A straight-line Mission's prefix ordinal happens to equal the revision it was
+  // served, so this fixture forces the divergence (served 7 vs ordinal 1): the
+  // integration test proves the wiring, this proves the preference.
   test("replay pins the durable ledger revision a Run was served, not the prefix ordinal", () => {
     const servedRecord: MissionRecord = {
       ...history(),

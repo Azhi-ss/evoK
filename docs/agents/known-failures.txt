@@ -36,11 +36,9 @@ PiAgentRuntime resolved-model wiring (#109) > feeds the tier-resolved model and 
 PiAgentRuntime resolved-model wiring (#109) > missing authentication fails clearly before work is dispatched, without silent fallback
 PiAgentRuntime resolved-model wiring (#109) > missing or invalid model configuration fails before any intent is dispatched
 PiAgentRuntime resolved-model wiring (#109) > the SDK session created for a wired Run keeps hidden retry/compaction disabled
-cli pack re-export isomorphism > src/cli/ barrel re-exports the same runtime bindings as evok-cli
 devii-opt-attest/v1 > a Python-written attestation verifies, and a changed artifact does not
 evok resources through the Pi SDK execution boundary (#110) > a real SDK read tool call reads a skill body and a skill-relative reference in place
 harnessopt_submit_gate > the command runs the full checklist and fails closed
-mission intake (#111) — complete request, skill loading, no dispatch > a complete request loads the intake skill in place, inspects project facts, saves a reviewable draft + initial plan, and never dispatches
 role spawn > an innovator launch uses its cwd and the relay BASE_URL, and cannot write the relay log
 runEvok foreground request/response (#109) > the session can read files from the selected research project but not write there
 runEvok research resources (#110) > a real SDK tool call reads an in-place skill reference even though the Run workspace differs
