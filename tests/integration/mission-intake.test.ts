@@ -10,20 +10,23 @@
  * tools and any start action are absent.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver, type SessionModelResolver } from "../../src/evok-model";
-import { discoverEvokResources, bundledSkillRoot } from "../../src/evok-resources";
+import { discoverEvokResources } from "../../src/evok-resources";
 import { runIntakeTurn, type RetrievalCapability } from "../../src/mission-intake";
 import { loadMissionDraft, MissionDraftCorruptionError } from "../../src/mission-draft";
 
+// Canonical temp dirs: the sandbox compares against real read roots, so a
+// macOS /var -> /private/var alias in the test layout would be denied for a
+// reason that has nothing to do with intake.
 async function layout() {
-  const home = await mkdtemp(join(tmpdir(), "evok-in-home-"));
-  const project = await mkdtemp(join(tmpdir(), "evok-in-project-"));
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "evok-in-ws-"));
+  const home = await realpath(await mkdtemp(join(tmpdir(), "evok-in-home-")));
+  const project = await realpath(await mkdtemp(join(tmpdir(), "evok-in-project-")));
+  const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "evok-in-ws-")));
   await mkdir(join(home, ".evok", "skills"), { recursive: true });
   await mkdir(join(project, ".evok", "skills"), { recursive: true });
   // Authorized project fact the model can inspect instead of asking the user.
@@ -89,7 +92,9 @@ describe("mission intake (#111) — complete request, skill loading, no dispatch
     const { faux, resolver } = await setupFaux("complete");
 
     let capturedSystem = "";
-    const skillPath = join(bundledSkillRoot(), "mission-intake", "SKILL.md");
+    // The skill is read from its discovered, approved location (the project copy
+    // a bundled sync places under .pi/skills), never from the packaged source.
+    const skillPath = resources.skills.find((s) => s.skill.name === "mission-intake")!.skill.filePath;
     faux.setResponses([
       (ctx: unknown) => {
         const system = ctx as { systemPrompt?: string; messages?: unknown[] };
