@@ -304,6 +304,8 @@ export interface MissionRunRecord {
     readonly snapshotId: string;
     readonly snapshotDigest: string;
     readonly sliceDigest: string;
+    /** The published snapshot's durable ledger revision (absent on legacy records). */
+    readonly ledgerRevision?: number;
   };
   readonly error?: string;
   readonly dispatchedAt: string;
@@ -1558,6 +1560,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           snapshotId: brokered.memorySlice.research.snapshotId,
           snapshotDigest: brokered.memorySlice.research.digest,
           sliceDigest: brokered.memorySlice.digest,
+          ledgerRevision: brokered.memorySlice.research.ledgerRevision,
         }
       : undefined;
 

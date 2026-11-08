@@ -59,6 +59,7 @@ export interface ReplayedRunMemory {
   readonly mode: ResearchMemoryEvaluationMode;
   /** Only Runs (and therefore facts) that already existed when this Run began. */
   readonly visibleRunIds: readonly string[];
+  /** Ledger revision the Mission served this Run; legacy records use the prefix ordinal. */
   readonly ledgerRevision: number;
   readonly snapshotId?: string;
   readonly snapshotDigest?: string;
@@ -136,6 +137,16 @@ function assertNoFutureInformation(cards: readonly { readonly summary?: string; 
 }
 
 /**
+ * The ledger revision the Mission durably served for one Run: the published
+ * snapshot the Run actually consumed. A legacy Run record (or a Run dispatched
+ * before any snapshot existed) has no served revision, so replay keeps the
+ * pre-existing prefix ordinal.
+ */
+function durableLedgerRevision(record: MissionRecord, runId: string, ordinal: number): number {
+  return record.runs?.[runId]?.researchMemory?.ledgerRevision ?? ordinal;
+}
+
+/**
  * Replays one durable Mission under one evaluation arm. Every Run is pinned to
  * the deterministic snapshot projected from the state visible before it began;
  * `off` delivers no Memory, `sham` delivers the Schema-only control packet and
@@ -148,6 +159,7 @@ export function replayResearchMemory(options: {
   const runs = trailRunsOf(options.record);
   const mode = options.mode;
   return runs.map((run, index) => {
+    const ledgerRevision = durableLedgerRevision(options.record, run.runId, index);
     const visibleRunIds = runs.filter((other) => timeOf(other.producedAt) < timeOf(run.beganAt)).map((other) => other.runId);
     const futureRunIds = runs
       .filter((other) => other.runId !== run.runId && timeOf(other.producedAt) >= timeOf(run.beganAt))
@@ -157,14 +169,14 @@ export function replayResearchMemory(options: {
         runId: run.runId,
         mode,
         visibleRunIds,
-        ledgerRevision: index,
+        ledgerRevision,
         cardCount: 0,
         control: false,
       });
     }
-    // The prefix's own ordinal, never the Mission's final stateVersion: a replay
-    // must not read a counter that the future advanced.
-    const source = { ...missionResearchSource(recordBefore(options.record, run.beganAt)), ledgerRevision: index };
+    // The revision the Mission actually served this Run, published BEFORE it
+    // began, never the final stateVersion the future advanced to.
+    const source = { ...missionResearchSource(recordBefore(options.record, run.beganAt)), ledgerRevision };
     const real = projectResearchMemorySnapshot(source);
     // A Sham arm serves the CONTROL snapshot, so its pinned identity must be the
     // same one a live Sham arm publishes (never the real snapshot's address).
@@ -176,7 +188,7 @@ export function replayResearchMemory(options: {
       runId: run.runId,
       mode,
       visibleRunIds,
-      ledgerRevision: index,
+      ledgerRevision,
       snapshotId: packet.snapshotId,
       snapshotDigest: packet.snapshotDigest,
       packetDigest: packet.digest,

@@ -410,6 +410,27 @@ describe("Memory Off / Sham / Real at the authorized lifecycle seam (M1-T9)", ()
     expect(replayResearchMemory({ record: real.record, mode: "real" })).toEqual(replay);
   });
 
+  test("offline replay reproduces the snapshot the real arm served the experiment Run", async () => {
+    const real = await runArm("real");
+    const replay = replayResearchMemory({ record: real.record, mode: "real" });
+    const run = replay.find((entry) => entry.runId === `${MISSION_ID}:exp:2`)!;
+    // The revision decision dispatched this Run and recorded the snapshot it
+    // actually consumed; replay must reproduce that identity, not an ordinal.
+    const revision = real.record.decisions!.find((decision) => decision.phase === "revision")!;
+    expect(revision.memory).toBeDefined();
+    expect(run.snapshotId).toBe(revision.memory!.snapshotId);
+    expect(run.snapshotDigest).toBe(revision.memory!.snapshotDigest);
+    // The durable ledger revision is recorded on the Run, and replay uses it.
+    const runRecord = real.record.runs![`${MISSION_ID}:exp:2`]!;
+    expect(runRecord.researchMemory!.snapshotDigest).toBe(revision.memory!.snapshotDigest);
+    expect(runRecord.researchMemory!.ledgerRevision).toBeDefined();
+    expect(run.ledgerRevision).toBe(runRecord.researchMemory!.ledgerRevision!);
+    // No future information: the Run's own measurement is not in its Memory.
+    expect(run.visibleRunIds).toEqual([`${MISSION_ID}:baseline:1`]);
+    // Determinism still holds.
+    expect(replayResearchMemory({ record: real.record, mode: "real" })).toEqual(replay);
+  });
+
   test("Mission status exposes only the read-only Memory summary", async () => {
     const sham = await runArm("sham");
     const summary = summarizeMission(sham.record);

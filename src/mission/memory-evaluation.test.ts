@@ -126,6 +126,26 @@ describe("offline replay (M1-T9 AC4)", () => {
     expect(replay[1]!.visibleRunIds).not.toContain("m-arm:exp:2");
   });
 
+  test("replay pins the durable ledger revision a Run was served, not the prefix ordinal", () => {
+    const servedRecord: MissionRecord = {
+      ...history(),
+      runs: {
+        "m-arm:exp:1": {
+          runId: "m-arm:exp:1", intentId: "i1", attempt: 1, status: "measured", workspace: "",
+          dispatchedAt: AT.one, finishedAt: AT.two,
+          researchMemory: { snapshotId: "research-memory:served", snapshotDigest: "served", sliceDigest: "slice", ledgerRevision: 7 },
+        },
+      },
+    };
+    const served = replayResearchMemory({ record: servedRecord, mode: "real" }).find((run) => run.runId === "m-arm:exp:1")!;
+    expect(served.ledgerRevision).toBe(7);
+    // A legacy Run record carries no served revision, so it keeps the ordinal.
+    const legacy = replayResearchMemory({ record: history(), mode: "real" }).find((run) => run.runId === "m-arm:exp:1")!;
+    expect(legacy.ledgerRevision).toBe(1);
+    // The ledger revision is part of the snapshot body, so it changes the identity.
+    expect(served.snapshotDigest).not.toBe(legacy.snapshotDigest);
+  });
+
   test("the replayed packet carries no run id that did not exist yet", () => {
     const replay = replayResearchMemory({ record: history(), mode: "real" });
     // The replay itself fails closed on leakage, so a completed replay of a
