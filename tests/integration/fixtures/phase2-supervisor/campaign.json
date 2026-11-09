@@ -1,0 +1,4 @@
+{
+  "best": "abc",
+  "revisions": { "abc": { "id": "rev-validated", "phases": { "screening": 0.75 } } }
+}

@@ -92,6 +92,15 @@ export type {
   DeployArenaOrchInput,
   DeployArenaOrchResult,
 } from "./deploy-arena-orch";
+export { Phase2Research, initPhase2Research, isPhase2Eligible } from "./phase2-research";
+export { createPhase2WorkspaceRunner } from "./phase2-workspace-runner";
+export type { Phase2WorkspaceRunnerOptions } from "./phase2-workspace-runner";
+export type {
+  Phase2DirectorView,
+  Phase2NextAction,
+  Phase2ResearcherView,
+  Phase2RevisionScore,
+} from "./phase2-research";
 export { assembleLlmCompArmSetup } from "./llm-propose-outer-min";
 export { assembleOuterMinPath } from "./outer-min-path";
 export { assembleOuterE2eMinPath } from "./outer-e2e-min-path";

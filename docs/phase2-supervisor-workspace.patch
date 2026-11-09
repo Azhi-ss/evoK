@@ -1,0 +1,176 @@
+diff --git a/local/pi-campaign-host.test.ts b/local/pi-campaign-host.test.ts
+index 3a45ffe..1a9e8dd 100644
+--- a/local/pi-campaign-host.test.ts
++++ b/local/pi-campaign-host.test.ts
+@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "n
+ import { tmpdir } from "node:os";
+ import { join, resolve } from "node:path";
+ import { createPhase2PiHost } from "../scripts/pi-campaign-host";
++import { MODEL } from "../scripts/pi-round-account";
+ 
+ const ROOT = resolve(import.meta.dir, "..");
+ async function workspace() {
+@@ -51,6 +52,37 @@ const args = {
+   sessionId: "pi-session-fixture",
+   objective: "Recover safely on a malformed action",
+ };
++test("supervisor wakes use the existing meter without a synthetic campaign job or provider switch", async () => {
++  const dir = await workspace();
++  const accounts: any[] = [];
++  const registered: string[] = [];
++  let closed = 0;
++  const pi = { events: {}, registerProvider: (name: string) => registered.push(name),
++    unregisterProvider: (name: string) => registered.splice(registered.indexOf(name), 1) };
++  const host = createPhase2PiHost(pi, dir, {
++    startMeter: async (_root, _signal, account) => {
++      accounts.push(account);
++      return { ...await mockMeter(), close: async () => { closed++; } };
++    },
++    meterTotal: async () => ({ heldCNY: 0, nodeHeldCNY: 0, spentCNY: 0, nodeSpentCNY: 0, remainingCNY: 100 }),
++  });
++  const report = { id: "supervisor-result-fixture", jobId: "supervisor", sessionId: "pi-1", supervisor: { watcher: "result" } };
++  try {
++    expect(host.supervision.directory).toBe(join(dir, ".phase2/campaign"));
++    const before = await readFile(join(dir, ".phase2/campaign/pi-work/jobs/proposal-003/job.json"), "utf8");
++    await expect(host.rounds.openDirector(report, { provider: "other", model: MODEL })).rejects.toThrow(/current provider/);
++    expect(accounts).toHaveLength(0);
++    const meter = await host.rounds.openDirector(report, { provider: "ai-modeling", model: MODEL });
++    expect(accounts[0]).toMatchObject({ role: "director", nodeId: "director-supervisor", deliveryId: report.id });
++    expect(registered).toEqual([meter.provider]);
++    expect(meter.model).toBe(MODEL);
++    await meter.close();
++    expect(closed).toBe(1);
++    expect(registered).toEqual([]);
++    expect(await readFile(join(dir, ".phase2/campaign/pi-work/jobs/proposal-003/job.json"), "utf8")).toBe(before);
++  } finally { await rm(dir, { recursive: true, force: true }); }
++});
++
+ test("real handoff isolates edits, binds fresh role memories, persists review and survives reopened Pi host", async () => {
+   const dir = await workspace(),
+     registered: string[] = [],
+diff --git a/local/test_preflight.py b/local/test_preflight.py
+index 7bf28de..e7c110b 100644
+--- a/local/test_preflight.py
++++ b/local/test_preflight.py
+@@ -33,6 +33,29 @@ class BudgetTest(unittest.TestCase):
+             self.assertEqual(summary["settledEstimate"], 41)
+             self.assertFalse(summary["mutable"])
+ 
++    def test_daily_spend_uses_plus_eight_dates_and_keeps_undated_costs_explicit(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            files = {
++                "config/budget.json": {"totalCap": 300, "cloudSpendCNY": 4},
++                "evidence/model-access.json": {"costUpperBoundCNY": 1},
++                ".evok/biomaster/requests.json": [
++                    {"state": "settled", "bookedCNY": 10, "at": "2026-11-07T15:59:00Z"},
++                    {"state": "held-unverified", "bookedCNY": 3, "at": "2026-11-07T16:00:00Z"},
++                    {"state": "reserved", "bookedCNY": 2, "at": "2026-11-08T01:00:00Z"},
++                    {"state": "settled", "bookedCNY": 7},
++                    {"state": "rejected", "bookedCNY": 99, "at": "2026-11-08T01:00:00Z"},
++                ],
++            }
++            for name, data in files.items():
++                path = root / name
++                path.parent.mkdir(parents=True, exist_ok=True)
++                path.write_text(json.dumps(data))
++            summary = preflight.budget_summary(root)
++            self.assertEqual(summary["dailySpend"], {"2026-11-07": 10, "2026-11-08": 5})
++            self.assertEqual(summary["undatedSpendCNY"], 12)
++            self.assertEqual(summary["remaining"], 273)
++
+ 
+ class QuotaTest(unittest.TestCase):
+     def test_other_competitors_do_not_consume_our_slot(self):
+diff --git a/scripts/pi-campaign-host.ts b/scripts/pi-campaign-host.ts
+index 901f4f6..7441b98 100644
+--- a/scripts/pi-campaign-host.ts
++++ b/scripts/pi-campaign-host.ts
+@@ -190,7 +190,11 @@ export function createPhase2PiHost(pi: HostPi, root: string, deps: Dependencies
+     async acknowledge(r: any) {
+       await cli("ack", "--job", r.jobId, "--session", r.sessionId, "--id", r.id);
+     },
+-    async openDirector(r: any) {
++    async openDirector(r: any, selection?: { provider: string; model: string }) {
++      // The existing meter is authorized for this provider/model only. Never silently
++      // route a supervisor wake to a different provider selected by the operator.
++      if (r.supervisor && (selection?.provider !== "ai-modeling" || selection.model !== MODEL))
++        throw Error("The current provider/model has no authorized campaign meter; select ai-modeling/" + MODEL);
+       const alias = "evok-meter-director-" + randomUUID();
+       const args = ["--job", r.jobId, "--session", r.sessionId, "--id", r.id, "--pid", String(process.pid)];
+       const account: Account = { role: "director", nodeId: "director-" + r.jobId, deliveryId: r.id };
+@@ -218,8 +222,11 @@ export function createPhase2PiHost(pi: HostPi, root: string, deps: Dependencies
+         }
+       };
+       try {
+-        owned = Boolean(await cli("claim-wake", ...args));
+-        if (!owned) throw Error("report is already owned by a Pi session");
++        // Supervisor dedupe is in Pi's session branch, not a synthetic job.json.
++        if (!r.supervisor) {
++          owned = Boolean(await cli("claim-wake", ...args));
++          if (!owned) throw Error("report is already owned by a Pi session");
++        }
+         await ensureUnstarted();
+         pi.registerProvider(alias, providerConfig(meter));
+         registered = true;
+@@ -232,6 +239,7 @@ export function createPhase2PiHost(pi: HostPi, root: string, deps: Dependencies
+   };
+   return {
+     rounds,
++    supervision: { directory: join(root, ".phase2/campaign") },
+     async hypotheses(values: string[]) {
+       return cli("hypotheses", "--set", JSON.stringify(values));
+     },
+diff --git a/scripts/pi_campaign_work.py b/scripts/pi_campaign_work.py
+index 93937fa..02ca3f6 100644
+--- a/scripts/pi_campaign_work.py
++++ b/scripts/pi_campaign_work.py
+@@ -141,6 +141,8 @@ def public_budget(project):
+             "heldUnverified",
+             "cloudSpend",
+             "remaining",
++            "dailySpend",
++            "undatedSpendCNY",
+         )
+     } | {"unsettledRequests": unresolved}
+ 
+diff --git a/scripts/preflight.py b/scripts/preflight.py
+index c4a1676..4682757 100755
+--- a/scripts/preflight.py
++++ b/scripts/preflight.py
+@@ -6,7 +6,7 @@ from __future__ import annotations
+ import hashlib
+ import json
+ import os
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from decimal import Decimal
+ from pathlib import Path
+ import subprocess
+@@ -41,6 +41,17 @@ def budget_summary(s1_root: Path) -> dict:
+     cloud = Decimal(str(budget.get("cloudSpendCNY", 0)))
+     cap = Decimal(str(budget["totalCap"]))
+     remaining = cap - settled - reserved - held - cloud
++    daily = {}
++    undated = Decimal(str(access["costUpperBoundCNY"])) + cloud
++    for row in ledger:
++        if row["state"] == "rejected":
++            continue
++        at = parse_time(row.get("at"))
++        if at is None or at.tzinfo is None:
++            undated += booked(row)
++        else:
++            day = at.astimezone(timezone(timedelta(hours=8))).date().isoformat()
++            daily[day] = daily.get(day, Decimal()) + booked(row)
+     return {
+         "status": "ok" if remaining >= 0 else "red",
+         "currency": budget.get("currency", "CNY"),
+@@ -50,6 +61,8 @@ def budget_summary(s1_root: Path) -> dict:
+         "heldUnverified": float(held),
+         "cloudSpend": float(cloud),
+         "remaining": float(remaining),
++        "dailySpend": {day: float(amount) for day, amount in sorted(daily.items())},
++        "undatedSpendCNY": float(undated),
+         "source": str(s1_root),
+         "mutable": False,
+     }

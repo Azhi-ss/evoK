@@ -80,6 +80,46 @@ export type {
   DeployArenaWorker,
 } from "./deploy-arena";
 export {
+  PHASE2_CHALLENGE_ID,
+  PHASE2_HARBOR_PIN,
+  PHASE2_MODEL_ALLOWLIST,
+  PHASE2_ORGANIZER_SUBJECT,
+  PHASE2_STATE_SCHEMA,
+  PHASE2_SUBMISSION_PLACEHOLDERS,
+  Phase2AmbiguousSubmitError,
+  Phase2Error,
+  Phase2PlaygroundAdapter,
+  buildPhase2SubmissionJson,
+  createPhase2JsonStore,
+  emptyPhase2State,
+  isPhase2Eligible,
+  parsePhase2OfficialStatus,
+  phase2AttemptPendingOfficial,
+  phase2AttemptSubmitted,
+  phase2AttemptUnconfirmed,
+  phase2LatestScore,
+  phase2Spent,
+  strongestPhase2Revision,
+} from "./phase2-playground";
+export type {
+  Phase2Attempt,
+  Phase2AttemptState,
+  Phase2Check,
+  Phase2Evidence,
+  Phase2EvidenceKind,
+  Phase2KitStatus,
+  Phase2Platform,
+  Phase2QuotaStatus,
+  Phase2Revision,
+  Phase2State,
+  Phase2Store,
+  Phase2SubmitResult,
+} from "./phase2-playground";
+export { CliPhase2Platform, digestPhase2Directory, runPhase2Command } from "./phase2-cli-platform";
+export type { Phase2CliPlatformOptions, Phase2CliRunner } from "./phase2-cli-platform";
+export { FakePhase2Platform } from "./phase2-fake-platform";
+export type { FakePhase2Script } from "./phase2-fake-platform";
+export {
   RULE_AUDIENCE_ROLES,
   RULE_SUMMARY_FIELDS,
   RULE_VISIBILITY_SCHEMA,
