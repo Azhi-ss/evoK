@@ -258,6 +258,22 @@ run.mkdir(parents=True)
     ]);
   });
 
+  test("a configured 3.9 interpreter is refused with one actionable error", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "devii-py39-"));
+    const python = join(dir, "python3");
+    writeFileSync(python, `#!/bin/sh\necho '["${python}", "3.9.6"]'\n`, { mode: 0o755 });
+    writeLimits(dir);
+    const executor = new DeviiExecutor({
+      python,
+      scriptPath: fakeScript(dir, "import sys\n"),
+      runRoot: join(dir, "runs"),
+      harnessHome: dir,
+      taskRoot: dir,
+      env: {},
+    });
+    await expect(executor.run(task, join(dir, "config.json"))).rejects.toThrow(/3\.9\.6[\s\S]*HARNESS_OPT_PYTHON/);
+  });
+
   test("held-out is refused and bohr still throws", async () => {
     const executor = new DeviiExecutor({ runRoot: "/tmp", harnessHome: "/tmp", env: process.env });
     await expect(executor.run({ id: "h", split: "held-out", path: "h.md" }, "config.json")).rejects.toThrow(/held-out/);

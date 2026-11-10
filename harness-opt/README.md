@@ -75,6 +75,8 @@ held-out 只有 `sealed/heldout-score.json`。读不到、JSON 坏、分数不�
 
 TTS 只认 `state/tts-comparison.json` 里 `source: "matched-budget"` 且 `status` 为 `passed` 或 `failed`。没有这份文件时状态是 `not-run`，提交门失败。held-out 和 `ttsBaseline` 的比较不能把这盏灯点绿。
 
+所有 python 子进程（relay、`devii_one.py`、`ewi_idle.py`、attestation 写入等）走同一条解析规则：`HARNESS_OPT_PYTHON` 指定的解释器，其次是调用方传入的 `options.python`，最后是 PATH 上第一个 `sys.version_info >= (3, 10)` 的 `python3`（同一个 PATH 条目里先看 `python3`，再看 `python3.14`…`python3.10`）。`relay/ledger.py` 用了 `str | None`，所以 3.9 不支持；显式指定的解释器缺失或低于 3.10 时直接报错，并在同一条消息里点名该路径、测到的版本和 `HARNESS_OPT_PYTHON`，不会静默退回 PATH。
+
 ## 执行器和题库
 
 `HarnessExecutor.run` 返回带 `steps` 的 trace。`BohrSandboxExecutor` 在没有本地 bohr / pi-bio-harness 镜像时抛 `ExecutorUnavailable`。本机闭环用 `SampleTraceExecutor`，重放 `fixtures/sample-trace.json`：read 成功、bash `exit 1: assertion failed...`、write 成功。报告写 `executor sample-trace`。基线路径含 `/base/` 时 reward 0.4，其后候选 0.8。

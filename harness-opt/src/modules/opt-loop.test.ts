@@ -43,6 +43,7 @@ import {
 import { assertRoleSpawn, hostWriteSession, roleWrite, type RoleSpawnConfig } from "./role-spawn";
 import { EFFECTIVE_KNOBS, formatKnobLine, knobCatalog } from "./effective-knobs";
 import { renderExecutorCommand, tokenCap, writeRunArtifacts, type OptExecutor, type OptRunRequest, type OptTask, type RunArtifactTiming } from "./opt-executor";
+import { resolvePython } from "./python";
 
 /** Caller-supplied loop target. The loop itself has no built-in task. */
 const LOOP_TASK: OptTask = {
@@ -457,7 +458,7 @@ server.serve_forever()
 
 /** Separate process. A server inside this test deadlocks under spawnSync. */
 function startEchoUpstream(): Promise<{ readonly url: string; close(): Promise<void> }> {
-  const child = spawn("python3", ["-c", ECHO_UPSTREAM_PY], { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(resolvePython(), ["-c", ECHO_UPSTREAM_PY], { stdio: ["ignore", "pipe", "pipe"] });
   return new Promise((resolve, reject) => {
     let buf = "";
     const timer = setTimeout(() => reject(new Error("echo upstream did not listen")), 5_000);
@@ -968,7 +969,7 @@ describe("optimization loop", () => {
           issues: ["checker_exception: ValueError: private evaluator returned non-finite score"],
         })}\n`);
         const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-        const kept = spawnSync("python3", ["-c", [
+        const kept = spawnSync(resolvePython(), ["-c", [
           "import sys",
           "sys.path.insert(0, sys.argv[1])",
           "import hooks",
@@ -1006,7 +1007,7 @@ describe("optimization loop", () => {
       rounds: 1,
       env: {},
       roles: stubOptRoles(fx.key),
-      executorCommand: ["python3", "{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
+      executorCommand: [resolvePython(), "{driver}", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
       driver: join(fx.root, "driver.py"),
     })).rejects.toThrow(/BASE_URL/);
   });
@@ -1679,7 +1680,7 @@ function onceStyleAttest(fx: Fixture, candidateConfigHash: string): string {
   })}\n`);
   const attest = join(fx.root, `once-attest-${candidateConfigHash.slice(0, 8)}`);
   const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
-  const proc = spawnSync("python3", [
+  const proc = spawnSync(resolvePython(), [
     script, "attest",
     "--run-dir", run,
     "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
@@ -1729,7 +1730,7 @@ function taskStyleAttest(fx: Fixture, candidateConfigHash: string): {
   const traceMtime = statSync(trace).mtimeMs;
   const attest = join(fx.root, `task-attest-${candidateConfigHash.slice(0, 8)}`);
   const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
-  const proc = spawnSync("python3", [
+  const proc = spawnSync(resolvePython(), [
     script, "attest",
     "--run-dir", run,
     "--harness", fx.harnessPath, "--harness-sha", createHash("sha256").update(readFileSync(fx.harnessPath)).digest("hex"),
@@ -4155,7 +4156,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
             RELAY_UPSTREAM_KEY_FILE: join(fx.attestRoot, "upstream.key"),
           };
           const logRoot = join(fx.attestRoot, "relay-logs");
-          const closed = spawnSync("python3", [
+          const closed = spawnSync(resolvePython(), [
             script, "close-run",
             "--log-root", logRoot,
             "--run-id", runIdOf(input.baseUrl),
@@ -4422,7 +4423,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     const flat = argv.join("\n");
     expect(flat).not.toContain(fx.key.toString("hex"));
     expect(flat).not.toContain(fx.keyFile);
-    expect(argv[0]).toBe("python3");
+    expect(argv[0]).toBe(resolvePython());
     expect(argv.slice(3).join("\n")).not.toContain("fromhex");
   });
 

@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { candidateHashFragment } from "./activation";
 import { writeHostAttestation, type AttestRunMeta } from "./attestation";
+import { resolvePython } from "./python";
 
 export interface OptTask {
   readonly id: string;
@@ -313,7 +314,7 @@ const COPY_CHECKER_PY = [
 /** Host copy of {run}/verifier into the relay checker directory. Runs before the attestation is signed. */
 export function copyCheckerBeforeSign(runDir: string, relayRoot: string, runId: string): void {
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  const proc = spawnSync("python3", ["-c", COPY_CHECKER_PY, relayDir, runDir, runId, relayRoot], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), ["-c", COPY_CHECKER_PY, relayDir, runDir, runId, relayRoot], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "checker copy failed").trim());
 }
 
@@ -382,7 +383,7 @@ function relayUsage(root: string, runId: string): { readonly tokens: number; rea
     "info = tokens(load(sys.argv[2]))",
     "print(json.dumps({'tokens': 0 if info['tokens'] is None else info['tokens'], 'usage_missing': bool(info['usage_missing'])}))",
   ].join("\n");
-  const proc = spawnSync("python3", ["-c", code, relayDir, log], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), ["-c", code, relayDir, log], { encoding: "utf8" });
   if (proc.status !== 0 || !proc.stdout) return { tokens: 0, usageMissing: true };
   try {
     const parsed = JSON.parse(proc.stdout) as { tokens?: unknown; usage_missing?: unknown };
@@ -458,7 +459,7 @@ function flatten(value: Record<string, unknown>, prefix = ""): Record<string, un
 
 function plantExecutorRelay(logPath: string, runId: string, systemText: string): void {
   const script = fileURLToPath(new URL("../../relay/plant.py", import.meta.url));
-  const proc = spawnSync("python3", [script, "plant-request", "--log", logPath, "--run-id", runId, "--system", systemText], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), [script, "plant-request", "--log", logPath, "--run-id", runId, "--system", systemText], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "relay plant failed").trim());
 }
 
