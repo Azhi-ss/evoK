@@ -33,11 +33,12 @@ import type {
 } from "./mission-start";
 import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
-import type { ResearchDecisionPacket } from "../evidence/research-memory";
+import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../evidence/research-memory";
 import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
 import { classifyTrailEntry } from "./mission-start";
 import type { EvokResources } from "../evok-resources";
 import { READ_ONLY_TOOLS } from "../pi-agent-runtime";
+import { deepFreeze, digestValue } from "../security-boundary";
 
 /** Bounded actions the decision model may choose within an authorized Mission. */
 export const DIRECTOR_ACTIONS = [
@@ -514,6 +515,129 @@ function measuredObservation(args: {
   };
 }
 
+/** One measured score the Mission state may never lose, however much Memory an arm is denied. */
+export interface MissionScoreboardRow {
+  readonly runId: string;
+  readonly kind: "baseline" | "experiment";
+  readonly attempt: number;
+  readonly action: DirectorAction | "baseline";
+  readonly score: number;
+}
+
+/**
+ * F5 (#231): the Mission's measured state, which is NOT Memory. An arm denied
+ * Research Memory still receives the current best and the full scoreboard, so
+ * "off" measures absence of Memory rather than amnesia.
+ */
+export interface MissionRetainedState {
+  /** Best measured Run. shortcut: the Mission contract records no metric
+   *  direction, so this is the highest score; a minimized metric needs
+   *  direction-aware selection. */
+  readonly currentBest?: MissionScoreboardRow;
+  /** Every measured Run's score, in stable run-id order. */
+  readonly scoreboard: readonly MissionScoreboardRow[];
+  /** Stable identity of the scoreboard, so a prompt can name what it carried. */
+  readonly digest: string;
+}
+
+/** Orders and digests the measured rows and selects the current best. */
+export function missionScoreboard(rows: readonly MissionScoreboardRow[]): MissionRetainedState {
+  const scoreboard = [...rows].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+  let currentBest: MissionScoreboardRow | undefined;
+  for (const row of scoreboard) {
+    if (currentBest === undefined || row.score > currentBest.score) currentBest = row;
+  }
+  return deepFreeze({
+    ...(currentBest === undefined ? {} : { currentBest }),
+    scoreboard,
+    digest: digestValue(scoreboard),
+  });
+}
+
+/** The retained Mission state implied by the observations a decision Run is handed. */
+export function missionRetainedState(observations: readonly DirectorObservation[]): MissionRetainedState {
+  return missionScoreboard(observations.flatMap((observation) => typeof observation.score === "number"
+    ? [{ runId: observation.runId, kind: observation.kind, attempt: observation.attempt, action: observation.action, score: observation.score }]
+    : []));
+}
+
+/**
+ * The durable measured scores of one Mission: the reference a decision
+ * projection must keep. It reads the record directly instead of going through
+ * `buildDirectorInput`, so a projection that stops serving a measured score
+ * shows up as a difference instead of cancelling itself out.
+ */
+export function recordRetainedState(record: MissionRecord): MissionRetainedState {
+  const rows: MissionScoreboardRow[] = [];
+  const baseline = record.baseline;
+  if (baseline !== undefined && typeof baseline.evaluation.score === "number") {
+    rows.push({
+      runId: baseline.runId,
+      kind: "baseline",
+      attempt: record.runs?.[baseline.runId]?.attempt ?? 1,
+      action: "baseline",
+      score: baseline.evaluation.score,
+    });
+  }
+  for (const entry of record.experiments ?? []) {
+    const score = entry.evaluation?.score;
+    if (typeof score !== "number") continue;
+    rows.push({ runId: entry.runId, kind: "experiment", attempt: entry.attempt, action: entry.action, score });
+  }
+  return missionScoreboard(rows);
+}
+
+/**
+ * The state a decision point hands its Director, through the trusted projection
+ * (only the observations matter here; the policy fields are inert).
+ */
+export function decisionRetainedState(record: MissionRecord): MissionRetainedState {
+  return missionRetainedState(buildDirectorInput(record, {
+    permissions: record.permissions ?? [],
+    hardRules: record.contract.hardRules,
+    stopConditions: record.stopConditions ?? [],
+  }).observations);
+}
+
+/**
+ * Where Mission-state retention is checked: the decision point where the state
+ * is handed to the Director, or a whole-Mission comparison arm (L2).
+ */
+export type OffRetainsMissionStateScope = "decision-point" | "whole-mission";
+
+/**
+ * F5 (#231): an `off` arm keeps the Mission's current best and scoreboard, so
+ * "no Memory" never becomes "no state". An arm that is denied Memory AND loses
+ * state would measure amnesia and bias the reading in Memory's favour by
+ * construction, so this is a hard assertion at both evaluation seams.
+ */
+export function assertOffRetainsMissionState(input: {
+  readonly mode: ResearchMemoryEvaluationMode;
+  readonly scope: OffRetainsMissionStateScope;
+  /** The state the off arm actually hands its Director. */
+  readonly retained: MissionRetainedState;
+  /** The same Mission's durable measurements, read independently of the projection. */
+  readonly expected: MissionRetainedState;
+  readonly runId?: string;
+}): void {
+  // Only the Memory-denied arm can lose state by construction.
+  if (input.mode !== "off") return;
+  const where = input.runId === undefined
+    ? `off arm (${input.scope})`
+    : `off arm (${input.scope}) for Run "${input.runId}"`;
+  const carried = new Map(input.retained.scoreboard.map((row) => [row.runId, row.score]));
+  const lost = input.expected.scoreboard.filter((row) => carried.get(row.runId) !== row.score);
+  if (lost.length > 0) {
+    throw new Error(`${where} lost the Mission scoreboard (${lost.map((row) => row.runId).join(", ")} missing from the state it was handed); an off arm may lose Memory but never Mission state`);
+  }
+  if (input.expected.currentBest !== undefined && input.retained.currentBest === undefined) {
+    // Guards a caller-built state: every in-repo producer derives currentBest
+    // from its own rows, so only an arm that assembles its state elsewhere
+    // (the L1 decision-point evaluation) can reach this.
+    throw new Error(`${where} lost the Mission's current best (Run "${input.expected.currentBest.runId}" scoring ${input.expected.currentBest.score}); an off arm may lose Memory but never Mission state`);
+  }
+}
+
 /**
  * Build the trusted model-facing projection from the durable Mission record.
  * Reads only authoritative fields; the model never sees credentials or raw
@@ -601,7 +725,11 @@ attempt with durable evidence references. Each observation carries "outcome":
 "positive" | "negative" | "operational". Only a measured refutation sets
 negativeEvidence=true; an operational failure (OOM, timeout, invalid
 measurement, protocol error) is NOT scientific evidence and never refutes a
-hypothesis — treat it as a condition to work around.
+hypothesis — treat it as a condition to work around. The "scoreboard" holds the
+Mission's measured scores and "currentBest"; that is Mission state, not Memory,
+and it is present even when no Research Memory packet is pinned. currentBest is
+the highest-scoring measured Run: if the metric is minimized, the best row is the
+lowest score instead.
 
 Choose the single most useful NEXT action within the authorized objective:
 - "investigate": inspect/understand before changing the candidate;
@@ -644,6 +772,7 @@ export interface PiMissionDirectorOptions {
  * Memory packet, so no other input can differ between the two stages (#211).
  */
 export function buildDirectorPrompt(input: DirectorInput): string {
+  const retained = missionRetainedState(input.observations);
   const stateJson = JSON.stringify({
     missionId: input.missionId,
     stateVersion: input.stateVersion,
@@ -654,6 +783,13 @@ export function buildDirectorPrompt(input: DirectorInput): string {
     stopConditions: input.stopConditions,
     tasks: input.tasks,
     observations: input.observations,
+    // F5 (#231): Mission state, not Memory: every arm receives it, including
+    // the off arm that pins no Research Memory packet at all.
+    scoreboard: {
+      ...(retained.currentBest === undefined ? {} : { currentBest: retained.currentBest }),
+      rows: retained.scoreboard,
+      digest: retained.digest,
+    },
   });
   const base = `${DIRECTOR_INSTRUCTIONS}\n\nCURRENT AUTHORITATIVE MISSION STATE (JSON):\n${stateJson}`;
   const phase = input.decisionPhase;

@@ -118,6 +118,10 @@ _Avoid_: Standing verification roster, multi-branch as v1 must-have, Execution P
 The evidence-driven cycle of selecting Tasks, proposing and executing Experiments, evaluating their results, updating beliefs, and choosing the next research action within an authorized Mission. It advances without a human prompt for every iteration, while the Research Objective and Mission Policy remain human-owned. It is the product control plane: authorize, continue, repair, and stop. A chat transcript is not Mission authority.
 _Avoid_: Chat loop, fixed execution script, chat-as-authority
 
+**Mission Retained State**:
+The measured Mission state an arm is never denied, however much Memory it is given or denied: the scoreboard of measured Run scores and the current best row among them. Memory Off drops historical narrative, never the current optimum; an arm that lost both would measure amnesia rather than absence of Memory.
+_Avoid_: Memory slice, agent state, scoreboard-as-verdict
+
 **File Blueprint**:
 The durable, content-addressed workspace files that make a Mission's GOAL, RULES, experiment log, and SCOREBOARD auditable outside the chat transcript. The files are Evidence; they do not score, promote, or authorize Stop by themselves.
 _Avoid_: Shared notes, prompt memory, scoreboard-as-verdict

@@ -31,6 +31,11 @@ import {
 } from "../evidence/research-memory";
 import { projectDecisionAccountability } from "./decision-accountability";
 import {
+  assertOffRetainsMissionState,
+  decisionRetainedState,
+  recordRetainedState,
+} from "./mission-director";
+import {
   classifyTrailEntry,
   missionResearchSource,
   type DecisionRecord,
@@ -600,6 +605,18 @@ export function evaluateResearchMemory(options: {
     throw new Error(`a Research Memory evaluation needs exactly one arm per mode (${RESEARCH_MEMORY_EVALUATION_MODES.join("/")}); missing [${missing.join(",")}], duplicate [${duplicated.join(",")}]`);
   }
   assertIndependentlyProducedArms(options.arms);
+  // F5 (#231): an off arm is a whole-Mission comparison arm too, so its
+  // decision-facing state must carry the scoreboard and current best its own
+  // record measured, not only skip Memory. The state actually handed to the
+  // Director is asserted where the decision point forms.
+  for (const arm of options.arms) {
+    assertOffRetainsMissionState({
+      mode: arm.mode,
+      scope: "whole-mission",
+      retained: decisionRetainedState(arm.record),
+      expected: recordRetainedState(arm.record),
+    });
+  }
   const ordered = [...options.arms].sort((a, b) => RESEARCH_MEMORY_EVALUATION_MODES.indexOf(a.mode) - RESEARCH_MEMORY_EVALUATION_MODES.indexOf(b.mode));
   const controls = controlChecks(options.plan, ordered);
   const drifted = controls.filter((control) => !control.matched).map((control) => control.control);

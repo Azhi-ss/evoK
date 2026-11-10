@@ -18,6 +18,12 @@ import {
   type ResearchMemoryEvaluationArm,
   type ResearchMemoryEvaluationPlan,
 } from "./memory-evaluation";
+import {
+  assertOffRetainsMissionState,
+  decisionRetainedState,
+  missionRetainedState,
+  recordRetainedState,
+} from "./mission-director";
 
 const TOKENS = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 };
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, units: "model-USD" };
@@ -355,5 +361,88 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
     }
     // A missing arm yields no reading rather than a fabricated one.
     expect(compareResearchMemoryArms(arms().slice(1))).toHaveLength(1);
+  });
+
+  test("the report refuses an off arm whose decision state lost the measured scoreboard (F5 / #231)", () => {
+    const lost = arms();
+    // A measured baseline that the trusted projection cannot carry: the off arm
+    // would be decided on a Mission with no current best at all.
+    lost[0] = {
+      mode: "off",
+      controls: CONTROLS,
+      record: armRecord("m-off", {
+        baseline: {
+          runId: "m-off:baseline:1",
+          candidateId: "candidate-baseline",
+          snapshotDigest: "snapshot-baseline",
+          evaluator: { id: "file-answer-deterministic", version: "1" },
+          evaluation: { ok: true, score: 0.5 },
+          evidenceRefs: ["evidence:baseline"],
+          measuredAt: AT.baseline,
+        },
+      }),
+    };
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: lost })).toThrow(/lost the Mission scoreboard/);
+  });
+});
+
+describe("off arm retains Mission state (F5 / #231)", () => {
+  test("both evaluation scopes carry the current best and the whole scoreboard", () => {
+    const record = history();
+    const durable = recordRetainedState(record);
+    expect(durable.scoreboard.map((row) => row.runId)).toEqual(["m-arm:baseline:1", "m-arm:exp:1", "m-arm:exp:2", "m-arm:exp:3"]);
+    expect(durable.currentBest?.runId).toBe("m-arm:exp:3");
+    // What the decision projection hands the model must be the durable state.
+    const projected = decisionRetainedState(record);
+    expect(projected.digest).toBe(durable.digest);
+    for (const scope of ["decision-point", "whole-mission"] as const) {
+      expect(() => assertOffRetainsMissionState({ mode: "off", scope, retained: projected, expected: durable })).not.toThrow();
+    }
+    // Only the Memory-denied arm can lose state by construction; the other
+    // arms are not asserted here.
+    expect(() => assertOffRetainsMissionState({ mode: "sham", scope: "whole-mission", retained: { scoreboard: [], digest: "none" }, expected: durable })).not.toThrow();
+  });
+
+  test("an off arm that lacks the scoreboard or the current best fails in both scopes", () => {
+    const expected = recordRetainedState(history());
+    for (const scope of ["decision-point", "whole-mission"] as const) {
+      expect(() => assertOffRetainsMissionState({ mode: "off", scope, retained: { scoreboard: [], digest: "empty" }, expected })).toThrow(/lost the Mission scoreboard/);
+      // Rows present but the current best dropped is still amnesia, not Memory.
+      expect(() => assertOffRetainsMissionState({
+        mode: "off",
+        scope,
+        retained: { scoreboard: expected.scoreboard, digest: expected.digest },
+        expected,
+      })).toThrow(/current best/);
+      // A partially retained scoreboard is refused too.
+      expect(() => assertOffRetainsMissionState({
+        mode: "off",
+        scope,
+        retained: { scoreboard: expected.scoreboard.slice(0, 1), digest: "partial" },
+        expected,
+      })).toThrow(/m-arm:exp/);
+    }
+  });
+
+  test("the decision point refuses an off arm whose handed state was stripped", () => {
+    const record = history();
+    // The controller hands one base state to every arm of a decision point, so
+    // the reference is that shared state, not a second read of the arm's own
+    // projection. An off arm that strips observations loses the scoreboard here.
+    const baseState = decisionRetainedState(record);
+    const stripped = missionRetainedState([]);
+    expect(() => assertOffRetainsMissionState({ mode: "off", scope: "decision-point", retained: stripped, expected: baseState })).toThrow(/lost the Mission scoreboard/);
+    // Keeping only the baseline (dropping the measured Experiments) is refused too.
+    expect(() => assertOffRetainsMissionState({
+      mode: "off",
+      scope: "decision-point",
+      retained: decisionRetainedState({ ...record, experiments: [] }),
+      expected: baseState,
+    })).toThrow(/m-arm:exp/);
+    // Handing the same base state passes, and replay still reports Off as fully
+    // Memory-blind rather than state-blind.
+    expect(() => assertOffRetainsMissionState({ mode: "off", scope: "decision-point", retained: baseState, expected: baseState })).not.toThrow();
+    const replay = replayResearchMemory({ record, mode: "off" });
+    expect(replay.map((entry) => entry.cardCount)).toEqual([0, 0, 0, 0]);
   });
 });
