@@ -29,6 +29,25 @@ export {
   researchMemoryArmMetrics,
 } from "./memory-evaluation";
 export {
+  HUMAN_INSIGHT_DRAFT_SCHEMA,
+  INSIGHT_DISPOSITIONS,
+  INSIGHT_INBOX_SCHEMA,
+  InsightInboxError,
+  projectInsightInbox,
+  recordInsightDisposition,
+  submitInsightDraft,
+} from "./insight-inbox";
+export type {
+  HumanInsightDraft,
+  HumanInsightEventType,
+  InsightDisposition,
+  InsightDispositionRecord,
+  InsightInbox,
+  InsightInboxItem,
+  InsightLedger,
+  SubmitHumanInsightDraftInput,
+} from "./insight-inbox";
+export {
   DECISION_POINT_CAVEATS,
   DECISION_POINT_EVALUATION_KIND,
   DECISION_POINT_EVALUATION_SCHEMA,

@@ -36,6 +36,25 @@ whole-Mission report.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
 
+## Adjacent: Human Insight (#238)
+
+Human Insight is **not** a memory source and has no epistemic authority: it is
+advisor context the Director may consider or refute. It shares only the Director
+input assembly seam.
+
+| Step | Module | Symbols |
+|---|---|---|
+| Drafts + Inbox projection (Mission ledger events, no write path of its own) | `src/mission/insight-inbox.ts` | `submitInsightDraft`, `recordInsightDisposition`, `projectInsightInbox`, `HumanInsightDraft`, `InsightInbox` |
+
+Event kinds `HUMAN_INSIGHT_DRAFT_CREATED` / `HUMAN_INSIGHT_DISPOSITION_RECORDED` live on
+the research Mission ledger (`src/mission/research-loop.ts`). The
+Approval/Evidence/Evaluation accounting is keyed on the competition-arm
+`MissionEventType`, so a research-ledger insight event has no kind at all
+(`ledgerEventKind` → `null`) and can never be classified as Evidence. The Inbox is
+rebuilt from events alone and its digest is byte-stable.
+
+Tests: `src/mission/insight-inbox.test.ts`.
+
 ## Tests
 
 - Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`
