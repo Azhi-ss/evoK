@@ -39,8 +39,8 @@ export function redactCredentials(text: string): string {
 
 /** The one recipe for a persisted record built from free text: redact, then
  * still refuse if a provider config or token shape survived. */
-export function redactedRecord(value: unknown, label: string): unknown {
+export function redactedRecord<T>(value: T, label: string): T {
   const record: unknown = JSON.parse(redactCredentials(JSON.stringify(value ?? null)));
   assertNoCredentials(record, label);
-  return record;
+  return record as T;
 }

@@ -9,10 +9,12 @@ import { createMemorySlice } from "./memory-slice";
 import { buildResearcherContext } from "./researcher-context";
 import {
   dispatchPiChild,
+  PiChildFailureError,
   PiChildTerminationUnconfirmedError,
   type PiChildTransportOptions,
 } from "./pi-child-dispatch";
 import { createPiSubagentsAdapter, type SubagentDelegation } from "./subagents-adapter";
+import { assertNoCredentials } from "./pi-child-records";
 import { PiSubagentsProtocolError } from "./pi-subagents-protocol";
 
 const contract = createCompetitionContract({
@@ -79,7 +81,10 @@ function bus() {
 }
 const register = "pi-subagents:runtime-agent-register:v1",
   request = "prompt-template:subagent:request",
-  response = "prompt-template:subagent:response";
+  response = "prompt-template:subagent:response",
+  update = "prompt-template:subagent:update";
+/** A secret of each shape the record guard refuses. */
+const key = "sk-live-0123456789abcdef0123456789";
 
 test("only the bound memory reaches the isolated, tool-free child; unrelated terminal events cannot complete it", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "evok-child-test-"));
@@ -177,6 +182,126 @@ test("an absent or pre-0.84 protocol fails closed before any registration or chi
     await expect(skew).rejects.toBeInstanceOf(PiSubagentsProtocolError);
     await expect(skew).rejects.toThrow(/detected 0\.79\.1[\s\S]*required >= 0\.84/);
     expect(seen).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a native crash reports the child's retained stream tail, exit code and native error, redacted", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-crash-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) => {
+    const id = { requestId: v.requestId, ownerRunId: v.ownerRunId, nodeId: v.nodeId };
+    events.emit(update, {
+      ...id,
+      runId: "native-run-1",
+      currentTool: "evok_read_evidence",
+      recentOutputLines: ["no evidence"],
+    });
+    // A rolling window: the plugin repeats what it already sent.
+    events.emit(update, {
+      ...id,
+      recentOutputLines: ["no evidence", "upstream refused: Bearer " + key],
+    });
+    // The terminal response can be the only carrier of the provider diagnostics.
+    events.emit(response, {
+      ...id,
+      status: "failed",
+      error: "provider exited with " + key,
+      exitCode: 3,
+      providerDiagnostics: { errorCount: 2, lastError: { kind: "http", message: "401 for " + key } },
+    });
+  });
+  try {
+    const failed = await dispatchPiChild({ events }, delegation, options(cwd)).catch((error) => error);
+    expect(failed).toBeInstanceOf(PiChildFailureError);
+    // What actually happened, not a bare "failed".
+    expect(failed.message).toMatch(/delegation failed/);
+    expect(failed.message).toContain("exit 3");
+    expect(failed.message).toContain("evok_read_evidence");
+    expect(failed.message).toContain("upstream refused");
+    expect(failed.message).toContain("native errors 2: 401 for");
+    expect(failed.message).toContain("native run native-run-1");
+    // The rolling window is retained once, not duplicated per update.
+    expect(failed.message.split("no evidence").length - 1).toBe(1);
+    // The stream is retained but never surfaced with a credential in it.
+    expect(failed.message).not.toContain(key);
+    const record = JSON.stringify(failed.diagnostics);
+    expect(record).not.toContain(key);
+    expect(record).toContain("[redacted]");
+    // The one record guard accepts what this path emits.
+    expect(() => assertNoCredentials(failed.diagnostics, "diagnostics")).not.toThrow();
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a registration failure is redacted diagnostic text, not a bare timeout", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-register-fail-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: false, error: Error("listener refused " + key) };
+  });
+  try {
+    const failed = await dispatchPiChild({ events }, delegation, options(cwd)).catch((error) => error);
+    expect(failed.message).toMatch(/registration_failed/);
+    expect(failed.message).toContain("listener refused");
+    expect(failed.message).not.toContain(key);
+    expect(failed.message).toContain("[redacted]");
+    expect(() => assertNoCredentials(failed.diagnostics, "diagnostics")).not.toThrow();
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a rejected launch reports the native reason alongside the request that was refused", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-launch-fail-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (message: any) =>
+    events.emit(response, { requestId: message.requestId, status: "invalid_request", error: "task over limit " + key }),
+  );
+  try {
+    const failed = await dispatchPiChild({ events }, delegation, options(cwd, { timeoutMs: 30 })).catch(
+      (error) => error,
+    );
+    expect(failed.message).toContain("invalid_request");
+    expect(failed.message).toContain("task over limit");
+    expect(failed.message).not.toContain(key);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an unconfirmed timeout still reports what the child had already streamed", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-timeout-tail-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on("prompt-template:subagent:cancel", () => {});
+  events.on(request, (v: any) =>
+    events.emit(update, {
+      requestId: v.requestId,
+      ownerRunId: v.ownerRunId,
+      nodeId: v.nodeId,
+      currentTool: "evok_read_file",
+      recentOutputLines: ["reading the candidate"],
+    }),
+  );
+  try {
+    const failed = await dispatchPiChild({ events }, delegation, options(cwd, { timeoutMs: 20 })).catch(
+      (error) => error,
+    );
+    expect(failed).toBeInstanceOf(PiChildTerminationUnconfirmedError);
+    expect(failed.message).toMatch(/timed out; child termination is unconfirmed/);
+    expect(failed.message).toContain("reading the candidate");
+    expect(failed.message).toContain("evok_read_file");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

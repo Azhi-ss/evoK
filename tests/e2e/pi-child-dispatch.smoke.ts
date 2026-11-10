@@ -202,10 +202,16 @@ export default function smoke(pi) {
         NO_COLOR: "1",
         TERM: "dumb",
       },
-      stdio: ["pipe", "ignore", "ignore"],
+      // Pi's failure output is evidence: retain it instead of draining and discarding it.
+      stdio: ["pipe", "ignore", "pipe"],
     },
   );
   const ended = once(proc, "exit");
+  const stderr: string[] = [];
+  proc.stderr!.on("data", (chunk) => {
+    stderr.push(String(chunk));
+    if (stderr.length > 8) stderr.shift();
+  });
   try {
     proc.stdin!.write('{"id":"test","type":"prompt","message":"/test-child"}\n');
     let results;
@@ -217,7 +223,10 @@ export default function smoke(pi) {
       }
       await delay(100);
     }
-    assert.ok(Array.isArray(results), JSON.stringify(results ?? "no Pi child receipt"));
+    assert.ok(
+      Array.isArray(results),
+      JSON.stringify(results ?? "no Pi child receipt; pi stderr: " + stderr.join("")),
+    );
     assert.deepEqual(
       results.map((row) => row.value.text),
       roles,

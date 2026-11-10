@@ -22,6 +22,7 @@ import { cp, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, sep } from "node:path";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { redactedRecord } from "./pi-child-records";
 import {
   CHILD_STATE_DIR,
   childToolGrants,
@@ -76,18 +77,124 @@ export interface PiChildDelegationResult extends SubagentDelegationResult {
   readonly value: PiChildResult;
 }
 
+/** What the native child was doing when it failed; already redacted (C8). */
+export interface PiChildDiagnostics {
+  readonly requestId: string;
+  readonly status: string;
+  readonly error?: string;
+  readonly runId?: string;
+  readonly exitCode?: number;
+  readonly lastTool?: string;
+  readonly outputTail?: readonly string[];
+  readonly nativeErrors?: { readonly count: number; readonly lastMessage?: string };
+}
+
+/** A native failure carrying the bounded redacted record behind its message (C8). */
+export class PiChildFailureError extends Error {
+  readonly diagnostics: PiChildDiagnostics;
+  constructor(role: RuleAudienceRole, diagnostics: PiChildDiagnostics) {
+    super("EvoK " + role + " delegation " + describeFailure(diagnostics));
+    this.name = "PiChildFailureError";
+    this.diagnostics = diagnostics;
+  }
+}
+
 /** The plugin never proved the cancelled child is terminal: reconcile by request id. */
 export class PiChildTerminationUnconfirmedError extends Error {
   readonly code = "termination_unconfirmed" as const;
   readonly requestId: string;
-  constructor(requestId: string, reason: string) {
-    super(reason + "; child termination is unconfirmed");
+  readonly diagnostics: PiChildDiagnostics;
+  constructor(requestId: string, reason: string, diagnostics: PiChildDiagnostics) {
+    super(reason + "; child termination is unconfirmed" + describeTrace(diagnostics));
     this.name = "PiChildTerminationUnconfirmedError";
     this.requestId = requestId;
+    this.diagnostics = diagnostics;
   }
 }
 
 const CHANNEL = "prompt-template:subagent:";
+/** The retained tail is bounded: enough to explain a failure, never the transcript. */
+const TAIL_LINES = 6;
+const TAIL_LINE_CHARS = 240;
+
+/** Bounded view of the child's progress stream; never persisted, only reported. */
+interface ProgressTrace {
+  runId?: string;
+  lastTool?: string;
+  output: string[];
+  nativeErrors?: { count: number; lastMessage?: string };
+}
+
+/** Retain what the child streamed instead of draining and discarding it (C8).
+ * The plugin reports a rolling window, so a later snapshot replaces the tail
+ * rather than appending to it (appending would duplicate lines and evict evidence).
+ */
+function retainProgress(trace: ProgressTrace, raw: unknown): void {
+  if (!raw || typeof raw !== "object") return;
+  const update = raw as Record<string, unknown>;
+  if (typeof update.runId === "string") trace.runId = update.runId;
+  if (typeof update.currentTool === "string") trace.lastTool = update.currentTool;
+  const keep = (line: unknown): string[] =>
+    typeof line === "string" && line.trim() !== "" ? [line.slice(0, TAIL_LINE_CHARS)] : [];
+  if (Array.isArray(update.recentOutputLines)) {
+    const window = update.recentOutputLines.flatMap(keep);
+    if (window.length) trace.output = window.slice(-TAIL_LINES);
+  } else if (typeof update.recentOutput === "string") {
+    const [line] = keep(update.recentOutput);
+    if (line !== undefined && trace.output.at(-1) !== line) {
+      trace.output = [...trace.output, line].slice(-TAIL_LINES);
+    }
+  }
+  const diagnostics = update.providerDiagnostics as
+    | { errorCount?: unknown; lastError?: { message?: unknown } }
+    | undefined;
+  if (!diagnostics || typeof diagnostics !== "object") return;
+  const lastMessage = diagnostics.lastError?.message;
+  trace.nativeErrors = {
+    count: typeof diagnostics.errorCount === "number" ? diagnostics.errorCount : 0,
+    ...(typeof lastMessage === "string" ? { lastMessage } : {}),
+  };
+}
+
+/** One diagnostic write, through the one record guard: redact, then refuse. */
+function diagnosticsRecord(
+  requestId: string,
+  status: string,
+  trace: ProgressTrace,
+  detail: { error?: string; exitCode?: number } = {},
+): PiChildDiagnostics {
+  return redactedRecord(
+    {
+      requestId,
+      status,
+      ...(detail.error ? { error: detail.error } : {}),
+      ...(trace.runId !== undefined ? { runId: trace.runId } : {}),
+      ...(detail.exitCode !== undefined ? { exitCode: detail.exitCode } : {}),
+      ...(trace.lastTool !== undefined ? { lastTool: trace.lastTool } : {}),
+      ...(trace.output.length ? { outputTail: trace.output } : {}),
+      ...(trace.nativeErrors ? { nativeErrors: trace.nativeErrors } : {}),
+    },
+    "pi-child diagnostics",
+  );
+}
+function describeFailure(diagnostics: PiChildDiagnostics): string {
+  let text = diagnostics.status;
+  if (diagnostics.error) text += ": " + diagnostics.error;
+  if (diagnostics.nativeErrors !== undefined) {
+    text += "; native errors " + diagnostics.nativeErrors.count;
+    if (diagnostics.nativeErrors.lastMessage) text += ": " + diagnostics.nativeErrors.lastMessage;
+  }
+  if (diagnostics.exitCode !== undefined) text += "; exit " + diagnostics.exitCode;
+  return text + describeTrace(diagnostics);
+}
+function describeTrace(diagnostics: PiChildDiagnostics): string {
+  let text = "";
+  if (diagnostics.runId !== undefined) text += "; native run " + diagnostics.runId;
+  if (diagnostics.lastTool !== undefined) text += "; last tool " + diagnostics.lastTool;
+  if (diagnostics.outputTail?.length)
+    text += "; output: " + diagnostics.outputTail.map((line) => JSON.stringify(line)).join(" | ");
+  return text;
+}
 const REGISTER = "pi-subagents:runtime-agent-register:v1";
 const THINKING = "max";
 const OBJECTIVE: Record<RuleAudienceRole, string> = {
@@ -138,6 +245,7 @@ export async function dispatchPiChild(
   const protocol = probePiSubagentsProtocol(options.protocolProbe);
 
   const requestId = randomUUID();
+  const trace: ProgressTrace = { output: [] };
   const identity = { requestId, ownerRunId: memory.missionId, nodeId: memory.runId };
   const name = "evok-" + role + "-" + requestId;
   const registration = {
@@ -218,9 +326,13 @@ export async function dispatchPiChild(
     if (cancelReason !== undefined) throw Error(cancelReason + "; child never started");
     pi.events.emit(REGISTER, registration);
     if (!registration.result?.ok)
-      throw Error(
-        "pi-subagents runtime registration unavailable" +
-          (registration.result ? ": " + registration.result.error.message : ""),
+      throw new PiChildFailureError(
+        role,
+        diagnosticsRecord(requestId, "registration_failed", trace, {
+          error: registration.result
+            ? registration.result.error.message
+            : "pi-subagents runtime registration unavailable",
+        }),
       );
     handle = registration.result.registration;
     // A cancel during registration never launched anything: dispose is safe.
@@ -233,7 +345,18 @@ export async function dispatchPiChild(
         // success and the child may still run, so the registration stays put.
         if (!settled)
           confirmDeadline = setTimeout(
-            () => finish(() => reject(new PiChildTerminationUnconfirmedError(requestId, reason)), true),
+            () =>
+              finish(
+                () =>
+                  reject(
+                    new PiChildTerminationUnconfirmedError(
+                      requestId,
+                      reason,
+                      diagnosticsRecord(requestId, "termination_unconfirmed", trace, { error: reason }),
+                    ),
+                  ),
+                true,
+              ),
             cancelConfirmMs,
           );
       };
@@ -244,11 +367,12 @@ export async function dispatchPiChild(
       }
       unlisten.push(
         pi.events.on(CHANNEL + "update", (e) => {
-          if (isOurs(e))
-            options.onUpdate?.({
-              ...(typeof e.runId === "string" ? { runId: e.runId } : {}),
-              ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
-            });
+          if (!isOurs(e)) return;
+          retainProgress(trace, e);
+          options.onUpdate?.({
+            ...(typeof e.runId === "string" ? { runId: e.runId } : {}),
+            ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
+          });
         }),
       );
       unlisten.push(
@@ -262,7 +386,17 @@ export async function dispatchPiChild(
             "status" in raw &&
             raw.status === "invalid_request"
           ) {
-            return finish(() => reject(Error("EvoK " + role + " delegation invalid_request")));
+            const reason = (raw as { error?: unknown }).error;
+            return finish(() =>
+              reject(
+                new PiChildFailureError(
+                  role,
+                  diagnosticsRecord(requestId, "invalid_request", trace, {
+                    ...(typeof reason === "string" ? { error: reason } : {}),
+                  }),
+                ),
+              ),
+            );
           }
           if (!isOurs(raw)) return;
           const e = raw as Partial<PiChildResult> & {
@@ -270,14 +404,30 @@ export async function dispatchPiChild(
             model?: string;
             thinking?: string;
             status?: string;
+            error?: string;
+            exitCode?: number;
             result?: { kind?: string; text?: string };
           };
           // The plugin emits this only once its own run for this request id is
           // terminal, which is the terminal native state this transport can see.
           const cancelled = cancelReason;
           if (cancelled !== undefined) return finish(() => reject(Error(cancelled)));
+          // Native status, error text, exit code and the retained stream tail: a
+          // crash reports what happened instead of a bare "failed" (C8).
           if (e.status !== "completed")
-            return finish(() => reject(Error("EvoK " + role + " delegation " + (e.status ?? "failed"))));
+            return finish(() => {
+              // The terminal response can carry the only provider diagnostics there were.
+              retainProgress(trace, e);
+              reject(
+                new PiChildFailureError(
+                  role,
+                  diagnosticsRecord(requestId, e.status ?? "failed", trace, {
+                    ...(typeof e.error === "string" ? { error: e.error } : {}),
+                    ...(typeof e.exitCode === "number" ? { exitCode: e.exitCode } : {}),
+                  }),
+                ),
+              );
+            });
           // A bare model here would be a violation of the negotiated protocol.
           if (e.agent !== name || e.model !== protocol.modelIdentity(options.model, THINKING) || e.thinking !== THINKING) {
             return finish(() => reject(Error("unexpected child agent, model or thinking level")));
@@ -307,7 +457,12 @@ export async function dispatchPiChild(
           result: { kind: "text" },
         });
       } catch (error) {
-        finish(() => reject(error instanceof Error ? error : Error(String(error))));
+        const reason = error instanceof Error ? error.message : String(error);
+        finish(() =>
+          reject(
+            new PiChildFailureError(role, diagnosticsRecord(requestId, "launch_failed", trace, { error: reason })),
+          ),
+        );
       }
     });
   } catch (error) {
