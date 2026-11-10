@@ -1,17 +1,22 @@
 /** Host-side transport for pi-subagents' foreground delegation protocol.
- * The installed protocol is probed before anything is registered or started,
- * so a skewed or absent install fails closed instead of surfacing later as a
- * registration or identity failure. The host registers the unique
- * evok-meter-* provider against its exclusive loopback relay before calling
- * this function, and owns that relay's lifetime. No credentials or
- * child-authored filenames are passed to tools here.
+ * This is the one native transport behind `createPiSubagentsAdapter`: it takes
+ * the guarded `SubagentDelegation` (child slice already derived) and the
+ * transport-only options, and never re-decides authority. The installed
+ * protocol is probed before anything is registered or started, so a skewed or
+ * absent install fails closed instead of surfacing later as a registration or
+ * identity failure. The host registers the unique evok-meter-* provider
+ * against its exclusive loopback relay before calling this function, and owns
+ * that relay's lifetime. No credentials or child-authored filenames are passed
+ * to tools here.
  */
 import { randomUUID } from "node:crypto";
 import { readdir, realpath } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import type { RuleAudienceRole } from "../competition/rule-visibility";
+import { validateMemorySlice } from "./memory-slice";
 import { probePiSubagentsProtocol, type PiSubagentsVersionProbe } from "./pi-subagents-protocol";
-import { validateRoleContext, type RoleTaskContext } from "./role-context";
+import { validateRoleContext } from "./role-context";
+import type { SubagentDelegation, SubagentDelegationResult } from "./subagents-adapter";
 
 interface Host {
   events: {
@@ -20,13 +25,12 @@ interface Host {
   };
 }
 
-export interface PiChildRequest {
-  role: "researcher" | "reviewer";
-  task: string;
+/** Everything the transport decides itself; the delegation supplies the rest. */
+export interface PiChildTransportOptions {
+  /** The child's own workspace; the transport never chooses or shares it. */
   cwd: string;
+  /** Fully qualified metered child model, e.g. `evok-meter-child/<model id>`. */
   model: string;
-  roleContext: RoleTaskContext;
-  memorySlice: MemorySlice;
   signal?: AbortSignal;
   timeoutMs?: number;
   onUpdate?: (update: { runId?: string; tokens?: number }) => void;
@@ -40,53 +44,69 @@ export interface PiChildResult {
   usage?: { input: number; output: number; cost: number };
 }
 
+export interface PiChildDelegationResult extends SubagentDelegationResult {
+  readonly value: PiChildResult;
+}
+
 const CHANNEL = "prompt-template:subagent:";
 const REGISTER = "pi-subagents:runtime-agent-register:v1";
 const THINKING = "max";
-const OBJECTIVE = {
+const OBJECTIVE: Record<RuleAudienceRole, string> = {
   researcher: "Produce the requested candidate changes. Return your answer as text to your supervisor.",
+  critic:
+    "Challenge the candidate: name its weakest claim and the evidence that would falsify it. Return your assessment to your supervisor.",
   reviewer:
     "Review the candidate independently against the supplied evidence. Return your assessment to your supervisor.",
 };
 
-export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<PiChildResult> {
-  const context = validateRoleContext(input.roleContext);
-  const memory = validateMemorySlice(input.memorySlice);
+export async function dispatchPiChild(
+  pi: Host,
+  delegation: SubagentDelegation,
+  options: PiChildTransportOptions,
+): Promise<PiChildDelegationResult> {
+  // The adapter guard already refused forbidden authority and memory widening;
+  // the transport only re-checks the binding it puts on the wire. The guard
+  // allows a delegation with no child context/slice, so the native registration
+  // states its extra requirement here rather than half-registering a child.
+  if (delegation.roleContext === undefined || delegation.memorySlice === undefined)
+    throw Error("pi-child transport: a delegated child needs its own bound role context and memory slice");
+  const context = validateRoleContext(delegation.roleContext);
+  const memory = validateMemorySlice(delegation.memorySlice);
+  const role = context.role;
   const audit = context.audit;
   if (
-    context.role !== input.role ||
     audit.memoryDigest !== memory.digest ||
     audit.runId !== memory.runId ||
     audit.targetAgentId !== memory.targetAgentId ||
     audit.taskId !== memory.taskId ||
     audit.missionId !== memory.missionId
   ) {
-    throw Error("child role, identity and MemorySlice must share the same broker binding");
+    throw Error("child identity and MemorySlice must share the same broker binding");
   }
-  if (!/^evok-meter-[a-z0-9-]+\/[A-Za-z0-9._-]+$/.test(input.model))
+  if (!/^evok-meter-[a-z0-9-]+\/[A-Za-z0-9._-]+$/.test(options.model))
     throw Error("child requires a fully qualified metered model");
-  const cwd = await realpath(input.cwd);
-  if (!isAbsolute(input.cwd) || (await readdir(cwd)).length !== 0) throw Error("child needs its own empty workspace");
-  const timeoutMs = input.timeoutMs ?? 15 * 60_000;
+  const cwd = await realpath(options.cwd);
+  if (!isAbsolute(options.cwd) || (await readdir(cwd)).length !== 0) throw Error("child needs its own empty workspace");
+  const timeoutMs = options.timeoutMs ?? 15 * 60_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_478_647)
     throw Error("invalid child timeout");
-  input.signal?.throwIfAborted();
+  options.signal?.throwIfAborted();
   // Fail closed before the native registration and before any child exists.
-  const protocol = probePiSubagentsProtocol(input.protocolProbe);
+  const protocol = probePiSubagentsProtocol(options.protocolProbe);
 
   const requestId = randomUUID();
   const identity = { requestId, ownerRunId: memory.missionId, nodeId: memory.runId };
-  const name = "evok-" + input.role + "-" + requestId;
+  const name = "evok-" + role + "-" + requestId;
   const registration = {
     version: 1,
     name,
     definition: {
-      description: "EvoK " + input.role,
-      systemPrompt: OBJECTIVE[input.role],
+      description: "EvoK " + role,
+      systemPrompt: OBJECTIVE[role],
       systemPromptMode: "replace",
       defaultContext: "fresh",
       defaultAsync: false,
-      model: input.model,
+      model: options.model,
       thinking: THINKING,
       inheritProjectContext: false,
       inheritGlobalContext: false,
@@ -115,7 +135,7 @@ export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abort: (() => void) | undefined;
   try {
-    return await new Promise<PiChildResult>((resolve, reject) => {
+    return await new Promise<PiChildDelegationResult>((resolve, reject) => {
       let cancelReason: string | undefined;
       function cancel(reason: string) {
         if (cancelReason) return;
@@ -133,7 +153,7 @@ export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<
       unlisten.push(
         pi.events.on(CHANNEL + "update", (e) => {
           if (isOurs(e))
-            input.onUpdate?.({
+            options.onUpdate?.({
               ...(typeof e.runId === "string" ? { runId: e.runId } : {}),
               ...(typeof e.tokens === "number" ? { tokens: e.tokens } : {}),
             });
@@ -150,7 +170,7 @@ export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<
             "status" in raw &&
             raw.status === "invalid_request"
           ) {
-            return reject(Error("EvoK " + input.role + " delegation invalid_request"));
+            return reject(Error("EvoK " + role + " delegation invalid_request"));
           }
           if (!isOurs(raw)) return;
           const e = raw as Partial<PiChildResult> & {
@@ -162,25 +182,25 @@ export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<
           };
           if (cancelReason) return reject(Error(cancelReason));
           if (e.status !== "completed")
-            return reject(Error("EvoK " + input.role + " delegation " + (e.status ?? "failed")));
+            return reject(Error("EvoK " + role + " delegation " + (e.status ?? "failed")));
           // A bare model here would be a violation of the negotiated protocol.
-          if (e.agent !== name || e.model !== protocol.modelIdentity(input.model, THINKING) || e.thinking !== THINKING) {
+          if (e.agent !== name || e.model !== protocol.modelIdentity(options.model, THINKING) || e.thinking !== THINKING) {
             return reject(Error("unexpected child agent, model or thinking level"));
           }
           if (e.result?.kind !== "text" || !e.result.text?.trim())
             return reject(Error("child returned no text result"));
-          resolve({ text: e.result.text, runId: e.runId, usage: e.usage });
+          resolve({ agent: delegation.agent, value: { text: e.result.text, runId: e.runId, usage: e.usage } });
         }),
       );
-      input.signal?.addEventListener("abort", abort, { once: true });
+      options.signal?.addEventListener("abort", abort, { once: true });
       timer = setTimeout(() => cancel("EvoK child timed out"), timeoutMs);
       pi.events.emit(CHANNEL + "request", {
         ...identity,
         agent: name,
-        task: JSON.stringify({ task: input.task, roleContext: context, memorySlice: memory }),
+        task: JSON.stringify({ task: delegation.task, roleContext: context, memorySlice: memory }),
         cwd,
         context: "fresh",
-        model: input.model,
+        model: options.model,
         thinking: THINKING,
         timeoutMs,
         skill: false,
@@ -192,7 +212,7 @@ export async function dispatchPiChild(pi: Host, input: PiChildRequest): Promise<
     });
   } finally {
     clearTimeout(timer);
-    if (abort) input.signal?.removeEventListener("abort", abort);
+    if (abort) options.signal?.removeEventListener("abort", abort);
     for (const off of unlisten) off();
     handle.dispose();
   }

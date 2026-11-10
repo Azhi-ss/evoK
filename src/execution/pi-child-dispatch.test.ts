@@ -6,7 +6,9 @@ import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { assembleRoleContext } from "./role-context";
 import { createMemorySlice } from "./memory-slice";
-import { dispatchPiChild } from "./pi-child-dispatch";
+import { buildResearcherContext } from "./researcher-context";
+import { dispatchPiChild, type PiChildTransportOptions } from "./pi-child-dispatch";
+import { createPiSubagentsAdapter, type SubagentDelegation } from "./subagents-adapter";
 import { PiSubagentsProtocolError } from "./pi-subagents-protocol";
 
 const contract = createCompetitionContract({
@@ -39,14 +41,21 @@ const roleContext = assembleRoleContext({
   tools: [],
   memoryDigest: memorySlice.digest,
 });
-const input = {
-  role: "researcher" as const,
+const model = "evok-meter-test/kimi-k3-1-pro-261024";
+const delegation: SubagentDelegation = {
+  agent: "researcher-child",
+  capability: "research",
   task: "Return one patch",
-  model: "evok-meter-test/kimi-k3-1-pro-261024",
+  context: buildResearcherContext({ objective: "Improve." }),
   roleContext,
   memorySlice,
-  protocolProbe: () => "0.84.0",
+  runId: identity.runId,
+  targetAgentId: identity.targetAgentId,
 };
+const options = (
+  cwd: string,
+  overrides: Partial<PiChildTransportOptions> = {},
+): PiChildTransportOptions => ({ cwd, model, protocolProbe: () => "0.84.0", ...overrides });
 type Handler = (data: unknown) => void;
 function bus() {
   const handlers = new Map<string, Set<Handler>>();
@@ -75,7 +84,7 @@ test("only the bound memory reaches the isolated, tool-free child; unrelated ter
   events.on(register, (v: any) => {
     expect(v.definition).toMatchObject({
       tools: [],
-      model: input.model,
+      model,
       systemPromptMode: "replace",
       inheritProjectContext: false,
       inheritGlobalContext: false,
@@ -97,7 +106,7 @@ test("only the bound memory reaches the isolated, tool-free child; unrelated ter
       skill: false,
       artifacts: false,
       intercomBridge: { mode: "off" },
-      model: input.model,
+      model,
       thinking: "max",
     });
     const task = JSON.parse(v.task);
@@ -116,8 +125,8 @@ test("only the bound memory reaches the isolated, tool-free child; unrelated ter
     events.emit(response, terminal);
   });
   try {
-    const output = await dispatchPiChild({ events }, { ...input, cwd });
-    expect(output.text).toBe("actual");
+    const output = await dispatchPiChild({ events }, delegation, options(cwd));
+    expect(output).toMatchObject({ agent: delegation.agent, value: { text: "actual" } });
     expect(disposed).toBe(true);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -133,13 +142,17 @@ test("mismatched bound context, direct provider and absent real listener all fai
   });
   try {
     const wrong = createMemorySlice({ ...identity, sliceId: "other" });
-    await expect(dispatchPiChild({ events }, { ...input, cwd, memorySlice: wrong })).rejects.toThrow(
-      /bound|binding/i,
-    );
     await expect(
-      dispatchPiChild({ events }, { ...input, cwd, model: "ai-modeling/kimi-k3-1-pro-261024" }),
+      dispatchPiChild({ events }, { ...delegation, memorySlice: wrong }, options(cwd)),
+    ).rejects.toThrow(/bound|binding/i);
+    await expect(
+      dispatchPiChild({ events }, delegation, options(cwd, { model: "ai-modeling/kimi-k3-1-pro-261024" })),
     ).rejects.toThrow(/meter/i);
-    await expect(dispatchPiChild({ events }, { ...input, cwd })).rejects.toThrow(/pi-subagents/i);
+    const unmetered = { ...delegation, roleContext: undefined, memorySlice: undefined };
+    await expect(dispatchPiChild({ events }, unmetered, options(cwd))).rejects.toThrow(
+      /needs its own bound role context/i,
+    );
+    await expect(dispatchPiChild({ events }, delegation, options(cwd))).rejects.toThrow(/pi-subagents/i);
     expect(launches).toBe(0);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -153,10 +166,10 @@ test("an absent or pre-0.84 protocol fails closed before any registration or chi
   events.on(register, () => seen.push("register"));
   events.on(request, () => seen.push("request"));
   try {
-    const absent = dispatchPiChild({ events }, { ...input, cwd, protocolProbe: () => undefined });
+    const absent = dispatchPiChild({ events }, delegation, options(cwd, { protocolProbe: () => undefined }));
     await expect(absent).rejects.toBeInstanceOf(PiSubagentsProtocolError);
     await expect(absent).rejects.toThrow(/detected none[\s\S]*required >= 0\.84/);
-    const skew = dispatchPiChild({ events }, { ...input, cwd, protocolProbe: () => "0.79.1" });
+    const skew = dispatchPiChild({ events }, delegation, options(cwd, { protocolProbe: () => "0.79.1" }));
     await expect(skew).rejects.toBeInstanceOf(PiSubagentsProtocolError);
     await expect(skew).rejects.toThrow(/detected 0\.79\.1[\s\S]*required >= 0\.84/);
     expect(seen).toEqual([]);
@@ -184,7 +197,7 @@ test("the negotiated protocol, not a hard-coded suffix, decides the expected chi
     }),
   );
   try {
-    await expect(dispatchPiChild({ events }, { ...input, cwd })).rejects.toThrow(
+    await expect(dispatchPiChild({ events }, delegation, options(cwd))).rejects.toThrow(
       /unexpected child agent, model or thinking level/,
     );
   } finally {
@@ -209,9 +222,9 @@ test("aborting waits for the plugin to acknowledge cancellation before disposing
     });
   });
   try {
-    await expect(dispatchPiChild({ events }, { ...input, cwd, signal: controller.signal })).rejects.toThrow(
-      /cancelled/,
-    );
+    await expect(
+      dispatchPiChild({ events }, delegation, options(cwd, { signal: controller.signal })),
+    ).rejects.toThrow(/cancelled/);
     expect(order).toEqual(["cancel", "acknowledged", "disposed"]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -228,8 +241,44 @@ test("plugin validation errors that only echo requestId reject the dispatch imme
     events.emit(response, { requestId: message.requestId, status: "invalid_request" }),
   );
   try {
-    await expect(dispatchPiChild({ events }, { ...input, cwd, timeoutMs: 30 })).rejects.toThrow(/invalid_request/);
+    await expect(dispatchPiChild({ events }, delegation, options(cwd, { timeoutMs: 30 }))).rejects.toThrow(
+      /invalid_request/,
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
 }, 8000);
+
+test("the guarded delegation is the transport's only input", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-guarded-"));
+  const events = bus();
+  const seen: string[] = [];
+  events.on(register, (registration: any) => {
+    seen.push("register");
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) => {
+    seen.push("request");
+    events.emit(response, {
+      requestId: v.requestId,
+      ownerRunId: v.ownerRunId,
+      nodeId: v.nodeId,
+      agent: v.agent,
+      status: "completed",
+      model: v.model + ":max",
+      thinking: "max",
+      result: { kind: "text", text: "guarded" },
+    });
+  });
+  const adapter = createPiSubagentsAdapter((value) => dispatchPiChild({ events }, value, options(cwd)));
+  try {
+    expect(await adapter.delegate(delegation)).toMatchObject({
+      agent: delegation.agent,
+      value: { text: "guarded" },
+    });
+    await expect(adapter.delegate({ ...delegation, capability: "promotion" })).rejects.toThrow(/authority stays with/);
+    expect(seen).toEqual(["register", "request"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

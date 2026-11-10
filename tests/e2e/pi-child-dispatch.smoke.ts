@@ -89,6 +89,7 @@ import { writeFileSync } from "node:fs";
 import { dispatchPiChild } from ${entry("pi-child-dispatch")};
 import { assembleRoleContext } from ${entry("role-context")};
 import { createMemorySlice } from ${entry("memory-slice")};
+import { buildResearcherContext } from ${entry("researcher-context")};
 import { createCompetitionContract } from ${entry("../competition/competition-contract")};
 import { createRuleVisibilityPolicy } from ${entry("../competition/rule-visibility")};
 export default function smoke(pi) {
@@ -107,7 +108,10 @@ export default function smoke(pi) {
         const id={missionId:"mission",taskId:"task-"+role,runId:"run-"+role,targetAgentId:"agent-"+role};
         const memorySlice=createMemorySlice({...id,sliceId:"slice-"+role,findings:[{findingId:"fact",summary:"slice-sentinel-"+role}]});
         const roleContext=assembleRoleContext({...id,role,contract,policy,objective:"Improve.",source:"test",memoryDigest:memorySlice.digest});
-        results.push(await dispatchPiChild(pi,{role,task:"Return your role.",model:alias+"/"+model,cwd:ctx.cwd+"/"+role,memorySlice,roleContext,protocolProbe:()=>${JSON.stringify(protocolVersion)},timeoutMs:15_000}));
+        const delegation={agent:role+"-child",capability:role==="reviewer"?"review":"research",task:"Return your role.",
+          context:buildResearcherContext({objective:"Improve."}),roleContext,memorySlice,runId:id.runId,targetAgentId:id.targetAgentId};
+        results.push(await dispatchPiChild(pi,delegation,{model:alias+"/"+model,cwd:ctx.cwd+"/"+role,
+          protocolProbe:()=>${JSON.stringify(protocolVersion)},timeoutMs:15_000}));
       }
       writeFileSync(${JSON.stringify(output)},JSON.stringify(results));
     } catch (error) { writeFileSync(${JSON.stringify(output)},JSON.stringify({error:String(error)})); }
@@ -157,16 +161,16 @@ export default function smoke(pi) {
     }
     assert.ok(Array.isArray(results), JSON.stringify(results ?? "no Pi child receipt"));
     assert.deepEqual(
-      results.map((row) => row.text),
+      results.map((row) => row.value.text),
       roles,
     );
-    assert.ok(results.every((row) => typeof row.runId === "string" && row.usage?.toolCalls === 0));
-    assert.notEqual(results[0].runId, results[1].runId);
+    assert.ok(results.every((row) => typeof row.value.runId === "string" && row.value.usage?.toolCalls === 0));
+    assert.notEqual(results[0].value.runId, results[1].value.runId);
     assert.deepEqual(
       calls,
       roles.map((role) => ({ role, tools: 0, key: true, max: true, clean: true })),
     );
-    console.log(JSON.stringify({ children: results.map((row) => row.runId), calls }));
+    console.log(JSON.stringify({ children: results.map((row) => row.value.runId), calls }));
   } finally {
     if (proc.exitCode === null) proc.kill("SIGTERM");
     await ended;
