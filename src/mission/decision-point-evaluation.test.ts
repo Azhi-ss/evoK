@@ -8,6 +8,9 @@
  * under-powered sample (< 50 points).
  */
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
@@ -23,12 +26,16 @@ import {
 } from "./mission-director";
 import { RESEARCH_MEMORY_CONTROL_CAVEAT } from "./memory-evaluation";
 import {
+  DECISION_POINT_HINDSIGHT_SCORING,
   DECISION_POINT_MIN_SAMPLE,
+  DECISION_POINT_SELECTION_BIAS_CAVEAT,
   DECISION_POINT_TRAJECTORY_CAVEAT,
   evaluateDecisionPoint,
   summarizeDecisionPoints,
   type FrozenDecisionPoint,
 } from "./decision-point-evaluation";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const USAGE = {
   tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
@@ -344,5 +351,32 @@ describe("L1 report: direction only, both caveats, real sample (A8)", () => {
       ["real", 50, 50],
     ]);
     expect(report.dispatchedExperiments).toBe(0);
+  });
+
+  // #234: the hindsight reference is part of the contract, not an implementation
+  // detail, so every report carries it verbatim and labels its bias limits.
+  test("every report carries the versioned action-taken scoring rule and its caveat", async () => {
+    const report = summarizeDecisionPoints(await points(DECISION_POINT_MIN_SAMPLE));
+    expect(report.hindsightScoring).toEqual(DECISION_POINT_HINDSIGHT_SCORING);
+    expect(report.hindsightScoring.reference).toBe("action-taken");
+    expect(report.hindsightScoring.id).toBe("evok.l1-hindsight-scoring/v1");
+    // Rationale and limits travel with the rule: a reviewer never has to infer
+    // which reference was used or what it cannot prove.
+    expect(report.hindsightScoring.rationale).toMatch(/already recorded/);
+    expect(report.hindsightScoring.biasLimits.length).toBeGreaterThan(0);
+    expect(report.hindsightScoring.biasLimits.join(" ")).toMatch(/not the best action/);
+    expect(report.caveats).toContain(DECISION_POINT_SELECTION_BIAS_CAVEAT);
+    expect(report.caveats.join(" ")).toMatch(/best action among those later measured/);
+    expect(report.caveats.join(" ")).toMatch(/selection bias/);
+  });
+
+  test("changing the rule requires an explicit versioned contract change", async () => {
+    expect(DECISION_POINT_HINDSIGHT_SCORING.changeRequires).toMatch(/versioned evaluation-contract change/);
+    // The rule is recorded in the contract the code points at, with the same
+    // identity: a rule change that skips the contract is visible here.
+    const contract = await readFile(join(HERE, "../../docs/research-memory-evaluation-v2.md"), "utf8");
+    expect(contract).toContain(DECISION_POINT_HINDSIGHT_SCORING.id);
+    expect(contract).toMatch(/action actually taken/);
+    expect(contract).toMatch(/versioned evaluation-contract change/);
   });
 });

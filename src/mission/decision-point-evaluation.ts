@@ -12,7 +12,7 @@
  * Scoring is hindsight against THE ACTION ACTUALLY TAKEN (locked in #222): the
  * revised proposal the original Mission durably recorded and then executed.
  * "Best action among later measurements" is deliberately NOT used, because it
- * needs comparable measurements and risks selection bias.
+ * needs comparable measurements and would introduce selection bias.
  *
  * This is not `evaluateResearchMemory`: that reads whole Missions (L2) and
  * refuses a zero-delta replay. L1 asks a smaller question — did Memory change
@@ -53,10 +53,38 @@ export const DECISION_POINT_MIN_SAMPLE = 50;
 export const DECISION_POINT_TRAJECTORY_CAVEAT =
   "L1 does not measure trajectory steering: it re-decides one frozen decision point at a time, so it can show whether Memory changed the next bounded action but never where Memory steers exploration across many steps (off-policy trajectories carry no propensity).";
 
-/** Every L1 report carries both limits; neither is optional. */
+/**
+ * Why the reference is the taken action and not a later-measured best one (#234,
+ * contract §3). Versioned: this rule defines what the metric means, so it may
+ * only change together with an explicit contract version bump.
+ */
+export const DECISION_POINT_HINDSIGHT_SCORING = deepFreeze({
+  id: "evok.l1-hindsight-scoring/v1" as const,
+  reference: "action-taken" as const,
+  rationale:
+    "The action actually taken is already recorded and measured by the Mission's own Evidence, so scoring against it costs no extra model call and needs no assumption about actions nobody ran.",
+  biasLimits: [
+    "Weak: the taken action is not the best action, so a proposal that beat it scores exactly like one that only matched it.",
+    "Untaken actions have no counterfactual: L1 can never credit Memory for a better action the original Mission did not take.",
+    "The taken action may itself have been a bad decision, so the rule measures agreement with the observed trajectory, not optimality.",
+  ],
+  changeRequires:
+    "A versioned evaluation-contract change: bump this id and record why in docs/research-memory-evaluation-v2.md §3 before any report is scored against another reference.",
+});
+
+/**
+ * The alternative this rule rejects, stated as a caveat so a report can never be
+ * read as measuring optimality: picking the best action among later measurements
+ * chooses the reference using information the arm could not have had.
+ */
+export const DECISION_POINT_SELECTION_BIAS_CAVEAT =
+  "L1 scores against the action actually taken, never the best action among those later measured: the set of later-measured actions depends on what the original Mission chose, so ranking them to pick a reference would introduce selection bias — the reference would be chosen with knowledge the arms could not have, and would move between samples.";
+
+/** Every L1 report carries all three limits; none is optional. */
 export const DECISION_POINT_CAVEATS: readonly string[] = [
   RESEARCH_MEMORY_CONTROL_CAVEAT,
   DECISION_POINT_TRAJECTORY_CAVEAT,
+  DECISION_POINT_SELECTION_BIAS_CAVEAT,
 ];
 
 /** One arm's Memory input for the same point: absent only for the off arm. */
@@ -239,6 +267,8 @@ export interface DecisionPointEvaluationReport {
   /** A direction is claimed, never an effect size. */
   readonly directionOnly: true;
   readonly statisticalSignificance: "none";
+  /** The versioned rule behind every `matchedActionTaken` count below (#234). */
+  readonly hindsightScoring: typeof DECISION_POINT_HINDSIGHT_SCORING;
   readonly caveats: readonly string[];
   readonly dispatchedExperiments: 0;
 }
@@ -285,6 +315,7 @@ export function summarizeDecisionPoints(results: readonly DecisionPointResult[])
     ],
     directionOnly: true as const,
     statisticalSignificance: "none" as const,
+    hindsightScoring: DECISION_POINT_HINDSIGHT_SCORING,
     caveats: DECISION_POINT_CAVEATS,
     dispatchedExperiments: 0 as const,
   });

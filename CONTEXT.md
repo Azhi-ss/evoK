@@ -261,7 +261,7 @@ A deterministic re-projection that pins each Run to the Mission state, stored Pr
 _Avoid_: Hindsight replay, transcript replay
 
 **Decision-Point Counterfactual (L1)**:
-One frozen decision point — the trusted Director input and frozen Blind Proposal that existed before the original decision — re-decided once per Memory Evaluation Arm over that same base state, then scored against the action the original Mission actually took. It dispatches no Experiment, reserves no Experiment budget, and states a direction only: it can never show where Memory steers exploration across many steps.
+One frozen decision point — the trusted Director input and frozen Blind Proposal that existed before the original decision — re-decided once per Memory Evaluation Arm over that same base state, then scored against the action the original Mission actually took under the versioned rule `evok.l1-hindsight-scoring/v1` (never a best later-measured action). It dispatches no Experiment, reserves no Experiment budget, and states a direction only: it can never show where Memory steers exploration across many steps.
 _Avoid_: Trajectory evaluation, Memory score, hindsight-optimal action
 
 **Online Multi-Arm Evaluation (L2)**:
