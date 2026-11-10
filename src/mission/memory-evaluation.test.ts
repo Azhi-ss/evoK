@@ -284,7 +284,34 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
     expect(report.comparisons.every((entry) => entry.perfectCausalControl === false)).toBe(true);
     expect(report.comparisons.every((entry) => entry.caveat === RESEARCH_MEMORY_CONTROL_CAVEAT)).toBe(true);
     expect(report.assumptions).toContain(RESEARCH_MEMORY_CONTROL_CAVEAT);
-    expect(report.replay.map((entry) => entry.mode)).toEqual(["off", "sham", "real"]);
+    expect(report.integrity.modes.map((entry) => entry.mode)).toEqual(["off", "sham", "real"]);
+  });
+
+  test("the report is a whole-mission-comparison and its replay is labelled integrity, not value", () => {
+    const report = evaluateResearchMemory({ plan: plan(), arms: arms() });
+    expect(report.kind).toBe("whole-mission-comparison");
+    expect(report.integrity.claim).toBe("integrity");
+    // The note says out loud what the section can and cannot answer.
+    expect(report.integrity.note).toContain("not value evidence");
+    // The old section name would let a reader take replay as a value reading.
+    expect("replay" in report).toBe(false);
+  });
+
+  test("replaying one MissionRecord as every arm is refused instead of reporting a zero delta", () => {
+    const record = armRecord("m-shared");
+    const shared = (["off", "sham", "real"] as const).map((mode) => ({ mode, record, controls: CONTROLS }));
+    const refused = /independently produced arms: modes \[off,sham,real\] all derive from the same MissionRecord "m-shared".*zero-delta report/;
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: shared })).toThrow(refused);
+    // Stamping the arm onto a copy is how one record becomes three arms; the
+    // label cannot make the underlying decisions/experiments any different.
+    const stamped = (["off", "sham", "real"] as const).map((mode) => ({ mode, record: { ...record, researchMemoryMode: mode }, controls: CONTROLS }));
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: stamped })).toThrow(refused);
+    // Two arms on one record are just as unmeasurable as three.
+    const partial = arms();
+    partial[1] = { mode: "sham", record: partial[0]!.record, controls: CONTROLS };
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: partial })).toThrow(/zero-delta report/);
+    // The lower-level comparison seam refuses it too, not only the report entry.
+    expect(() => compareResearchMemoryArms(shared)).toThrow(refused);
   });
 
   test("the report records every controlled dimension and whether the arms kept it", () => {

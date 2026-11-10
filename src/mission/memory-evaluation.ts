@@ -9,12 +9,16 @@
  * proposals visible BEFORE that Run began — so Run N can never see information
  * produced after Run N started.
  *
- * The report is a comparison reading, not a causal proof: a Schema-only Sham can
- * match card structure, field surface and bounds, but not semantic information,
- * so it is a control input and never a perfect causal control. It is also a pure
- * read over authoritative durable records: it dispatches nothing, measures
- * nothing, and changes no evaluator, Promotion, Admission, Budget, hang or
- * Broker rule.
+ * The report is a `whole-mission-comparison` reading, not a causal proof: a
+ * Schema-only Sham can match card structure, field surface and bounds, but not
+ * semantic information, so it is a control input and never a perfect causal
+ * control. Arms must be independently produced Missions; feeding one
+ * MissionRecord through all three modes is refused because its deltas are zero
+ * by construction. The replay section is labelled `integrity`: it proves no
+ * future information reached a Run, never that Memory had research value. It is
+ * also a pure read over authoritative durable records: it dispatches nothing,
+ * measures nothing, and changes no evaluator, Promotion, Admission, Budget, hang
+ * or Broker rule.
  */
 import { deepFreeze, digestValue } from "../security-boundary";
 import {
@@ -34,7 +38,21 @@ import {
   type MissionRecord,
 } from "./mission-start";
 
-export const RESEARCH_MEMORY_EVALUATION_SCHEMA = "evok.research-memory-evaluation/v1" as const;
+export const RESEARCH_MEMORY_EVALUATION_SCHEMA = "evok.research-memory-evaluation/v2" as const;
+
+/**
+ * What the three-arm report measures: one whole Mission per mode, produced
+ * independently. It is not a decision-point counterfactual (L1) and not a
+ * single-record replay.
+ */
+export const RESEARCH_MEMORY_EVALUATION_KIND = "whole-mission-comparison" as const;
+
+/** The only claim offline replay supports: integrity, never research value. */
+export const RESEARCH_MEMORY_INTEGRITY_CLAIM = "integrity" as const;
+
+/** What the labelled `integrity` section can and cannot answer. */
+export const RESEARCH_MEMORY_INTEGRITY_NOTE =
+  "Offline replay is integrity evidence only: it shows no Run saw information produced after it began and that projection is deterministic. It is not value evidence and says nothing about whether Memory helped.";
 
 export type { ResearchMemoryEvaluationMode } from "../evidence/research-memory";
 
@@ -395,6 +413,7 @@ const COMPARISON_READINGS: readonly {
 
 /** Compares the arms that are present; a missing arm yields no reading. */
 export function compareResearchMemoryArms(arms: readonly ResearchMemoryEvaluationArm[]): readonly ResearchMemoryComparison[] {
+  assertIndependentlyProducedArms(arms);
   const metrics = new Map(arms.map((arm) => [arm.mode, researchMemoryArmMetrics(arm)]));
   return COMPARISON_READINGS.flatMap((reading) => {
     const control = metrics.get(reading.baseline);
@@ -523,21 +542,52 @@ export interface ResearchMemoryEvaluationReplay {
   readonly runs: readonly ReplayedRunMemory[];
 }
 
+/** Replay evidence, labelled so it can never be read as a value reading. */
+export interface ResearchMemoryEvaluationIntegrity {
+  readonly claim: typeof RESEARCH_MEMORY_INTEGRITY_CLAIM;
+  readonly note: string;
+  /** Every arm's offline replay, so future-information leakage is auditable. */
+  readonly modes: readonly ResearchMemoryEvaluationReplay[];
+}
+
 export interface ResearchMemoryEvaluationReport {
   readonly schema: typeof RESEARCH_MEMORY_EVALUATION_SCHEMA;
+  readonly kind: typeof RESEARCH_MEMORY_EVALUATION_KIND;
   readonly missionIds: readonly string[];
   readonly arms: readonly ResearchMemoryArmMetrics[];
   readonly comparisons: readonly ResearchMemoryComparison[];
   readonly controls: readonly ResearchMemoryControlCheck[];
-  /** Every arm's offline replay, so future-information leakage is auditable. */
-  readonly replay: readonly ResearchMemoryEvaluationReplay[];
+  readonly integrity: ResearchMemoryEvaluationIntegrity;
   readonly assumptions: readonly string[];
 }
 
 /**
+ * A whole-Mission comparison needs independently produced arms. Replaying one
+ * MissionRecord under every mode reads the same decisions, experiments and
+ * budget three times, so every delta is exactly zero by construction: that is
+ * an invalid input, not a measurement of Memory. The arm stamp itself is
+ * ignored, because `{ ...record, researchMemoryMode: mode }` is the natural way
+ * to derive the three arms from one record.
+ */
+function assertIndependentlyProducedArms(arms: readonly ResearchMemoryEvaluationArm[]): void {
+  const byRecord = new Map<string, { readonly id: string; readonly modes: ResearchMemoryEvaluationMode[] }>();
+  for (const arm of arms) {
+    const digest = digestValue({ ...arm.record, researchMemoryMode: undefined });
+    const entry = byRecord.get(digest);
+    if (entry === undefined) byRecord.set(digest, { id: arm.record.id, modes: [arm.mode] });
+    else entry.modes.push(arm.mode);
+  }
+  for (const { id, modes } of byRecord.values()) {
+    if (modes.length > 1) {
+      throw new Error(`a whole-mission comparison needs independently produced arms: modes [${modes.join(",")}] all derive from the same MissionRecord "${id}", so the comparison would be a guaranteed zero-delta report`);
+    }
+  }
+}
+
+/**
  * Builds the deterministic offline report from one durable record per arm. It
- * refuses a duplicate or missing arm: a reading is only defined against the
- * other two modes.
+ * refuses a duplicate, missing or same-record arm: a reading is only defined
+ * against two independently produced Missions.
  */
 export function evaluateResearchMemory(options: {
   readonly plan: ResearchMemoryEvaluationPlan;
@@ -549,6 +599,7 @@ export function evaluateResearchMemory(options: {
   if (missing.length > 0 || duplicated.length > 0) {
     throw new Error(`a Research Memory evaluation needs exactly one arm per mode (${RESEARCH_MEMORY_EVALUATION_MODES.join("/")}); missing [${missing.join(",")}], duplicate [${duplicated.join(",")}]`);
   }
+  assertIndependentlyProducedArms(options.arms);
   const ordered = [...options.arms].sort((a, b) => RESEARCH_MEMORY_EVALUATION_MODES.indexOf(a.mode) - RESEARCH_MEMORY_EVALUATION_MODES.indexOf(b.mode));
   const controls = controlChecks(options.plan, ordered);
   const drifted = controls.filter((control) => !control.matched).map((control) => control.control);
@@ -559,11 +610,16 @@ export function evaluateResearchMemory(options: {
   }
   return deepFreeze({
     schema: RESEARCH_MEMORY_EVALUATION_SCHEMA,
+    kind: RESEARCH_MEMORY_EVALUATION_KIND,
     missionIds: ordered.map((arm) => arm.record.id),
     arms: ordered.map((arm) => researchMemoryArmMetrics(arm)),
     comparisons: compareResearchMemoryArms(ordered),
     controls,
-    replay: ordered.map((arm) => ({ mode: arm.mode, runs: replayResearchMemory({ record: arm.record, mode: arm.mode }) })),
+    integrity: {
+      claim: RESEARCH_MEMORY_INTEGRITY_CLAIM,
+      note: RESEARCH_MEMORY_INTEGRITY_NOTE,
+      modes: ordered.map((arm) => ({ mode: arm.mode, runs: replayResearchMemory({ record: arm.record, mode: arm.mode }) })),
+    },
     assumptions: RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
   });
 }

@@ -17,7 +17,10 @@ export {
 export {
   RESEARCH_MEMORY_CONTROL_CAVEAT,
   RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
+  RESEARCH_MEMORY_EVALUATION_KIND,
   RESEARCH_MEMORY_EVALUATION_SCHEMA,
+  RESEARCH_MEMORY_INTEGRITY_CLAIM,
+  RESEARCH_MEMORY_INTEGRITY_NOTE,
   compareResearchMemoryArms,
   evaluateResearchMemory,
   initialStateDigestOf,
@@ -33,6 +36,7 @@ export type {
   ResearchMemoryControlCheck,
   ResearchMemoryControlName,
   ResearchMemoryEvaluationArm,
+  ResearchMemoryEvaluationIntegrity,
   ResearchMemoryEvaluationMode,
   ResearchMemoryEvaluationPlan,
   ResearchMemoryEvaluationReplay,
