@@ -63,10 +63,13 @@ import {
 } from "../pi-agent-runtime";
 export type { RuntimeUsage } from "../pi-agent-runtime";
 import {
+  assertOffRetainsMissionState,
   buildDirectorInput,
   deriveDecisionDelta,
   DirectorDecisionFailedError,
   DirectorProposalRejectedError,
+  missionRetainedState,
+  recordRetainedState,
   validateDirectorProposal,
   type DecisionDelta,
   type DirectorAction,
@@ -2217,6 +2220,15 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         permissions: record.permissions ?? draft.constraints.permissions ?? [],
         hardRules: record.contract.hardRules,
         stopConditions: record.stopConditions ?? draft.stopConditions,
+      });
+      // F5 (#231): Memory Off drops historical narrative, never Mission state.
+      // The state actually handed to this decision point must still carry the
+      // scoreboard and current best the durable record measured.
+      assertOffRetainsMissionState({
+        mode: researchMemoryMode,
+        scope: "decision-point",
+        retained: missionRetainedState(directorInput.observations),
+        expected: recordRetainedState(record),
       });
 
       // ── M1-T2 two-stage decision (#211) ──────────────────────────────────

@@ -14,10 +14,15 @@ projection, the decision packet, Run injection, recovery, or the evaluation.
 | Durable snapshot + provider | `src/execution/research-memory-provider.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
 | Run-bound slice | `src/execution/memory-slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice` |
 | Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
-| Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta` |
+| Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta`, `missionRetainedState`, `recordRetainedState`, `decisionRetainedState`, `assertOffRetainsMissionState` |
 | Recovery rebuild | `src/mission/mission-resume.ts` | `reconcileResearchMemory` |
 | Accountability / diversity / counterfactuals | `src/mission/decision-accountability.ts` | `projectDecisionAccountability`, `ResearchDiversity` |
 | Offline evaluation | `src/mission/memory-evaluation.ts` | `replayResearchMemory`, `evaluateResearchMemory`, `researchMemoryArmMetrics` |
+
+F5 (#231): the off arm keeps the Mission's `Mission Retained State` (scoreboard +
+current best) in the prompt and at the decision point; `assertOffRetainsMissionState`
+is called where the Director input is built (`mission-start.ts`) and in the
+whole-Mission report.
 
 ## Lookup by question
 
@@ -25,6 +30,7 @@ projection, the decision packet, Run injection, recovery, or the evaluation.
 - How are cards ordered, truncated, reserved, and omitted? `projectResearchMemorySnapshot` and `projectResearchDecisionPacket`.
 - What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `runMissionController`.
 - Why can't a Run see the future? `replayResearchMemory` (dispatch vs completion instants; it pins the ledger revision the Run was durably served — `MissionRunRecord.researchMemory.ledgerRevision` — and falls back to the prefix ordinal only for legacy records without it).
+- Is replay value evidence? No. `evaluateResearchMemory` labels the replay section `integrity` (`claim: integrity`) and labels its comparison `whole-mission-comparison` (`kind`); it refuses arms that all derive from one MissionRecord, because those deltas are zero by construction.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
 

@@ -23,7 +23,13 @@ import {
   type BaselineEvaluator,
   type MissionRecord,
 } from "../../src/mission-start";
-import type { DirectorInput, DirectorProposal, MissionDirector } from "../../src/mission-director";
+import {
+  buildDirectorPrompt,
+  missionRetainedState,
+  type DirectorInput,
+  type DirectorProposal,
+  type MissionDirector,
+} from "../../src/mission-director";
 import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
@@ -301,6 +307,20 @@ describe("Memory Off / Sham / Real at the authorized lifecycle seam (M1-T9)", ()
     expect(revisionRecord.delta).toBeUndefined();
     expect(off.record.researchMemory).toBeUndefined();
     expect(off.prompts.every((prompt) => !prompt.includes("MEMORY SLICE"))).toBe(true);
+  });
+
+  test("an off arm's prompt still carries the current best and scoreboard digest (F5 / #231)", async () => {
+    const off = await runArm("off");
+    const revision = off.calls.find((call) => call.stage === "revision")!;
+    // No Memory packet is pinned for the off arm, so what the prompt carries
+    // here is Mission state, never Memory.
+    expect(revision.input.decisionPhase?.memoryPacket).toBeUndefined();
+    const retained = missionRetainedState(revision.input.observations);
+    expect(retained.currentBest?.score).toBe(0.75);
+    const prompt = buildDirectorPrompt(revision.input);
+    expect(prompt).toContain("no Research Memory snapshot is pinned");
+    expect(prompt).toContain(retained.digest);
+    expect(prompt).toContain(retained.currentBest!.runId);
   });
 
   test("Schema-only Sham keeps card structure and bounds but carries no research content", async () => {

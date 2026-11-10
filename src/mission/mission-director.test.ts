@@ -19,6 +19,7 @@ import {
   buildDirectorInput,
   buildDirectorPrompt,
   deriveDecisionDelta,
+  missionRetainedState,
   validateDirectorProposal,
   type DirectorInput,
   type DirectorProposal,
@@ -470,5 +471,22 @@ describe("two-stage decision prompt (#211)", () => {
     }));
     expect(revision).toContain("BLIND PROPOSAL");
     expect(revision).toContain("no Research Memory snapshot is pinned");
+  });
+
+  test("the off arm's prompt still carries the Mission scoreboard, digest and current best (F5 / #231)", () => {
+    // An off arm pins no Memory packet at all, so anything the prompt still
+    // carries here is Mission state and not Memory.
+    const off = buildDirectorPrompt(input({
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt") },
+    }));
+    expect(off).toContain("no Research Memory snapshot is pinned");
+    const retained = missionRetainedState(input().observations);
+    expect(retained.currentBest?.runId).toBe("m-t5:baseline:1");
+    expect(off).toContain('"scoreboard"');
+    expect(off).toContain(retained.digest);
+    expect(off).toContain(retained.currentBest!.runId);
+    expect(off).toContain(String(retained.currentBest!.score));
+    // The blind stage is the same trusted state, so it carries it too.
+    expect(buildDirectorPrompt(input())).toContain(retained.digest);
   });
 });
