@@ -118,6 +118,13 @@ export type {
   ExecutionAudience,
   ExecutionContext,
 } from "./execution-context";
+export { createChildMetering } from "./pi-child-metering";
+export type {
+  ChildMetering,
+  ChildMeteringAuth,
+  ChildMeteringHost,
+  ChildMeteringOptions,
+} from "./pi-child-metering";
 export {
   ROLE_CONTEXT_SCHEMA,
   RoleContextError,

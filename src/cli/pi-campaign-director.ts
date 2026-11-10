@@ -1,8 +1,9 @@
 // Pi owns the interactive Director session. The campaign host owns durable work and evidence.
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { registerRoundWake, type RoundWakeHost } from "./pi-round-wake";
 import { createSupervisorRoundHost, type SupervisorOptions } from "./pi-supervisor";
 import { Type } from "typebox";
+import { createChildMetering, type ChildMetering } from "../execution/pi-child-metering";
 import { directorCollaboratorBatch, type CollaboratorSpec } from "../execution/pi-child-protocol";
 
 export type CampaignLimits = { researcherCNY?: number; reviewerCNY?: number; roundCNY?: number };
@@ -18,6 +19,12 @@ export interface CampaignDispatch {
   sessionId: string;
   signal: AbortSignal;
   onStatus?: (line: string) => void;
+  /**
+   * The controller-owned metered child model. Its `evok-meter-*` provider is
+   * already registered on this Pi host and lives for the controller lifetime,
+   * so consecutive children share one registration.
+   */
+  metering: Pick<ChildMetering, "alias" | "model" | "provider" | "usage">;
 }
 
 export interface PiCampaignHost {
@@ -40,6 +47,27 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
     : host.rounds;
   const wake = rounds ? registerRoundWake(pi, rounds) : undefined;
   let active: { jobId: string; role: string; abort: AbortController; done: Promise<void> } | undefined;
+  // ONE metering relay + provider per controller lifetime: registered before the
+  // first child dispatch and reused by every later one, so metering never depends
+  // on a per-child fixture or on the child holding the host's credentials.
+  let metered: { binding: string; child: ChildMetering } | undefined;
+  const meteredChild = async (ctx: ExtensionContext): Promise<ChildMetering> => {
+    const model = ctx.model;
+    if (!model) throw Error("a metered child needs the controller's current model");
+    const binding = ctx.sessionManager.getSessionId() + "|" + model.provider + "/" + model.id;
+    if (metered?.binding === binding) return metered.child;
+    if (metered) {
+      // A different session or model must not reuse the previous relay.
+      const stale = metered.child;
+      metered = undefined;
+      await stale.dispose().catch(() => {});
+    }
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) throw Error("a metered child needs resolvable provider authentication: " + auth.error);
+    const child = await createChildMetering(pi, { model, auth });
+    metered = { binding, child };
+    return child;
+  };
 
   if (host.hypotheses)
     pi.registerTool({
@@ -128,6 +156,26 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
         throw Error("the Reviewer uses the frozen candidate diff");
       const abort = new AbortController();
       const sessionId = ctx.sessionManager.getSessionId();
+      // Claim synchronously: Pi may run sibling tool calls concurrently, so two
+      // dispatches must not both pass the guard while metering is being opened.
+      let settle!: () => void;
+      const claim = {
+        jobId: params.jobId,
+        role: params.role,
+        abort,
+        done: new Promise<void>((resolve) => (settle = resolve)),
+      };
+      active = claim;
+      let metering: CampaignDispatch["metering"];
+      try {
+        // Fail closed before any child starts: no unmetered or unregistered child.
+        const meter = await meteredChild(ctx);
+        metering = { alias: meter.alias, model: meter.model, provider: meter.provider, usage: meter.usage };
+      } catch (error) {
+        if (active === claim) active = undefined;
+        settle();
+        throw error;
+      }
       if (ctx.hasUI) ctx.ui.setStatus("evok-child", "● " + params.role + " · " + params.jobId);
       const publish = (text: string) => {
         if (!abort.signal.aborted && ctx.sessionManager.getSessionId() === sessionId) {
@@ -141,6 +189,7 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
         const receipt = await host.dispatch({
           ...params,
           sessionId,
+          metering,
           signal: abort.signal,
           onStatus: (line) => {
             if (abort.signal.aborted || ctx.sessionManager.getSessionId() !== sessionId) return;
@@ -156,11 +205,12 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
           jobId: params.jobId,
           role: "reviewer",
           sessionId,
+          metering,
           signal: abort.signal,
           objective: "Review the frozen changes against the recorded hypothesis before evaluation.",
         });
       };
-      const done = Promise.resolve()
+      Promise.resolve()
         .then(run)
         .then(
           (outcome) => publish("EvoK · " + params.jobId + " · " + JSON.stringify(outcome)),
@@ -170,13 +220,13 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
             ),
         )
         .finally(() => {
-          if (active?.abort === abort) {
+          if (active === claim) {
             active = undefined;
             if (ctx.hasUI) ctx.ui.setStatus("evok-child", undefined);
             if (!abort.signal.aborted && wake) void wake(ctx);
           }
+          settle();
         });
-      active = { jobId: params.jobId, role: params.role, abort, done };
       return result({ jobId: params.jobId, role: params.role, state: "starting" });
     },
   });
@@ -212,5 +262,8 @@ export function registerCampaignDirector(pi: ExtensionAPI, host: PiCampaignHost)
   pi.on("session_shutdown", async () => {
     active?.abort.abort();
     await active?.done;
+    const owned = metered?.child;
+    metered = undefined;
+    if (owned) await owned.dispose();
   });
 }

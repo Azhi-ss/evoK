@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 const plugin = process.argv[2];
 if (!plugin) throw Error("pass the installed pi-subagents extension entry");
 const engine = resolve(dirname(fileURLToPath(import.meta.url)), "../../src/execution");
+// The smoke launches the plugin it was handed, so it declares that install's protocol.
+const { probePiSubagentsEntryProtocol } = await import(join(engine, "pi-subagents-protocol.ts"));
+const protocolVersion = probePiSubagentsEntryProtocol(resolve(plugin)).version;
 const scratch = await mkdtemp(join(tmpdir(), "evok-child-smoke-"));
 const home = join(scratch, "pi"),
   cwd = join(scratch, "workspace");
@@ -104,7 +107,7 @@ export default function smoke(pi) {
         const id={missionId:"mission",taskId:"task-"+role,runId:"run-"+role,targetAgentId:"agent-"+role};
         const memorySlice=createMemorySlice({...id,sliceId:"slice-"+role,findings:[{findingId:"fact",summary:"slice-sentinel-"+role}]});
         const roleContext=assembleRoleContext({...id,role,contract,policy,objective:"Improve.",source:"test",memoryDigest:memorySlice.digest});
-        results.push(await dispatchPiChild(pi,{role,task:"Return your role.",model:alias+"/"+model,cwd:ctx.cwd+"/"+role,memorySlice,roleContext,timeoutMs:15_000}));
+        results.push(await dispatchPiChild(pi,{role,task:"Return your role.",model:alias+"/"+model,cwd:ctx.cwd+"/"+role,memorySlice,roleContext,protocolProbe:()=>${JSON.stringify(protocolVersion)},timeoutMs:15_000}));
       }
       writeFileSync(${JSON.stringify(output)},JSON.stringify(results));
     } catch (error) { writeFileSync(${JSON.stringify(output)},JSON.stringify({error:String(error)})); }
