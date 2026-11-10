@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCompetitionContract } from "../competition/competition-contract";
@@ -416,6 +416,168 @@ test("a timeout after launch also needs the terminal native state before it may 
     expect(failed).toMatchObject({ code: "termination_unconfirmed", requestId });
     expect(failed.message).toMatch(/timed out; child termination is unconfirmed/);
     expect(order).toEqual(["request", "cancel"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+/** The plugin's own terminal answer for this request id. */
+const complete =
+  (events: ReturnType<typeof bus>, text = "done") =>
+  (v: any) =>
+    events.emit(response, {
+      requestId: v.requestId,
+      ownerRunId: v.ownerRunId,
+      nodeId: v.nodeId,
+      agent: v.agent,
+      status: "completed",
+      model: v.model + ":max",
+      thinking: "max",
+      result: { kind: "text", text },
+    });
+const roleContextWith = (tools: string[]) =>
+  assembleRoleContext({
+    ...identity,
+    role: "researcher",
+    objective: "Improve.",
+    contract,
+    policy,
+    source: "test",
+    tools,
+    memoryDigest: memorySlice.digest,
+  });
+/** Load the entry the transport declared and see what a child would actually get. */
+async function childToolNames(entry: string): Promise<string[]> {
+  const names: string[] = [];
+  const pi = {
+    on: () => () => {},
+    registerTool: (definition: { name: string }) => void names.push(definition.name),
+    setActiveTools: () => {},
+  };
+  await (await import(entry)).default(pi);
+  return names;
+}
+
+test("a Task Contract grant is the only tool the child gets, and the installer executes it", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-grant-"));
+  const events = bus();
+  let definition: any;
+  events.on(register, (registration: any) => {
+    definition = registration.definition;
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) => {
+    // One rule for tool turns; pi-subagents' call-count budget is a different unit.
+    expect(v.toolBudget).toBeUndefined();
+    complete(events, "granted")(v);
+  });
+  try {
+    await dispatchPiChild(
+      { events },
+      { ...delegation, roleContext: roleContextWith(["evok_read_evidence", "evok_read_file"]) },
+      options(cwd, { remainingToolTurns: 1 }),
+    );
+    expect(definition.tools).toEqual(["evok_read_evidence", "evok_read_file"]);
+    expect(definition.subagentOnlyExtensions).toHaveLength(1);
+    const binding = JSON.parse(
+      await readFile(join(cwd, ".evok", "binding.json"), "utf8"),
+    );
+    expect(binding).toMatchObject({
+      roleRunId: identity.runId,
+      profile: "research",
+      tools: ["evok_read_evidence", "evok_read_file"],
+      remainingToolTurns: 1,
+    });
+    expect(binding.evidence).toEqual([{ ref: "one", summary: "Only this observation." }]);
+    expect(await childToolNames(definition.subagentOnlyExtensions[0])).toEqual([
+      "evok_read_evidence",
+      "evok_read_file",
+    ]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("no grant means no tool and no child state directory", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-no-grant-"));
+  const events = bus();
+  let definition: any;
+  events.on(register, (registration: any) => {
+    definition = registration.definition;
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, complete(events, "none"));
+  try {
+    await dispatchPiChild({ events }, delegation, options(cwd));
+    expect(definition.tools).toEqual([]);
+    expect(definition.subagentOnlyExtensions).toEqual([]);
+    expect(await readdir(cwd)).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a grant this transport cannot execute is refused before anything is registered", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-unsupported-"));
+  const events = bus();
+  const seen: string[] = [];
+  events.on(register, () => seen.push("register"));
+  events.on(request, () => seen.push("request"));
+  try {
+    await expect(
+      dispatchPiChild(
+        { events },
+        { ...delegation, roleContext: roleContextWith(["evok_read_evidence", "evok_experiment"]) },
+        options(cwd),
+      ),
+    ).rejects.toThrow(/cannot be granted evok_experiment/);
+    expect(seen).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("fork copies the parent snapshot into the child's own workspace", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "evok-parent-"));
+  const cwd = await mkdtemp(join(tmpdir(), "evok-fork-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, complete(events, "forked"));
+  try {
+    await writeFile(join(parent, "finding.md"), "parent artifact");
+    const output = await dispatchPiChild(
+      { events },
+      delegation,
+      options(cwd, { workspace: { mode: "fork", from: parent } }),
+    );
+    expect(output.value.text).toBe("forked");
+    expect(await readFile(join(cwd, "finding.md"), "utf8")).toBe("parent artifact");
+    // The parent snapshot is a source, never the child's workspace.
+    expect(await readdir(parent)).toEqual(["finding.md"]);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("fork is refused when the parent snapshot is absent, and a shared workspace is refused outright", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-fork-refused-"));
+  const events = bus();
+  const seen: string[] = [];
+  events.on(register, () => seen.push("register"));
+  events.on(request, () => seen.push("request"));
+  try {
+    await expect(
+      dispatchPiChild({ events }, delegation, options(cwd, { workspace: { mode: "fork", from: join(cwd, "absent") } })),
+    ).rejects.toThrow(/parent snapshot/);
+    await expect(
+      dispatchPiChild({ events }, delegation, options(cwd, { workspace: { mode: "shared" } as any })),
+    ).rejects.toThrow(/fresh|fork/);
+    await writeFile(join(cwd, "already-here"), "");
+    await expect(dispatchPiChild({ events }, delegation, options(cwd))).rejects.toThrow(/empty workspace/);
+    expect(seen).toEqual([]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

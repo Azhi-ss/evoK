@@ -6,18 +6,29 @@
  * absent install fails closed instead of surfacing later as a registration or
  * identity failure. The host registers the unique evok-meter-* provider
  * against its exclusive loopback relay before calling this function, and owns
- * that relay's lifetime. No credentials or child-authored filenames are passed
- * to tools here. One deadline covers registration, launch and execution: a
+ * that relay's lifetime. A child gets only the scoped tools its Task Contract
+ * grants (default none) and only in tool turns it may still spend; the grant and
+ * the installer entry are written into the child's own workspace. That workspace
+ * is fresh, or a copy of a parent snapshot — never shared. No credentials or
+ * child-authored filenames are passed to tools here. One deadline covers
+ * registration, launch and execution: a
  * cancel or timeout resolves only on a terminal native state for this request
  * id, on confirmation that the child never started, or as an explicit
  * `termination_unconfirmed` carrying the request id — and the registration is
  * never disposed while the child may still be running.
  */
 import { randomUUID } from "node:crypto";
-import { readdir, realpath } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { cp, readdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, sep } from "node:path";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
-import { validateMemorySlice } from "./memory-slice";
+import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import {
+  CHILD_STATE_DIR,
+  childToolGrants,
+  profileForRole,
+  writeChildToolPackage,
+  type ChildEvidence,
+} from "./pi-child-tools";
 import { probePiSubagentsProtocol, type PiSubagentsVersionProbe } from "./pi-subagents-protocol";
 import { validateRoleContext } from "./role-context";
 import type { SubagentDelegation, SubagentDelegationResult } from "./subagents-adapter";
@@ -29,6 +40,11 @@ interface Host {
   };
 }
 
+/** Fresh, or artifacts copied from a parent snapshot. A shared workspace is refused (ADR-0001). */
+export type PiChildWorkspace =
+  | { readonly mode: "fresh" }
+  | { readonly mode: "fork"; readonly from: string };
+
 /** Everything the transport decides itself; the delegation supplies the rest. */
 export interface PiChildTransportOptions {
   /** The child's own workspace; the transport never chooses or shares it. */
@@ -38,6 +54,13 @@ export interface PiChildTransportOptions {
   signal?: AbortSignal;
   /** Single deadline covering registration, launch and execution; `0` means it is already spent. */
   timeoutMs?: number;
+  /**
+   * Non-control tool turns the Task Contract still allows this child. Default 8,
+   * the same total the receipt store reconciles against; `0` spends none.
+   */
+  remainingToolTurns?: number;
+  /** How the child's workspace is prepared. Default: a fresh empty directory. */
+  workspace?: PiChildWorkspace;
   onUpdate?: (update: { runId?: string; tokens?: number }) => void;
   /** Host protocol probe; defaults to the installed pi-subagents package. */
   protocolProbe?: PiSubagentsVersionProbe;
@@ -104,6 +127,12 @@ export async function dispatchPiChild(
   const timeoutMs = options.timeoutMs ?? 15 * 60_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_478_647)
     throw Error("invalid child timeout");
+  // C10: the Task Contract decides the child's tools, and the default is none.
+  const tools = childToolGrants(role, context.tools);
+  const remainingToolTurns = options.remainingToolTurns ?? 8;
+  if (!Number.isSafeInteger(remainingToolTurns) || remainingToolTurns < 0 || remainingToolTurns > 8)
+    throw Error("invalid remaining tool turns");
+  const workspace = options.workspace ?? { mode: "fresh" };
   options.signal?.throwIfAborted();
   // Fail closed before the native registration and before any child exists.
   const protocol = probePiSubagentsProtocol(options.protocolProbe);
@@ -125,10 +154,10 @@ export async function dispatchPiChild(
       inheritProjectContext: false,
       inheritGlobalContext: false,
       inheritSkills: false,
-      tools: [],
+      tools,
       skills: [],
       extensions: [],
-      subagentOnlyExtensions: [],
+      subagentOnlyExtensions: [] as string[],
       mcpDirectTools: [],
       allowNestedSubagents: false,
       defaultReads: [],
@@ -171,9 +200,19 @@ export async function dispatchPiChild(
   const deadlineAt = Date.now() + timeoutMs;
   deadline = setTimeout(() => cancel("EvoK child timed out"), timeoutMs);
   try {
-    const cwd = await realpath(options.cwd);
-    if (!isAbsolute(options.cwd) || (await readdir(cwd)).length !== 0)
-      throw Error("child needs its own empty workspace");
+    const cwd = await prepareWorkspace(options.cwd, workspace);
+    // A granted tool only exists if the child is pointed at the installer entry,
+    // which carries the grant list and the turn budget it must enforce.
+    if (tools.length)
+      registration.definition.subagentOnlyExtensions = [
+        await writeChildToolPackage(join(cwd, CHILD_STATE_DIR), {
+          roleRunId: memory.runId,
+          profile: profileForRole(role),
+          tools,
+          remainingToolTurns,
+          evidence: evidenceOf(memory),
+        }),
+      ];
     // A budget already spent while preparing never registers or launches a child.
     if (Date.now() >= deadlineAt) cancel("EvoK child timed out");
     if (cancelReason !== undefined) throw Error(cancelReason + "; child never started");
@@ -263,7 +302,8 @@ export async function dispatchPiChild(
           skill: false,
           artifacts: false,
           intercomBridge: { mode: "off" },
-          toolBudget: { hard: 0, block: "*" },
+          // No `toolBudget`: it counts calls, while the child's grant is spent in
+          // tool turns, which the installer enforces as the one rule (C7).
           result: { kind: "text" },
         });
       } catch (error) {
@@ -274,4 +314,28 @@ export async function dispatchPiChild(
     finish(() => {});
     throw error;
   }
+}
+
+/** A fresh empty workspace, or the parent snapshot copied into it. Never shared. */
+async function prepareWorkspace(cwd: string, workspace: PiChildWorkspace): Promise<string> {
+  if (!isAbsolute(cwd)) throw Error("child needs an absolute workspace path");
+  if (workspace.mode !== "fresh" && workspace.mode !== "fork")
+    throw Error("a child workspace is fresh or a fork of a parent snapshot; a shared one is out of scope");
+  const root = await realpath(cwd);
+  if ((await readdir(root)).length !== 0) throw Error("child needs its own empty workspace");
+  if (workspace.mode === "fresh") return root;
+  const from = await realpath(workspace.from).catch(() => {
+    throw Error("fork needs an existing parent snapshot directory: " + workspace.from);
+  });
+  if (from === root || from.startsWith(root + sep) || !(await stat(from)).isDirectory())
+    throw Error("fork needs an existing parent snapshot directory outside the child workspace: " + workspace.from);
+  // shortcut: the snapshot is copied whole, unmeasured; cap it if a parent
+  // workspace ever grows large enough to make a bounded fork worth the I/O.
+  await cp(from, root, { recursive: true, force: true });
+  return root;
+}
+
+/** The evidence a granted child may read back: its own slice's findings, nothing wider. */
+function evidenceOf(memory: MemorySlice): ChildEvidence[] {
+  return memory.findings.map((finding) => ({ ref: finding.findingId, summary: finding.summary }));
 }

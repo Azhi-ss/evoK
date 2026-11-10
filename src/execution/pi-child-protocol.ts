@@ -69,6 +69,10 @@ const communicate = Type.Object(
   { target_node_id: Type.String({ minLength: 1, maxLength: 256 }), message: shortText, evidence_refs: refs },
   { additionalProperties: false },
 );
+/** Every child-issued control action, ending the turn (deliver) or not. */
+export const controlActions = ["evok_deliver", "evok_recruit", "evok_communicate"] as const;
+export type ControlAction = (typeof controlActions)[number];
+/** Grants that only widen what a worker may do inside its turn. */
 export type WorkerControl = "evok_recruit" | "evok_communicate";
 export type WorkerAction =
   | { name: "evok_deliver"; args: Static<typeof deliver> }
