@@ -48,6 +48,20 @@ export type {
   SubmitHumanInsightDraftInput,
 } from "./insight-inbox";
 export {
+  DIRECTOR_INSIGHT_DEFAULT_MAX,
+  DIRECTOR_INSIGHT_SIDECAR_SCHEMA,
+  assertRevisionInsightDispositions,
+  buildDirectorInsightSidecar,
+  emptyDirectorInsightSidecar,
+  recordRevisionInsightDispositions,
+} from "./director-insight-sidecar";
+export type {
+  DirectorInsightSidecar,
+  DirectorInsightSidecarItem,
+  RecordRevisionInsightDispositionsInput,
+  RevisionInsightDispositionInput,
+} from "./director-insight-sidecar";
+export {
   DECISION_POINT_CAVEATS,
   DECISION_POINT_EVALUATION_KIND,
   DECISION_POINT_EVALUATION_SCHEMA,

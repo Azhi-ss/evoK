@@ -18,6 +18,9 @@ import {
   type DirectorInput,
 } from "./mission-director";
 import type { EvokResources } from "../evok-resources";
+import { InMemoryResearchLedger } from "./research-loop";
+import { submitInsightDraft } from "./insight-inbox";
+import { buildDirectorInsightSidecar } from "./director-insight-sidecar";
 
 const stats = {
   tokens: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 },
@@ -114,6 +117,41 @@ describe("createPiMissionDirector (#113 AC2)", () => {
     // read-only tools only
     expect(fake.tools[0]).toEqual(expect.arrayContaining(["read", "grep", "find", "ls"]));
     expect(fake.tools[0]!.sort()).toEqual([...new Set(fake.tools[0]!)].sort());
+  });
+
+  test("a Revision carries the pinned Insight sidecar, and its judgements pass through for the controller", async () => {
+    const res = await resources();
+    const ledger = new InMemoryResearchLedger();
+    submitInsightDraft(ledger, { missionId: "m-unit", insightId: "insight-1", text: "the fold window may be too wide", author: "operator" });
+    const fake = fakeSession(JSON.stringify({
+      stateVersion: 2,
+      action: "change-direction",
+      rationale: "the human idea is worth one bounded check",
+      task: { objective: "materialize answer.txt with value 0.9", expectedOutputs: ["answer.txt"] },
+      expectedCost: 0.01,
+      insightDispositions: [{ insightId: "insight-1", disposition: "deferred", reason: "after the split contract is re-measured" }],
+    }));
+    const director = createPiMissionDirector({
+      resources: res,
+      runtimeFactory: (root) => new PiAgentRuntime({
+        workspaceRoot: root,
+        sessionFactory: async () => fake.session,
+      }),
+    });
+    const decision = await director.decide({
+      ...directorInput(),
+      decisionPhase: {
+        blindProposal: { stateVersion: 2, action: "change-direction", rationale: "blind choice" },
+        insightSidecar: buildDirectorInsightSidecar(ledger.events(), { missionId: "m-unit" }),
+      },
+    });
+    // The Revision prompt carries the pinned Insight; the controller, not the
+    // adapter, validates the judgement against that pin.
+    expect(fake.prompts[0]!).toContain("INSIGHT SIDECAR");
+    expect(fake.prompts[0]!).toContain("the fold window may be too wide");
+    expect(decision.insightDispositions).toEqual([
+      { insightId: "insight-1", disposition: "deferred", reason: "after the split contract is re-measured" },
+    ]);
   });
 
   test("non-JSON model text is surfaced as a proposal rejection (controller owns correction)", async () => {

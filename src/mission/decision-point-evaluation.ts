@@ -24,6 +24,7 @@ import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../ev
 import { RESEARCH_MEMORY_EVALUATION_MODES } from "../evidence/research-memory";
 import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { RESEARCH_MEMORY_CONTROL_CAVEAT, assertNoFutureInformation } from "./memory-evaluation";
+import { emptyDirectorInsightSidecar } from "./director-insight-sidecar";
 import {
   assertOffRetainsMissionState,
   deriveDecisionDelta,
@@ -177,7 +178,14 @@ export async function evaluateDecisionPoint(options: {
     const state = structuredClone(point.baseState);
     const handed: DirectorInput = deepFreeze({
       ...state,
-      decisionPhase: { blindProposal: point.blindProposal, ...(packet === undefined ? {} : { memoryPacket: packet }) },
+      decisionPhase: {
+        blindProposal: point.blindProposal,
+        ...(packet === undefined ? {} : { memoryPacket: packet }),
+        // #240: the Revision stage always carries an Insight sidecar. This
+        // frozen point holds no Insight, so every arm reads the same empty pin;
+        // #241 makes the arms carry one identical non-empty snapshot.
+        insightSidecar: emptyDirectorInsightSidecar(point.baseState.missionId),
+      },
     });
     // F5 (#231): Memory Off drops narrative, never Mission state.
     assertOffRetainsMissionState({
