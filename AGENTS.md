@@ -29,3 +29,23 @@ Memory subsystem (projection, decision packet, Run injection, recovery, evaluati
 - Use TDD for behavior changes. Preserve unrelated changes. Before completion, run `bun run check` (typecheck + whitespace + full suite vs the known-host-failure baseline) and `/code-review`; then commit, comment the result on the issue, and close it. Baseline rules: `docs/agents/known-failures.md`.
 - Only after the ticket is committed, closed, and the tracked worktree is clean, use the session-resolved Orca CLI to open a new fresh Pi in the active worktree and send it the next eligible ticket. Never implement the next ticket in the current session.
 - Stop on blockers, failed gates, ambiguity, unexplained dirty state, or when no eligible ticket remains.
+
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+This repository is indexed by CodeGraph (`.codegraph/` at the root): a SQLite graph
+of symbols, calls, imports and inheritance, kept fresh by a file watcher.
+
+Use it **before** grep/read when you need to understand or locate code, and before
+editing a symbol you can name:
+
+- **MCP tool** `mcp__codegraph__codegraph_explore` — pass this repository's absolute
+  path as `projectPath`; the MCP server starts outside the repo, so without it there
+  is no default project. One call returns the relevant symbols' line-numbered source
+  plus the call paths and blast radius; treat that source as already Read.
+- **Shell fallback**: `codegraph explore "<symbols or question>" -p <repo root>` —
+  same output, for subagents without the MCP tool.
+
+Read/grep is still the tool for configs, docs, and files the index skipped.
+Trust the graph; re-reading a file it already returned is wasted work.
+<!-- CODEGRAPH_END -->
