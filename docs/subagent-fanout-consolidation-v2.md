@@ -1,6 +1,6 @@
 # Subagent Fan-Out: Consolidation Spec v2
 
-status: revised diagnosis + cleanup plan (implementation not yet authorized)
+status: diagnosis + cleanup plan; A1–A5 delivered (#223–#227); A6 tools/workspace (#228) and A7 diagnostics/docs (#229) open
 supersedes: `docs/subagent-fanout-consolidation.md` v1 (that file is superseded and
             should be replaced by this one)
 reviewed: `pi-child-dispatch.ts`, `pi-child-work.ts`, `pi-child-owner.ts`,
@@ -93,7 +93,7 @@ capability gap, not a defect to preserve accidentally.
   smoke are deleted. `PiWorkerRequest` is deleted with them.
 - `pi-child-protocol.ts` is deleted unless a real requirement for child-issued
   control actions is demonstrated. If that requirement exists, it is designed as
-  a separate capability, not preserved by default.
+  a separate capability, not preserved by default (answered by A5; see §8 Q1).
 - `collaboration-scheduler.ts` is deleted. Concurrency needs are served by
   `Promise.all` over the guarded adapter until a real requirement exists.
 
@@ -157,7 +157,7 @@ src/execution/
   pi-child-work.ts          DELETE
   pi-child-owner.ts         DELETE
   pi-child-recruit.ts       DELETE
-  pi-child-protocol.ts      DELETE unless a child-control requirement is demonstrated
+  pi-child-protocol.ts      KEEP; Q1 answered, relocation belongs to A6 (§8)
   collaboration-scheduler.ts DELETE
   collaboration-*.test.ts   DELETE with it
   pi-child-*.test.ts        rewrite against the single transport
@@ -167,6 +167,14 @@ tests/e2e/
 docs/
   multi-agent-architecture.md one seam, one transport, sequential mainline by default
 ```
+
+Delivered: `pi-child-work.ts` and its e2e smoke went with #225. `pi-child-owner.ts`
+and `collaboration-scheduler.ts` (with `collaboration-scheduler.test.ts` and
+`collaboration-questions.test.ts`) went with #227. `pi-child-protocol.ts` stays for
+its one live consumer, `src/cli/pi-campaign-director.ts`, which publishes the
+Director hire schema (`directorCollaboratorBatch`, `CollaboratorSpec`) from it
+(see §8 Q1). The `pi-child-*.test.ts` rewrite against the single transport is A6/A7
+work; #227 only renamed the orphaned recruit test to the module it actually covers.
 
 ## 6. Acceptance tests (existing adapter seam)
 
@@ -205,6 +213,12 @@ T12. `bun test --rerun-all-tests`, `bun run typecheck`, `git diff --check` stay 
 
 Q1 — Does any Mission Task Contract actually need child-issued control actions?
 If not, `pi-child-protocol.ts` is deleted.
+Answered by A5 (#227): yes. `src/cli/pi-campaign-director.ts` is a registered Pi
+extension that publishes the Director hire schema from it. Retained rather than
+relocated because moving ~200 lines out of the Director path is A6 (#228) work,
+not a deletion. `pi-child-tools.ts` and `pi-child-recovery.ts` also import its
+schemas, but they have no production caller of their own: A6 wires the installer,
+and `docs/memory-subsystem-prd.md` §9 decides whether they survive.
 Q2 — Where should the metering relay live in production (CLI launch, Mission
 controller, or a dedicated execution-broker component)? C2 requires this to be
 answered before implementation, not after.
