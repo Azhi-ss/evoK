@@ -161,6 +161,38 @@ describe("TUI mirror extension registration", () => {
 });
 
 describe("TUI mirror = CLI gates (no dilution)", () => {
+  test("Mission slash commands retain explicit CLI defaults and accept explicit overrides", async () => {
+    const project = await tempProject();
+    try {
+      const resolver = await fauxResolver("tui-mission-defaults");
+      for (const command of ["/start", "/mission-resume"]) {
+        for (const override of [false, true]) {
+          let seen: ReturnType<typeof parseEvokArgs> | undefined;
+          let hosts: readonly string[] | undefined;
+          const runner = async (options: Parameters<NonNullable<Parameters<typeof runEvok>[0]["startRunner"]>>[0]): Promise<never> => {
+            hosts = options.network;
+            throw new Error("captured dispatch without running a model");
+          };
+          const result = await executeTuiMirrorCommand({
+            input: `${command} --mission m-test${override ? " --director-tier mid --allow-host other" : ""}`,
+            projectRoot: project,
+            missionDefaults: { directorTier: "fast", allowHost: "nose", thinking: "high" },
+            createResolver: async (args) => { seen = args; return resolver; },
+            evaluator: { id: "e", version: "1", async evaluate() { return { ok: true, score: 1 }; } },
+            startRunner: runner,
+            resumeRunner: runner,
+          });
+          expect(result.stderr).toContain("captured dispatch");
+          expect(seen?.directorTier).toBe(override ? "mid" : "fast");
+          expect(seen?.thinking).toBe("high");
+          expect(hosts).toEqual([override ? "other" : "nose"]);
+        }
+      }
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
+  });
+
   test("/skills in TUI is the same readable directory as CLI", async () => {
     const project = await tempProject();
     try {

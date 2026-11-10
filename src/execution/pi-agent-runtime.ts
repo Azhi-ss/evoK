@@ -1053,9 +1053,7 @@ export class PiAgentRuntime {
         allowedTools: tools,
         allowBash: requestedPolicy.allowBash === true,
       }, {
-        protectedReadRoots: this.resources?.readRoots
-          ?.map((path) => resolve(path))
-          .filter((path) => readRoots.includes(path)),
+        protectedReadRoots: this.resources?.readRoots,
       });
       const events: RuntimeEvent[] = [];
       const seen = new Set<string>();

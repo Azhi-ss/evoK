@@ -174,6 +174,8 @@ export interface ExecuteTuiMirrorOptions {
   readonly input: string;
   readonly projectRoot: string;
   readonly tier?: string;
+  /** Explicit CLI choices carried into user-invoked Mission slash commands. */
+  readonly missionDefaults?: Pick<ParsedEvokArgs, "directorTier" | "allowHost" | "thinking">;
   readonly createResolver?: EvokRunOptions["createResolver"];
   readonly startRunner?: EvokRunOptions["startRunner"];
   readonly resumeRunner?: EvokRunOptions["resumeRunner"];
@@ -209,6 +211,7 @@ export async function executeTuiMirrorCommand(options: ExecuteTuiMirrorOptions):
     };
   }
   const args: ParsedEvokArgs = {
+    ...options.missionDefaults,
     ...parseEvokArgs(parsed.argv),
     project: options.projectRoot,
     ...(options.tier ? { tier: options.tier } : {}),

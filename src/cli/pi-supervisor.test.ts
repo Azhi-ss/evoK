@@ -57,7 +57,7 @@ test("ordinary campaign rounds still pass through the wrapper unchanged and keep
     report: async () => round,
     acknowledge: async report => { acknowledged.push(report.id); },
     openDirector: async () => ({ provider: "p", model: "m", close: async () => {} }),
-  }, { directory: w.directory, status: async () => ({}) });
+  }, { directory: w.directory, status: async () => ({}), now: () => new Date("2026-11-08T12:00:00Z") });
   hooks.get("session_start")({}, { sessionManager: { getSessionId: () => "pi-1", getBranch: () => [] } });
   const stop = host.subscribe!(() => {});
   expect(await host.report("pi-1")).toEqual(round);

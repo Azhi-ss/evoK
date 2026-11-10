@@ -4,9 +4,9 @@
  */
 import { createHash, createPublicKey, generateKeyPairSync, sign as signDigest, verify as verifyDigest } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isShellToolName } from "./user-bash";
 
 export type SandboxViolationKind =
@@ -70,11 +70,29 @@ const DEFAULT_PROTECTED_SEGMENTS = new Set([
 ]);
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 const KNOWN_TOOLS = ["read", "grep", "find", "ls", "bash", "powershell", "edit", "write"] as const;
-const NETWORK_COMMAND = /\b(?:curl|wget|nc|ncat|netcat|telnet|socat|ssh|scp|ftp|httpie|nslookup|dig|ping|fetch|docker|podman|kubectl|psql|mysql|redis-cli)\b|\b(?:git\s+(?:clone|fetch|pull|push)|npm\s+(?:install|ci|update)|bun\s+(?:install|add|update)|pnpm\s+(?:install|add|update))\b|\/dev\/(?:tcp|udp)\b|\b(?:connect|socket)\s*\(/i;
+const NETWORK_COMMAND = /\b(?:curl|wget|nc|ncat|netcat|telnet|socat|ftp|httpie|nslookup|dig|ping|fetch|docker|podman|kubectl|psql|mysql|redis-cli)\b|\b(?:git\s+(?:clone|fetch|pull|push)|npm\s+(?:install|ci|update)|bun\s+(?:install|add|update)|pnpm\s+(?:install|add|update))\b|\/dev\/(?:tcp|udp)\b|\b(?:connect|socket)\s*\(/i;
+const SSH_COMMAND = /\b(?:ssh|scp)\b/i;
 const INLINE_COMMAND = /(?:^|[;&|\r\n])\s*(?:sh|bash|zsh|fish|node|bun|deno|python(?:3)?|perl|ruby)\s+(?:-e|--eval|-c)\b|\b(?:eval|exec)\s*\(|\$\(|`/i;
 const PROTECTED_COMMAND_PATH = /(?:^|[\s"'=])(?:~(?:\/|\\)|\/)(?:[^\s"']*\/)?(?:\.ssh|\.aws|\.config|\.npmrc|\.git-credentials|\.env(?:\.|\b)|credentials?|secrets?|id_rsa|id_ed25519|etc\/(?:passwd|shadow|sudoers)|var\/run|proc(?:\/|\b)|sys(?:\/|\b)|dev\/((?:tcp|udp)|docker\.sock))/i;
 const HOST_SOCKET_COMMAND = /\b(?:docker|podman|kubectl)\b|\/var\/run\/|docker\.sock/i;
 const URL_TOKEN = /https?:\/\/[^\s"'`;&|)]+/gi;
+
+export function isPlainSshHost(host: string): boolean {
+  return /^(?:[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)*$/i.test(host);
+}
+
+/** A single command with literal words only; never parse a partial shell program. */
+function sshCommandWords(command: string): string[] {
+  let rest = command.trim();
+  const words: string[] = [];
+  while (rest) {
+    const match = /^(?:'([^'\r\n]*)'|([a-z0-9_./:@%+=,-]+))(?:[ \t]+|$)/i.exec(rest);
+    if (!match) throw new SandboxViolation("network", "ssh/scp requires one simple command without shell expansion or operators");
+    words.push(match[1] ?? match[2]);
+    rest = rest.slice(match[0].length);
+  }
+  return words;
+}
 
 export function clone<T>(value: T): T {
   if (typeof structuredClone === "function") return structuredClone(value);
@@ -98,12 +116,23 @@ function within(root: string, child: string): boolean {
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 }
 
-/** realpath when the path exists, lexical path otherwise (missing targets stay lexical). */
+/** Resolve existing ancestors too: a missing leaf must not hide a symlink escape. */
 function realpathSafe(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
+  let existing = resolve(path);
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync(existing), ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return resolve(path);
+      if (lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw new SandboxViolation("symlink", `unresolved symlink path: ${path}`);
+      }
+      const parent = dirname(existing);
+      if (parent === existing) return resolve(path);
+      suffix.unshift(basename(existing));
+      existing = parent;
+    }
   }
 }
 
@@ -252,7 +281,8 @@ export class SandboxBoundary {
     this.realReadRoots = Object.freeze(this.readRoots.map((path) => realpathSafe(path)));
     this.protectedReadRoots = Object.freeze([...new Set((options.protectedReadRoots ?? [])
       .map((path) => resolve(path))
-      .filter((path) => this.readRoots.includes(path)))]);
+      .filter((path) => this.realReadRoots.includes(realpathSafe(path)))
+      .flatMap((path) => [path, realpathSafe(path)]))]);
     this.policy = deepFreeze({
       ...policy,
       root: this.root,
@@ -262,10 +292,10 @@ export class SandboxBoundary {
       ...(policy.protectedPaths === undefined ? {} : { protectedPaths: [...policy.protectedPaths] }),
       ...(policy.allowedTools === undefined ? {} : { allowedTools: [...policy.allowedTools] }),
     });
-    this.protectedPaths = Object.freeze([
+    this.protectedPaths = Object.freeze([...new Set([
       ...((policy.protectedPaths ?? []).map((path) => resolve(this.root, path))),
       ...((policy.credentialPaths ?? []).map((path) => resolve(this.root, path))),
-    ]);
+    ].flatMap((path) => [path, realpathSafe(path)]))]);
   }
 
   private isProtected(target: string): boolean {
@@ -274,7 +304,12 @@ export class SandboxBoundary {
     // protected segments relative to that root so the root itself may be named
     // `policy`, while `.env`, `credentials`, and similar files below it remain
     // protected. Untrusted readRoots do not get this exception.
-    const protectedRoot = this.protectedReadRoots.find((path) => within(path, target));
+    let protectedRoot = this.protectedReadRoots.find((path) => within(path, target));
+    if (!protectedRoot) {
+      const canonical = realpathSafe(target);
+      protectedRoot = this.protectedReadRoots.find((path) => within(path, canonical));
+      if (protectedRoot) target = canonical;
+    }
     const relativeBase = protectedRoot ?? this.root;
     const parts = normalizedPath(relative(relativeBase, target)).split("/").filter(Boolean).map((part) => part.toLowerCase());
     return parts.some((part) => DEFAULT_PROTECTED_SEGMENTS.has(part) || part.startsWith(".env."));
@@ -289,19 +324,26 @@ export class SandboxBoundary {
     }
     const parts = normalizedPath(path).split("/");
     if (parts.includes("..")) throw new SandboxViolation("path-traversal", `path traversal is not allowed: ${path}`);
-    const target = isAbsolute(path) ? resolve(path) : resolve(this.root, path);
+    let target = isAbsolute(path) ? resolve(path) : resolve(this.root, path);
     const readOnly = operation === "read" || operation === "inspect";
+    const realTarget = readOnly ? realpathSafe(target) : target;
+    // CLI and SDK paths may use different filesystem aliases (e.g. /var and
+    // /private/var on macOS). Canonical containment grants the same read, never
+    // a write or a broader root. Check protections in both spellings below.
+    const canonicalRead = readOnly && withinRealRoots(this.realReadRoots, realTarget);
+    if (this.isProtected(target) || (readOnly && this.isProtected(realTarget))) {
+      throw new SandboxViolation("protected-path", `protected path is not accessible: ${path}`);
+    }
+    if (canonicalRead && !within(this.root, target) && !withinRealRoots(this.readRoots, target)) target = realTarget;
     const inRoot = within(this.root, target);
-    const inReadRoot = readOnly && this.readRoots.some((readRoot) => within(readRoot, target));
+    const inReadRoot = readOnly && (canonicalRead || withinRealRoots(this.readRoots, target));
     if (!inRoot && !inReadRoot) throw new SandboxViolation("path-traversal", `path escapes sandbox root: ${path}`);
     if (!inRoot && !readOnly) throw new SandboxViolation("path-traversal", `write/execute path must stay inside the run workspace: ${path}`);
-    if (this.isProtected(target)) throw new SandboxViolation("protected-path", `protected path is not accessible: ${path}`);
     // Symlink containment: every existing path component must resolve inside
     // the run workspace or an explicitly approved read root (sync chokepoint
     // for read tool calls; assertPathAsync adds component-level checks for writes).
-    if (readOnly && !inRoot) {
-      const realTarget = realpathSafe(target);
-      if (!withinRealRoots(this.realReadRoots, realTarget)) {
+    if (readOnly) {
+      if (!canonicalRead && !within(realpathSafe(this.root), realTarget)) {
         throw new SandboxViolation("symlink", `path resolves outside approved read roots: ${path}`);
       }
     }
@@ -312,7 +354,7 @@ export class SandboxBoundary {
     const target = this.assertPath(path, operation);
     const containingRoot = within(this.root, target)
       ? this.root
-      : this.readRoots.find((readRoot) => within(readRoot, target));
+      : [...this.readRoots, ...this.realReadRoots].find((readRoot) => within(readRoot, target));
     if (!containingRoot) throw new SandboxViolation("path-traversal", `path escapes sandbox root: ${path}`);
     let existing = target;
     while (true) {
@@ -370,6 +412,45 @@ export class SandboxBoundary {
     if (this.policy.allowHostSockets !== true) throw new SandboxViolation("host-socket", `host socket access is denied: ${target}`);
   }
 
+  private assertSshCommand(command: string): void {
+    const [program, ...args] = sshCommandWords(command);
+    const assertHost = (host: string) => {
+      // SSH aliases are exact destinations, unlike the HTTP subdomain policy.
+      if (!isPlainSshHost(host) || !Array.isArray(this.policy.network)
+        || !this.policy.network.some((entry) => entry.toLowerCase() === host.toLowerCase())) {
+        throw new SandboxViolation("network", "ssh/scp target is not explicitly allowlisted");
+      }
+    };
+    if (program === "ssh" && args.length >= 2) {
+      assertHost(args[0]);
+      if (!args[1].trim() || args[1].trimStart().startsWith("-") || SSH_COMMAND.test(args.slice(1).join(" "))) {
+        throw new SandboxViolation("network", "ssh options and nested ssh/scp commands are not supported");
+      }
+      return;
+    }
+    if (program !== "scp" || args.length !== 2 || args.some((arg) => !arg || arg.startsWith("-"))) {
+      throw new SandboxViolation("network", "only ssh host command and scp source destination are supported");
+    }
+    const remotes = args.map((arg) => /^([a-z0-9._-]+):([a-z0-9_./-]+)$/i.exec(arg));
+    if (remotes.filter(Boolean).length !== 1) throw new SandboxViolation("network", "scp requires exactly one remote endpoint");
+    const remoteIndex = remotes[0] ? 0 : 1;
+    assertHost(remotes[remoteIndex]![1]);
+    const local = args[1 - remoteIndex];
+    if (local.includes(":")) throw new SandboxViolation("network", "unsupported scp endpoint");
+    const target = this.assertPath(local, remoteIndex === 0 ? "write" : "read");
+    // Require an explicit destination file; a directory would let the remote
+    // basename select a different (possibly symlinked/protected) local target.
+    if (remoteIndex === 0) {
+      if (statSync(target, { throwIfNoEntry: false })?.isDirectory()) {
+        throw new SandboxViolation("path-traversal", "scp downloads require an explicit local file path");
+      }
+      const canonical = realpathSafe(target);
+      if (!within(realpathSafe(this.root), canonical) || this.isProtected(canonical)) {
+        throw new SandboxViolation("symlink", "scp destination escapes the writable workspace");
+      }
+    }
+  }
+
   assertTool(tool: string): void {
     if (typeof tool !== "string" || tool.trim() === "") throw new SandboxViolation("tool", "tool name is required");
     const allowed = this.policy.allowedTools ?? READ_ONLY_TOOLS;
@@ -389,6 +470,9 @@ export class SandboxBoundary {
       if (normalizedPath(command).split("/").includes("..")) throw new SandboxViolation("path-traversal", "path traversal is not allowed in commands");
       if (PROTECTED_COMMAND_PATH.test(command)) throw new SandboxViolation("protected-path", "protected data is not accessible from commands");
       if (HOST_SOCKET_COMMAND.test(command)) throw new SandboxViolation("host-socket", "host socket commands are not allowed");
+      if (SSH_COMMAND.test(command)) {
+        this.assertSshCommand(command);
+      }
       if (NETWORK_COMMAND.test(command)) {
         const urls = command.match(URL_TOKEN) ?? [];
         if (urls.length === 0 || !urls.every((url) => {

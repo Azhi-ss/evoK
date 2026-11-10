@@ -35,9 +35,10 @@ import {
 import type { DirectorInput, MissionDirector } from "../../src/mission-director";
 import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
+import { runEvok, parseEvokArgs } from "../../src/cli/evok-cli";
 import { discoverEvokResources } from "../../src/evok-resources";
-import { SandboxBoundary } from "../../src/security-boundary";
-import { PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/pi-agent-runtime";
+import { SandboxBoundary, type SandboxPolicy } from "../../src/security-boundary";
+import { defaultSessionFactory, PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/pi-agent-runtime";
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import { probeHostInventory } from "../../src/execution/host-inventory";
@@ -396,6 +397,162 @@ describe("authorized baseline through the real Pi path (#112 AC2–AC4)", () => 
     });
     expect(outcome.evaluation.score).toBe(0.625);
   });
+
+  test("CLI start/resume preserve candidate shell grants and price a separate director tier by its actual model", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-cli-tiers"));
+    await writeFile(join(project, ".evok", "evaluation.json"), JSON.stringify({ id: "file-metric", version: "1", artifact: "answer.txt" }));
+    const candidate = fauxProvider({ provider: "evok-cli-candidate", models: [{ id: "deep", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } }] });
+    const director = fauxProvider({ provider: "evok-cli-director", models: [{ id: "fast", cost: { input: 7, output: 7, cacheRead: 7, cacheWrite: 7 } }] });
+    candidate.setResponses([
+      fauxAssistantMessage(fauxToolCall("bash", { command: "printf '0.625\\n' > answer.txt" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("candidate prepared"),
+    ]);
+    director.setResponses(Array.from({ length: 6 }, () => (ctx) => {
+      const state = JSON.stringify(ctx.messages).match(/\\"stateVersion\\":\s*(\d+)/);
+      if (!state) throw new Error("director did not receive authoritative state");
+      return fauxAssistantMessage(JSON.stringify({ stateVersion: Number(state[1]), action: "stop", rationale: "baseline measured", stopReason: "offline test complete" }));
+    }));
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    modelRuntime.registerNativeProvider(candidate.provider);
+    modelRuntime.registerNativeProvider(director.provider);
+    await modelRuntime.refresh({ allowNetwork: false });
+    const resolver = await createEvokModelResolver({
+      modelRuntime,
+      orchestra: { deep: "evok-cli-candidate/deep", fast: "evok-cli-director/fast" },
+    });
+    let output = "";
+    const stream = { write(chunk: string) { output += chunk; return true; } };
+    const code = await runEvok({
+      args: parseEvokArgs(["--start", "--project", project, "--mission", draft.id, "--tier", "deep", "--director-tier", "fast"]),
+      createResolver: async () => resolver, stdout: stream, stderr: stream,
+    });
+    expect(code).toBe(0);
+    const initial = await loadMissionRecord(project, draft.id);
+    const decisionCalls = director.state.callCount;
+    const resumed = await runEvok({
+      args: parseEvokArgs(["--resume", "--project", project, "--mission", draft.id, "--tier", "deep", "--director-tier", "fast"]),
+      createResolver: async () => resolver, stdout: stream, stderr: stream,
+    });
+    expect(resumed).toBe(0);
+    expect(director.state.callCount).toBeGreaterThan(decisionCalls);
+    const record = await loadMissionRecord(project, draft.id);
+    expect(record.usage.decisions!.length).toBeGreaterThan(initial.usage.decisions!.length);
+    expect(record.baseline?.evaluation.score).toBe(0.625);
+    expect(candidate.state.callCount).toBe(2);
+    expect(director.state.callCount).toBeGreaterThan(0);
+    for (const line of record.usage.decisions ?? []) {
+      expect(line.tokens.total).toBeGreaterThan(0);
+      expect(line.cost.total).toBeCloseTo(line.tokens.total * 7 / 1_000_000, 10);
+    }
+    expect(record.usage.decisions?.length).toBeGreaterThan(0);
+  });
+
+  for (const allowHost of [false, true]) {
+    test(`Mission runtime factories retain ${allowHost ? "explicit host grants" : "network none by default"}`, async () => {
+      const project = await tempProject();
+      tempDirs.push(project);
+      const draft = await seedDraft(project, completeDraft(`m-factory-network-${allowHost}`));
+      const { resolver, resources } = await controlledHarness(project, "bash");
+      let effective: SandboxPolicy | undefined;
+      const outcome = await startAuthorizedMission({
+        projectRoot: project, missionId: draft.id, authorization: auth(),
+        resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+        priceModelCost: () => priceTokens,
+        ...(allowHost ? { network: ["nose"] } : {}),
+        runtimeFactory: (workspaceRoot, sandbox) => new PiAgentRuntime({
+          workspaceRoot, sandbox, modelResolver: resolver, resources,
+          sessionFactory: (options) => {
+            effective = options.sandbox;
+            return defaultSessionFactory(options);
+          },
+        }),
+      });
+      expect(outcome.evaluation.score).toBe(0.625);
+      expect(effective?.allowBash).toBe(true);
+      expect(effective?.network).toEqual(allowHost ? ["nose"] : "none");
+      const boundary = new SandboxBoundary(effective);
+      const approved = () => boundary.assertToolCall("bash", { command: "ssh nose 'pwd'" });
+      if (allowHost) expect(approved).not.toThrow();
+      else expect(approved).toThrow();
+      expect(() => boundary.assertToolCall("bash", { command: "ssh other 'pwd'" })).toThrow();
+      expect(() => boundary.assertToolCall("write", { path: join(project, "README.md") })).toThrow();
+    });
+  }
+
+  test("Mission candidates receive explicitly approved domain context and read skill references in place", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-domain-context"));
+    const template = await readFile(new URL("../../templates/research-context.APPEND_SYSTEM.md", import.meta.url), "utf8");
+    await writeFile(join(project, ".evok", "APPEND_SYSTEM.md"), template.replaceAll("<kb-id>", "697419"));
+    await writeFile(join(project, "AGENTS.md"), "UNAPPROVED-AGENTS-CONTEXT");
+    const skillDir = join(project, ".pi", "skills", "domain-research");
+    await mkdir(join(skillDir, "references"), { recursive: true });
+    await writeFile(join(project, ".pi", "APPEND_SYSTEM.md"), "PERSONAL-PI-CONTEXT");
+    await writeFile(join(skillDir, "SKILL.md"), "---\nname: domain-research\ndescription: Approved project research references\nowner: evok\ncategory: policy\nstate: accepted\n---\nRead references/literature.md relative to this skill directory.\n");
+    const reference = join(skillDir, "references", "literature.md");
+    await writeFile(reference, "APPROVED-LITERATURE-EXCERPT");
+    const { resolver, resources, faux } = await controlledHarness(project);
+    let system = "";
+    let observedReference = "";
+    faux.setResponses([
+      (ctx) => {
+        system = JSON.stringify(ctx.messages);
+        return fauxAssistantMessage(fauxToolCall("read", { path: reference }), { stopReason: "toolUse" });
+      },
+      (ctx) => {
+        observedReference = JSON.stringify(ctx.messages);
+        return fauxAssistantMessage(fauxToolCall("write", { path: "answer.txt", content: "0.75\n" }), { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("candidate prepared using the approved reference"),
+    ]);
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+    });
+    expect(outcome.evaluation.score).toBe(0.75);
+    expect(system).toContain("bohr kb search 697419");
+    expect(system).toContain("never invent measurements or citations");
+    expect(system).toContain("Approved project research references");
+    expect(system).not.toContain("UNAPPROVED-AGENTS-CONTEXT");
+    expect(system).not.toContain("PERSONAL-PI-CONTEXT");
+    expect(observedReference).toContain("APPROVED-LITERATURE-EXCERPT");
+    expect(await readFile(reference, "utf8")).toBe("APPROVED-LITERATURE-EXCERPT");
+  });
+
+  for (const target of ["controller", "evaluator", "credentials", "outside", "project-write"] as const) {
+    test(`domain context does not authorize candidate access to ${target}`, async () => {
+      const project = await tempProject();
+      const outside = await tempProject();
+      tempDirs.push(project, outside);
+      const draft = await seedDraft(project, completeDraft(`m-domain-deny-${target}`));
+      await writeFile(join(project, ".evok", "APPEND_SYSTEM.md"), "Approved context: literature kb 697419.");
+      await mkdir(join(project, "evaluator"));
+      await mkdir(join(project, "credentials"));
+      const paths = {
+        controller: join(project, ".evok", "APPEND_SYSTEM.md"),
+        evaluator: join(project, "evaluator", "hidden.txt"),
+        credentials: join(project, "credentials", "key.txt"),
+        outside: join(outside, "hidden.txt"),
+        "project-write": join(project, "README.md"),
+      };
+      for (const path of [paths.evaluator, paths.credentials, paths.outside]) await writeFile(path, "PRIVATE-CONTENT");
+      const { resolver, resources, faux } = await controlledHarness(project);
+      const call = target === "project-write"
+        ? fauxToolCall("write", { path: paths[target], content: "unauthorized replacement" })
+        : fauxToolCall("read", { path: paths[target] });
+      faux.setResponses([fauxAssistantMessage(call, { stopReason: "toolUse" }), fauxAssistantMessage("unreachable")]);
+      await expect(startAuthorizedMission({
+        projectRoot: project, missionId: draft.id, authorization: auth(),
+        resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+        priceModelCost: () => priceTokens,
+      })).rejects.toThrow(/protected|escapes|workspace/i);
+      expect(await readFile(join(project, "README.md"), "utf8")).toBe("# t4 research project");
+    });
+  }
 
   test("candidate bash/read/write cannot reach the controller .evok tree, credentials, or skill sources", () => {
     // Static boundary regression (US40): the exact policy the baseline Run

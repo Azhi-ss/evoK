@@ -27,6 +27,7 @@ import { isatty } from "node:tty";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { PiAgentRuntime } from "../pi-agent-runtime";
+import { isPlainSshHost } from "../execution/security-boundary";
 import { launchPiNativeTui, type NativeTuiLaunch } from "./pi-native-tui";
 import { calculateCost } from "@earendil-works/pi-ai";
 import type { SessionModelResolver } from "../evok-model";
@@ -51,6 +52,7 @@ import {
   listUnfinishedMissions,
   type BaselineEvaluator,
   type StartMissionOutcome,
+  type StartMissionOptions,
   DEFAULT_MAX_EXPERIMENTS,
 } from "../mission-start";
 import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission-director";
@@ -118,6 +120,10 @@ export interface ParsedEvokArgs {
   readonly request?: string;
   readonly project?: string;
   readonly tier: string;
+  /** Optional independent tier for Mission Director decisions; defaults to --tier. */
+  readonly directorTier?: string;
+  /** Explicit operator-granted hostname for candidate ssh/scp (e.g. nose). */
+  readonly allowHost?: string;
   /** Pi thinking level passed to foreground and Mission runtime sessions. */
   readonly thinking?: EvokThinkingLevel;
   readonly orchestra?: string;
@@ -164,6 +170,8 @@ options:
                     Isolated Run workspaces are temp dirs — do not point
                     --project at a workspace.
   --tier <tier>     model tier: default | fast | deep | mid (default: default)
+  --director-tier <tier>  Mission Director model tier (default: same as --tier)
+  --allow-host <hostname>  allow candidate ssh/scp to this hostname only
   --orchestra <f>   JSON file binding {fast?, deep?, mid?} to Pi catalog refs
   --thinking <level> Pi thinking level: off | minimal | low | medium | high | xhigh | max
   --timeout-ms <n>  bound one Run to n milliseconds (default: ${DEFAULT_TIMEOUT_MS})
@@ -237,6 +245,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   let request: string | undefined;
   let project: string | undefined;
   let tier = "default";
+  let directorTier: string | undefined;
+  let allowHost: string | undefined;
   let thinking: EvokThinkingLevel | undefined;
   let orchestra: string | undefined;
   let timeoutMs = DEFAULT_TIMEOUT_MS;
@@ -263,6 +273,12 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
     } else if (arg === "--tier") {
       tier = argv[++i] ?? "";
       if (!TIERS.has(tier)) return { tier, timeoutMs, reserveCost, error: `--tier must be one of ${[...TIERS].join(", ")} (got "${tier}")` };
+    } else if (arg === "--director-tier") {
+      directorTier = argv[++i] ?? "";
+      if (!TIERS.has(directorTier)) return { tier, timeoutMs, reserveCost, error: `--director-tier must be one of ${[...TIERS].join(", ")} (got "${directorTier}")` };
+    } else if (arg === "--allow-host") {
+      allowHost = argv[++i] ?? "";
+      if (!isPlainSshHost(allowHost)) return { tier, timeoutMs, reserveCost, error: "--allow-host requires a plain hostname" };
     } else if (arg === "--thinking") {
       const value = argv[++i] ?? "";
       if (!THINKING_LEVELS.has(value)) return { tier, timeoutMs, reserveCost, error: `--thinking must be one of ${[...THINKING_LEVELS].join(", ")} (got "${value}")` };
@@ -351,6 +367,8 @@ export function parseEvokArgs(argv: readonly string[]): ParsedEvokArgs {
   }
   return {
     request, project, tier, orchestra, timeoutMs,
+    ...(directorTier ? { directorTier } : {}),
+    ...(allowHost ? { allowHost } : {}),
     ...(thinking ? { thinking } : {}),
     ...(intake ? { intake: true } : {}),
     ...(start ? { start: true } : {}),
@@ -408,6 +426,24 @@ type Out = { write(chunk: string): boolean };
 
 function asOut(stream: { write(chunk: string): boolean } | undefined): Out {
   return (stream ?? (process.stdout as unknown as { write(chunk: string): boolean })) as Out;
+}
+
+/** Price the model that actually ran, including an independently selected Director. */
+async function missionCostPricer(resolver: SessionModelResolver, args: ParsedEvokArgs): Promise<StartMissionOptions["priceModelCost"]> {
+  const resolved = await Promise.all([...new Set([args.tier, args.directorTier ?? args.tier])]
+    .map((tier) => resolver.resolve(tier).catch(() => undefined)));
+  return (model) => (tokens) => {
+    const actual = resolved.find((entry) => entry?.model.id === model.id);
+    if (!actual) return undefined;
+    const rates = actual.modelId.cost;
+    if (!rates || typeof rates.input !== "number") return undefined;
+    const cost = calculateCost(actual.modelId, {
+      ...tokens,
+      totalTokens: tokens.total,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+    return Number.isFinite(cost?.total) ? cost!.total : undefined;
+  };
 }
 
 /** Probe model/auth for the start inventory without dispatching a Run. */
@@ -633,6 +669,7 @@ async function runNativeTui(
           input,
           projectRoot,
           tier: args.tier,
+          missionDefaults: { directorTier: args.directorTier, allowHost: args.allowHost, thinking: args.thinking },
           createResolver: async () => resolver,
           startRunner: options.startRunner,
           resumeRunner: options.resumeRunner,
@@ -994,21 +1031,7 @@ async function runMissionStart(
   const bound = boundSignal(args, options.signal);
   // Trusted-side metering is needed ONLY on the real path; an injected
   // startRunner (tests/adapters) brings its own accounting.
-  const resolved = options.startRunner ? undefined : await resolver.resolve(args.tier).catch(() => undefined);
-  const priceModelCost = resolved
-    ? () => (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
-        const rates = (resolved.modelId as unknown as { cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).cost;
-        if (!rates || typeof rates.input !== "number") return undefined; // unknown cost, never a verified zero
-        const cost = calculateCost(resolved.modelId, {
-          input: tokens.input,
-          output: tokens.output,
-          cacheRead: tokens.cacheRead,
-          cacheWrite: tokens.cacheWrite,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        } as Parameters<typeof calculateCost>[1]);
-        return Number.isFinite(cost?.total) ? cost!.total : undefined;
-      }
-    : undefined;
+  const priceModelCost = options.startRunner ? undefined : await missionCostPricer(resolver, args);
   // #113: unless --baseline-only (or an injected test director opts out), the
   // real path continues autonomously via a fresh read-only Pi director per
   // decision. Injected startRunner tests that want baseline behavior omit it.
@@ -1024,7 +1047,7 @@ async function runMissionStart(
         resources,
         ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
       }),
-      tier: args.tier,
+      tier: args.directorTier ?? args.tier,
     });
   }
   try {
@@ -1036,10 +1059,12 @@ async function runMissionStart(
       resources,
       evaluator,
       tier: args.tier,
-      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+      ...(args.allowHost ? { network: [args.allowHost] } : {}),
+      runtimeFactory: (workspaceRoot, sandbox) => new PiAgentRuntime({
         workspaceRoot,
         modelResolver: resolver,
         resources,
+        sandbox,
         ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
       }),
       signal: bound.signal,
@@ -1184,21 +1209,7 @@ async function runMissionResume(
   }
 
   const bound = boundSignal(args, options.signal);
-  const resolved = options.resumeRunner ? undefined : await resolver.resolve(args.tier).catch(() => undefined);
-  const priceModelCost = resolved
-    ? () => (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => {
-        const rates = (resolved.modelId as unknown as { cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).cost;
-        if (!rates || typeof rates.input !== "number") return undefined;
-        const cost = calculateCost(resolved.modelId, {
-          input: tokens.input,
-          output: tokens.output,
-          cacheRead: tokens.cacheRead,
-          cacheWrite: tokens.cacheWrite,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        } as Parameters<typeof calculateCost>[1]);
-        return Number.isFinite(cost?.total) ? cost!.total : undefined;
-      }
-    : undefined;
+  const priceModelCost = options.resumeRunner ? undefined : await missionCostPricer(resolver, args);
   // A resume ALWAYS needs the autonomous director; --baseline-only is a start
   // option and does not apply. The Pi-backed director is the real default.
   let director: MissionDirector | undefined = options.director;
@@ -1211,7 +1222,7 @@ async function runMissionResume(
         resources,
         ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
       }),
-      tier: args.tier,
+      tier: args.directorTier ?? args.tier,
     });
   }
   try {
@@ -1223,10 +1234,12 @@ async function runMissionResume(
       resources,
       evaluator,
       tier: args.tier,
-      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+      ...(args.allowHost ? { network: [args.allowHost] } : {}),
+      runtimeFactory: (workspaceRoot, sandbox) => new PiAgentRuntime({
         workspaceRoot,
         modelResolver: resolver,
         resources,
+        sandbox,
         ...(args.thinking ? { sessionOptions: { thinkingLevel: args.thinking } } : {}),
       }),
       signal: bound.signal,

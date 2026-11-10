@@ -116,7 +116,7 @@ import {
   type SynthesisProposalContext,
   type SynthesisRejectionReason,
 } from "../evidence/synthesis-proposal";
-import { digestValue } from "../security-boundary";
+import { digestValue, type SandboxPolicy } from "../security-boundary";
 import type { CompetitionContract } from "../competition/competition-contract";
 import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
@@ -604,10 +604,12 @@ export interface StartMissionOptions {
    * Test/broker seam: builds the runtime for one attempt (fresh workspace
    * root). Defaults to a PiAgentRuntime wired to `resolver`/`resources`.
    */
-  readonly runtimeFactory?: (workspaceRoot: string) => PiAgentRuntime;
+  readonly runtimeFactory?: (workspaceRoot: string, sandbox: SandboxPolicy) => PiAgentRuntime;
   /** Enforceable budget unit; must match the draft's declared unit. */
   readonly budgetUnits?: string;
   readonly tier?: string;
+  /** Trusted operator-granted outbound host allowlist for candidate ssh/scp. */
+  readonly network?: readonly string[];
   readonly signal?: AbortSignal;
   /**
    * Model/control cost reserved BEFORE dispatch for a single Run/decision call
@@ -1402,8 +1404,9 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
     "Produce the real artifact files in the workspace. Do NOT write a score file, do NOT self-report a score, and do NOT claim verification: an independent evaluator measures the immutable snapshot after you finish. Text claims are never evidence.",
     options.competitionContext
-      ? "Your competition rules for this role are in the ROLE CONTEXT block. The sandbox enforces no network and no external submission."
-      : `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no network", "no external submission"].join("; ")}`,
+      ? "Your competition rules for this role are in the ROLE CONTEXT block. No external submission is authorized."
+      : `Hard rules: ${[...(draft.constraints.hardRules ?? []), "no external submission"].join("; ")}`,
+    candidateNetworkInstruction(options.network),
     "Read-only project inspection is allowed; writes are confined to this workspace. Stop when the baseline artifact is materialized.",
   ].filter((line) => line !== "").join("\n");
 
@@ -1411,6 +1414,12 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
     options, draft, record, reserveCost, releaseLock, competition: preparedCompetitionContext,
     mode: { kind: "start", baselineRunId, baselineTask, baselineInstructions },
   });
+}
+
+function candidateNetworkInstruction(network: readonly string[] | undefined): string {
+  return network?.length
+    ? `The operator permits supported network commands only to these hosts: ${network.join(", ")}. SSH/SCP require exact hostnames and simple commands without options or shell operators. This grants no external submission or additional filesystem access.`
+    : "The sandbox enforces no network access.";
 }
 
 
@@ -1581,12 +1590,13 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     const disposeWorkspace = () => rm(workspaceParent, { recursive: true, force: true }).catch(() => {});
 
     // A fresh runtime per attempt: no reused session, workspace, or attempt id.
-    const runtime = (options.runtimeFactory ?? ((workspaceRoot: string) => new PiAgentRuntime({
+    const sandbox: SandboxPolicy = { allowBash, network: options.network ?? "none" };
+    const runtime = (options.runtimeFactory ?? ((workspaceRoot: string, sandbox: SandboxPolicy) => new PiAgentRuntime({
       workspaceRoot,
       modelResolver: options.resolver,
       resources: options.resources,
-      sandbox: { allowBash },
-    })))(workspaceParent);
+      sandbox,
+    })))(workspaceParent, sandbox);
 
     let result: AgentRuntimeResult;
     try {
@@ -1622,7 +1632,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
             readRoots: [options.projectRoot, ...options.resources.readRoots],
             sandbox: {
               allowBash,
-              network: "none",
+              network: options.network ?? "none",
               allowedTools: roleTools,
               protectedPaths: [
                 join(options.projectRoot, ".evok"),
@@ -1942,8 +1952,9 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         draft.evaluation.metric ? `The independent evaluator measures "${draft.evaluation.method}" with metric ${draft.evaluation.metric}.` : `The independent evaluator measures "${draft.evaluation.method}".`,
         "Produce the real artifact files. Do NOT write a score file, do NOT self-report a score, do NOT claim success: an independent evaluator measures the immutable snapshot after you finish. Failed attempts are evidence, not results to hide.",
         broker
-          ? "Your competition rules for this role are in the ROLE CONTEXT block. The sandbox enforces no network and no external submission."
-          : `Hard rules: ${[...record.contract.hardRules, "no network", "no external submission"].join("; ")}`,
+          ? "Your competition rules for this role are in the ROLE CONTEXT block. No external submission is authorized."
+          : `Hard rules: ${[...record.contract.hardRules, "no external submission"].join("; ")}`,
+        candidateNetworkInstruction(options.network),
         "Read-only project inspection is allowed; writes are confined to this workspace.",
       ].join("\n");
     };

@@ -65,6 +65,13 @@ Options: `--project <dir>` (default cwd), `--tier default|fast|deep|mid`
 (default `default`), `--orchestra <file.json>` (tier bindings to Pi catalog
 refs), `--timeout-ms <n>` (per-Run bound, default 10 min), `-h/--help`.
 
+Mission candidates use `--tier`; `--director-tier <tier>` independently selects
+the Director (default: same tier). Network stays disabled unless the operator
+grants `--allow-host <hostname>` for a Mission with local shell permission.
+See [explicit Mission research context](docs/mission-research-context.md) for
+the supported commands and a copyable `.evok/APPEND_SYSTEM.md` template that
+delivers approved domain rules and literature references to candidates.
+
 Mission intake and start (#111/#112):
 
 ```text

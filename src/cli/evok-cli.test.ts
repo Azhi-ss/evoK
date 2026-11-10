@@ -48,9 +48,11 @@ function catalogFrom(runtime: ModelRuntime, refs: string[], defaultRef?: string)
 
 describe("parseEvokArgs", () => {
   test("reads request positional, --tier, --project, --orchestra and --timeout-ms", () => {
-    const parsed = parseEvokArgs(["hello world", "--tier", "deep", "--thinking", "max", "--project", "/tmp/p", "--timeout-ms", "42"]);
+    const parsed = parseEvokArgs(["hello world", "--tier", "deep", "--director-tier", "fast", "--allow-host", "nose", "--thinking", "max", "--project", "/tmp/p", "--timeout-ms", "42"]);
     expect(parsed.request).toBe("hello world");
     expect(parsed.tier).toBe("deep");
+    expect(parsed.directorTier).toBe("fast");
+    expect(parsed.allowHost).toBe("nose");
     expect(parsed.thinking).toBe("max");
     expect(parsed.project).toBe("/tmp/p");
     expect(parsed.timeoutMs).toBe(42);
@@ -59,6 +61,11 @@ describe("parseEvokArgs", () => {
 
   test("rejects an unknown tier and unknown flag", () => {
     expect(parseEvokArgs(["x", "--tier", "ultra"]).error).toContain("--tier");
+    expect(parseEvokArgs(["x", "--director-tier", "ultra"]).error).toContain("--director-tier");
+    expect(parseEvokArgs(["x", "--allow-host", "https://nose"]).error).toContain("--allow-host");
+    for (const host of ["--start", "-oProxyCommand=bad", "user@nose", "nose:22", "*.nose", "..", "nose..local"]) {
+      expect(parseEvokArgs(["x", "--allow-host", host]).error).toContain("--allow-host");
+    }
     expect(parseEvokArgs(["x", "--thinking", "turbo"]).error).toContain("--thinking");
     expect(parseEvokArgs(["x", "--bogus"]).error).toContain("--bogus");
   });
@@ -211,11 +218,12 @@ describe("runEvok foreground request/response (#109)", async () => {
       catalog: catalogFrom(modelRuntime, [ref], ref),
     });
     const stdout = new CollectStream();
+    const stderr = new CollectStream();
     const code = await runEvok({
       args: { request: "read FINDING.txt", project, tier: "default", timeoutMs: 600000 },
       createResolver: async () => resolver,
       stdout,
-      stderr: new CollectStream(),
+      stderr,
     });
     expect(code).toBe(0);
     expect(stdout.text()).toContain("project observable content 42");
@@ -440,11 +448,12 @@ describe("runEvok research resources (#110)", () => {
       catalog: catalogFrom(modelRuntime, [ref], ref),
     });
     const stdout = new CollectStream();
+    const stderr = new CollectStream();
     const code = await runEvok({
       args: { request: "use the method skill", project, tier: "default", timeoutMs: 600000 },
       createResolver: async () => resolver,
       stdout,
-      stderr: new CollectStream(),
+      stderr,
     });
     expect(code).toBe(0);
     // Tool results go to the model, not stdout. The model saw both reads succeed

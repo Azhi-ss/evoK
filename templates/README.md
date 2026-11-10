@@ -31,3 +31,9 @@ Do not pass a relative `--project` and do not point `--project` at an isolated
 Run workspace. A newcomer scaffold that already includes the file-metric
 contract lives at `examples/demo-start/`. The true-domain suite-metric
 scaffold lives at `examples/demo-suite/`.
+
+For project-approved research rules and literature references, use
+[`research-context.APPEND_SYSTEM.md`](research-context.APPEND_SYSTEM.md) and the
+[Mission research context guide](../docs/mission-research-context.md). The
+existing prompt/skill loader delivers these explicitly; do not leave essential
+candidate rules only in `AGENTS.md`.
