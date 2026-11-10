@@ -10,6 +10,11 @@ import { setTimeout as delay } from "node:timers/promises";
 
 const plugin = process.argv[2];
 if (!plugin) throw Error("pass installed pi-subagents bundle/index.js");
+// The smoke launches the plugin it was handed, so it declares that install's protocol.
+const { probePiSubagentsEntryProtocol } = await import(
+  join(resolve(import.meta.dirname, "../../src"), "execution/pi-subagents-protocol.ts")
+);
+const protocolVersion = probePiSubagentsEntryProtocol(resolve(plugin)).version;
 const recruit = process.argv[3] === "recruit";
 const communicate = process.argv[3] === "communicate";
 const exhaust = process.argv[3] === "exhaust";
@@ -129,7 +134,7 @@ export default function(pi){
      const stateDir=${JSON.stringify(join(dir, "state"))};
      let liveFence;
      const input={onStarted:()=>{liveFence=JSON.parse(readFileSync(stateDir+'/active.json','utf8'));},nodeId:'node-A',roleName:'analyst',profile:'diagnostic',cwd:${JSON.stringify(cwd)},stateDir:${JSON.stringify(join(dir, "state"))},task:'Deliver.',roleContext,memorySlice,
-        remainingToolTurns:${exhaust ? 1 : 8},depth:1, controls:${JSON.stringify(recruit ? ["evok_recruit"] : communicate ? ["evok_communicate"] : [])}, tools:${JSON.stringify(recruit ? ["evok_read_evidence"] : [])},execute:async(name,args)=>'scoped:'+args.ref, nativePlugin:${JSON.stringify(resolve(plugin))}, model:{alias:'evok-meter-fixture',id:modelId,config:{...config,apiKey:'round-'+i+'-key'}},resumeRunId:results[0]?.nativeRunId,timeoutMs:35000};
+        remainingToolTurns:${exhaust ? 1 : 8},protocolProbe:()=>${JSON.stringify(protocolVersion)},depth:1, controls:${JSON.stringify(recruit ? ["evok_recruit"] : communicate ? ["evok_communicate"] : [])}, tools:${JSON.stringify(recruit ? ["evok_read_evidence"] : [])},execute:async(name,args)=>'scoped:'+args.ref, nativePlugin:${JSON.stringify(resolve(plugin))}, model:{alias:'evok-meter-fixture',id:modelId,config:{...config,apiKey:'round-'+i+'-key'}},resumeRunId:results[0]?.nativeRunId,timeoutMs:35000};
      const outcome=await runPiWorker(pi,input); results.push(outcome);
      if (${communicate} && i === 1) {
        // Emulate the coordinator dying just after the real native process exited,

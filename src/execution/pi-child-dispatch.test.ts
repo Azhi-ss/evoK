@@ -7,6 +7,7 @@ import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { assembleRoleContext } from "./role-context";
 import { createMemorySlice } from "./memory-slice";
 import { dispatchPiChild } from "./pi-child-dispatch";
+import { PiSubagentsProtocolError } from "./pi-subagents-protocol";
 
 const contract = createCompetitionContract({
   version: "1",
@@ -44,6 +45,7 @@ const input = {
   model: "evok-meter-test/kimi-k3-1-pro-261024",
   roleContext,
   memorySlice,
+  protocolProbe: () => "0.84.0",
 };
 type Handler = (data: unknown) => void;
 function bus() {
@@ -139,6 +141,52 @@ test("mismatched bound context, direct provider and absent real listener all fai
     ).rejects.toThrow(/meter/i);
     await expect(dispatchPiChild({ events }, { ...input, cwd })).rejects.toThrow(/pi-subagents/i);
     expect(launches).toBe(0);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an absent or pre-0.84 protocol fails closed before any registration or child start", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-child-test-"));
+  const events = bus();
+  const seen: string[] = [];
+  events.on(register, () => seen.push("register"));
+  events.on(request, () => seen.push("request"));
+  try {
+    const absent = dispatchPiChild({ events }, { ...input, cwd, protocolProbe: () => undefined });
+    await expect(absent).rejects.toBeInstanceOf(PiSubagentsProtocolError);
+    await expect(absent).rejects.toThrow(/detected none[\s\S]*required >= 0\.84/);
+    const skew = dispatchPiChild({ events }, { ...input, cwd, protocolProbe: () => "0.79.1" });
+    await expect(skew).rejects.toBeInstanceOf(PiSubagentsProtocolError);
+    await expect(skew).rejects.toThrow(/detected 0\.79\.1[\s\S]*required >= 0\.84/);
+    expect(seen).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("the negotiated protocol, not a hard-coded suffix, decides the expected child identity", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-child-identity-"));
+  const events = bus();
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) =>
+    events.emit(response, {
+      requestId: v.requestId,
+      ownerRunId: v.ownerRunId,
+      nodeId: v.nodeId,
+      agent: v.agent,
+      status: "completed",
+      model: v.model,
+      thinking: "max",
+      result: { kind: "text", text: "actual" },
+    }),
+  );
+  try {
+    await expect(dispatchPiChild({ events }, { ...input, cwd })).rejects.toThrow(
+      /unexpected child agent, model or thinking level/,
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

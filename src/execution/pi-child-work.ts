@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { homedir } from "node:os";
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -12,6 +11,12 @@ import { validateRoleContext, type RoleTaskContext } from "./role-context";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
 import { digestValue } from "./security-boundary";
 import { Check } from "typebox/value";
+import {
+  probePiSubagentsProtocol,
+  probePiSubagentsVersion,
+  resolvePiSubagentsExtension,
+  type PiSubagentsVersionProbe,
+} from "./pi-subagents-protocol";
 import { workerTools, hostToolSchemas, type WorkerControl, type WorkerProfile } from "./pi-child-protocol";
 import type { WorkerBinding } from "./pi-child-tools";
 
@@ -29,6 +34,8 @@ export interface PiWorkerRequest {
   controls?: readonly WorkerControl[];
   depth?: number;
   nativePlugin?: string;
+  /** Host protocol probe; defaults to the installed pi-subagents package. */
+  protocolProbe?: PiSubagentsVersionProbe;
   remainingToolTurns?: number;
   resumeRunId?: string;
   signal?: AbortSignal;
@@ -46,6 +53,9 @@ import {
 } from "./pi-child-recovery";
 
 export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<WorkerReceipt> {
+  // Fail closed before the worker writes any state or starts a child. Only the
+  // host install is gated: a caller-supplied nativePlugin is taken as declared.
+  probePiSubagentsProtocol(input.protocolProbe);
   const memory = validateMemorySlice(input.memorySlice);
   const context = validateRoleContext(input.roleContext);
   if (
@@ -247,11 +257,11 @@ export async function runPiWorker(_pi: Host, input: PiWorkerRequest): Promise<Wo
     );
     const agentDir = join(stateDir, "pi");
     await mkdir(agentDir, { recursive: true, mode: 0o700 });
-    const plugin =
-      input.nativePlugin ??
-      join(
-        process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent"),
-        "npm/node_modules/pi-subagents/bundle/index.js",
+    // Resolved from the install's own manifest, never a hard-coded layout path.
+    const plugin = input.nativePlugin ?? resolvePiSubagentsExtension();
+    if (!plugin)
+      throw Error(
+        "pi-subagents " + (probePiSubagentsVersion() ?? "install") + " declares no extension entry",
       );
     owner = spawn(
       "pi",
