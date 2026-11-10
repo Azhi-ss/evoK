@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  RESEARCH_MEMORY_EVALUATION_MODES,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   shamResearchDecisionPacket,
@@ -22,11 +23,15 @@ import {
   type DirectorProposal,
 } from "./mission-director";
 import { RESEARCH_MEMORY_CONTROL_CAVEAT } from "./memory-evaluation";
+import { submitInsightDraft } from "./insight-inbox";
+import { buildDirectorInsightSidecar, type DirectorInsightSidecar } from "./director-insight-sidecar";
+import { InMemoryResearchLedger } from "./research-loop";
 import {
   DECISION_POINT_MIN_SAMPLE,
   DECISION_POINT_TRAJECTORY_CAVEAT,
   evaluateDecisionPoint,
   summarizeDecisionPoints,
+  type DecisionPointInsight,
   type FrozenDecisionPoint,
 } from "./decision-point-evaluation";
 
@@ -115,6 +120,27 @@ function scriptedDirector(chosen?: (input: DirectorInput) => DirectorProposal) {
   };
 }
 
+/** One arm's Insight pin, built the way a Revision would build it. */
+function sidecarOf(missionId: string, insightIds: readonly string[] = ["insight-a", "insight-b"]): DirectorInsightSidecar {
+  const ledger = new InMemoryResearchLedger();
+  for (const insightId of insightIds) {
+    submitInsightDraft(ledger, { missionId, insightId, text: `${insightId}: temperature may be underweighted`, author: "operator" });
+  }
+  return buildDirectorInsightSidecar(ledger.events(), { missionId });
+}
+
+/** The default fixture: one identical Insight snapshot per arm (D7 / §6). */
+function identicalInsight(missionId: string): DecisionPointInsight {
+  return RESEARCH_MEMORY_EVALUATION_MODES.map((mode) => ({ mode, sidecar: sidecarOf(missionId) }));
+}
+
+/** Re-pins one item's version and keeps the digest a real derivation, not a stale bytes blob. */
+function reversioned(sidecar: DirectorInsightSidecar, index: number, version: number): DirectorInsightSidecar {
+  const { digest: _digest, ...body } = sidecar;
+  const items = body.items.map((item, at) => (at === index ? { ...item, version } : item));
+  return { ...body, items, digest: digestValue({ ...body, items }) };
+}
+
 function pointOf(record: MissionRecord, overrides: Partial<FrozenDecisionPoint> = {}): FrozenDecisionPoint {
   const real = projectResearchDecisionPacket(projectResearchMemorySnapshot(missionResearchSource(record)));
   return {
@@ -125,6 +151,7 @@ function pointOf(record: MissionRecord, overrides: Partial<FrozenDecisionPoint> 
     missionState: recordRetainedState(record),
     blindProposal: proposal("materialize answer.txt again"),
     packets: [{ mode: "off" }, { mode: "sham", packet: shamResearchDecisionPacket(real) }, { mode: "real", packet: real }],
+    insight: identicalInsight(record.id),
     actionTaken: { runId: `${record.id}:exp:3`, proposal: proposal("probe a competing kernel", "change-direction") },
     futureRunIds: [],
     ...overrides,
@@ -197,6 +224,78 @@ describe("L1 one decision point, three arms (R1 / A2 / A5)", () => {
     await expect(evaluateDecisionPoint({ point: { ...point, packets: [{ mode: "off", packet: real!.packet }, sham!, real!] }, director })).rejects.toThrow(/off arm carries no Memory packet/);
     // A Sham arm without the control packet is not a control input.
     await expect(evaluateDecisionPoint({ point: { ...point, packets: [off!, { mode: "sham", packet: real!.packet }, real!] }, director })).rejects.toThrow(/sham.*control/);
+  });
+});
+
+describe("L1 holds Insight constant across arms (#241, #238 D7 / §6)", () => {
+  const PINNED = [{ insightId: "insight-a", version: 1 }, { insightId: "insight-b", version: 1 }];
+
+  test("every arm reads the identical pinned Insight: same ids, versions, order", async () => {
+    const point = pointOf(recordOf());
+    const { director, calls } = scriptedDirector();
+    const result = await evaluateDecisionPoint({ point, director });
+    const handed = calls.map((call) => call.decisionPhase!.insightSidecar);
+    // All three arms read one snapshot: a differing arm would measure the
+    // operator's intuition instead of Memory.
+    expect(handed.map((sidecar) => sidecar.digest)).toEqual([handed[0]!.digest, handed[0]!.digest, handed[0]!.digest]);
+    expect(handed[0]!.items.map((item) => [item.insightId, item.version])).toEqual(PINNED.map((pin) => [pin.insightId, pin.version]));
+    // The Sham arm stays a control on Memory content only: same Insight as Real.
+    expect(calls[1]!.decisionPhase!.memoryPacket!.control).toBe("sham");
+    expect(handed[1]).toEqual(handed[2]!);
+    // Insight is never Evidence and never dispatches: the arms only amend the proposal.
+    expect(result.dispatchedExperiments).toBe(0);
+    expect(result.insight.state).toBe("identical");
+    expect(result.insight.pinned).toEqual(PINNED);
+    // The recorded digest is the snapshot the arms read, so the pin is re-verifiable.
+    expect(result.insight.digest).toBe(handed[0]!.digest);
+  });
+
+  test("refuses arms that read different Insight, naming the mismatch", async () => {
+    const record = recordOf();
+    const point = pointOf(record);
+    const off = { mode: "off" as const, sidecar: sidecarOf(record.id) };
+    const sham = { mode: "sham" as const, sidecar: sidecarOf(record.id) };
+    const real = { mode: "real" as const, sidecar: sidecarOf(record.id) };
+    const { director, calls } = scriptedDirector();
+    // Same ids, different version: the arms read different bytes for one Insight.
+    await expect(evaluateDecisionPoint({
+      point: { ...point, insight: [off, { mode: "sham" as const, sidecar: reversioned(sham.sidecar, 0, 2) }, real] },
+      director,
+    })).rejects.toThrow(/identical Insight snapshot.*off.*sham/);
+    // Same ids, different order: the pin, not just the set, is the contract.
+    await expect(evaluateDecisionPoint({
+      point: { ...point, insight: [off, { mode: "sham" as const, sidecar: sidecarOf(record.id, ["insight-b", "insight-a"]) }, real] },
+      director,
+    })).rejects.toThrow(/identical Insight snapshot/);
+    // An arm with no Insight at all is not a constant: missing and duplicated arms are refused.
+    await expect(evaluateDecisionPoint({ point: { ...point, insight: [off, real] }, director })).rejects.toThrow(/missing \[sham\]/);
+    await expect(evaluateDecisionPoint({ point: { ...point, insight: [off, sham, real, real] }, director })).rejects.toThrow(/duplicate \[real\]/);
+    // Insight is Mission-scoped: another Mission's pin is not this point's context.
+    await expect(evaluateDecisionPoint({
+      point: { ...point, insight: [off, { mode: "sham" as const, sidecar: sidecarOf("other-mission") }, real] },
+      director,
+    })).rejects.toThrow(/Mission-scoped/);
+    // Refused before any priced decision call is made.
+    expect(calls).toHaveLength(0);
+  });
+
+  test("Insight can be disabled entirely, and the choice is visible in the report", async () => {
+    const point = pointOf(recordOf(), { insight: "disabled" });
+    const { director, calls } = scriptedDirector();
+    const result = await evaluateDecisionPoint({ point, director });
+    // Disabled is still an explicit empty pin: loading Insight is never a skipped stage (#240 / §4.1).
+    for (const call of calls) {
+      const sidecar = call.decisionPhase!.insightSidecar;
+      expect(sidecar.items).toEqual([]);
+      expect(sidecar.omittedCount).toBe(0);
+      expect(sidecar.missionId).toBe("m-l1");
+    }
+    expect(result.insight).toEqual({ state: "disabled", pinned: [] });
+    const disabled = await Promise.all(Array.from({ length: DECISION_POINT_MIN_SAMPLE }, async (_unused, index) => {
+      const { director: armDirector } = scriptedDirector();
+      return evaluateDecisionPoint({ point: pointOf(recordOf(`m-l1-off-${index}`), { insight: "disabled" }), director: armDirector });
+    }));
+    expect(summarizeDecisionPoints(disabled).insight).toEqual({ state: "disabled", pinned: [], digests: [] });
   });
 });
 
@@ -344,5 +443,21 @@ describe("L1 report: direction only, both caveats, real sample (A8)", () => {
       ["real", 50, 50],
     ]);
     expect(report.dispatchedExperiments).toBe(0);
+    // The Insight control is auditable after the fact: which ids and versions
+    // were supplied, and how many distinct snapshots the sample read.
+    expect(report.insight.state).toBe("identical");
+    expect(report.insight.pinned).toEqual([{ insightId: "insight-a", version: 1 }, { insightId: "insight-b", version: 1 }]);
+    expect(report.insight.digests).toHaveLength(DECISION_POINT_MIN_SAMPLE);
+    // Different Missions have their own Inbox, so the supply is a union of pins,
+    // never a snapshot: identity is enforced per decision point (see results).
+    const replayed = await evaluateDecisionPoint({ point: pointOf(recordOf("m-l1-0")), director: scriptedDirector().director });
+    expect(report.insight.digests).toContain(replayed.insight.digest!);
+  });
+
+  test("refuses a sample that mixes Insight on with Insight off", async () => {
+    const sample = await points(DECISION_POINT_MIN_SAMPLE);
+    const { director } = scriptedDirector();
+    const disabled = await evaluateDecisionPoint({ point: pointOf(recordOf("m-l1-disabled"), { insight: "disabled" }), director });
+    expect(() => summarizeDecisionPoints([disabled, ...sample.slice(1)])).toThrow(/mixes Insight on and off/);
   });
 });
