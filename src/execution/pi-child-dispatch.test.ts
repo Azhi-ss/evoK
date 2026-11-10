@@ -7,7 +7,11 @@ import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { assembleRoleContext } from "./role-context";
 import { createMemorySlice } from "./memory-slice";
 import { buildResearcherContext } from "./researcher-context";
-import { dispatchPiChild, type PiChildTransportOptions } from "./pi-child-dispatch";
+import {
+  dispatchPiChild,
+  PiChildTerminationUnconfirmedError,
+  type PiChildTransportOptions,
+} from "./pi-child-dispatch";
 import { createPiSubagentsAdapter, type SubagentDelegation } from "./subagents-adapter";
 import { PiSubagentsProtocolError } from "./pi-subagents-protocol";
 
@@ -278,6 +282,140 @@ test("the guarded delegation is the transport's only input", async () => {
     });
     await expect(adapter.delegate({ ...delegation, capability: "promotion" })).rejects.toThrow(/authority stays with/);
     expect(seen).toEqual(["register", "request"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a cancel after launch keeps the registration while the child may still run and names the request id", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-unconfirmed-"));
+  const events = bus();
+  const controller = new AbortController();
+  const order: string[] = [];
+  let requestId = "";
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose: () => order.push("disposed") } };
+  });
+  events.on(request, (v: any) => {
+    requestId = v.requestId;
+    controller.abort();
+  });
+  events.on("prompt-template:subagent:cancel", () => order.push("cancel"));
+  try {
+    const failed = await dispatchPiChild(
+      { events },
+      delegation,
+      options(cwd, { signal: controller.signal, timeoutMs: 20 }),
+    ).catch((error) => error);
+    expect(failed).toBeInstanceOf(PiChildTerminationUnconfirmedError);
+    expect(failed).toMatchObject({ code: "termination_unconfirmed", requestId });
+    expect(failed.message).toMatch(/cancelled; child termination is unconfirmed/);
+    // Never disposed: the plugin never confirmed the child is terminal.
+    expect(order).toEqual(["cancel"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a cancel after launch settles only on the terminal native state, then disposes", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-terminal-"));
+  const events = bus();
+  const controller = new AbortController();
+  const order: string[] = [];
+  let acknowledge: (() => void) | undefined;
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose: () => order.push("disposed") } };
+  });
+  events.on(request, () => {
+    order.push("request");
+    controller.abort();
+  });
+  events.on("prompt-template:subagent:cancel", (identity: any) => {
+    order.push("cancel");
+    acknowledge = () => events.emit(response, { ...identity, status: "cancelled" });
+  });
+  try {
+    const settled = dispatchPiChild(
+      { events },
+      delegation,
+      options(cwd, { signal: controller.signal, timeoutMs: 10_000 }),
+    ).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(order).toEqual(["request", "cancel"]);
+    acknowledge!();
+    await expect(settled).resolves.toMatch(/^EvoK child cancelled$/);
+    expect(order).toEqual(["request", "cancel", "disposed"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a deadline already spent before launch confirms the child never started and registers nothing", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-preflight-timeout-"));
+  const events = bus();
+  const seen: string[] = [];
+  events.on(register, (registration: any) => {
+    seen.push("register");
+    registration.result = { ok: true, registration: { dispose: () => seen.push("disposed") } };
+  });
+  events.on(request, () => seen.push("request"));
+  try {
+    const started = Date.now();
+    await expect(dispatchPiChild({ events }, delegation, options(cwd, { timeoutMs: 0 }))).rejects.toThrow(
+      /timed out; child never started/,
+    );
+    // One deadline covers registration and launch: no separate startup window.
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(seen).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a cancel requested during registration never launches and disposes the fresh registration", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-preflight-cancel-"));
+  const events = bus();
+  const controller = new AbortController();
+  const order: string[] = [];
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose: () => order.push("disposed") } };
+    controller.abort();
+  });
+  events.on(request, () => order.push("request"));
+  try {
+    await expect(
+      dispatchPiChild({ events }, delegation, options(cwd, { signal: controller.signal })),
+    ).rejects.toThrow(/cancelled; child never started/);
+    expect(order).toEqual(["disposed"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a timeout after launch also needs the terminal native state before it may be reported", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-timeout-confirm-"));
+  const events = bus();
+  const order: string[] = [];
+  let requestId = "";
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose: () => order.push("disposed") } };
+  });
+  events.on(request, (v: any) => {
+    requestId = v.requestId;
+    order.push("request");
+  });
+  events.on("prompt-template:subagent:cancel", () => order.push("cancel"));
+  try {
+    const failed = await dispatchPiChild({ events }, delegation, options(cwd, { timeoutMs: 20 })).catch(
+      (error) => error,
+    );
+    expect(failed).toBeInstanceOf(PiChildTerminationUnconfirmedError);
+    expect(failed).toMatchObject({ code: "termination_unconfirmed", requestId });
+    expect(failed.message).toMatch(/timed out; child termination is unconfirmed/);
+    expect(order).toEqual(["request", "cancel"]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

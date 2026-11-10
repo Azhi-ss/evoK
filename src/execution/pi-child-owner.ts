@@ -5,6 +5,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { WorkerBinding } from "./pi-child-tools";
+import { redactedRecord } from "./pi-child-records";
 type Host = Pick<ExtensionAPI, "events">;
 interface RpcResult {
   details?: { asyncId?: string; asyncDir?: string; runId?: string };
@@ -32,7 +33,9 @@ export default function workerControlOwner(pi: ExtensionAPI) {
   function report(kind: string, value: unknown) {
     const file = join(stateDir, round + "." + kind + ".json"),
       tmp = file + ".tmp";
-    writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 });
+    // Credentials never reach a durable record (C6).
+    const record = redactedRecord(value, file);
+    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
     renameSync(tmp, file);
   }
   const spec = JSON.parse(readFileSync(join(stateDir, round + ".launch.json"), "utf8"));

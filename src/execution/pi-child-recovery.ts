@@ -3,6 +3,7 @@ import { open, readFile, readdir, realpath, rename, rm, writeFile } from "node:f
 import { join } from "node:path";
 import { validateRoleContext } from "./role-context";
 import { validateMemorySlice } from "./memory-slice";
+import { assertNoCredentials } from "./pi-child-records";
 import { validateWorkerAction, type WorkerAction, type WorkerProfile } from "./pi-child-protocol";
 
 export interface WorkerReceipt {
@@ -95,9 +96,11 @@ export async function commitWorkerReceipt(
   const receipt = await readAction(stateDir, attempt, nativeRunId);
   const target = join(stateDir, "native-history.json"),
     tmp = target + "." + randomUUID();
+  const record = { identity: attempt.identity, taskRunId: attempt.taskRunId, ...receipt };
+  assertNoCredentials(record, target);
   await writeFile(
     tmp,
-    JSON.stringify({ identity: attempt.identity, taskRunId: attempt.taskRunId, ...receipt }),
+    JSON.stringify(record),
     {
       mode: 0o600,
     },

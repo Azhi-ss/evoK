@@ -11,6 +11,7 @@ import {
 } from "./pi-child-protocol";
 
 import type { WorkerAttempt } from "./pi-child-recovery";
+import { assertNoCredentials } from "./pi-child-records";
 
 export interface WorkerBinding extends WorkerAttempt {
   nodeId: string;
@@ -81,7 +82,9 @@ export function installPiWorkerTools(pi: ExtensionAPI, stateDir: string) {
       async execute(_id, args, signal) {
         if (isControl) {
           const action = validateWorkerAction(name, args, binding.profile, allowed);
-          writeFileSync(join(stateDir, binding.roleRunId + ".action.json"), JSON.stringify(action), {
+          const file = join(stateDir, binding.roleRunId + ".action.json");
+          assertNoCredentials(action, file);
+          writeFileSync(file, JSON.stringify(action), {
             flag: "wx",
             mode: 0o600,
           });
