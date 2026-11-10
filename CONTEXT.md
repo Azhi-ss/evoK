@@ -260,6 +260,10 @@ _Avoid_: Placeholder evidence, fake finding
 A deterministic re-projection that pins each Run to the Mission state, stored Proposals, and Memory snapshot that existed before that Run began, so Run N can never see information produced after it started. It compares arms without a live model provider or GPU.
 _Avoid_: Hindsight replay, transcript replay
 
+**Decision-Point Counterfactual (L1)**:
+One frozen decision point — the trusted Director input and frozen Blind Proposal that existed before the original decision — re-decided once per Memory Evaluation Arm over that same base state, then scored against the action the original Mission actually took. It dispatches no Experiment, reserves no Experiment budget, and states a direction only: it can never show where Memory steers exploration across many steps.
+_Avoid_: Trajectory evaluation, Memory score, hindsight-optimal action
+
 **Negative Evidence**:
 Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances. Only a real measurement creates it; an operational failure alone never does.
 _Avoid_: Error log

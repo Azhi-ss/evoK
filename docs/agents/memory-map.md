@@ -17,7 +17,8 @@ projection, the decision packet, Run injection, recovery, or the evaluation.
 | Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta`, `missionRetainedState`, `recordRetainedState`, `decisionRetainedState`, `assertOffRetainsMissionState` |
 | Recovery rebuild | `src/mission/mission-resume.ts` | `reconcileResearchMemory` |
 | Accountability / diversity / counterfactuals | `src/mission/decision-accountability.ts` | `projectDecisionAccountability`, `ResearchDiversity` |
-| Offline evaluation | `src/mission/memory-evaluation.ts` | `replayResearchMemory`, `evaluateResearchMemory`, `researchMemoryArmMetrics` |
+| Offline evaluation | `src/mission/memory-evaluation.ts` | `replayResearchMemory`, `evaluateResearchMemory`, `researchMemoryArmMetrics`, `assertNoFutureInformation` |
+| Decision-point counterfactual (L1) | `src/mission/decision-point-evaluation.ts` | `evaluateDecisionPoint`, `summarizeDecisionPoints`, `FrozenDecisionPoint`, `DECISION_POINT_CAVEATS` |
 
 F5 (#231): the off arm keeps the Mission's `Mission Retained State` (scoreboard +
 current best) in the prompt and at the decision point; `assertOffRetainsMissionState`
@@ -31,13 +32,14 @@ whole-Mission report.
 - What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `runMissionController`.
 - Why can't a Run see the future? `replayResearchMemory` (dispatch vs completion instants; it pins the ledger revision the Run was durably served — `MissionRunRecord.researchMemory.ledgerRevision` — and falls back to the prefix ordinal only for legacy records without it).
 - Is replay value evidence? No. `evaluateResearchMemory` labels the replay section `integrity` (`claim: integrity`) and labels its comparison `whole-mission-comparison` (`kind`); it refuses arms that all derive from one MissionRecord, because those deltas are zero by construction.
+- How does one decision get scored? `evaluateDecisionPoint` re-decides one frozen decision point per Off/Sham/Real packet over a shared base state, dispatches nothing, and scores against the action the original Mission actually took. `summarizeDecisionPoints` needs ≥ 50 points, reports direction only, and carries both the Sham and the trajectory-steering caveats.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
 
 ## Tests
 
 - Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`
-- Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
+- Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
 - Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218` blocks), `tests/integration/memory-evaluation.test.ts`
 
 ## Boundaries

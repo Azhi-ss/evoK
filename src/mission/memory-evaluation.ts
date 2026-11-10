@@ -147,14 +147,20 @@ function escapeRegExp(text: string): string {
 /**
  * Fails closed if any delivered text mentions a Run that did not exist yet.
  * Without this guard a projection built from the full record would leak the
- * future into an earlier Run's Memory and turn replay into hindsight.
+ * future into an earlier Run's Memory and turn replay into hindsight. Shared
+ * with the L1 decision-point evaluation, which pins one frozen instant instead
+ * of a Run dispatch.
  */
-function assertNoFutureInformation(cards: readonly { readonly summary?: string; readonly sourceRefs?: readonly string[]; readonly applicability?: readonly string[] }[], futureRunIds: readonly string[], at: TrailRun): void {
+export function assertNoFutureInformation(
+  cards: readonly { readonly summary?: string; readonly sourceRefs?: readonly string[]; readonly applicability?: readonly string[] }[],
+  futureRunIds: readonly string[],
+  where: string,
+): void {
   const text = JSON.stringify(cards);
   for (const runId of futureRunIds) {
     // `:<digits>` trail suffix: `exp:1` must not match `exp:10`.
     if (new RegExp(`${escapeRegExp(runId)}(?![0-9])`).test(text)) {
-      throw new Error(`offline replay for Run "${at.runId}" leaked information produced after it began (${runId})`);
+      throw new Error(`${where} leaked information produced after it began (${runId})`);
     }
   }
 }
@@ -206,7 +212,7 @@ export function replayResearchMemory(options: {
     const snapshot = mode === "sham" ? shamResearchMemorySnapshot(real) : real;
     const projected = projectResearchDecisionPacket(snapshot);
     const packet = mode === "sham" ? shamResearchDecisionPacket(projected) : projected;
-    assertNoFutureInformation(packet.cards, futureRunIds, run);
+    assertNoFutureInformation(packet.cards, futureRunIds, `offline replay for Run "${run.runId}"`);
     return deepFreeze({
       runId: run.runId,
       mode,

@@ -21,12 +21,33 @@ export {
   RESEARCH_MEMORY_EVALUATION_SCHEMA,
   RESEARCH_MEMORY_INTEGRITY_CLAIM,
   RESEARCH_MEMORY_INTEGRITY_NOTE,
+  assertNoFutureInformation,
   compareResearchMemoryArms,
   evaluateResearchMemory,
   initialStateDigestOf,
   replayResearchMemory,
   researchMemoryArmMetrics,
 } from "./memory-evaluation";
+export {
+  DECISION_POINT_CAVEATS,
+  DECISION_POINT_EVALUATION_KIND,
+  DECISION_POINT_EVALUATION_SCHEMA,
+  DECISION_POINT_MIN_SAMPLE,
+  DECISION_POINT_TRAJECTORY_CAVEAT,
+  evaluateDecisionPoint,
+  summarizeDecisionPoints,
+} from "./decision-point-evaluation";
+export type {
+  DecisionPointActionTaken,
+  DecisionPointArmReading,
+  DecisionPointArmResult,
+  DecisionPointDirection,
+  DecisionPointDirectionReading,
+  DecisionPointEvaluationReport,
+  DecisionPointPacket,
+  DecisionPointResult,
+  FrozenDecisionPoint,
+} from "./decision-point-evaluation";
 export type {
   ReplayedRunMemory,
   ResearchMemoryArmMetrics,

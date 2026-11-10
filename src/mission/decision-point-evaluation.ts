@@ -1,0 +1,291 @@
+/**
+ * L1 decision-point counterfactual evaluation (#232, spec `docs/research-memory-evaluation-v2.md`
+ * §3, parent #222).
+ *
+ * One FROZEN decision point — the trusted Director input plus the frozen Blind
+ * Proposal that already existed — is re-decided once per Off/Sham/Real packet
+ * over the SAME base state. The revision stage is the existing bounded one:
+ * `buildDirectorInput`'s projection plus `DirectorDecisionPhase`, handed to the
+ * existing `MissionDirector` port. Nothing is dispatched: this module has no
+ * dispatch seam, reserves no Experiment budget, and measures no Run.
+ *
+ * Scoring is hindsight against THE ACTION ACTUALLY TAKEN (locked in #222): the
+ * revised proposal the original Mission durably recorded and then executed.
+ * "Best action among later measurements" is deliberately NOT used, because it
+ * needs comparable measurements and risks selection bias.
+ *
+ * This is not `evaluateResearchMemory`: that reads whole Missions (L2) and
+ * refuses a zero-delta replay. L1 asks a smaller question — did Memory change
+ * ONE decision for the better — so its report states a DIRECTION only, always
+ * carries the Sham control caveat and the trajectory-steering caveat, and makes
+ * no significance claim at any sample size.
+ */
+import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../evidence/research-memory";
+import { RESEARCH_MEMORY_EVALUATION_MODES } from "../evidence/research-memory";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
+import { RESEARCH_MEMORY_CONTROL_CAVEAT, assertNoFutureInformation } from "./memory-evaluation";
+import {
+  assertOffRetainsMissionState,
+  deriveDecisionDelta,
+  missionRetainedState,
+  type DecisionDelta,
+  type DirectorInput,
+  type DirectorProposal,
+  type MissionDirector,
+  type MissionRetainedState,
+} from "./mission-director";
+
+export const DECISION_POINT_EVALUATION_SCHEMA = "evok.decision-point-evaluation/v1" as const;
+
+/** What one L1 report measures: a single decision, never a trajectory. */
+export const DECISION_POINT_EVALUATION_KIND = "decision-point-counterfactual" as const;
+
+/**
+ * Sample target from the spec: below this the report refuses to state a
+ * direction instead of reading noise as a signal.
+ */
+export const DECISION_POINT_MIN_SAMPLE = 50;
+
+/**
+ * The scope limit of every L1 reading: off-policy steps carry no propensity, so
+ * the effect of Memory on exploration over many steps is invisible here.
+ */
+export const DECISION_POINT_TRAJECTORY_CAVEAT =
+  "L1 does not measure trajectory steering: it re-decides one frozen decision point at a time, so it can show whether Memory changed the next bounded action but never where Memory steers exploration across many steps (off-policy trajectories carry no propensity).";
+
+/** Every L1 report carries both limits; neither is optional. */
+export const DECISION_POINT_CAVEATS: readonly string[] = [
+  RESEARCH_MEMORY_CONTROL_CAVEAT,
+  DECISION_POINT_TRAJECTORY_CAVEAT,
+];
+
+/** One arm's Memory input for the same point: absent only for the off arm. */
+export interface DecisionPointPacket {
+  readonly mode: ResearchMemoryEvaluationMode;
+  readonly packet?: ResearchDecisionPacket;
+}
+
+/** The revised proposal the original Mission executed, and its measured Run. */
+export interface DecisionPointActionTaken {
+  readonly runId: string;
+  readonly proposal: DirectorProposal;
+}
+
+/**
+ * A decision point captured from a completed Mission: the trusted state and
+ * frozen Blind Proposal that existed BEFORE the original decision, one packet
+ * per arm, the durable Mission state no arm may lose, and the action the
+ * original Mission actually took (the hindsight reference, never an arm input).
+ */
+export interface FrozenDecisionPoint {
+  readonly pointId: string;
+  /** The trusted Director input at that instant; identical in every arm. */
+  readonly baseState: DirectorInput;
+  /**
+   * The Mission's measured state AS OF this point (the record projected to that
+   * instant), read independently of the projection. An arm may lose Memory,
+   * never this state; a record-state snapshot from AFTER the point would name
+   * Runs the base state cannot carry yet.
+   */
+  readonly missionState: MissionRetainedState;
+  /** The Blind Proposal frozen before any Memory was visible. */
+  readonly blindProposal: DirectorProposal;
+  readonly packets: readonly DecisionPointPacket[];
+  readonly actionTaken: DecisionPointActionTaken;
+  /** Runs/refs produced AFTER this point; a packet naming one leaks the future. */
+  readonly futureRunIds: readonly string[];
+}
+
+export interface DecisionPointArmResult {
+  readonly mode: ResearchMemoryEvaluationMode;
+  readonly proposal: DirectorProposal;
+  /** Controller-derived change from the frozen Blind Proposal. */
+  readonly delta: DecisionDelta;
+  /** Hindsight score against the action actually taken. */
+  readonly matchedActionTaken: boolean;
+}
+
+export interface DecisionPointResult {
+  readonly pointId: string;
+  readonly missionId: string;
+  readonly actionTakenRunId: string;
+  readonly arms: readonly DecisionPointArmResult[];
+  /** Structural: L1 has no dispatch seam, so it can never spend Experiment budget. */
+  readonly dispatchedExperiments: 0;
+}
+
+function packetOf(point: FrozenDecisionPoint, mode: ResearchMemoryEvaluationMode): DecisionPointPacket {
+  const matches = point.packets.filter((entry) => entry.mode === mode);
+  return matches[0]!;
+}
+
+/**
+ * Refuses any arm set that would make the comparison fake: a missing or
+ * duplicated arm, an off arm carrying Memory, a Sham arm without the control
+ * packet, or packets that do not come from ONE bounded presentation of the same
+ * point (different Mission, ledger revision or card bound).
+ */
+function assertArmPackets(point: FrozenDecisionPoint): void {
+  const modes = point.packets.map((entry) => entry.mode);
+  const missing = RESEARCH_MEMORY_EVALUATION_MODES.filter((mode) => !modes.includes(mode));
+  const duplicated = modes.filter((mode, index) => modes.indexOf(mode) !== index);
+  if (missing.length > 0 || duplicated.length > 0) {
+    throw new Error(`a decision-point evaluation needs exactly one arm per mode (${RESEARCH_MEMORY_EVALUATION_MODES.join("/")}): missing [${missing.join(",")}], duplicate [${duplicated.join(",")}]`);
+  }
+  const off = packetOf(point, "off");
+  if (off.packet !== undefined) {
+    throw new Error(`the off arm carries no Memory packet: it is the Memory-denied arm, so a packet there would hide Memory in the control`);
+  }
+  const sham = packetOf(point, "sham").packet;
+  const real = packetOf(point, "real").packet;
+  if (sham === undefined || sham.control !== "sham") {
+    throw new Error(`the sham arm needs the schema-only sham control packet; a research packet there is not a control input`);
+  }
+  if (real === undefined || real.control !== undefined) {
+    throw new Error(`the real arm needs the Research Memory packet, not a control input`);
+  }
+  const samePoint = sham.missionId === point.baseState.missionId
+    && real.missionId === point.baseState.missionId
+    && sham.ledgerRevision === real.ledgerRevision
+    && sham.cards.length === real.cards.length;
+  if (!samePoint) {
+    throw new Error(`the sham and real packets must be one bounded presentation of the same decision point (same mission, ledger revision and card count)`);
+  }
+}
+
+/**
+ * Re-decides one frozen decision point in every arm and scores the proposals
+ * against the action the original Mission took. Deterministic given the same
+ * Director; no Experiment is dispatched and no budget is reserved.
+ */
+export async function evaluateDecisionPoint(options: {
+  readonly point: FrozenDecisionPoint;
+  readonly director: Pick<MissionDirector, "decide">;
+}): Promise<DecisionPointResult> {
+  const point = options.point;
+  assertArmPackets(point);
+  // No future information: a packet may only carry what already existed at this
+  // point, so the pinned-ledger guard runs BEFORE any priced decision call.
+  for (const mode of ["sham", "real"] as const) {
+    assertNoFutureInformation(packetOf(point, mode).packet!.cards, point.futureRunIds, `decision point "${point.pointId}" had a ${mode} packet`);
+  }
+  const expected = point.missionState;
+  const arms: DecisionPointArmResult[] = [];
+  for (const mode of RESEARCH_MEMORY_EVALUATION_MODES) {
+    const packet = packetOf(point, mode).packet;
+    // The base state is copied, never shared: an arm can only differ by packet.
+    const state = structuredClone(point.baseState);
+    const handed: DirectorInput = deepFreeze({
+      ...state,
+      decisionPhase: { blindProposal: point.blindProposal, ...(packet === undefined ? {} : { memoryPacket: packet }) },
+    });
+    // F5 (#231): Memory Off drops narrative, never Mission state.
+    assertOffRetainsMissionState({
+      mode,
+      scope: "decision-point",
+      retained: missionRetainedState(handed.observations),
+      expected,
+      runId: point.actionTaken.runId,
+    });
+    const decision = await options.director.decide(handed);
+    const againstTaken = deriveDecisionDelta(point.actionTaken.proposal, decision.proposal);
+    arms.push({
+      mode,
+      proposal: decision.proposal,
+      delta: deriveDecisionDelta(point.blindProposal, decision.proposal),
+      // Only the dispatched head matters, so this is the same controller-derived
+      // comparison used for the delta, against the action actually taken. A
+      // wider declared output set is still the taken action, not a different one.
+      matchedActionTaken: againstTaken === "unchanged" || againstTaken === "expanded_via_existing_search",
+    });
+  }
+  return deepFreeze({
+    pointId: point.pointId,
+    missionId: point.baseState.missionId,
+    actionTakenRunId: point.actionTaken.runId,
+    arms,
+    dispatchedExperiments: 0 as const,
+  });
+}
+
+export interface DecisionPointArmReading {
+  readonly mode: ResearchMemoryEvaluationMode;
+  readonly proposals: number;
+  /** How Memory changed the decision, over the whole sample. */
+  readonly deltas: Readonly<Record<DecisionDelta, number>>;
+  /** Hindsight matches against the action actually taken. */
+  readonly matchedActionTaken: number;
+  /** Revision stages whose controller-derived delta is not `unchanged`. */
+  readonly divergent: number;
+}
+
+export type DecisionPointDirection = "treatment-higher" | "treatment-lower" | "flat";
+
+export interface DecisionPointDirectionReading {
+  readonly metric: "matched-action-taken";
+  readonly baseline: ResearchMemoryEvaluationMode;
+  readonly treatment: ResearchMemoryEvaluationMode;
+  /** Sign only: no effect size, no interval. */
+  readonly direction: DecisionPointDirection;
+}
+
+export interface DecisionPointEvaluationReport {
+  readonly schema: typeof DECISION_POINT_EVALUATION_SCHEMA;
+  readonly kind: typeof DECISION_POINT_EVALUATION_KIND;
+  readonly decisionPoints: number;
+  readonly missions: readonly string[];
+  readonly arms: readonly DecisionPointArmReading[];
+  readonly directions: readonly DecisionPointDirectionReading[];
+  /** A direction is claimed, never an effect size. */
+  readonly directionOnly: true;
+  readonly statisticalSignificance: "none";
+  readonly caveats: readonly string[];
+  readonly dispatchedExperiments: 0;
+}
+
+function directionOf(baseline: number, treatment: number): DecisionPointDirection {
+  return treatment > baseline ? "treatment-higher" : treatment < baseline ? "treatment-lower" : "flat";
+}
+
+/**
+ * Aggregates evaluated points into a report. It refuses an under-powered
+ * sample: below the declared minimum a direction would be noise, so no report
+ * is produced. Above it the report stays directional and caveated.
+ */
+export function summarizeDecisionPoints(results: readonly DecisionPointResult[]): DecisionPointEvaluationReport {
+  if (results.length < DECISION_POINT_MIN_SAMPLE) {
+    throw new Error(`an L1 decision-point report needs at least ${DECISION_POINT_MIN_SAMPLE} decision points to state a direction (got ${results.length}); collect more frozen decision points instead of reading noise`);
+  }
+  if (new Set(results.map((result) => result.pointId)).size !== results.length) {
+    throw new Error("an L1 decision-point report needs distinct decision points: a repeated pointId inflates the sample without adding evidence");
+  }
+  const reading = (mode: ResearchMemoryEvaluationMode): DecisionPointArmReading => {
+    const arms = results.flatMap((result) => result.arms.filter((arm) => arm.mode === mode));
+    const deltas: Record<DecisionDelta, number> = { unchanged: 0, reordered: 0, replaced: 0, withdrawn: 0, expanded_via_existing_search: 0 };
+    for (const arm of arms) deltas[arm.delta] += 1;
+    return deepFreeze({
+      mode,
+      proposals: arms.length,
+      deltas,
+      matchedActionTaken: arms.filter((arm) => arm.matchedActionTaken).length,
+      divergent: arms.filter((arm) => arm.delta !== "unchanged").length,
+    });
+  };
+  const arms = RESEARCH_MEMORY_EVALUATION_MODES.map(reading);
+  const matched = (mode: ResearchMemoryEvaluationMode) => arms.find((arm) => arm.mode === mode)!.matchedActionTaken;
+  return deepFreeze({
+    schema: DECISION_POINT_EVALUATION_SCHEMA,
+    kind: DECISION_POINT_EVALUATION_KIND,
+    decisionPoints: results.length,
+    missions: [...new Set(results.map((result) => result.missionId))],
+    arms,
+    directions: [
+      { metric: "matched-action-taken", baseline: "off", treatment: "real", direction: directionOf(matched("off"), matched("real")) },
+      { metric: "matched-action-taken", baseline: "sham", treatment: "real", direction: directionOf(matched("sham"), matched("real")) },
+    ],
+    directionOnly: true as const,
+    statisticalSignificance: "none" as const,
+    caveats: DECISION_POINT_CAVEATS,
+    dispatchedExperiments: 0 as const,
+  });
+}
