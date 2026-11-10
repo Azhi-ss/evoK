@@ -1,5 +1,7 @@
 .research-cache/
 .feishu-agent/
+# Local scratch: downloaded reference material and one-off dumps.
+/tmp/
 pi-session-*.html
 .scratch/
 # Generated Mission storage for projects opened inside this repo (ADR-0004).
