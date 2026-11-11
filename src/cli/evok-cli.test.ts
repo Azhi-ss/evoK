@@ -1459,6 +1459,37 @@ describe("thin /skills directory view (ET-M1-SKILL / #140)", () => {
     await rm(project, { recursive: true, force: true });
   });
 
+  test("/skill charter loads L1 and is not start/continue/submit authorization", async () => {
+    const project = await tempProject();
+    const stdout = new CollectStream();
+    let tuiLaunched = false;
+    const code = await runEvok({
+      args: parseEvokArgs(["/skill", "charter", "--project", project]),
+      createResolver: async () => { throw new Error("no model configuration"); },
+      isTty: () => true,
+      launchNativeTui: async () => { tuiLaunched = true; },
+      stdout,
+      stderr: new CollectStream(),
+    });
+    expect(code).toBe(0);
+    expect(tuiLaunched).toBe(false);
+    const text = stdout.text();
+    expect(text).toMatch(/disclosure l1-body/i);
+    expect(text).toMatch(/state: candidate/);
+    expect(text).toMatch(/evok\.research-charter\/v1/);
+    expect(text).toMatch(/RESEARCH_CHARTER_APPROVED/);
+    expect(text).toMatch(/BENCHMARK_PROTOCOL_FROZEN/);
+    expect(text).toMatch(/BENCHMARK_EXTENSION_ADDED/);
+    expect(text).toMatch(/never re-scored|not re-scored/i);
+    expect(text).toMatch(/no_go_recommended/);
+    expect(text).toMatch(/ambition never|never enters termination/i);
+    expect(text).toMatch(/no new agent role/i);
+    expect(text).toMatch(/no vector store/i);
+    expect(text).toMatch(/not authorization to start, continue, or submit/i);
+    expect(text).toMatch(/does not\s+relax/i);
+    await rm(project, { recursive: true, force: true });
+  });
+
   test("/skill search loads L1 and is not start/continue/submit authorization", async () => {
     const project = await tempProject();
     const stdout = new CollectStream();
