@@ -51,9 +51,9 @@ import {
   classifyTrailEntry,
 } from "./mission-start";
 import {
-  loadResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
-} from "../execution/research-memory-provider";
+  loadActiveResearchMemorySnapshot,
+  researchMemoryStoreFor,
+} from "../memory";
 import {
   projectResearchMemorySnapshot,
   researchMemoryModeOf,
@@ -92,11 +92,15 @@ export async function reconcileResearchMemory(options: {
   if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
   const record = options.record;
   const dir = researchMemoryDir(options.projectRoot, record.id);
+  // M-c (#244): recovery reads and rebuilds through the default store, so a
+  // switch from the file store migrates first and a damaged database is rebuilt
+  // the same way a damaged file store was.
+  const store = researchMemoryStoreFor(dir);
   const declared = record.researchMemory;
   let served: ResearchMemorySnapshot | undefined;
   let damage: string | undefined;
   try {
-    served = await loadResearchMemorySnapshot(dir);
+    served = await loadActiveResearchMemorySnapshot(store);
   } catch (error) {
     // Damaged pointer/snapshot bytes: rebuild is the sanctioned repair, and the
     // damage stays visible in the RECOVERY_MEMORY_REBUILT event below.
@@ -149,8 +153,8 @@ export async function reconcileResearchMemory(options: {
       : { record: { ...record, researchMemory: rebuiltSummary } };
   }
 
-  await publishResearchMemorySnapshot(dir, expected);
-  const verified = await loadResearchMemorySnapshot(dir);
+  await store.publish(expected);
+  const verified = await loadActiveResearchMemorySnapshot(store);
   if (verified === undefined || verified.digest !== expected.digest) {
     throw new ReconciliationBlockedError(
       `recovery blocked for ${record.id}: the rebuilt Research Memory snapshot could not be verified after publication`,

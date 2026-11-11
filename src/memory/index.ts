@@ -4,9 +4,10 @@
  * Seventh directory, not a seventh logical owner (ADR-0016): the six-pack
  * authority map in ADR-0007 is unchanged. This directory owns only the derived
  * projection (`projection.ts`, `schema.ts`, `packet.ts`, `sham.ts`), durable
- * derived storage (`store.ts`), and Run-bound slice assembly (`slice.ts`). It
- * owns no write path to Mission history and no gate, promotion, admission,
- * budget, T48, hang, or submission authority.
+ * derived storage (`store.ts`), Run-bound slice assembly (`slice.ts`), and the
+ * snapshot-pinned read-only serving tool (`tool.ts`). It owns no write path to
+ * Mission history and no gate, promotion, admission, budget, T48, hang, or
+ * submission authority.
  *
  * The names below are exactly the public surface the pre-move modules exposed:
  * other packages import from here, never from an individual memory module, so
@@ -105,6 +106,30 @@ export {
   RESEARCH_MEMORY_POINTER_SCHEMA,
   publishResearchMemorySnapshot,
   loadResearchMemorySnapshot,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryProviderFromStore,
+  createFileResearchMemoryStore,
   createResearchMemoryProvider,
   createDelegatedResearchMemoryProvider,
 } from "./store";
+export type { ResearchMemoryStore } from "./store";
+export {
+  RESEARCH_MEMORY_DATABASE_FILENAME,
+  RESEARCH_MEMORY_STORE_ENV,
+  defaultResearchMemoryProvider,
+  researchMemoryStoreFor,
+  researchMemoryStoreName,
+} from "./default-store";
+export type { ResearchMemoryStoreName } from "./default-store";
+export {
+  createSqliteResearchMemoryStore,
+  createSqliteResearchMemoryProvider,
+  migrateFileResearchMemory,
+} from "./sqlite-store";
+export {
+  MEMORY_READ_TOOL,
+  MEMORY_READ_SCHEMA,
+  readMemoryCard,
+  createMemoryReadTool,
+} from "./tool";
+export type { MemoryReadBody, MemoryReadProvenance, MemoryReadRecord, MemoryReadTool } from "./tool";

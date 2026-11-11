@@ -102,10 +102,10 @@ import { checkHostCapabilities } from "../execution/host-capabilities";
 import type { HostInventory } from "../execution/host-inventory";
 import type { ResourceRequest } from "../execution/resource-lease";
 import {
-  createResearchMemoryProvider,
-  loadResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
-} from "../execution/research-memory-provider";
+  defaultResearchMemoryProvider,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryStoreFor,
+} from "../memory";
 import {
   assertMemorySafeText,
   assertPacketCardRefs,
@@ -539,7 +539,9 @@ export type HistoryEventType =
   | "RECOVERY_REMEASURED"
   | "RECOVERY_ABANDONED_INTENT"
   // M1-T7: a damaged or missing derived Memory snapshot was rebuilt
-  | "RECOVERY_MEMORY_REBUILT";
+  | "RECOVERY_MEMORY_REBUILT"
+  // M-d (#245): one served Research Memory card was read on demand (or refused)
+  | "MEMORY_READ";
 
 export interface HistoryEvent {
   readonly type: HistoryEventType;
@@ -766,7 +768,9 @@ function researchMemoryProviderFor(options: StartMissionOptions, missionId: stri
   if (options.competitionContext === undefined) return undefined;
   if (options.competitionContext.memory) return options.competitionContext.memory;
   if (mode === "off") return undefined;
-  return createResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
+  // M-c (#244): the default store is SQLite, migrated from this Mission's files
+  // on first use; the file reader stays the rollback path.
+  return defaultResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
 }
 
 /** Project-local derived-artifact namespace (under the git-ignored Mission dir). */
@@ -789,7 +793,7 @@ async function projectAndPublishResearchMemory(
   // M1-T9: the Sham arm publishes the SAME structural projection with control
   // slots only, so no research content reaches a comparison arm by accident.
   const snapshot = mode === "sham" ? shamResearchMemorySnapshot(projected) : projected;
-  await publishResearchMemorySnapshot(researchMemoryDir(projectRoot, record.id), snapshot);
+  await researchMemoryStoreFor(researchMemoryDir(projectRoot, record.id)).publish(snapshot);
   const next: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
   await persist(projectRoot, next);
   return next;
@@ -1709,6 +1713,21 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       return { record: r, outcome: { kind: "run-failed", runId: args.runId, attempt: args.attempt, error: message } };
     }
 
+    // M-d (#245): every served-card read of a confirmed Run is a Mission ledger
+    // event, so an on-demand read is auditable and countable per arm instead of
+    // becoming invisible extra context. Refused attempts are recorded too: an
+    // attempt to read outside the served packet is exactly what a reviewer must
+    // see.
+    // shortcut: reads made by a Run that fails before returning are not Mission
+    // history events; they stay auditable in that Run's durable tool-intent
+    // record. Emit them through a read sink when failed-Run reads matter.
+    for (const read of result.memoryReads ?? []) {
+      r = withEvent(r, { type: "MEMORY_READ", at: now(), detail: {
+        runId: args.runId, cardId: read.cardId, snapshotId: read.snapshotId, snapshotDigest: read.snapshotDigest,
+        outcome: read.outcome, ...(read.reason === undefined ? {} : { reason: read.reason }),
+      } });
+    }
+
     const modelCost = result.model && options.priceModelCost ? options.priceModelCost(result.model) : undefined;
     let runCost = result.usage.cost.total;
     if (!Number.isFinite(runCost) || runCost === 0) {
@@ -2374,7 +2393,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         let pinnedPacket: ResearchDecisionPacket | undefined;
         if (researchMemoryEnabled) {
           try {
-            const snapshot = await loadResearchMemorySnapshot(memoryDir);
+            const snapshot = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(memoryDir));
             if (snapshot !== undefined) {
               const projected = projectResearchDecisionPacket(snapshot);
               // M1-T9: the Sham arm delivers the Schema-only control packet, not

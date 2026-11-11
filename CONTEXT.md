@@ -193,7 +193,7 @@ A conclusion drawn from one or more Evidence items within stated conditions and 
 _Avoid_: Claim (a Claim may communicate a Finding externally)
 
 **Research Memory**:
-A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it. Its physical home is `src/memory/` ([ADR-0016](docs/adr/0016-memory-physical-pack.md)): a seventh directory, not a seventh logical owner. The durable derived snapshot and its active pointer are served by `src/memory/store.ts` (immutable snapshot files today; SQLite becomes the primary store in M-b, and a storage change must not alter the bytes a Run was served).
+A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it. Its physical home is `src/memory/` ([ADR-0016](docs/adr/0016-memory-physical-pack.md)): a seventh directory, not a seventh logical owner. The durable derived snapshot and its active pointer live in one SQLite database per Mission (`src/memory/sqlite-store.ts`), the default store behind the store-neutral seam in `src/memory/store.ts` since M-c/#244; that Mission's earlier snapshot files are migrated on first use and the file reader stays the rollback path (`EVOK_RESEARCH_MEMORY_STORE=file`). A storage change must never alter the bytes a Run was served.
 _Avoid_: Transcript memory, second evidence ledger, session memory
 
 **Finding Card**:
@@ -227,6 +227,10 @@ _Avoid_: Memory output, second opinion, Memory-approved action
 **Research Decision Packet**:
 The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
 _Avoid_: Memory dump, second snapshot, full history
+
+**Memory Read**:
+The read-only second serving channel: `memory_read(ref)` returns the body and provenance refs of ONE card whose id was present in the packet that Run was served. It resolves against the same pinned snapshot as injection, cannot enumerate, search, or cross a Run/Mission/arm boundary, and each attempt (delivered or refused) of a Run that reaches a confirmed result is a `MEMORY_READ` Mission ledger event — a Run that fails first keeps its attempts in its durable tool-intent record. The Sham arm exposes the same tool returning control-slot bodies, so an arm comparison measures memory, not tool access.
+_Avoid_: Semantic search, free-text retrieval, memory dump
 
 **Delegated Memory Slice**:
 The Research Memory slice a delegated child agent receives: newly generated for the child's own Mission/Task/Run/targetAgent from the parent's pinned Research Memory snapshot. It is never the parent's, a sibling's, or a previous Run's slice, and it can never carry a wider packet than the parent was shown.

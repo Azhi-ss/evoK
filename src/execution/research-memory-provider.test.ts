@@ -108,6 +108,22 @@ describe("snapshot commit and pointer switch atomicity (#216)", () => {
 });
 
 describe("default research memory provider (#210)", () => {
+  test("the provider refuses a pointer whose snapshotId is not its digest's address", async () => {
+    const dir = await memoryDir();
+    const published = snapshot();
+    await publishResearchMemorySnapshot(dir, published);
+    const pointer = JSON.parse(await readFile(join(dir, "active.json"), "utf8"));
+    await writeFile(join(dir, "active.json"), JSON.stringify({ ...pointer, snapshotId: "research-memory:not-this-digest" }));
+    await expect(createResearchMemoryProvider(dir)({
+      missionId: "m-memory",
+      taskId: "task-exp-2",
+      runId: "m-memory:exp:2",
+      targetAgentId: "agent",
+      role: "researcher",
+      evidenceRefs: [],
+    })).rejects.toThrow(/does not match its snapshot/);
+  });
+
   test("returns an additive v3 slice bound to this Run, with the pinned card and snapshot", async () => {
     const dir = await memoryDir();
     const pinned = snapshot();
