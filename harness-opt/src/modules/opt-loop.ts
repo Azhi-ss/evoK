@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, copyFileSync, existsSync, fchmodSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectAttestedActivation, relayRequestsActive, runStartConfigHash, type ActivationInspection } from "./activation";
@@ -2032,7 +2033,10 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   }
   assertAttestRoot(options.attestRoot, options.out);
   assertKeyOutside(options.attestKeyFile, [options.out]);
-  const executor = options.executor ?? executorFor(options, env, attestKey, harnessPin);
+  // A docker `once` child reads the relay port from its env, so it gets this copy by reference and
+  // the allocated port is filled in below, once preflight has passed.
+  const childEnv: NodeJS.ProcessEnv = { ...env };
+  const executor = options.executor ?? executorFor(options, childEnv, attestKey, harnessPin);
   const now = options.now ?? (() => new Date());
   const scoreHost = {
     now: () => now().getTime() / 1000,
@@ -2181,7 +2185,8 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
   let realRunWallS = resume?.realRunWallS ?? 0;
   let readOnlyWallS = resume?.readOnlyWallS ?? 0;
   const innovatorCap = typeof preRound1.innovatorCap === "number" ? preRound1.innovatorCap : LOOP_CAPS.innovatorCap;
-  const relayPort = relayListenPort(env);
+  const relayPort = await relayListenPort(env);
+  childEnv.HARNESS_RELAY_PORT = relayPort;
   const upstreamKeyFile = ensureUpstreamKey(options.attestRoot, options.attestKeyFile, env);
   const priorVoids = resume?.voids ?? carriedVoidEntries(options, attestKey);
   const campaignVoids = [...priorVoids, ...addedVoids];
@@ -2351,7 +2356,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
           const wait = ROLE_RETRY_DELAYS_MS[n - 2] ?? ROLE_RETRY_DELAYS_MS[ROLE_RETRY_DELAYS_MS.length - 1] ?? 60_000;
           await sleep(wait);
         }
-        const relay = roleRelay(relayRoot, env);
+        const relay = roleRelay(relayRoot, env, relayPort);
         const built = spec.build(relay);
         lastSpawn = built.spawn;
         await relayRpc({ op: "open", runId: relay.runId, kind: spec.kind, expectedSha: controlSha });
@@ -2601,7 +2606,7 @@ export async function runOptLoop(options: OptLoopOptions): Promise<OptLoopResult
     }
     const closeWithoutRun = (note: string, duplicate: boolean): boolean => {
       consecutiveNoAccept += 1;
-      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env), "这一轮没有候选，不评测。", "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
+      const reviewSpawn = prepareRole(options.out, round, "reviewer-gate", options.piBin, [], roleRelay(relayRoot, env, relayPort), "这一轮没有候选，不评测。", "reviewer-gate", options.roleMaxTokens?.["reviewer-gate"]);
       hostWriteSession(reviewSpawn, sessionLines("reviewer-gate", note), attestKey);
       const reviewSha = captureSession(options.out, round, "reviewer-gate", reviewSpawn.sessionPath, attestKey)?.sha256 ?? null;
       emitClosure({
@@ -5136,8 +5141,25 @@ function defaultRelayRoot(): string {
   return proc.stdout.trim();
 }
 
-function relayListenPort(env: NodeJS.ProcessEnv): string {
-  return typeof env.HARNESS_RELAY_PORT === "string" && env.HARNESS_RELAY_PORT.trim() !== "" ? env.HARNESS_RELAY_PORT.trim() : "8642";
+/**
+ * Port 0 lets the kernel pick a free port; the probe reads the real number back, so no run depends
+ * on a fixed one. `HARNESS_RELAY_PORT` stays the explicit override a real deployment uses.
+ * shortcut: probe-then-bind leaves a short window where another process can take the port; upgrade
+ * to a relay that reports its own bound port if a concurrent run ever stops with `internal_error`.
+ */
+async function relayListenPort(env: NodeJS.ProcessEnv): Promise<string> {
+  const configured = env.HARNESS_RELAY_PORT;
+  if (typeof configured === "string" && configured.trim() !== "") return configured.trim();
+  const server = createNetServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, relayBindHost(env), () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!port) throw new Error("relay port allocation failed");
+  return String(port);
 }
 
 function relayBindHost(env: NodeJS.ProcessEnv): string {
@@ -5150,9 +5172,8 @@ function relayUpstream(env: NodeJS.ProcessEnv): string {
   return typeof configured === "string" ? configured.trim() : "";
 }
 
-function roleRelay(root: string, env: NodeJS.ProcessEnv): RoleRelay {
+function roleRelay(root: string, env: NodeJS.ProcessEnv, port: string): RoleRelay {
   const runId = hostRunId();
-  const port = relayListenPort(env);
   return {
     relayLog: join(root, runId, "relay.jsonl"),
     runId,
@@ -5565,8 +5586,10 @@ class RelayControl {
     this.child.stdin.on("error", () => undefined);
     this.child.on("error", (err) => this.fail(err));
     this.child.on("exit", (code) => {
+      liveRelays.delete(this.child);
       this.fail(new Error((this.stderr || `relay control exited ${code ?? "null"}`).trim()));
     });
+    liveRelays.add(this.child);
   }
 
   private fail(err: Error): void {
@@ -5590,12 +5613,27 @@ class RelayControl {
   async shutdown(): Promise<void> {
     if (this.dead) return;
     try {
-      await this.request({ op: "shutdown" });
+      await Promise.race([this.request({ op: "shutdown" }), shutdownTimeout()]);
     } catch {
-      return;
+      // A dead relay has nothing left to reap; an unresponsive one is killed below.
+    } finally {
+      this.child.kill();
+      liveRelays.delete(this.child);
     }
-    this.child.kill();
   }
+}
+
+/** Relays still running in this process. A timed-out or crashed run must not leave one bound. */
+const liveRelays = new Set<ChildProcessWithoutNullStreams>();
+process.on("exit", () => {
+  for (const child of liveRelays) child.kill();
+});
+
+/** Bounds the graceful shutdown, so a relay that stops answering is still killed. */
+function shutdownTimeout(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 5_000).unref();
+  });
 }
 
 function readJsonl(file: string): unknown[] {
