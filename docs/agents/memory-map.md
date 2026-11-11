@@ -1,18 +1,28 @@
 # Memory subsystem map
 
-M1 Research Memory spans evidence, execution, and mission. Reading one module is
-usually not enough; this map is the index. Read it before changing the memory
-projection, the decision packet, Run injection, recovery, or the evaluation.
+Research Memory has one physical home: `src/memory/` ([ADR-0016](../adr/0016-memory-physical-pack.md),
+seventh directory, not a seventh logical owner). Reading one module is still not
+always enough — lifecycle and prompt assembly stay in `src/mission/` — but the
+projection, the packet, the store and the slice are now in one place. Read this
+map before changing the memory projection, the decision packet, Run injection,
+recovery, or the evaluation.
+
+`src/memory/index.ts` is the only public export surface: code outside the
+directory imports from `src/memory`, never from an individual module in it. The
+old paths (`src/evidence/research-memory.ts`,
+`src/execution/research-memory-provider.ts`, `src/execution/memory-slice.ts`) are
+migration-period re-export shims of that entry point and are removed in M-e.
 
 ## The seam, in order
 
 | Step | Module | Symbols |
 |---|---|---|
-| Projection (derived, no write authority) | `src/evidence/research-memory.ts` | `projectResearchMemorySnapshot`, `validateResearchMemorySnapshot`, `summarizeResearchMemorySnapshot`, card schemas, `researchMemoryModeOf` |
-| Bounded decision view | `src/evidence/research-memory.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
-| Sham control input | `src/evidence/research-memory.ts` | `RESEARCH_CONTROL_CARD_SCHEMA`, `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` |
-| Durable snapshot + provider | `src/execution/research-memory-provider.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
-| Run-bound slice | `src/execution/memory-slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice` |
+| Card / snapshot / packet schemas, revisions, validation, digest | `src/memory/schema.ts` | `RESEARCH_MEMORY_SNAPSHOT_SCHEMA`, card schema constants, `ResearchMemoryError`, `validateResearchMemorySnapshot`, `summarizeResearchMemorySnapshot`, `researchMemoryModeOf`, `ResearchMemorySnapshot`, `ResearchDecisionPacket` |
+| Projection (derived, no write authority) | `src/memory/projection.ts` | `projectResearchMemorySnapshot`, `evaluateResearchApplicability`, `retrieveResearchMemory` |
+| Bounded decision view | `src/memory/packet.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
+| Sham control input | `src/memory/sham.ts` | `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` (`RESEARCH_CONTROL_CARD_SCHEMA` lives in `schema.ts`) |
+| Durable snapshot + provider | `src/memory/store.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
+| Run-bound slice | `src/memory/slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice`, `MemorySliceError` |
 | Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
 | Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta`, `missionRetainedState`, `recordRetainedState`, `decisionRetainedState`, `assertOffRetainsMissionState` |
 | Recovery rebuild | `src/mission/mission-resume.ts` | `reconcileResearchMemory` |
@@ -25,9 +35,14 @@ current best) in the prompt and at the decision point; `assertOffRetainsMissionS
 is called where the Director input is built (`mission-start.ts`) and in the
 whole-Mission report.
 
+M-a (#242) was a physical move with zero behaviour change: for a fixed input every
+snapshot, packet, Sham and slice digest is unchanged, pinned by
+`src/memory/digests.test.ts`. A changed literal there is a served-content change
+and must be justified as one, not edited to match new code.
+
 ## Lookup by question
 
-- Which card schemas and fields exist? `src/evidence/research-memory.ts` (card interfaces near the top).
+- Which card schemas and fields exist? `src/memory/schema.ts` (card interfaces near the top).
 - How are cards ordered, truncated, reserved, and omitted? `projectResearchMemorySnapshot` and `projectResearchDecisionPacket`.
 - What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `runMissionController`.
 - Why can't a Run see the future? `replayResearchMemory` (dispatch vs completion instants; it pins the ledger revision the Run was durably served — `MissionRunRecord.researchMemory.ledgerRevision` — and falls back to the prefix ordinal only for legacy records without it).
@@ -38,12 +53,14 @@ whole-Mission report.
 - Is human Insight allowed to differ across arms? No. Every arm reads the **same** Insight snapshot (same ids, versions, order) or Insight is `"disabled"` for the run; a point whose arms differ is refused before any priced call, and the result/report record the pinned ids+versions (or the disabled choice) so the control is auditable. `summarizeDecisionPoints` also refuses a sample that mixes Insight on and off, since that would measure the operator's intuition rather than Memory.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
+- What is stored on disk today? `snapshots/<digest>.json` plus `active.json`, written by `store.ts` (immutable snapshot first, then an atomic pointer switch). SQLite is the decided primary store and lands behind the same provider interface in M-b (#243).
 
 ## Adjacent: Human Insight (#238)
 
 Human Insight is **not** a memory source and has no epistemic authority: it is
 advisor context the Director may consider or refute. It shares only the Director
-input assembly seam.
+input assembly seam, and it stays in `src/mission/` — it is not part of Research
+Memory and did not move in M-a.
 
 | Step | Module | Symbols |
 |---|---|---|
@@ -73,13 +90,14 @@ Tests: `src/mission/insight-inbox.test.ts`, `src/mission/director-insight-sideca
 
 ## Tests
 
-- Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`
+- Digests (M-a pin): `src/memory/digests.test.ts`
+- Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`, `src/execution/memory-slice.test.ts`, `src/execution/research-memory-provider.test.ts`
 - Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
 - Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218`, `#240` blocks), `tests/integration/memory-evaluation.test.ts`
 
 ## Boundaries
 
-`AGENTS.md` names the physical packs. Memory is evidence-owned for projection and
-policy, execution-owned for slice/provider publication, mission-owned for the
-lifecycle and evaluation reads. It is advisory: no evaluator, Promotion,
-Admission, Budget, hang/T48 or Broker predicate may read it.
+Memory has one physical home (`src/memory/`) and no seventh authority: the
+logical map in ADR-0007 is unchanged. Memory is advisory: no evaluator,
+Promotion, Admission, Budget, hang/T48 or Broker predicate may read it, and
+nothing in `src/memory/` may write Mission history.

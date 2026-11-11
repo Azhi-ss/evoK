@@ -34,6 +34,11 @@ plane. The fixture file still re-exports `research-loop` (and kin) as a
 test convenience barrel — that is not Mission authorize / continue /
 repair / stop authority. Do not route new product control through it.
 
+Later note: `src/memory/` (ADR-0016, #242) adds a seventh physical
+directory after this closeout. It is a home for the Research Memory projection,
+not a seventh logical owner; the six-pack table above, its ownership, and the
+"no second package move" freeze stand as recorded.
+
 ## Residual flat `src/*.ts` shims
 
 **Deleted (dead — no remaining in-repo consumer besides the old compat test):**

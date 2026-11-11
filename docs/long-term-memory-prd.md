@@ -3,6 +3,11 @@ status: m1-delivered
 version: 0.2
 ---
 
+> 落位说明（#242 M-a）：Research Memory 的物理位置现为 `src/memory/`
+> ([ADR-0016](adr/0016-memory-physical-pack.md))；存储引擎（SQLite 主存）与
+> `memory_read` 服务通道由 [memory-subsystem-prd.md](memory-subsystem-prd.md)
+> 决定，本文的 M1 设计不再代表当前存储方案。
+
 # evoK Long-term Research Memory PRD
 
 > 目标：让 evoK 在长时间、多方向的比赛研究中，维护“现在研究到了什么阶段、哪些解释仍在竞争、旧结论何时失效、下一步怎样区分它们”，而不只是记住哪些 Experiment 曾经运行过。
