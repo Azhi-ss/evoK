@@ -660,7 +660,12 @@ function canonical(value: unknown, seen: Set<object>): string {
 }
 
 export function digestValue(value: unknown): string {
-  return createHash("sha256").update(canonical(value, new Set())).digest("hex");
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+/** Canonical JSON text: the exact bytes `digestValue` hashes, so a stored payload can be re-verified. */
+export function canonicalJson(value: unknown): string {
+  return canonical(value, new Set());
 }
 
 /**

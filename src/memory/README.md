@@ -5,8 +5,9 @@ history stays the only write log: nothing in this directory appends, rewrites,
 retires or promotes anything there, and a snapshot can be rebuilt from the
 Mission record at any time. What lives here is the deterministic projection
 (`schema.ts`, `projection.ts`, `packet.ts`, `sham.ts`), the durable derived
-storage (`store.ts`, currently the immutable snapshot files plus an atomically
-switched pointer; SQLite becomes the primary store in M-b), Run-bound slice
+storage (`store.ts`: the immutable snapshot files plus an atomically switched
+pointer, still the default, and the SQLite store in `sqlite-store.ts` behind the
+same provider seam since M-b/#243; M-c switches the default), Run-bound slice
 assembly (`slice.ts`), and the read-only serving tool (`tool.ts`). Serving is two
 channels: the Director's revision is bound to one pinned decision packet, never
 to whatever the pointer names later; and `memory_read(ref)` (M-d, #245) returns

@@ -21,7 +21,8 @@ migration-period re-export shims of that entry point and are removed in M-e.
 | Projection (derived, no write authority) | `src/memory/projection.ts` | `projectResearchMemorySnapshot`, `evaluateResearchApplicability`, `retrieveResearchMemory` |
 | Bounded decision view | `src/memory/packet.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
 | Sham control input | `src/memory/sham.ts` | `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` (`RESEARCH_CONTROL_CARD_SCHEMA` lives in `schema.ts`) |
-| Durable snapshot + provider | `src/memory/store.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
+| Durable snapshot + provider | `src/memory/store.ts` | `ResearchMemoryStore` seam, `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `loadFileResearchMemorySnapshots`, `createFileResearchMemoryStore`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
+| SQLite store behind the same seam (M-b) | `src/memory/sqlite-store.ts` | `createSqliteResearchMemoryStore`, `createSqliteResearchMemoryProvider`, `migrateFileResearchMemory` |
 | Read-only serving tool (M-d) | `src/memory/tool.ts` | `MEMORY_READ_TOOL`, `MEMORY_READ_SCHEMA`, `readMemoryCard`, `createMemoryReadTool` |
 | Run-bound slice | `src/memory/slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice`, `MemorySliceError` |
 | Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
@@ -35,6 +36,13 @@ F5 (#231): the off arm keeps the Mission's `Mission Retained State` (scoreboard 
 current best) in the prompt and at the decision point; `assertOffRetainsMissionState`
 is called where the Director input is built (`mission-start.ts`) and in the
 whole-Mission report.
+
+M-b (#243) added a SQLite implementation of the same `ResearchMemoryStore` seam
+(snapshot rows + `cards` query projection + `active` pointer in one transaction,
+canonical-JSON `payload`, digest re-derived on every read). The **file store is
+still the default**; M-c (#244) switches it. Parity is judged on bytes: for one
+Mission record both stores must return identical snapshot digests and identical
+packet projections (`src/memory/sqlite-store.test.ts`).
 
 M-a (#242) was a physical move with zero behaviour change: for a fixed input every
 snapshot, packet, Sham and slice digest is unchanged, pinned by
@@ -79,7 +87,7 @@ Run was not served.
 - Is human Insight allowed to differ across arms? No. Every arm reads the **same** Insight snapshot (same ids, versions, order) or Insight is `"disabled"` for the run; a point whose arms differ is refused before any priced call, and the result/report record the pinned ids+versions (or the disabled choice) so the control is auditable. `summarizeDecisionPoints` also refuses a sample that mixes Insight on and off, since that would measure the operator's intuition rather than Memory.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
-- What is stored on disk today? `snapshots/<digest>.json` plus `active.json`, written by `store.ts` (immutable snapshot first, then an atomic pointer switch). SQLite is the decided primary store and lands behind the same provider interface in M-b (#243).
+- What is stored on disk today? `snapshots/<digest>.json` plus `active.json`, written by `store.ts` (immutable snapshot first, then an atomic pointer switch) — still the default after M-b (#243). The SQLite store in `sqlite-store.ts` holds the same bytes behind the same provider; `migrateFileResearchMemory` copies the files over with digest verification.
 - Can an agent ask for a card body? Only for a card the packet it was served already names, and only from that same pinned snapshot: `memory_read(ref)` (M-d, `src/memory/tool.ts`). It cannot search or list, never crosses a Run/Mission/arm, and every attempt is a `MEMORY_READ` ledger event. The Sham arm exposes the same tool over control slots.
 
 ## Adjacent: Human Insight (#238)
@@ -118,6 +126,7 @@ Tests: `src/mission/insight-inbox.test.ts`, `src/mission/director-insight-sideca
 ## Tests
 
 - Digests (M-a pin): `src/memory/digests.test.ts`
+- Store parity and P1-P6 (M-b): `src/memory/sqlite-store.test.ts`
 - Read tool (M-d): `src/memory/tool.test.ts`, plus the registration case in `src/execution/pi-agent-runtime.test.ts` and the `MEMORY_READ` ledger case in `tests/integration/mission-start.test.ts`
 - Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`, `src/execution/memory-slice.test.ts`, `src/execution/research-memory-provider.test.ts`
 - Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`

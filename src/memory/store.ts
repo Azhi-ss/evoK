@@ -8,9 +8,10 @@
  * new one. Serving fails closed on a damaged pointer/snapshot; it never treats
  * corruption as an empty research history.
  */
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  snapshotIdFor,
   validateResearchMemorySnapshot,
   type ResearchMemorySnapshot,
 } from "./schema";
@@ -40,6 +41,20 @@ function snapshotPath(dir: string, digest: string): string {
   // Digest-derived filename: no caller-supplied path segment can escape the dir.
   if (!/^[a-f0-9]{64}$/.test(digest)) throw new MemorySliceError("research memory digest must be a 64-char hex content address");
   return join(dir, SNAPSHOTS_DIRNAME, `${digest}.json`);
+}
+
+/**
+ * Store-neutral serving seam. The file store and the SQLite store are
+ * interchangeable behind it; the provider builds a slice from exactly one
+ * pinned snapshot, so a later publication can never reach an already-served Run.
+ */
+export interface ResearchMemoryStore {
+  /** Publishes one immutable snapshot and switches the active pointer atomically. */
+  publish(snapshot: ResearchMemorySnapshot): Promise<void>;
+  /** The active pointer DIGEST; undefined means nothing was ever published. */
+  loadActive(): Promise<string | undefined>;
+  /** One pinned snapshot by content address; never "latest". */
+  loadPinned(digest: string): Promise<ResearchMemorySnapshot>;
 }
 
 /**
@@ -81,8 +96,32 @@ export async function publishResearchMemorySnapshot(dir: string, snapshot: Resea
   await atomicWriteJson(pointerPath(dir), pointer);
 }
 
-/** Loads the active snapshot; undefined means no snapshot was ever published. */
-export async function loadResearchMemorySnapshot(dir: string): Promise<ResearchMemorySnapshot | undefined> {
+/** Reads ONE content-addressed snapshot file and re-verifies its digest. */
+async function readPinnedSnapshot(dir: string, digest: string, missing: string): Promise<ResearchMemorySnapshot> {
+  let stored: string;
+  try {
+    stored = await readFile(snapshotPath(dir, digest), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new MemorySliceError(missing);
+    }
+    throw error;
+  }
+  let snapshot: ResearchMemorySnapshot;
+  try {
+    snapshot = validateResearchMemorySnapshot(JSON.parse(stored));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new MemorySliceError("research memory snapshot is not valid JSON");
+    throw error;
+  }
+  if (snapshot.digest !== digest) {
+    throw new MemorySliceError("research memory snapshot bytes do not match their content address");
+  }
+  return snapshot;
+}
+
+/** Reads the active pointer only; content is always read through a pinned digest (P6). */
+async function readActivePointer(dir: string): Promise<ActivePointer | undefined> {
   let raw: string;
   try {
     raw = await readFile(pointerPath(dir), "utf8");
@@ -103,26 +142,63 @@ export async function loadResearchMemorySnapshot(dir: string): Promise<ResearchM
   if (schema !== RESEARCH_MEMORY_POINTER_SCHEMA || typeof snapshotId !== "string" || typeof digest !== "string") {
     throw new MemorySliceError("research memory active pointer is malformed; refusing to serve an empty history");
   }
-  let stored: string;
-  try {
-    stored = await readFile(snapshotPath(dir, digest), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new MemorySliceError("research memory active pointer names a missing snapshot; refusing to serve an empty history");
-    }
-    throw error;
-  }
-  let snapshot: ResearchMemorySnapshot;
-  try {
-    snapshot = validateResearchMemorySnapshot(JSON.parse(stored));
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new MemorySliceError("research memory snapshot is not valid JSON");
-    throw error;
-  }
-  if (snapshot.digest !== digest || snapshot.snapshotId !== snapshotId) {
+  return { schema, snapshotId, digest };
+}
+
+/** Loads the active snapshot; undefined means no snapshot was ever published. */
+export async function loadResearchMemorySnapshot(dir: string): Promise<ResearchMemorySnapshot | undefined> {
+  const pointer = await readActivePointer(dir);
+  if (pointer === undefined) return undefined;
+  const snapshot = await readPinnedSnapshot(
+    dir,
+    pointer.digest,
+    "research memory active pointer names a missing snapshot; refusing to serve an empty history",
+  );
+  if (snapshot.snapshotId !== pointer.snapshotId) {
     throw new MemorySliceError("research memory active pointer does not match its snapshot");
   }
   return snapshot;
+}
+
+/** The file store: the default implementation of the store-neutral seam. */
+export function createFileResearchMemoryStore(dir: string): ResearchMemoryStore {
+  return {
+    publish: (snapshot) => publishResearchMemorySnapshot(dir, snapshot),
+    loadActive: async () => {
+      const pointer = await readActivePointer(dir);
+      if (pointer === undefined) return undefined;
+      // The pointer's id is derived from its digest; a disagreement is damage.
+      if (pointer.snapshotId !== snapshotIdFor(pointer.digest)) {
+        throw new MemorySliceError("research memory active pointer does not match its snapshot");
+      }
+      return pointer.digest;
+    },
+    loadPinned: (digest) => readPinnedSnapshot(dir, digest, "research memory snapshot is missing; refusing to serve an empty history"),
+  };
+}
+
+/**
+ * Every content-addressed snapshot file, each re-verified. The file layout
+ * belongs to `store.ts`, so the SQLite migration (and M-c) do not re-implement it.
+ */
+export async function loadFileResearchMemorySnapshots(dir: string): Promise<readonly ResearchMemorySnapshot[]> {
+  let names: string[];
+  try {
+    names = (await readdir(join(dir, SNAPSHOTS_DIRNAME))).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const snapshots: ResearchMemorySnapshot[] = [];
+  for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+    const digest = name.slice(0, -".json".length);
+    // The filename IS the content address: a stray name is not a snapshot.
+    if (!/^[a-f0-9]{64}$/.test(digest)) {
+      throw new MemorySliceError(`research memory file ${name} is not a content address; refusing to migrate it`);
+    }
+    snapshots.push(await readPinnedSnapshot(dir, digest, `research memory file ${name} is missing`));
+  }
+  return snapshots;
 }
 
 /**
@@ -130,10 +206,12 @@ export async function loadResearchMemorySnapshot(dir: string): Promise<ResearchM
  * snapshot. Returns undefined before any measured Run exists, so a first Run
  * keeps the legacy prompt. Another Mission's snapshot fails closed.
  */
-export function createResearchMemoryProvider(dir: string): MemoryProvider {
+export function researchMemoryProviderFromStore(store: ResearchMemoryStore): MemoryProvider {
   return async (request): Promise<MemorySlice | undefined> => {
-    const snapshot = await loadResearchMemorySnapshot(dir);
-    if (snapshot === undefined) return undefined;
+    const digest = await store.loadActive();
+    if (digest === undefined) return undefined;
+    // P6: one pointer read starts the Run; everything it is served is pinned.
+    const snapshot = await store.loadPinned(digest);
     if (snapshot.missionId !== request.missionId) {
       throw new MemorySliceError(`research memory snapshot belongs to Mission "${snapshot.missionId}", not "${request.missionId}"`);
     }
@@ -150,6 +228,13 @@ export function createResearchMemoryProvider(dir: string): MemoryProvider {
       research: snapshot,
     });
   };
+}
+
+/**
+ * The default durable provider over the file store (the default store until M-c).
+ */
+export function createResearchMemoryProvider(dir: string): MemoryProvider {
+  return researchMemoryProviderFromStore(createFileResearchMemoryStore(dir));
 }
 
 /**
