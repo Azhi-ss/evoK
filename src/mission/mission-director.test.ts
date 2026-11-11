@@ -25,6 +25,7 @@ import {
   type DirectorProposal,
 } from "./mission-director";
 import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { emptyDirectorInsightSidecar } from "./director-insight-sidecar";
 import type { MissionRecord } from "./mission-start";
 
 function input(overrides: Partial<DirectorInput> = {}): DirectorInput {
@@ -430,7 +431,7 @@ describe("two-stage decision prompt (#211)", () => {
     const blind = buildDirectorPrompt(input());
     const blindProposal = proposal("investigate", "materialize answer.txt with value 0.8");
     const revision = buildDirectorPrompt(input({
-      decisionPhase: { blindProposal, memoryPacket: packet },
+      decisionPhase: { blindProposal, memoryPacket: packet, insightSidecar: emptyDirectorInsightSidecar("m-t5") },
     }));
     expect(revision.startsWith(blind)).toBe(true);
     const added = revision.slice(blind.length);
@@ -446,7 +447,7 @@ describe("two-stage decision prompt (#211)", () => {
 
   test("a truncated packet is disclosed as incomplete, a complete one is not (#215)", () => {
     const revisionFor = (memoryPacket: typeof packet) => buildDirectorPrompt(input({
-      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), memoryPacket },
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), memoryPacket, insightSidecar: emptyDirectorInsightSidecar("m-t5") },
     }));
     const whole = revisionFor(packet);
     expect(whole).not.toContain("TRUNCATED");
@@ -467,7 +468,7 @@ describe("two-stage decision prompt (#211)", () => {
 
   test("a revision without a pinned packet still freezes and re-reads the blind proposal", () => {
     const revision = buildDirectorPrompt(input({
-      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt") },
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), insightSidecar: emptyDirectorInsightSidecar("m-t5") },
     }));
     expect(revision).toContain("BLIND PROPOSAL");
     expect(revision).toContain("no Research Memory snapshot is pinned");
@@ -477,7 +478,7 @@ describe("two-stage decision prompt (#211)", () => {
     // An off arm pins no Memory packet at all, so anything the prompt still
     // carries here is Mission state and not Memory.
     const off = buildDirectorPrompt(input({
-      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt") },
+      decisionPhase: { blindProposal: proposal("investigate", "materialize answer.txt"), insightSidecar: emptyDirectorInsightSidecar("m-t5") },
     }));
     expect(off).toContain("no Research Memory snapshot is pinned");
     const retained = missionRetainedState(input().observations);

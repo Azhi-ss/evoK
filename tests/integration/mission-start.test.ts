@@ -33,6 +33,8 @@ import {
   type StartAuthorization,
 } from "../../src/mission-start";
 import type { DirectorInput, MissionDirector } from "../../src/mission-director";
+import { InMemoryResearchLedger } from "../../src/mission/research-loop";
+import { projectInsightInbox, submitInsightDraft } from "../../src/mission/insight-inbox";
 import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { runEvok, parseEvokArgs } from "../../src/cli/evok-cli";
@@ -1196,7 +1198,7 @@ const DECISION_USAGE = {
   cost: { input: 0.002, output: 0.003, cacheRead: 0, cacheWrite: 0, total: 0.005 },
 };
 
-type StageScript = { proposal: unknown; usedMemoryRefs?: string[] };
+type StageScript = { proposal: unknown; usedMemoryRefs?: string[]; insightDispositions?: readonly { insightId: string; disposition: string; reason?: string; proposalRef?: string }[] };
 
 /** A deterministic two-stage decision port that records what each stage saw. */
 function twoStageDirector(script: (input: DirectorInput, stage: "blind" | "revision", attempt: number) => StageScript) {
@@ -1213,6 +1215,7 @@ function twoStageDirector(script: (input: DirectorInput, stage: "blind" | "revis
         usage: DECISION_USAGE,
         model: { provider: CONTROL_PROVIDER, model: "deterministic", id: `${CONTROL_PROVIDER}/deterministic` },
         ...(result.usedMemoryRefs ? { usedMemoryRefs: result.usedMemoryRefs } : {}),
+        ...(result.insightDispositions ? { insightDispositions: result.insightDispositions as never } : {}),
       };
     },
   };
@@ -1537,6 +1540,142 @@ describe("Memory-blind and Memory-informed Director decisions (#211)", () => {
     // Every decision line above is a settled reservation, not a free call.
     expect(outcome.record.budget.remaining).toBeCloseTo(outcome.record.budget.total - outcome.record.budget.consumed, 6);
   });
+});
+
+// ── #240: the human Insight sidecar at the Director Revision ────────────────
+
+describe("human Insight at the Director Revision (#240)", () => {
+  const IDEA = "INSERTED HUMAN IDEA: temperature may be underweighted";
+
+  /** A research ledger holding one pending Insight draft for this Mission. */
+  function insightLedger(missionId: string) {
+    const ledger = new InMemoryResearchLedger();
+    submitInsightDraft(ledger, { missionId, insightId: "insight-temp", text: IDEA, author: "operator" });
+    return ledger;
+  }
+
+  async function startWithInsight(missionId: string, script: Parameters<typeof twoStageDirector>[0], ledger?: InMemoryResearchLedger) {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft(missionId, {
+      budget: { total: 3, units: "model-USD", note: "human Insight sidecar" },
+    }));
+    const { resolver, resources } = await controlledHarness(project);
+    const writes = { prompts: [] as string[], answer: "0.8" };
+    const { director, calls } = twoStageDirector(script);
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director,
+      maxExperiments: 1,
+      ...(ledger === undefined ? {} : { insightLedger: ledger }),
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: brokerSession(writes),
+      }),
+    });
+    return { project, draft, outcome, calls, ledger };
+  }
+
+  test("the Revision receives the pinned sidecar and records one disposition per Insight", async () => {
+    const ledger = insightLedger("m-insight-sidecar");
+    const { draft, outcome, calls } = await startWithInsight("m-insight-sidecar", (input, stage) => stage === "blind"
+      ? { proposal: investigateTask("materialize answer.txt", input.stateVersion) }
+      : {
+        proposal: investigateTask("materialize answer.txt again after weighing the human idea", input.stateVersion),
+        insightDispositions: [{ insightId: "insight-temp", disposition: "rejected", reason: "temperature co-varies with the other variables, so it is not identifiable here" }],
+      }, ledger);
+
+    // Mandatory visibility, never mandatory adoption: the blind stage holds no
+    // Insight at all, and the Revision stage is handed the pinned pin.
+    expect(calls[0]!.stage).toBe("blind");
+    expect(calls[0]!.input.decisionPhase).toBeUndefined();
+    const revisionInput = calls[1]!.input;
+    const sidecar = revisionInput.decisionPhase!.insightSidecar;
+    expect(sidecar.items.map((item) => [item.insightId, item.version])).toEqual([["insight-temp", 1]]);
+    expect(sidecar.items[0]!.text).toBe(IDEA);
+    expect(sidecar.truncated).toBe(false);
+
+    // Each Revision durably records the ids and versions it actually read.
+    const revision = outcome.record.decisions!.find((decision) => decision.phase === "revision")!;
+    expect(revision.insight).toEqual({
+      sidecarDigest: sidecar.digest,
+      items: [{ insightId: "insight-temp", version: 1 }],
+      omittedCount: 0,
+      truncated: false,
+    });
+    expect(outcome.record.decisions!.find((decision) => decision.phase === "blind")!.insight).toBeUndefined();
+
+    // The judgement is appended through the existing Insight path, with the
+    // decision ref the operator needs to trace it.
+    const recorded = ledger.events().filter((event) => event.type === "HUMAN_INSIGHT_DISPOSITION_RECORDED");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.payload).toMatchObject({
+      missionId: draft.id,
+      insightId: "insight-temp",
+      version: 1,
+      disposition: "rejected",
+      decisionRef: revision.decisionGroupId,
+    });
+    expect(recorded[0]!.payload.reason).toContain("co-varies");
+    expect(projectInsightInbox(ledger.events(), { missionId: draft.id }).items[0]!.status).toBe("rejected");
+
+    // An Insight never dispatches: the one Experiment is the ordinary Revised
+    // Proposal's, and no ledger event of any other kind appeared.
+    expect(outcome.experiments).toHaveLength(1);
+    expect(ledger.events().map((event) => event.type)).toEqual(["HUMAN_INSIGHT_DRAFT_CREATED", "HUMAN_INSIGHT_DISPOSITION_RECORDED"]);
+  }, 60_000);
+
+  test("an unanswered pinned Insight is a recorded gap, not a blocked Revision", async () => {
+    const ledger = insightLedger("m-insight-gap");
+    submitInsightDraft(ledger, { missionId: "m-insight-gap", insightId: "insight-split", text: "SHOULD STAY PENDING", author: "operator" });
+    const { draft, outcome } = await startWithInsight("m-insight-gap", (input, stage) => stage === "blind"
+      ? { proposal: investigateTask("materialize answer.txt", input.stateVersion) }
+      : {
+        proposal: investigateTask("materialize answer.txt after the human idea", input.stateVersion),
+        insightDispositions: [{ insightId: "insight-temp", disposition: "deferred", reason: "revisit once the split is re-measured" }],
+      }, ledger);
+
+    // The Revision is not blocked by the second, unanswered pin: the gap is
+    // durable and the unread Insight stays pending for a later Revision.
+    expect(outcome.status).toBe("iteration-limit");
+    expect(outcome.experiments).toHaveLength(1);
+    const revision = outcome.record.decisions!.find((decision) => decision.phase === "revision")!;
+    expect(revision.insight?.items.map((item) => item.insightId)).toEqual(["insight-temp", "insight-split"]);
+    expect(revision.insight?.undispositioned).toEqual(["insight-split"]);
+    const inbox = projectInsightInbox(ledger.events(), { missionId: draft.id });
+    expect(inbox.items.map((item) => [item.draft.insightId, item.status])).toEqual([["insight-temp", "deferred"], ["insight-split", "pending"]]);
+    // A deferred Insight keeps its reason, so the operator sees when to revisit.
+    expect(inbox.items[0]!.disposition?.reason).toContain("re-measured");
+  }, 60_000);
+
+  test("a missing reason is a rejected attempt, and its retry cannot disposition the Insight twice", async () => {
+    const ledger = insightLedger("m-insight-retry");
+    const { outcome, calls, draft } = await startWithInsight("m-insight-retry", (input, stage, attempt) => stage === "blind"
+      ? { proposal: investigateTask("materialize answer.txt", input.stateVersion) }
+      : {
+        proposal: investigateTask("materialize answer.txt after the retry", input.stateVersion),
+        // First Revision attempt refutes the idea without a reason: refused.
+        insightDispositions: attempt === 1
+          ? [{ insightId: "insight-temp", disposition: "rejected" }]
+          : [{ insightId: "insight-temp", disposition: "ignored", reason: "not worth pursuing before the split is re-measured" }],
+      }, ledger);
+
+    expect(calls.filter((call) => call.stage === "revision").map((call) => call.attempt)).toEqual([1, 2]);
+    const revisionAttempts = outcome.record.decisions!.filter((decision) => decision.phase === "revision");
+    expect(revisionAttempts.map((decision) => decision.accepted)).toEqual([false, true]);
+    expect(revisionAttempts[0]!.rejection).toContain("requires a reason");
+
+    // Exactly one disposition event: the refused attempt wrote nothing, and the
+    // accepted one wrote once even though the cycle ran two attempts.
+    const recorded = ledger.events().filter((event) => event.type === "HUMAN_INSIGHT_DISPOSITION_RECORDED");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.payload).toMatchObject({ disposition: "ignored", decisionRef: revisionAttempts[1]!.decisionGroupId });
+    expect(projectInsightInbox(ledger.events(), { missionId: draft.id }).items[0]!.status).toBe("ignored");
+    // `ignored` is a judgement, not a refutation: no rejected event was ever written.
+    expect(ledger.events().some((event) => event.payload.disposition === "rejected")).toBe(false);
+  }, 60_000);
 });
 
 // ── M1-T3 (#212): accepted Synthesis Proposals stay unverified cards ────────

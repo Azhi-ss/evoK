@@ -34,6 +34,7 @@ import type {
 import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
 import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../evidence/research-memory";
+import type { DirectorInsightSidecar, RevisionInsightDispositionInput } from "./director-insight-sidecar";
 import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
 import { classifyTrailEntry } from "./mission-start";
 import type { EvokResources } from "../evok-resources";
@@ -144,6 +145,12 @@ export interface DirectorDecisionPhase {
   readonly blindProposal: DirectorProposal;
   /** Cards from exactly one pinned snapshot; absent when none is pinned. */
   readonly memoryPacket?: ResearchDecisionPacket;
+  /**
+   * #240: the pinned pending Insight this Revision reads. Required, because
+   * loading it is part of the Revision step (§4.1): an empty sidecar states
+   * "nothing pending" instead of quietly skipping the input.
+   */
+  readonly insightSidecar: DirectorInsightSidecar;
 }
 
 /** Controller-derived comparison of the blind and revised proposals. */
@@ -163,6 +170,12 @@ export interface DirectorDecision {
   readonly model?: ModelConfigView;
   /** Revision only: Memory card refs the model says it used (validated ⊆ packet). */
   readonly usedMemoryRefs?: readonly string[];
+  /**
+   * Revision only: the judgement the model recorded for each pinned Insight
+   * (#240). Unvalidated here: the controller checks it against the sidecar it
+   * actually delivered before any disposition becomes durable.
+   */
+  readonly insightDispositions?: readonly RevisionInsightDispositionInput[];
 }
 
 /**
@@ -795,6 +808,7 @@ export function buildDirectorPrompt(input: DirectorInput): string {
   const phase = input.decisionPhase;
   if (phase === undefined) return base;
   const packet = phase.memoryPacket;
+  const sidecar = phase.insightSidecar;
   return [
     base,
     "",
@@ -808,7 +822,21 @@ export function buildDirectorPrompt(input: DirectorInput): string {
     ...(packet?.truncated
       ? ["The packet above is TRUNCATED: its omissions/omittedCardCount fields count the cards it does not carry, so it is not the complete history."]
       : []),
-    "Respond with the same JSON shape; you may add \"alternatives\" (bounded actions only) and \"usedMemoryRefs\" (card ids from this packet only).",
+    // #238 D6 / #240: the human side of the same Revision. It is advisory
+    // context with no epistemic authority and no dispatch path of its own.
+    sidecar.items.length === 0
+      ? "INSIGHT SIDECAR: no pending human Insight is pinned for this Revision (an explicit empty sidecar, not a skipped input)."
+      : `INSIGHT SIDECAR (advisor context only: pending human Insight, pinned ids and versions, JSON):\n${JSON.stringify(sidecar)}`,
+    ...(sidecar.items.length === 0
+      ? []
+      : [
+        "Human Insight has zero epistemic authority: it proves nothing, it is never Evidence or a Verified Claim, and it grants no objective, permission, budget, submission or dispatch authority. It may only inform this Revised Proposal — an Insight never runs an Experiment by itself.",
+        "Answer every pinned Insight: add \"insightDispositions\" as a list of {insightId, disposition, reason?, proposalRef?}. disposition is one of \"ignored\" (seen, not worth pursuing), \"rejected\" (refuted — reason required), \"experiment_proposed\" (worth testing — proposalRef required, naming this Revision's proposal) and \"deferred\" (not now — say when to revisit). \"ignored\" and \"rejected\" are different answers: unpursuable is not disproved.",
+      ]),
+    ...(sidecar.truncated
+      ? ["The sidecar above is TRUNCATED: its omittedCount field counts pending Insight it does not carry, so it is not the whole Inbox."]
+      : []),
+    "Respond with the same JSON shape; you may add \"alternatives\" (bounded actions only), \"usedMemoryRefs\" (card ids from this packet only) and \"insightDispositions\" (pinned Insight ids only).",
   ].join("\n");
 }
 
@@ -823,6 +851,22 @@ function jsonFromText(text: string | undefined): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The model's own judgement list, kept as returned: the controller validates it
+ * against the pinned sidecar, so a malformed entry is rejected with a reason
+ * instead of being silently dropped (a dropped entry would read as "no answer").
+ * Only a non-object list member is skipped; anything shaped like a judgement is
+ * passed on for that validation.
+ */
+function insightDispositionsOf(raw: readonly unknown[]): RevisionInsightDispositionInput[] {
+  return raw.filter(isRecord).map((entry) => ({
+    insightId: typeof entry.insightId === "string" ? entry.insightId : "",
+    disposition: (typeof entry.disposition === "string" ? entry.disposition : "") as RevisionInsightDispositionInput["disposition"],
+    ...(typeof entry.reason === "string" ? { reason: entry.reason } : {}),
+    ...(typeof entry.proposalRef === "string" ? { proposalRef: entry.proposalRef } : {}),
+  }));
 }
 
 /**
@@ -933,6 +977,7 @@ export function createPiMissionDirector(options: PiMissionDirectorOptions): Miss
         ...(Array.isArray(parsed.usedMemoryRefs)
           ? { usedMemoryRefs: parsed.usedMemoryRefs.filter((ref): ref is string => typeof ref === "string" && ref.trim() !== "") }
           : {}),
+        ...(Array.isArray(parsed.insightDispositions) ? { insightDispositions: insightDispositionsOf(parsed.insightDispositions) } : {}),
       };
     },
   };

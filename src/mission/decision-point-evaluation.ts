@@ -24,6 +24,7 @@ import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../ev
 import { RESEARCH_MEMORY_EVALUATION_MODES } from "../evidence/research-memory";
 import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { RESEARCH_MEMORY_CONTROL_CAVEAT, assertNoFutureInformation } from "./memory-evaluation";
+import { emptyDirectorInsightSidecar, type DirectorInsightSidecar, type DirectorInsightSidecarItem } from "./director-insight-sidecar";
 import {
   assertOffRetainsMissionState,
   deriveDecisionDelta,
@@ -93,6 +94,45 @@ export interface DecisionPointPacket {
   readonly packet?: ResearchDecisionPacket;
 }
 
+/** One arm's Insight input: the pinned snapshot that arm's Revision reads. */
+export interface DecisionPointInsightArm {
+  readonly mode: ResearchMemoryEvaluationMode;
+  readonly sidecar: DirectorInsightSidecar;
+}
+
+/**
+ * How the whole point treats human Insight (#238 D7 / §6): one identical pin per
+ * arm, or `"disabled"` because the run exists to evaluate Memory and must not
+ * measure the operator's intuition instead.
+ */
+export type DecisionPointInsight = "disabled" | readonly DecisionPointInsightArm[];
+
+/** One pinned Insight: the id and version a Revision was shown, never its text. */
+export type DecisionPointInsightPin = Pick<DirectorInsightSidecarItem, "insightId" | "version">;
+
+/** The pinned Insight one point's arms read, and whether Insight was on at all. */
+export interface DecisionPointInsightReading {
+  readonly state: "disabled" | "identical";
+  /** Every pin the arms read, in the snapshot's order; empty when disabled. */
+  readonly pinned: readonly DecisionPointInsightPin[];
+  /** Digest of the identical snapshot every arm read; absent when disabled. */
+  readonly digest?: string;
+}
+
+/**
+ * What the run supplied as Insight. Identity is guaranteed per decision point
+ * (see the results), not across the sample: points from different Missions have
+ * their own Inbox, so this is the union of everything supplied, never a
+ * snapshot any single Revision read.
+ */
+export interface DecisionPointInsightSupply {
+  readonly state: "disabled" | "identical";
+  /** Every distinct id/version supplied, in first-seen order; empty when disabled. */
+  readonly pinned: readonly DecisionPointInsightPin[];
+  /** The distinct snapshot digests the sample read; empty when disabled. */
+  readonly digests: readonly string[];
+}
+
 /** The revised proposal the original Mission executed, and its measured Run. */
 export interface DecisionPointActionTaken {
   readonly runId: string;
@@ -119,6 +159,11 @@ export interface FrozenDecisionPoint {
   /** The Blind Proposal frozen before any Memory was visible. */
   readonly blindProposal: DirectorProposal;
   readonly packets: readonly DecisionPointPacket[];
+  /**
+   * The Insight every arm reads: one identical snapshot per arm (same ids,
+   * versions and order, D7), or `"disabled"` for a Memory-evaluation run.
+   */
+  readonly insight: DecisionPointInsight;
   readonly actionTaken: DecisionPointActionTaken;
   /** Runs/refs produced AFTER this point; a packet naming one leaks the future. */
   readonly futureRunIds: readonly string[];
@@ -138,6 +183,8 @@ export interface DecisionPointResult {
   readonly missionId: string;
   readonly actionTakenRunId: string;
   readonly arms: readonly DecisionPointArmResult[];
+  /** Which Insight ids/versions every arm read, or that Insight was disabled. */
+  readonly insight: DecisionPointInsightReading;
   /** Structural: L1 has no dispatch seam, so it can never spend Experiment budget. */
   readonly dispatchedExperiments: 0;
 }
@@ -147,6 +194,15 @@ function packetOf(point: FrozenDecisionPoint, mode: ResearchMemoryEvaluationMode
   return matches[0]!;
 }
 
+/** Refuses an arm set that is not exactly one entry per mode: that is not a comparison. */
+function assertOneArmPerMode(modes: readonly ResearchMemoryEvaluationMode[], subject: string): void {
+  const missing = RESEARCH_MEMORY_EVALUATION_MODES.filter((mode) => !modes.includes(mode));
+  const duplicated = modes.filter((mode, index) => modes.indexOf(mode) !== index);
+  if (missing.length > 0 || duplicated.length > 0) {
+    throw new Error(`${subject}: missing [${missing.join(",")}], duplicate [${duplicated.join(",")}]`);
+  }
+}
+
 /**
  * Refuses any arm set that would make the comparison fake: a missing or
  * duplicated arm, an off arm carrying Memory, a Sham arm without the control
@@ -154,12 +210,7 @@ function packetOf(point: FrozenDecisionPoint, mode: ResearchMemoryEvaluationMode
  * point (different Mission, ledger revision or card bound).
  */
 function assertArmPackets(point: FrozenDecisionPoint): void {
-  const modes = point.packets.map((entry) => entry.mode);
-  const missing = RESEARCH_MEMORY_EVALUATION_MODES.filter((mode) => !modes.includes(mode));
-  const duplicated = modes.filter((mode, index) => modes.indexOf(mode) !== index);
-  if (missing.length > 0 || duplicated.length > 0) {
-    throw new Error(`a decision-point evaluation needs exactly one arm per mode (${RESEARCH_MEMORY_EVALUATION_MODES.join("/")}): missing [${missing.join(",")}], duplicate [${duplicated.join(",")}]`);
-  }
+  assertOneArmPerMode(point.packets.map((entry) => entry.mode), `a decision-point evaluation needs exactly one arm per mode (${RESEARCH_MEMORY_EVALUATION_MODES.join("/")})`);
   const off = packetOf(point, "off");
   if (off.packet !== undefined) {
     throw new Error(`the off arm carries no Memory packet: it is the Memory-denied arm, so a packet there would hide Memory in the control`);
@@ -182,6 +233,43 @@ function assertArmPackets(point: FrozenDecisionPoint): void {
 }
 
 /**
+ * Returns the one Insight snapshot every arm must read, or `undefined` when
+ * Insight is disabled for the point. A point whose arms read different Insight
+ * cannot attribute a measured change to Memory, so it is refused here — before
+ * any priced decision call — naming the arm and the pins that differ.
+ */
+function assertArmInsight(point: FrozenDecisionPoint): DirectorInsightSidecar | undefined {
+  const insight = point.insight;
+  if (insight === "disabled") return undefined;
+  assertOneArmPerMode(insight.map((entry) => entry.mode), "every arm of a decision-point evaluation needs its own Insight snapshot, identical across arms or disabled for all of them");
+  const label = (sidecar: DirectorInsightSidecar) => `${sidecar.items.map(pinKey).join(", ")} (digest ${sidecar.digest.slice(0, 12)}...)`;
+  const [reference, ...others] = insight;
+  for (const arm of insight) {
+    if (arm.sidecar.missionId !== point.baseState.missionId) {
+      throw new Error(`Insight is Mission-scoped: the ${arm.mode} arm's snapshot belongs to ${arm.sidecar.missionId}, not to decision point "${point.pointId}" in ${point.baseState.missionId}`);
+    }
+  }
+  for (const arm of others) {
+    // The whole snapshot, not just the id set: a differing version, order,
+    // text or truncation makes the arms measure something other than Memory.
+    if (arm.sidecar.digest !== reference!.sidecar.digest) {
+      throw new Error(`the arms of one decision-point comparison must read an identical Insight snapshot: ${reference!.mode} read [${label(reference!.sidecar)}] but ${arm.mode} read [${label(arm.sidecar)}]`);
+    }
+  }
+  return reference!.sidecar;
+}
+
+function pinKey(pin: DecisionPointInsightPin): string {
+  return `${pin.insightId}@v${pin.version}`;
+}
+
+function insightReadingOf(sidecar: DirectorInsightSidecar | undefined): DecisionPointInsightReading {
+  return sidecar === undefined
+    ? { state: "disabled", pinned: [] }
+    : { state: "identical", pinned: sidecar.items.map((item) => ({ insightId: item.insightId, version: item.version })), digest: sidecar.digest };
+}
+
+/**
  * Re-decides one frozen decision point in every arm and scores the proposals
  * against the action the original Mission took. Deterministic given the same
  * Director; no Experiment is dispatched and no budget is reserved.
@@ -192,6 +280,7 @@ export async function evaluateDecisionPoint(options: {
 }): Promise<DecisionPointResult> {
   const point = options.point;
   assertArmPackets(point);
+  const insight = assertArmInsight(point);
   // No future information: a packet may only carry what already existed at this
   // point, so the pinned-ledger guard runs BEFORE any priced decision call.
   for (const mode of ["sham", "real"] as const) {
@@ -205,7 +294,14 @@ export async function evaluateDecisionPoint(options: {
     const state = structuredClone(point.baseState);
     const handed: DirectorInput = deepFreeze({
       ...state,
-      decisionPhase: { blindProposal: point.blindProposal, ...(packet === undefined ? {} : { memoryPacket: packet }) },
+      decisionPhase: {
+        blindProposal: point.blindProposal,
+        ...(packet === undefined ? {} : { memoryPacket: packet }),
+        // #240: the Revision stage always carries an Insight sidecar. #241: every
+        // arm reads the SAME pinned snapshot, or the explicit empty pin of a run
+        // with Insight disabled.
+        insightSidecar: insight ?? emptyDirectorInsightSidecar(point.baseState.missionId),
+      },
     });
     // F5 (#231): Memory Off drops narrative, never Mission state.
     assertOffRetainsMissionState({
@@ -232,6 +328,7 @@ export async function evaluateDecisionPoint(options: {
     missionId: point.baseState.missionId,
     actionTakenRunId: point.actionTaken.runId,
     arms,
+    insight: insightReadingOf(insight),
     dispatchedExperiments: 0 as const,
   });
 }
@@ -264,6 +361,8 @@ export interface DecisionPointEvaluationReport {
   readonly missions: readonly string[];
   readonly arms: readonly DecisionPointArmReading[];
   readonly directions: readonly DecisionPointDirectionReading[];
+  /** Which Insight ids/versions were supplied, or that Insight was off for the run. */
+  readonly insight: DecisionPointInsightSupply;
   /** A direction is claimed, never an effect size. */
   readonly directionOnly: true;
   readonly statisticalSignificance: "none";
@@ -301,6 +400,19 @@ export function summarizeDecisionPoints(results: readonly DecisionPointResult[])
       divergent: arms.filter((arm) => arm.delta !== "unchanged").length,
     });
   };
+  // A sample that turns Insight on for some points and off for others cannot be
+  // attributed to Memory either, so it is refused rather than averaged.
+  const states = [...new Set(results.map((result) => result.insight.state))];
+  if (states.length > 1) {
+    throw new Error(`an L1 decision-point report mixes Insight on and off (${states.join(", ")}): a comparison whose arms differ in Insight measures the operator's intuition, not Memory`);
+  }
+  const pinned = new Map<string, DecisionPointInsightPin>();
+  const digests = new Set<string>();
+  for (const result of results) {
+    for (const pin of result.insight.pinned) pinned.set(pinKey(pin), pin);
+    if (result.insight.digest !== undefined) digests.add(result.insight.digest);
+  }
+  const insight: DecisionPointInsightSupply = deepFreeze({ state: states[0]!, pinned: [...pinned.values()], digests: [...digests] });
   const arms = RESEARCH_MEMORY_EVALUATION_MODES.map(reading);
   const matched = (mode: ResearchMemoryEvaluationMode) => arms.find((arm) => arm.mode === mode)!.matchedActionTaken;
   return deepFreeze({
@@ -316,6 +428,7 @@ export function summarizeDecisionPoints(results: readonly DecisionPointResult[])
     directionOnly: true as const,
     statisticalSignificance: "none" as const,
     hindsightScoring: DECISION_POINT_HINDSIGHT_SCORING,
+    insight,
     caveats: DECISION_POINT_CAVEATS,
     dispatchedExperiments: 0 as const,
   });

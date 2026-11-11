@@ -80,6 +80,15 @@ import {
 } from "./mission-director";
 import { projectDecisionAccountability, type CounterfactualStatus, type RejectedDirectionApplicability, type ResearchDiversity } from "./decision-accountability";
 import {
+  assertRevisionInsightDispositions,
+  buildDirectorInsightSidecar,
+  emptyDirectorInsightSidecar,
+  recordRevisionInsightDispositions,
+  undispositionedInsightIds,
+  type DirectorInsightSidecar,
+} from "./director-insight-sidecar";
+import type { InsightLedger } from "./insight-inbox";
+import {
   RESUMABLE_STATUSES,
   reconcileInterruptedMission,
   reconcileResearchMemory,
@@ -416,6 +425,8 @@ export interface DecisionRecord {
   readonly model?: ModelConfigView;
   /** M1-T2: the pinned Memory view the revision stage actually received. */
   readonly memory?: DecisionMemoryUse;
+  /** #240: the pinned human Insight the revision stage actually received. */
+  readonly insight?: DecisionInsightUse;
   /** M1-T2: controller-derived delta between the two stages. */
   readonly delta?: DecisionDelta;
   /** M1-T2: the revision's own reason, kept next to the blind rationale. */
@@ -428,7 +439,22 @@ export interface DecisionRecord {
 export type DecisionPhase = "blind" | "revision";
 
 /** Durable audit fields one decision stage contributes to its priced call. */
-type DecisionAuditFields = Pick<DecisionRecord, "phase" | "decisionGroupId" | "model" | "memory" | "delta" | "revisionReason" | "rejectedAlternatives">;
+type DecisionAuditFields = Pick<DecisionRecord, "phase" | "decisionGroupId" | "model" | "memory" | "insight" | "delta" | "revisionReason" | "rejectedAlternatives">;
+
+/**
+ * What one Revision was SHOWN from the Mission Insight Inbox (#240): the pinned
+ * ids and versions, plus the omission count, so the durable record can be
+ * audited against the log the operator later reads. It carries no Insight text
+ * and nothing epistemic: Insight is advisor context, never Evidence.
+ */
+export interface DecisionInsightUse {
+  readonly sidecarDigest: string;
+  readonly items: readonly { readonly insightId: string; readonly version: number }[];
+  /** Pinned Insight the Revision did not answer at all: a gap, never a stop. */
+  readonly undispositioned?: readonly string[];
+  readonly omittedCount: number;
+  readonly truncated: boolean;
+}
 
 /** What the Memory-informed stage was shown, and which cards it used. */
 export interface DecisionMemoryUse {
@@ -637,6 +663,16 @@ export interface StartMissionOptions {
    * absent, behavior stays the T4 single-baseline slice.
    */
   readonly director?: MissionDirector;
+  /**
+   * #240: the Mission ledger that holds this Mission's human Insight drafts.
+   * The controller reads pending Insight from it unconditionally at every
+   * Revision and appends the dispositions it recorded back to it. When absent,
+   * the Revision still receives an explicit EMPTY sidecar: loading is part of
+   * the Revision step, so absence is a stated fact and never a skipped stage.
+   * No CLI or evaluation surface supplies it yet, so a Mission started today
+   * pins the empty sidecar; wiring an operator surface is a separate ticket.
+   */
+  readonly insightLedger?: InsightLedger;
   /** Maximum Experiments AFTER the baseline in one authorized start (default 3). */
   readonly maxExperiments?: number;
   /**
@@ -1999,6 +2035,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       startAttempt?: number;
       blindProposal?: DirectorProposal;
       packet?: ResearchDecisionPacket;
+      insightSidecar?: DirectorInsightSidecar;
     }): Promise<{ record: MissionRecord; proposal?: DirectorProposal; blockedReason?: string }> => {
       let r = args.current;
       let blockedReason: string | undefined;
@@ -2007,7 +2044,20 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
       /** Durable audit fields for one accepted stage call (#211 AC6). */
       const auditOf = (proposal: DirectorProposal, call: DirectorDecision): Partial<DecisionAuditFields> => {
         const usedCardRefs = [...new Set(call.usedMemoryRefs ?? [])];
-        const base = { ...stageExtra, ...(call.model ? { model: call.model } : {}) };
+        // #240: only a stage that was handed a sidecar records what it read.
+        const unanswered = args.insightSidecar === undefined
+          ? []
+          : undispositionedInsightIds(args.insightSidecar, call.insightDispositions ?? []);
+        const insightAudit = args.insightSidecar === undefined ? {} : {
+          insight: {
+            sidecarDigest: args.insightSidecar.digest,
+            items: args.insightSidecar.items.map((item) => ({ insightId: item.insightId, version: item.version })),
+            ...(unanswered.length > 0 ? { undispositioned: unanswered } : {}),
+            omittedCount: args.insightSidecar.omittedCount,
+            truncated: args.insightSidecar.truncated,
+          },
+        };
+        const base = { ...stageExtra, ...(call.model ? { model: call.model } : {}), ...insightAudit };
         if (args.phase === "blind") return base;
         // M1-T6: every rejected direction keeps the Memory refs that informed the
         // revision, their applicability, and an UNOBSERVED counterfactual. Nothing
@@ -2032,7 +2082,11 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         // A delta only exists when Memory was actually delivered; an Off or
         // unpinned Mission must never attribute a change to Memory it never saw.
         if (args.packet === undefined || args.blindProposal === undefined) {
-          return { ...base, revisionReason: proposal.rationale, ...(rejectedAlternatives.length ? { rejectedAlternatives } : {}) };
+          return {
+            ...base,
+            revisionReason: proposal.rationale,
+            ...(rejectedAlternatives.length ? { rejectedAlternatives } : {}),
+          };
         }
         const delta = deriveDecisionDelta(args.blindProposal, proposal);
         if (delta !== "unchanged") {
@@ -2137,6 +2191,11 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           else if (call.usedMemoryRefs?.length) {
             throw new DirectorProposalRejectedError("no Research Decision Packet was delivered, so no Memory card can be claimed as used");
           }
+          // #240: a Revision owes one answer per pinned Insight before anything
+          // becomes durable; a bad answer is a rejected attempt, not a silent gap.
+          if (args.insightSidecar !== undefined) {
+            assertRevisionInsightDispositions(args.insightSidecar, call.insightDispositions ?? []);
+          }
         } catch (error) {
           const reason = (error as Error).message;
           const metered = await meterDecision({
@@ -2173,6 +2232,19 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           await persist(options.projectRoot, r);
           await releaseLock();
           throw new BudgetExhaustedError(r.stopReason!);
+        }
+        // #240: the accepted Revision's judgements become ledger events THROUGH
+        // the existing Insight path, before its own record is durable. Recording
+        // first means a crash loses nothing (an answered Insight is no longer
+        // pending, so a re-decided Revision pins only the rest) and duplicates
+        // nothing (an identical retry in this cycle is a no-op).
+        if (options.insightLedger !== undefined && args.insightSidecar !== undefined && args.insightSidecar.items.length > 0) {
+          recordRevisionInsightDispositions(options.insightLedger, {
+            missionId: r.id,
+            sidecar: args.insightSidecar,
+            decisionRef: args.decisionGroupId,
+            dispositions: call.insightDispositions ?? [],
+          });
         }
         // A priced decision may itself cross the budget: metered cost leaves
         // consumed/remaining honest; enforce a hard stop here.
@@ -2321,6 +2393,26 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           }
         }
 
+        // #240: the Insight sidecar is pinned here, next to the Memory packet and
+        // AFTER the Blind Proposal is durable, so no human idea can reach the
+        // blind stage. Loading is unconditional: without an Insight ledger the
+        // Revision receives an explicit empty sidecar instead of no input at all.
+        let insightSidecar: DirectorInsightSidecar;
+        try {
+          insightSidecar = options.insightLedger === undefined
+            ? emptyDirectorInsightSidecar(record.id)
+            : buildDirectorInsightSidecar(options.insightLedger.events(), { missionId: record.id });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          record = withEvent(record, { type: "PROPOSAL_REJECTED", at: now(), detail: { decisionId: decisionGroupId, reason } }, {
+            status: "director-blocked",
+            stopReason: `human Insight could not be pinned for the revision stage (${reason}); refusing to revise without the operator's pending input`,
+          });
+          await persist(options.projectRoot, record);
+          await releaseLock();
+          throw new DirectorBlockedError(record.stopReason!, reason);
+        }
+
         const revisionStage = await decideStage({
           current: record,
           stageInput: {
@@ -2328,6 +2420,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
             decisionPhase: {
               blindProposal,
               ...(pinnedPacket ? { memoryPacket: pinnedPacket } : {}),
+              insightSidecar,
             },
           },
           phase: "revision",
@@ -2336,6 +2429,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
           startAttempt: frozenRevision.nextAttempt,
           blindProposal,
           ...(pinnedPacket ? { packet: pinnedPacket } : {}),
+          insightSidecar,
         });
         record = revisionStage.record;
         if (record.status === "budget-exhausted") {

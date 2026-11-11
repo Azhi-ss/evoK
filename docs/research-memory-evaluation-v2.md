@@ -119,6 +119,10 @@ section.
 ### Controls
 
 - The base state is byte-identical across arms except for the Memory packet.
+- Human Insight is identical across arms — same ids, versions and order — or
+  disabled for the whole run, and the report records which choice was made and
+  which pins were supplied (#241). A point whose arms read different Insight is
+  refused before any decision call.
 - No future information: the packet may only contain what existed at that
   decision point, enforced by the existing pinned-ledger check.
 - `off` still carries the Mission's current best and scoreboard state (F5).

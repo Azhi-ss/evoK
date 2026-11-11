@@ -34,6 +34,39 @@ export {
   researchMemoryArmMetrics,
 } from "./memory-evaluation";
 export {
+  HUMAN_INSIGHT_DRAFT_SCHEMA,
+  INSIGHT_DISPOSITIONS,
+  INSIGHT_INBOX_SCHEMA,
+  InsightInboxError,
+  projectInsightInbox,
+  recordInsightDisposition,
+  submitInsightDraft,
+} from "./insight-inbox";
+export type {
+  HumanInsightDraft,
+  HumanInsightEventType,
+  InsightDisposition,
+  InsightDispositionRecord,
+  InsightInbox,
+  InsightInboxItem,
+  InsightLedger,
+  SubmitHumanInsightDraftInput,
+} from "./insight-inbox";
+export {
+  DIRECTOR_INSIGHT_DEFAULT_MAX,
+  DIRECTOR_INSIGHT_SIDECAR_SCHEMA,
+  assertRevisionInsightDispositions,
+  buildDirectorInsightSidecar,
+  emptyDirectorInsightSidecar,
+  recordRevisionInsightDispositions,
+} from "./director-insight-sidecar";
+export type {
+  DirectorInsightSidecar,
+  DirectorInsightSidecarItem,
+  RecordRevisionInsightDispositionsInput,
+  RevisionInsightDispositionInput,
+} from "./director-insight-sidecar";
+export {
   DECISION_POINT_CAVEATS,
   DECISION_POINT_EVALUATION_KIND,
   DECISION_POINT_EVALUATION_SCHEMA,
@@ -51,6 +84,11 @@ export type {
   DecisionPointDirection,
   DecisionPointDirectionReading,
   DecisionPointEvaluationReport,
+  DecisionPointInsight,
+  DecisionPointInsightArm,
+  DecisionPointInsightPin,
+  DecisionPointInsightReading,
+  DecisionPointInsightSupply,
   DecisionPointPacket,
   DecisionPointResult,
   FrozenDecisionPoint,
