@@ -273,10 +273,11 @@ derived projection, no write authority, SQLite primary, injection + pinned read.
 
 A single review, not a feature ticket. Checklist:
 
-1. **Dead code**: `collaboration-scheduler.ts`, `pi-child-work/owner/recruit.ts`
-   (deleted by #221), `dag-scheduler.ts`, `team-execution.ts`,
+1. **Dead code**: `dag-scheduler.ts`, `team-execution.ts`,
    `pi-campaign-director.ts` — confirm each is either wired or deleted, and that
-   no barrel still exports a removed symbol.
+   no barrel still exports a removed symbol. (`collaboration-scheduler.ts` and
+   `pi-child-work/owner.ts` are already deleted by #221, so only these three are
+   still open.)
 2. **Shims**: flat `src/*.ts` re-exports kept by ADR-0013 plus the new memory
    shims; remove any with no remaining importer.
 3. **Docs drift**: every row of §8 re-read against the code.

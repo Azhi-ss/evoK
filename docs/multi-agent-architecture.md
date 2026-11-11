@@ -5,8 +5,8 @@ Status: implementation pointer for the contract/resource/context seam landed in
 `src/execution/host-inventory.ts`, `src/execution/resource-lease.ts`,
 `src/execution/run-manifest.ts`, `src/execution/execution-context.ts`,
 `src/execution/researcher-context.ts`, `src/execution/role-context.ts`, `src/execution/memory-slice.ts`,
-`src/execution/context-broker.ts`, and
-`src/execution/subagents-adapter.ts`. `RoleTaskContext` (optionally with a
+`src/execution/context-broker.ts`, `src/execution/subagents-adapter.ts`,
+`src/execution/pi-child-dispatch.ts`, and `src/execution/pi-child-metering.ts`. `RoleTaskContext` (optionally with a
 `MemorySlice`) is assembled per Run by the `ContextBroker`, bound to that Run's
 `targetAgentId`/`runId`, and injected only into the matching `PiAgentRuntime`
 request; it is not a shared system prompt.
@@ -50,9 +50,9 @@ module-level compatibility seams, not separate Pi extensions.
                 └──────────────────────────────┘
 
    Execution Broker (execution pack): HostInventory probe → ResourceLease
-   grant → ResourceUsage record. pi-subagents: OPTIONAL fan-out transport
-   only — no Mission authority, no resource allocation, no evaluation, no
-   promotion, no submission.
+   grant → ResourceUsage record. pi-subagents: the ONE delegation transport
+   below the Mission Controller — no Mission authority, no resource
+   allocation, no evaluation, no promotion, no submission.
 ```
 
 - **Mission Controller** holds the human-owned objective, Mission Policy, and
@@ -65,8 +65,9 @@ module-level compatibility seams, not separate Pi extensions.
   CompetitionContract and evaluation data. Researcher agents never do.
 - **Execution Broker** grants ResourceLeases against a probed HostInventory
   and records ResourceUsage; it does not evaluate, promote, or submit.
-- **pi-subagents** is an optional delegation transport. The guard in
-  `subagents-adapter.ts` rejects any delegation asking for
+- **pi-subagents** is the delegation transport (an optional *dependency*: the
+  core packs do not import it). The guard in `subagents-adapter.ts` rejects
+  any delegation asking for
   `mission-authority`, `resource-allocation`, `evaluation`, `promotion`,
   `admission`, or `submission` *before* the transport runs. A delegation may
   carry an explicit `RoleTaskContext` + `MemorySlice` for the CHILD, but the
@@ -232,12 +233,51 @@ Researcher prompt.
   (ADR-0005): sessions, model/tool loops, sandbox, prompts/skills loading.
   evoK does not build a second agent loop and does not inherit Pi's prompts,
   skills, or history into Runs (ADR-0006).
-- **pi-subagents** is an optional fan-out transport for delegating bounded
-  subtasks to short-lived agents. In this repo it is consumed by
-  `harness-opt`'s delegate over its event bus; the core packs do **not**
-  import it. `createPiSubagentsAdapter(transport)` wraps any such transport
-  with the fail-closed capability guard above, so the adapter is a delegation
-  mechanism and never an authority.
+- **pi-subagents** is the ONE native delegation transport. The core packs
+  still do not import it: it is driven by `src/execution/pi-child-dispatch.ts`
+  over Pi's event bus, reached only through the seam below.
+
+## One seam, one transport, one mainline
+
+Delegated child execution has exactly one of each; adding a second of any of
+these is a design change, not an implementation detail. Rules for each are
+owned by the fan-out spec
+([`subagent-fanout-consolidation-v2.md`](subagent-fanout-consolidation-v2.md) §3);
+this section states the shape and points there for the detail.
+
+- **One delegation seam.** `SubagentTransport` behind
+  `createPiSubagentsAdapter` (`execution/subagents-adapter.ts`) is the only way
+  a Mission may dispatch a child, and its guard runs before any native
+  registration. There is no second dispatch path, adapter or wrapper to keep
+  in sync with that guard. The seam and its transport are exported from
+  `execution/index.ts`; both are covered by unit tests and the offline e2e
+  smoke, and neither is wired into the Mission mainline yet (explicit
+  non-goal, §7 of the spec).
+- **One native transport.** `execution/pi-child-dispatch.ts` is the only
+  transport behind that seam. It negotiates the installed pi-subagents
+  protocol before anything is registered (`pi-subagents-protocol.ts`),
+  registers one child on the plugin's own event bus, and uses one deadline for
+  registration, launch and execution. Failures — registration, launch, native
+  crash — reject with a `PiChildFailureError` whose message and `diagnostics`
+  record carry the native status, error text, exit code, last tool and a
+  bounded tail of what the child had already streamed; that record is built
+  through `pi-child-records.ts`, so no credential can reach a caller or a
+  persisted file. Streams are retained and redacted, never drained and
+  discarded.
+- **Sequential Mission mainline.** `runMissionController` stays sequential:
+  one Run at a time, no fan-out, no DAG scheduler. When more than one child is
+  genuinely independent, concurrency is `Promise.all` over the guarded
+  adapter (`fanOut`), which is a caller-side choice and grants no additional
+  authority. Nothing in the mainline depends on parallel children.
+- **Controller-owned metering.** `createChildMetering`
+  (`execution/pi-child-metering.ts`, live in
+  `src/cli/pi-campaign-director.ts`) starts ONE loopback relay and registers
+  the unique `evok-meter-*` provider *before* the first child dispatch; both
+  live for the controller's lifetime, so consecutive children reuse one
+  registration instead of one per call. The relay forwards with the host's
+  resolved credentials, which never leave the controller process and are
+  never handed to a child. Token counts stay controller-side; cost pricing
+  stays with the caller.
 
 ## Who sees what (context injection boundary)
 

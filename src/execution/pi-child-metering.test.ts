@@ -12,6 +12,8 @@ import { createMemorySlice } from "./memory-slice";
 import { createChildMetering } from "./pi-child-metering";
 import { dispatchPiChild } from "./pi-child-dispatch";
 import { assembleRoleContext } from "./role-context";
+import { buildResearcherContext } from "./researcher-context";
+import type { SubagentDelegation } from "./subagents-adapter";
 
 const contract = createCompetitionContract({
   version: "1",
@@ -27,7 +29,7 @@ const policy = createRuleVisibilityPolicy({
   contractDigest: contract.digest,
   allow: { researcher: ["scoring.metric"], reviewer: ["scoring.metric"] },
 });
-function binding(role: "researcher" | "reviewer") {
+function delegation(role: "researcher" | "reviewer"): SubagentDelegation {
   const identity = { missionId: "mission", taskId: "task", runId: "run123", targetAgentId: role + "@run123" };
   const memorySlice = createMemorySlice({
     ...identity,
@@ -44,7 +46,16 @@ function binding(role: "researcher" | "reviewer") {
     tools: [],
     memoryDigest: memorySlice.digest,
   });
-  return { memorySlice, roleContext };
+  return {
+    agent: role + "-child",
+    capability: role === "reviewer" ? "review" : "research",
+    task: "Return your role",
+    context: buildResearcherContext({ objective: "Improve." }),
+    roleContext,
+    memorySlice,
+    runId: identity.runId,
+    targetAgentId: identity.targetAgentId,
+  };
 }
 
 function childModel(baseUrl: string): Model<any> {
@@ -240,18 +251,12 @@ test("one controller-owned registration serves consecutive children and outlives
     for (const role of ["researcher", "reviewer"] as const) {
       const cwd = await mkdtemp(join(tmpdir(), "evok-metered-child-"));
       workspaces.push(cwd);
-      const result = await dispatchPiChild(
-        { events },
-        {
-          role,
-          task: "Return your role",
-          model: metering.model,
-          cwd,
-          ...binding(role),
-          protocolProbe: () => "0.84.0",
-        },
-      );
-      expect(result.text).toBe("actual");
+      const result = await dispatchPiChild({ events }, delegation(role), {
+        model: metering.model,
+        cwd,
+        protocolProbe: () => "0.84.0",
+      });
+      expect(result.value.text).toBe("actual");
       // Still registered between children: no per-child registration or teardown.
       expect(registered.has(metering.alias)).toBe(true);
     }

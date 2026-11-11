@@ -1,6 +1,7 @@
 # Subagent Fan-Out: Consolidation Spec v2
 
-status: revised diagnosis + cleanup plan (implementation not yet authorized)
+status: diagnosis + cleanup plan; A1–A7 delivered (#223–#229). §8 keeps the answered
+        questions for reference; no ticket in this series remains open.
 supersedes: `docs/subagent-fanout-consolidation.md` v1 (that file is superseded and
             should be replaced by this one)
 reviewed: `pi-child-dispatch.ts`, `pi-child-work.ts`, `pi-child-owner.ts`,
@@ -17,10 +18,13 @@ the files again:
 E1 — **The metered provider is registered only on the worker side.**
 `dispatchPiChild` states in its own header comment that the host must register
 the unique `evok-meter-*` provider against a loopback relay *before* calling it.
-`registerProvider` appears only in `pi-child-tools.ts` and `pi-child-owner.ts` —
-both were on v1's delete list. The only other live example is
-`tests/e2e/pi-child-dispatch.smoke.ts`. Deleting per v1 leaves the metering
-implementation inside a test fixture.
+At the time of writing `registerProvider` appeared only in `pi-child-tools.ts` and
+`pi-child-owner.ts` — both were on v1's delete list — with
+the only other live example in `tests/e2e/pi-child-dispatch.smoke.ts`, so deleting
+per v1 would have left metering inside a test fixture. A2 (#224) answered this
+instead of deleting it: the relay and provider registration now live in production
+code, `src/execution/pi-child-metering.ts`, owned by the Mission controller
+(`src/cli/pi-campaign-director.ts`).
 
 E2 — **The version probe is a precondition, not an improvement.**
 `dispatchPiChild` assumes 0.84 semantics (appends `:max` to the model identity);
@@ -93,7 +97,7 @@ capability gap, not a defect to preserve accidentally.
   smoke are deleted. `PiWorkerRequest` is deleted with them.
 - `pi-child-protocol.ts` is deleted unless a real requirement for child-issued
   control actions is demonstrated. If that requirement exists, it is designed as
-  a separate capability, not preserved by default.
+  a separate capability, not preserved by default (answered by A5; see §8 Q1).
 - `collaboration-scheduler.ts` is deleted. Concurrency needs are served by
   `Promise.all` over the guarded adapter until a real requirement exists.
 
@@ -157,7 +161,7 @@ src/execution/
   pi-child-work.ts          DELETE
   pi-child-owner.ts         DELETE
   pi-child-recruit.ts       DELETE
-  pi-child-protocol.ts      DELETE unless a child-control requirement is demonstrated
+  pi-child-protocol.ts      KEEP; Q1 answered (§8)
   collaboration-scheduler.ts DELETE
   collaboration-*.test.ts   DELETE with it
   pi-child-*.test.ts        rewrite against the single transport
@@ -167,6 +171,15 @@ tests/e2e/
 docs/
   multi-agent-architecture.md one seam, one transport, sequential mainline by default
 ```
+
+Delivered: `pi-child-work.ts` and its e2e smoke went with #225. `pi-child-owner.ts`
+and `collaboration-scheduler.ts` (with `collaboration-scheduler.test.ts` and
+`collaboration-questions.test.ts`) went with #227. `pi-child-protocol.ts` stays for
+its one live consumer, `src/cli/pi-campaign-director.ts`, which publishes the
+Director hire schema (`directorCollaboratorBatch`, `CollaboratorSpec`) from it
+(see §8 Q1); relocating that schema out of the Director path was declined, not
+deferred. The `pi-child-*.test.ts` rewrite against the single transport
+finished in #228 (installer/grant path) and #229 (diagnostics).
 
 ## 6. Acceptance tests (existing adapter seam)
 
@@ -205,6 +218,14 @@ T12. `bun test --rerun-all-tests`, `bun run typecheck`, `git diff --check` stay 
 
 Q1 — Does any Mission Task Contract actually need child-issued control actions?
 If not, `pi-child-protocol.ts` is deleted.
+Answered by A5 (#227): yes. `src/cli/pi-campaign-director.ts` is a registered Pi
+extension that publishes the Director hire schema from it. Retained rather than
+relocated because moving ~200 lines out of the Director path is not a
+requirement: the Director path is the schema's only consumer. `pi-child-tools.ts`
+has imported its schemas since A6 (#228) wired the installer into the transport,
+so both retained modules now have a production importer;
+`pi-child-recovery.ts` stays the receipt store (§3) and
+`docs/memory-subsystem-prd.md` §9 owns its long-term disposition.
 Q2 — Where should the metering relay live in production (CLI launch, Mission
 controller, or a dedicated execution-broker component)? C2 requires this to be
 answered before implementation, not after.

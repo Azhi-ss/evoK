@@ -38,6 +38,13 @@ closed; a v2 parent keeps its v2 shape. Trusted Evaluator/Executor contexts stay
 uninjected, and nothing here assembles a second context or touches Mission
 dispatch.
 
+Amendment (M2-T226 / #226): the child transport's durable records stay under
+`src/execution/`. `pi-child-dispatch` holds the single deadline and the confirmed
+termination outcome (`termination_unconfirmed` carries the request id), and
+`pi-child-records` is the one guard that keeps provider configs, API keys and tool
+tokens out of every persisted launch/fence/receipt record. No new gate or
+delegation authority.
+
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
