@@ -57,10 +57,10 @@ the shape of the failure list, because the common causes look different:
   report. That is why the same command can pass on one run and refuse the next on the same
   machine. Run `bun install --frozen-lockfile`, then re-run the gate.
 - **`Address already in use` and whole groups of relay tests** (`optimize-one command`,
-  `search tree`): the relay binds a fixed default port, so a second suite on the same host
-  (`harness-opt` in another worktree, or a leftover relay) steals it. Check
-  `ps -eo command | grep 'bun test --rerun-all-tests'` and `lsof -nP -iTCP:8642` before
-  blaming your change; re-run the gate once the other run finishes.
+  `search tree`): since #247 each run allocates a free relay port, and `HARNESS_RELAY_PORT`
+  pins one only when a deployment sets it. Seeing this anyway means an older build or worktree
+  is still binding 8642: check `ps -eo command | grep 'bun test --rerun-all-tests'` and
+  `lsof -nP -iTCP:8642` before blaming your change.
 
 Measured on the reference host at `d703c38`: 3.14 first on `PATH` gave 39 current /
 42 accepted, exit 0; `/usr/bin` first (3.9.6) gave 207 current / 168 new, exit 1; with

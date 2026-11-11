@@ -268,6 +268,26 @@ function roleLog(root: string, baseUrl: string): string {
   return join(root, runIdOf(baseUrl), "relay.jsonl");
 }
 
+function relayPortOf(baseUrl: string | undefined): string {
+  const match = /^http:\/\/127\.0\.0\.1:(\d+)\/r\//.exec(baseUrl ?? "");
+  if (!match?.[1]) throw new Error(`relay base url has no port: ${baseUrl ?? ""}`);
+  return match[1];
+}
+
+/** True once nothing accepts on the port. A killed relay must free it, retries absorb the exit race. */
+async function portFree(port: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const server = createServer();
+    const bound = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(Number(port), "127.0.0.1", () => resolve(true));
+    });
+    if (bound) return new Promise<boolean>((resolve) => server.close(() => resolve(true)));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
 function reviewerRelayLogs(root: string): string[] {
   if (!existsSync(root)) return [];
   const found: string[] = [];
@@ -3893,7 +3913,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     });
     const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
     const relayRoot = join(fx.attestRoot, "relay-logs");
-    expect(spawn.baseUrl?.startsWith("http://127.0.0.1:8642/r/")).toBe(true);
+    expect(relayPortOf(spawn.baseUrl)).not.toBe("8642");
     expect(spawn.baseUrl?.endsWith("/v1")).toBe(true);
     expect(spawn.relayLog).toBeUndefined();
     expect(JSON.stringify(spawn)).not.toContain(relayRoot);
@@ -3907,6 +3927,69 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(innovatorInput).not.toContain("relay.jsonl");
     expect(innovatorInput).toContain("baseUrl");
     expect(fake.calls).toHaveLength(1);
+  });
+
+  test("the loop relay binds an allocated port instead of the fixed 8642", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: stubOptRoles(fx.key),
+    });
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+    const port = relayPortOf(spawn.baseUrl);
+    expect(port).not.toBe("8642");
+    expect(Number(port)).toBeGreaterThan(0);
+    expect(await portFree(port)).toBe(true);
+  });
+
+  test("HARNESS_RELAY_PORT stays the explicit override for a deployment", async () => {
+    const first = fixture();
+    await runOptLoop({
+      ...hostOpts(first),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(first).executor,
+      roles: stubOptRoles(first.key),
+    });
+    const allocated = JSON.parse(readFileSync(join(first.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+    const port = relayPortOf(allocated.baseUrl);
+    expect(await portFree(port)).toBe(true);
+    const second = fixture();
+    const result = await runOptLoop({
+      ...hostOpts(second),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fakeExecutor(second).executor,
+      roles: stubOptRoles(second.key),
+      env: { HARNESS_RELAY_BIND: "127.0.0.1", HARNESS_RELAY_PORT: port },
+    });
+    expect(result.stopReport.reason).toBeNull();
+    const pinned = JSON.parse(readFileSync(join(second.out, "round1/sessions/innovator-0.spawn.json"), "utf8")) as RoleSpawnConfig;
+    expect(relayPortOf(pinned.baseUrl)).toBe(port);
+  });
+
+  test("a relay from a stopped loop is reaped, so no stale relay keeps its port", async () => {
+    const fx = fixture();
+    const fake = fakeExecutor(fx);
+    const result = await runOptLoop({
+      ...hostOpts(fx),
+      mode: "dry-run",
+      rounds: 1,
+      executor: fake.executor,
+      roles: {
+        ...stubOptRoles(fx.key),
+        gap() {
+          throw new Error("sensor exploded");
+        },
+      },
+    });
+    expect(result.stopReport.reason).toBe("internal_error");
+    const spawn = JSON.parse(readFileSync(join(fx.out, "round1/sessions/gap-finder.spawn.json"), "utf8")) as RoleSpawnConfig;
+    expect(await portFree(relayPortOf(spawn.baseUrl))).toBe(true);
   });
 
   test("the on-disk spawn file omits the relay log", async () => {
@@ -3947,7 +4030,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
         async innovate(input) {
           expect(input).not.toHaveProperty("relayLog");
           expect(input).not.toHaveProperty("runId");
-          expect(input.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:8642\/r\/[0-9a-f]{32}\/v1$/);
+          expect(input.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\/[0-9a-f]{32}\/v1$/);
           const shown = readFileSync(join(fx.out, "round1/innovator-0-input.json"), "utf8");
           expect(shown).not.toContain("relayLog");
           expect(shown).not.toContain("relay.jsonl");
@@ -3972,7 +4055,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
     expect(spawn.relayLog).toBeUndefined();
     expect(shownSpawn).not.toContain(relayRoot);
     expect(shownSpawn).not.toContain("relay.jsonl");
-    expect(spawn.baseUrl?.startsWith("http://127.0.0.1:8642/r/")).toBe(true);
+    expect(relayPortOf(spawn.baseUrl)).not.toBe("8642");
     const gapInput = readFileSync(join(fx.out, "round1/gap-input.json"), "utf8");
     expect(gapInput).not.toContain("relayLog");
     expect(gapInput).not.toContain("relay.jsonl");
@@ -4160,7 +4243,7 @@ console.log(JSON.stringify({ attestation: join(run, "attestation.json") }));
             script, "close-run",
             "--log-root", logRoot,
             "--run-id", runIdOf(input.baseUrl),
-            "--port", "8642",
+            "--port", relayPortOf(input.baseUrl),
           ], { encoding: "utf8", env });
           if (closed.status !== 0) throw new Error(closed.stderr || closed.stdout || "close-run failed");
           appendFileSync(roleLog(logRoot, input.baseUrl), "{\"type\":\"tamper\"}\n");
