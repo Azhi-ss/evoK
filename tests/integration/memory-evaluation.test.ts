@@ -43,10 +43,12 @@ import {
 } from "../../src/evidence/research-memory";
 import {
   RESEARCH_MEMORY_CONTROL_CAVEAT,
+  RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS,
   evaluateResearchMemory,
   initialStateDigestOf,
   replayResearchMemory,
   type ResearchMemoryEvaluationMode,
+  type ResearchMemoryL1Signal,
 } from "../../src/mission/memory-evaluation";
 
 const CONTROL_PROVIDER = "evok-t9-control";
@@ -56,6 +58,22 @@ const DECISION_USAGE = {
   cost: { input: 0.002, output: 0.003, cacheRead: 0, cacheWrite: 0, total: 0.005 },
 };
 const DIRECTOR_MODEL = { provider: CONTROL_PROVIDER, model: "deterministic", id: `${CONTROL_PROVIDER}/deterministic` };
+
+/**
+ * The L1 gate L2 is authorized by: direction only, no significance, L1's own
+ * sample floor. A real L1 run supplies this shape from
+ * `summarizeDecisionPoints`; the lifecycle seam here is L2, so the gate is a
+ * plain reading.
+ */
+function l1Gate(): ResearchMemoryL1Signal {
+  return {
+    kind: "decision-point-counterfactual",
+    decisionPoints: RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS,
+    directionOnly: true,
+    statisticalSignificance: "none",
+    directions: [{ metric: "matched-action-taken", baseline: "off", treatment: "real", direction: "treatment-higher" }],
+  };
+}
 
 const fileEvaluator: BaselineEvaluator = {
   id: "file-answer-deterministic",
@@ -389,6 +407,7 @@ describe("Memory Off / Sham / Real at the authorized lifecycle seam (M1-T9)", ()
       },
       arms: [off, sham, real].map((arm) => ({
         mode: arm.mode,
+        origin: "new-run" as const,
         record: arm.record,
         controls: {
           modelVersion: "default",
@@ -399,6 +418,7 @@ describe("Memory Off / Sham / Real at the authorized lifecycle seam (M1-T9)", ()
           evaluationBudget: 1,
         },
       })),
+      l1Signal: l1Gate(),
     });
 
     expect(report.controls.filter((control) => !control.matched)).toEqual([]);

@@ -2,6 +2,7 @@
 
 status: revised design (implementation not yet authorized)
 scope: proving whether Mission Research Memory is worth its cost
+scoring contract: `evok.l1-hindsight-scoring/v1` (see §3, "Hindsight scoring rule")
 reviewed: `src/mission/memory-evaluation.ts`, `src/mission/mission-director.ts`,
           `docs/long-term-memory-prd.md` §11, `tests/integration/memory-evaluation.test.ts`
 
@@ -79,6 +80,42 @@ Each one is a natural counterfactual decision point.
 5. Score the proposal against the **actually observed** outcome that followed the
    original decision.
 
+### Hindsight scoring rule (`evok.l1-hindsight-scoring/v1`)
+
+The L1 reference is **the action actually taken** — the revised proposal the
+original Mission durably recorded and then executed. It is never the best action
+among those the Mission later measured.
+
+Rationale
+
+- Cheap: the taken action is already recorded and measured by the Mission's own
+  Evidence, so scoring costs no extra model call and no comparable re-measurement.
+- Unbiased: the reference is fixed before any arm is re-decided, so no arm can
+  influence which action it is scored against.
+- Auditable: "did the arm propose what the Mission did?" is a structural
+  `deriveDecisionDelta` comparison, not an LLM judge.
+
+Bias limits (carried by every report)
+
+- **Weak.** One observed action is not the best action, so a proposal that beat
+  the taken action scores exactly like one that merely matched it.
+- **No counterfactual for untaken actions.** L1 can never credit Memory for a
+  better action the original Mission did not take.
+- **The taken action may itself be a bad decision.** The rule measures agreement
+  with the observed trajectory, not optimality.
+- **Selection bias is why the alternative was rejected.** Scoring against the best
+  action among those later measured would rank a set that depends on what the
+  original Mission chose, so the reference would be picked with information the
+  arms could not have had, and would move between samples. That variant needs
+  comparable measurements and its own contract version.
+
+**Changing this rule requires an explicit versioned evaluation-contract change**:
+bump the contract id (`evok.l1-hindsight-scoring/v2`) and record the new
+reference, its rationale and its bias limits here before any report is scored
+against it. Reports are not edited in place to describe a different reference;
+an unreviewed code change to the rule is a contract change that skipped this
+section.
+
 ### Controls
 
 - The base state is byte-identical across arms except for the Memory packet.
@@ -92,8 +129,8 @@ Each one is a natural counterfactual decision point.
 ### Metrics
 
 - Decision delta distribution (unchanged / reordered / replaced / withdrawn).
-- Whether the revised action matched the action that was actually beneficial in
-  hindsight, using the original Experiment's measured Evidence.
+- Whether the revised action matched the action actually taken, scored over the
+  original Experiment's measured Evidence (see "Hindsight scoring rule" above).
 - Rate of proposing an already-measured objective with no replication value.
 - Preservation of competing Hypotheses in the proposal.
 
@@ -167,7 +204,8 @@ R4 — Keep `replayResearchMemory` and its future-information check, but rename 
 report section to `integrity` so it is never presented as value evidence.
 
 R5 — Reports must carry the existing Sham caveat and the new
-"L1 does not measure trajectory steering" caveat.
+"L1 does not measure trajectory steering" caveat, plus the versioned
+hindsight-scoring rule and its selection-bias caveat (§3).
 
 ## 7. Acceptance tests
 
@@ -195,10 +233,11 @@ A9. `bun test --rerun-all-tests`, `bun run typecheck`, `git diff --check` stay a
   budget authorization.
 - Any change to evaluator, promotion, admission, budget or submission gates.
 
-## 9. Open question
+## 9. Settled: the hindsight reference
 
-What counts as a "beneficial action in hindsight" for L1 scoring — the action
-that was actually taken, or the best action among those later measured? The
-former is cheap and unbiased but weak; the latter needs comparable measurements
-and risks selection bias. This must be settled before L1 implementation, since
-it determines whether the metric means anything.
+Settled by contract §3 "Hindsight scoring rule" (`evok.l1-hindsight-scoring/v1`,
+#234): L1 scores against **the action actually taken**, not the best action among
+those later measured. The taken action is cheap and unbiased; the best-later
+variant needs comparable measurements and would introduce selection bias, so it
+is a separate optional refinement with its own contract version. This is settled
+before L1 implementation, which is what the metric's meaning depends on.

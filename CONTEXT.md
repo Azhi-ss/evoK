@@ -261,8 +261,12 @@ A deterministic re-projection that pins each Run to the Mission state, stored Pr
 _Avoid_: Hindsight replay, transcript replay
 
 **Decision-Point Counterfactual (L1)**:
-One frozen decision point — the trusted Director input and frozen Blind Proposal that existed before the original decision — re-decided once per Memory Evaluation Arm over that same base state, then scored against the action the original Mission actually took. It dispatches no Experiment, reserves no Experiment budget, and states a direction only: it can never show where Memory steers exploration across many steps.
+One frozen decision point — the trusted Director input and frozen Blind Proposal that existed before the original decision — re-decided once per Memory Evaluation Arm over that same base state, then scored against the action the original Mission actually took under the versioned rule `evok.l1-hindsight-scoring/v1` (never a best later-measured action). It dispatches no Experiment, reserves no Experiment budget, and states a direction only: it can never show where Memory steers exploration across many steps.
 _Avoid_: Trajectory evaluation, Memory score, hindsight-optimal action
+
+**Online Multi-Arm Evaluation (L2)**:
+The whole-Mission comparison of the three Memory Evaluation Arms, run as new Missions with matched controls, and only after L1 reported a directional benefit at decision points. Arms replayed from a historical ledger are never mixed with newly run arms; both Director stages are counted in every arm including `off`; and a conclusion is stated only as a direction that 2–3 independent Mission comparisons reproduce, never as an effect size or a significance claim.
+_Avoid_: A/B test, significance test, Memory ROI
 
 **Negative Evidence**:
 Evidence that a Candidate or approach failed, was inconclusive, or violated a condition under a recorded set of circumstances. Only a real measurement creates it; an operational failure alone never does.

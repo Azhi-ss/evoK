@@ -30,6 +30,7 @@ import {
   type ResearchMemoryEvaluationMode,
 } from "../evidence/research-memory";
 import { projectDecisionAccountability } from "./decision-accountability";
+import type { DecisionPointDirection } from "./decision-point-evaluation";
 import {
   assertOffRetainsMissionState,
   decisionRetainedState,
@@ -55,6 +56,14 @@ export const RESEARCH_MEMORY_EVALUATION_KIND = "whole-mission-comparison" as con
 /** The only claim offline replay supports: integrity, never research value. */
 export const RESEARCH_MEMORY_INTEGRITY_CLAIM = "integrity" as const;
 
+/**
+ * The second limit of an L2 reading: values are read as signs, never as effect
+ * sizes, and a sign is only stated as a conclusion when another Mission
+ * reproduces it. Reported next to every L2 conclusion.
+ */
+export const RESEARCH_MEMORY_DIRECTION_CAVEAT =
+  "L2 readings are directional only: each treatment-minus-control value is read as a sign on one sanctioned metric, with no significance test and no effect size claimed. A conclusion is stated only when the same direction holds across 2–3 independently run Missions; flat or disagreeing readings state no conclusion.";
+
 /** What the labelled `integrity` section can and cannot answer. */
 export const RESEARCH_MEMORY_INTEGRITY_NOTE =
   "Offline replay is integrity evidence only: it shows no Run saw information produced after it began and that projection is deterministic. It is not value evidence and says nothing about whether Memory helped.";
@@ -71,6 +80,7 @@ export const RESEARCH_MEMORY_CONTROL_CAVEAT =
 
 export const RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS: readonly string[] = [
   RESEARCH_MEMORY_CONTROL_CAVEAT,
+  RESEARCH_MEMORY_DIRECTION_CAVEAT,
   "Rejected alternatives stay counterfactually unobserved unless a later comparable measured Experiment supplies the counterfactual Evidence.",
   "Offline replay pins each Run to Mission state, proposals and snapshot visible before it began; no live model provider and no GPU are required.",
   "Arms are comparable only when model version, prompts, tools, decision calls, budgets, stopping conditions and initial state were held equal.",
@@ -247,7 +257,55 @@ export interface ResearchMemoryArmControls {
 export interface ResearchMemoryEvaluationArm {
   readonly mode: ResearchMemoryEvaluationMode;
   readonly record: MissionRecord;
+  /**
+   * Where this arm's record came from. L2 runs new Missions; an arm replayed
+   * from a frozen historical ledger can never be subtracted from one that was
+   * actually run, so the report refuses any set that is not all `new-run`. No
+   * replay arm carries a structural marker yet, so this declaration is the
+   * discriminator: a future replay-arm producer must set it.
+   */
+  readonly origin: ResearchMemoryArmOrigin;
   readonly controls?: ResearchMemoryArmControls;
+}
+
+/** An arm is either a freshly run Mission or a frozen historical replay. */
+export type ResearchMemoryArmOrigin = "new-run" | "historical-replay";
+
+/**
+ * L1's own sample floor, mirrored here because `memory-evaluation` cannot value-
+ * import `decision-point-evaluation` (that module imports this one); a test keeps
+ * the two equal.
+ */
+export const RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS = 50;
+
+export type ResearchMemoryDirection = DecisionPointDirection;
+
+/** One directional reading from the L1 decision-point report. */
+export interface ResearchMemoryL1DirectionReading {
+  readonly metric: "matched-action-taken";
+  readonly baseline: ResearchMemoryEvaluationMode;
+  readonly treatment: ResearchMemoryEvaluationMode;
+  readonly direction: ResearchMemoryDirection;
+}
+
+/**
+ * The L1 input L2 is gated on: a `DecisionPointEvaluationReport` satisfies this
+ * structurally. L2 is only worth its cost once L1 saw a directional benefit at
+ * decision points, and it inherits L1's own rules — direction only, no
+ * significance, enough points to state a direction.
+ */
+export interface ResearchMemoryL1Signal {
+  readonly kind: string;
+  readonly decisionPoints: number;
+  readonly directionOnly: true;
+  readonly statisticalSignificance: "none";
+  readonly directions: readonly ResearchMemoryL1DirectionReading[];
+}
+
+/** What gated this L2 run, recorded so the report carries its own provenance. */
+export interface ResearchMemoryL1Gate {
+  readonly decisionPoints: number;
+  readonly overallBenefitDirection: ResearchMemoryDirection;
 }
 
 export interface ResearchMemoryStageCosts {
@@ -336,7 +394,7 @@ function countReplication(experiments: readonly ExperimentTrailEntry[]): {
 }
 
 /** The read-only metrics of one completed arm. */
-export function researchMemoryArmMetrics(arm: ResearchMemoryEvaluationArm): ResearchMemoryArmMetrics {
+export function researchMemoryArmMetrics(arm: Pick<ResearchMemoryEvaluationArm, "mode" | "record">): ResearchMemoryArmMetrics {
   const record = arm.record;
   const decisions = record.decisions ?? [];
   const experiments = record.experiments ?? [];
@@ -422,8 +480,12 @@ const COMPARISON_READINGS: readonly {
   },
 ];
 
-/** Compares the arms that are present; a missing arm yields no reading. */
+/** Compares the arms that are present; a missing arm yields no reading. Every
+ * arm must be a newly run Mission, and every set independently produced. This is
+ * the measurement seam, not the L2 entry: only `evaluateResearchMemory` carries
+ * the L1 gate. */
 export function compareResearchMemoryArms(arms: readonly ResearchMemoryEvaluationArm[]): readonly ResearchMemoryComparison[] {
+  assertNewlyRunArms(arms);
   assertIndependentlyProducedArms(arms);
   const metrics = new Map(arms.map((arm) => [arm.mode, researchMemoryArmMetrics(arm)]));
   return COMPARISON_READINGS.flatMap((reading) => {
@@ -564,12 +626,60 @@ export interface ResearchMemoryEvaluationIntegrity {
 export interface ResearchMemoryEvaluationReport {
   readonly schema: typeof RESEARCH_MEMORY_EVALUATION_SCHEMA;
   readonly kind: typeof RESEARCH_MEMORY_EVALUATION_KIND;
+  /** The L1 reading that authorized this L2 run; absent L1 never reaches here. */
+  readonly l1: ResearchMemoryL1Gate;
   readonly missionIds: readonly string[];
   readonly arms: readonly ResearchMemoryArmMetrics[];
   readonly comparisons: readonly ResearchMemoryComparison[];
   readonly controls: readonly ResearchMemoryControlCheck[];
   readonly integrity: ResearchMemoryEvaluationIntegrity;
+  /** The only reading is a direction; the numeric deltas are raw treatment-minus-control measurements, never claimed effect sizes. */
+  readonly directionOnly: true;
+  readonly statisticalSignificance: "none";
   readonly assumptions: readonly string[];
+}
+
+/**
+ * L2 reads newly run Missions only. A historical replay can be re-partitioned
+ * into arbitrarily many “arms”, but it is frozen evidence that cannot be
+ * subtracted from a Mission actually run under another arm.
+ */
+function assertNewlyRunArms(arms: readonly ResearchMemoryEvaluationArm[]): void {
+  const replayed = arms.filter((arm) => arm.origin !== "new-run");
+  if (replayed.length === 0) return;
+  const modes = replayed.map((arm) => arm.mode).join(",");
+  if (replayed.length !== arms.length) {
+    throw new Error(`historical-replay arms cannot be mixed with newly-run arms in one L2 report (modes [${modes}] came from a frozen historical ledger): run every arm as a new Mission, or report the replay separately as integrity`);
+  }
+  throw new Error(`an L2 report needs newly-run Missions: every arm here (modes [${modes}]) was replayed from a historical ledger, so no arm was actually run`);
+}
+
+/**
+ * The L1 gate. L2 costs real Director calls in three arms, so it runs only when
+ * L1 already saw a directional benefit at decision points — with L1's own rules
+ * (direction only, no significance) and its own sample floor.
+ */
+function assertL1DirectionalSignal(signal: ResearchMemoryL1Signal | undefined): ResearchMemoryL1Gate {
+  if (signal === undefined) {
+    throw new Error("L2 online evaluation requires an L1 directional-signal input: L1 must show a directional benefit at decision points before any multi-arm Mission is run");
+  }
+  if (signal.kind !== "decision-point-counterfactual") {
+    throw new Error(`L2 is gated on an L1 decision-point counterfactual, not on "${signal.kind}": a whole-Mission reading cannot authorize another whole-Mission run`);
+  }
+  if (signal.directionOnly !== true || signal.statisticalSignificance !== "none") {
+    throw new Error("the L1 gate must be directional only: no significance testing is allowed, so a signal carrying a significance claim cannot authorize L2");
+  }
+  if (signal.decisionPoints < RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS) {
+    throw new Error(`the L1 gate needs at least ${RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS} decision points to state a direction (got ${signal.decisionPoints}); an under-powered L1 cannot authorize L2`);
+  }
+  const overall = signal.directions.find((entry) => entry.metric === "matched-action-taken" && entry.baseline === "off" && entry.treatment === "real");
+  if (overall === undefined) {
+    throw new Error("the L1 gate is missing its off/real matched-action-taken direction, so it carries no benefit signal for L2 to follow");
+  }
+  if (overall.direction !== "treatment-higher") {
+    throw new Error(`L2 runs only when L1 shows a directional benefit: the off/real matched-action-taken direction was "${overall.direction}"`);
+  }
+  return deepFreeze({ decisionPoints: signal.decisionPoints, overallBenefitDirection: overall.direction });
 }
 
 /**
@@ -603,7 +713,12 @@ function assertIndependentlyProducedArms(arms: readonly ResearchMemoryEvaluation
 export function evaluateResearchMemory(options: {
   readonly plan: ResearchMemoryEvaluationPlan;
   readonly arms: readonly ResearchMemoryEvaluationArm[];
+  readonly l1Signal: ResearchMemoryL1Signal;
 }): ResearchMemoryEvaluationReport {
+  // The L1 gate and the origin rule come first: neither is a reading to be
+  // fixed up after the fact, and each closes off work L2 must not start.
+  const l1 = assertL1DirectionalSignal(options.l1Signal);
+  assertNewlyRunArms(options.arms);
   const modes = options.arms.map((arm) => arm.mode);
   const missing = RESEARCH_MEMORY_EVALUATION_MODES.filter((mode) => !modes.includes(mode));
   const duplicated = modes.filter((mode, index) => modes.indexOf(mode) !== index);
@@ -634,6 +749,7 @@ export function evaluateResearchMemory(options: {
   return deepFreeze({
     schema: RESEARCH_MEMORY_EVALUATION_SCHEMA,
     kind: RESEARCH_MEMORY_EVALUATION_KIND,
+    l1,
     missionIds: ordered.map((arm) => arm.record.id),
     arms: ordered.map((arm) => researchMemoryArmMetrics(arm)),
     comparisons: compareResearchMemoryArms(ordered),
@@ -643,6 +759,115 @@ export function evaluateResearchMemory(options: {
       note: RESEARCH_MEMORY_INTEGRITY_NOTE,
       modes: ordered.map((arm) => ({ mode: arm.mode, runs: replayResearchMemory({ record: arm.record, mode: arm.mode }) })),
     },
+    directionOnly: true as const,
+    statisticalSignificance: "none" as const,
     assumptions: RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
+  });
+}
+
+// ── Directional conclusion across 2–3 Missions ─────────────────────────────
+
+export const RESEARCH_MEMORY_CONCLUSION_KIND = "directional-conclusion" as const;
+
+/**
+ * The only metrics an L2 conclusion may read directionally (spec §4). Both
+ * Director-stage costs are reportable per arm and summed into `decisionCost`;
+ * they are cost, never a directional benefit.
+ */
+export const RESEARCH_MEMORY_DIRECTIONAL_METRICS = ["hypothesisDiversity", "knownFailureRepetition", "validEvidencePerBudget"] as const;
+
+export type ResearchMemoryDirectionalMetric = (typeof RESEARCH_MEMORY_DIRECTIONAL_METRICS)[number];
+
+/** One metric's sign in one Mission: no effect size, no interval. */
+export interface ResearchMemoryMetricDirection {
+  readonly metric: ResearchMemoryDirectionalMetric;
+  readonly baseline: ResearchMemoryEvaluationMode;
+  readonly treatment: ResearchMemoryEvaluationMode;
+  readonly direction: ResearchMemoryDirection;
+}
+
+/** The directions one Mission produced, so a reader can see a disagreement. */
+export interface ResearchMemoryMissionDirections {
+  readonly missionIds: readonly string[];
+  readonly directions: readonly ResearchMemoryMetricDirection[];
+}
+
+export interface ResearchMemoryDirectionalConclusion {
+  readonly kind: typeof RESEARCH_MEMORY_CONCLUSION_KIND;
+  readonly directionOnly: true;
+  readonly statisticalSignificance: "none";
+  /**
+   * Independent three-arm comparisons compared here (2–3). Each one runs the
+   * three Memory arms from its own Mission's initial state, so this is the
+   * spec's cross-Mission replication count.
+   */
+  readonly replicates: number;
+  readonly readings: readonly ResearchMemoryMissionDirections[];
+  /** Only directions that were not flat and held in EVERY Mission. */
+  readonly agreed: readonly ResearchMemoryMetricDirection[];
+  readonly conclusion: "stated" | "none";
+  readonly statement: string;
+  readonly caveats: readonly string[];
+}
+
+function directionOf(value: number): ResearchMemoryDirection {
+  return value > 0 ? "treatment-higher" : value < 0 ? "treatment-lower" : "flat";
+}
+
+function directionsOf(report: ResearchMemoryEvaluationReport): ResearchMemoryMissionDirections {
+  return deepFreeze({
+    missionIds: report.missionIds,
+    directions: RESEARCH_MEMORY_DIRECTIONAL_METRICS.flatMap((metric) =>
+      report.comparisons.map((comparison) => ({
+        metric,
+        baseline: comparison.baseline,
+        treatment: comparison.treatment,
+        direction: directionOf(comparison.delta[metric]),
+      }))),
+  });
+}
+
+/**
+ * States a direction only when every replicate agrees on it. One replicate is a
+ * reading, not a conclusion; `flat` everywhere is no signal, and a disagreement
+ * is reported as a disagreement. No effect size, no interval, no significance
+ * claim is produced at any sample size.
+ */
+export function concludeResearchMemory(options: {
+  readonly reports: readonly ResearchMemoryEvaluationReport[];
+}): ResearchMemoryDirectionalConclusion {
+  const reports = options.reports;
+  if (reports.length < 2 || reports.length > 3) {
+    throw new Error(`an L2 directional conclusion needs 2–3 independently run Mission comparisons (each three arms from one initial state); got ${reports.length}, so repeat the experiment on another Mission instead of concluding from one reading`);
+  }
+  const seen = new Set<string>();
+  for (const report of reports) {
+    for (const missionId of report.missionIds) {
+      if (seen.has(missionId)) {
+        throw new Error(`an L2 directional conclusion needs distinct Missions: "${missionId}" appears in two reports, so one Mission is counted twice`);
+      }
+      seen.add(missionId);
+    }
+  }
+  const readings = reports.map(directionsOf);
+  const agreed = (readings[0]?.directions ?? []).filter((entry) =>
+    entry.direction !== "flat"
+    && readings.every((reading) => reading.directions.some((other) =>
+      other.metric === entry.metric
+      && other.baseline === entry.baseline
+      && other.treatment === entry.treatment
+      && other.direction === entry.direction)));
+  return deepFreeze({
+    kind: RESEARCH_MEMORY_CONCLUSION_KIND,
+    directionOnly: true as const,
+    statisticalSignificance: "none" as const,
+    replicates: reports.length,
+    readings,
+    agreed,
+    conclusion: agreed.length > 0 ? "stated" as const : "none" as const,
+    statement: agreed.length > 0
+      ? `${agreed.length} direction(s) held across ${reports.length} Mission comparisons; this is a direction, never an effect size or a significance claim.`
+      : `directions disagreed across ${reports.length} Mission comparisons, or were flat everywhere: no conclusion is stated.`,
+    caveats: RESEARCH_MEMORY_EVALUATION_ASSUMPTIONS,
   });
 }

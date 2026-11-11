@@ -9,15 +9,21 @@ import { describe, expect, test } from "bun:test";
 import { MissionResumeRejectedError, assertResearchMemoryArmUnchanged, type DecisionRecord, type ExperimentTrailEntry, type MissionRecord } from "./mission-start";
 import {
   RESEARCH_MEMORY_CONTROL_CAVEAT,
+  RESEARCH_MEMORY_DIRECTION_CAVEAT,
   RESEARCH_MEMORY_EVALUATION_SCHEMA,
+  RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS,
   compareResearchMemoryArms,
+  concludeResearchMemory,
   evaluateResearchMemory,
   initialStateDigestOf,
   replayResearchMemory,
   researchMemoryArmMetrics,
   type ResearchMemoryEvaluationArm,
   type ResearchMemoryEvaluationPlan,
+  type ResearchMemoryEvaluationReport,
+  type ResearchMemoryL1Signal,
 } from "./memory-evaluation";
+import { DECISION_POINT_EVALUATION_KIND, DECISION_POINT_MIN_SAMPLE, type DecisionPointEvaluationReport } from "./decision-point-evaluation";
 import {
   assertOffRetainsMissionState,
   decisionRetainedState,
@@ -266,7 +272,20 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
   };
 
   function arms(): ResearchMemoryEvaluationArm[] {
-    return (["off", "sham", "real"] as const).map((mode) => ({ mode, record: armRecord(`m-${mode}`), controls: CONTROLS }));
+    return (["off", "sham", "real"] as const).map((mode) => ({ mode, origin: "new-run" as const, record: armRecord(`m-${mode}`), controls: CONTROLS }));
+  }
+
+  function l1Signal(): ResearchMemoryL1Signal {
+    return {
+      kind: "decision-point-counterfactual",
+      decisionPoints: DECISION_POINT_MIN_SAMPLE,
+      directionOnly: true,
+      statisticalSignificance: "none",
+      directions: [
+        { metric: "matched-action-taken", baseline: "off", treatment: "real", direction: "treatment-higher" },
+        { metric: "matched-action-taken", baseline: "sham", treatment: "real", direction: "treatment-higher" },
+      ],
+    };
   }
 
   function plan(): ResearchMemoryEvaluationPlan {
@@ -283,7 +302,7 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
   }
 
   test("one arm per mode yields the three separated readings without a causal claim", () => {
-    const report = evaluateResearchMemory({ plan: plan(), arms: arms() });
+    const report = evaluateResearchMemory({ plan: plan(), arms: arms(), l1Signal: l1Signal() });
     expect(report.schema).toBe(RESEARCH_MEMORY_EVALUATION_SCHEMA);
     expect(report.arms.map((arm) => arm.mode)).toEqual(["off", "sham", "real"]);
     expect(report.comparisons.map((entry) => entry.reading)).toEqual(["overall-benefit", "content-contribution", "context-effect"]);
@@ -294,7 +313,7 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
   });
 
   test("the report is a whole-mission-comparison and its replay is labelled integrity, not value", () => {
-    const report = evaluateResearchMemory({ plan: plan(), arms: arms() });
+    const report = evaluateResearchMemory({ plan: plan(), arms: arms(), l1Signal: l1Signal() });
     expect(report.kind).toBe("whole-mission-comparison");
     expect(report.integrity.claim).toBe("integrity");
     // The note says out loud what the section can and cannot answer.
@@ -305,23 +324,23 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
 
   test("replaying one MissionRecord as every arm is refused instead of reporting a zero delta", () => {
     const record = armRecord("m-shared");
-    const shared = (["off", "sham", "real"] as const).map((mode) => ({ mode, record, controls: CONTROLS }));
+    const shared = (["off", "sham", "real"] as const).map((mode) => ({ mode, origin: "new-run" as const, record, controls: CONTROLS }));
     const refused = /independently produced arms: modes \[off,sham,real\] all derive from the same MissionRecord "m-shared".*zero-delta report/;
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: shared })).toThrow(refused);
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: shared, l1Signal: l1Signal() })).toThrow(refused);
     // Stamping the arm onto a copy is how one record becomes three arms; the
     // label cannot make the underlying decisions/experiments any different.
-    const stamped = (["off", "sham", "real"] as const).map((mode) => ({ mode, record: { ...record, researchMemoryMode: mode }, controls: CONTROLS }));
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: stamped })).toThrow(refused);
+    const stamped = (["off", "sham", "real"] as const).map((mode) => ({ mode, origin: "new-run" as const, record: { ...record, researchMemoryMode: mode }, controls: CONTROLS }));
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: stamped, l1Signal: l1Signal() })).toThrow(refused);
     // Two arms on one record are just as unmeasurable as three.
     const partial = arms();
-    partial[1] = { mode: "sham", record: partial[0]!.record, controls: CONTROLS };
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: partial })).toThrow(/zero-delta report/);
+    partial[1] = { mode: "sham", origin: "new-run", record: partial[0]!.record, controls: CONTROLS };
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: partial, l1Signal: l1Signal() })).toThrow(/zero-delta report/);
     // The lower-level comparison seam refuses it too, not only the report entry.
     expect(() => compareResearchMemoryArms(shared)).toThrow(refused);
   });
 
   test("the report records every controlled dimension and whether the arms kept it", () => {
-    const report = evaluateResearchMemory({ plan: plan(), arms: arms() });
+    const report = evaluateResearchMemory({ plan: plan(), arms: arms(), l1Signal: l1Signal() });
     const controls = report.controls.map((entry) => entry.control);
     expect(controls).toEqual([
       "model-version",
@@ -340,16 +359,16 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
 
   test("a drifted arm or a missing arm refuses to produce a reading", () => {
     const drifted = arms();
-    drifted[2] = { mode: "real", record: armRecord("m-real", { budget: { total: 2, units: "model-USD", consumed: 0.3, remaining: 1.7 } }) };
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: drifted })).toThrow(/token-budget/);
+    drifted[2] = { mode: "real", origin: "new-run", record: armRecord("m-real", { budget: { total: 2, units: "model-USD", consumed: 0.3, remaining: 1.7 } }) };
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: drifted, l1Signal: l1Signal() })).toThrow(/token-budget/);
 
     // An undeclared control cannot be assumed matched either.
     const undeclared = arms();
     delete (undeclared[1] as { controls?: unknown }).controls;
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: undeclared })).toThrow(/base-prompts/);
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: undeclared, l1Signal: l1Signal() })).toThrow(/base-prompts/);
 
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: arms().slice(0, 2) })).toThrow(/one arm per mode/);
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: [...arms(), arms()[0]!] })).toThrow(/duplicate/);
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: arms().slice(0, 2), l1Signal: l1Signal() })).toThrow(/one arm per mode/);
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: [...arms(), arms()[0]!], l1Signal: l1Signal() })).toThrow(/duplicate/);
   });
 
   test("comparisons are treatment minus control, never an absolute score", () => {
@@ -369,6 +388,7 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
     // would be decided on a Mission with no current best at all.
     lost[0] = {
       mode: "off",
+      origin: "new-run",
       controls: CONTROLS,
       record: armRecord("m-off", {
         baseline: {
@@ -382,7 +402,7 @@ describe("three-arm report (M1-T9 AC3/AC5)", () => {
         },
       }),
     };
-    expect(() => evaluateResearchMemory({ plan: plan(), arms: lost })).toThrow(/lost the Mission scoreboard/);
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: lost, l1Signal: l1Signal() })).toThrow(/lost the Mission scoreboard/);
   });
 });
 
@@ -444,5 +464,172 @@ describe("off arm retains Mission state (F5 / #231)", () => {
     expect(() => assertOffRetainsMissionState({ mode: "off", scope: "decision-point", retained: baseState, expected: baseState })).not.toThrow();
     const replay = replayResearchMemory({ record, mode: "off" });
     expect(replay.map((entry) => entry.cardCount)).toEqual([0, 0, 0, 0]);
+  });
+});
+
+describe("L2 online multi-arm gating (B4 / #233)", () => {
+  const CONTROLS = {
+    modelVersion: "default",
+    basePromptRevision: "director-prompt/v1",
+    tools: ["read"],
+    experimentBudget: 1,
+    retryBudget: 1,
+    evaluationBudget: 1,
+  };
+
+  /** One L1 reading: directional only, no significance, enough points to state a direction. */
+  function l1Signal(overrides: Partial<ResearchMemoryL1Signal> = {}): ResearchMemoryL1Signal {
+    return {
+      kind: "decision-point-counterfactual",
+      decisionPoints: DECISION_POINT_MIN_SAMPLE,
+      directionOnly: true,
+      statisticalSignificance: "none",
+      directions: [
+        { metric: "matched-action-taken", baseline: "off", treatment: "real", direction: "treatment-higher" },
+        { metric: "matched-action-taken", baseline: "sham", treatment: "real", direction: "treatment-higher" },
+      ],
+      ...overrides,
+    };
+  }
+
+  /** One arm record whose exploration width is the number of distinct objectives. */
+  function exploredArm(id: string, objectives: readonly string[]): MissionRecord {
+    return armRecord(id, {
+      experiments: objectives.map((taskObjective, index) =>
+        trail({ runId: `${id}:exp:${index + 1}`, at: AT.one, taskObjective, evaluation: { ok: true, score: 0.6 } })),
+    });
+  }
+
+  function arms(prefix = "m-off", objectives: readonly string[] = ["materialize answer.txt"]): ResearchMemoryEvaluationArm[] {
+    return (["off", "sham", "real"] as const).map((mode) => ({
+      mode,
+      origin: "new-run" as const,
+      record: exploredArm(`${prefix}-${mode}`, objectives),
+      controls: CONTROLS,
+    }));
+  }
+
+  function plan(decisionCalls = 0): ResearchMemoryEvaluationPlan {
+    const record = armRecord("m-plan");
+    return {
+      modelVersion: "default",
+      basePromptRevision: "director-prompt/v1",
+      tools: ["read"],
+      decisionCalls,
+      budgets: { token: 1, experiment: 1, retry: 1, evaluation: 1 },
+      stoppingConditions: record.stopConditions!,
+      initialStateDigest: initialStateDigestOf(record),
+    };
+  }
+
+  function replicate(prefix: string, widths: { readonly off: number; readonly sham: number; readonly real: number }): ResearchMemoryEvaluationReport {
+    const all: ResearchMemoryEvaluationArm[] = (["off", "sham", "real"] as const).map((mode) => ({
+      mode,
+      origin: "new-run" as const,
+      record: exploredArm(`${prefix}-${mode}`, Array.from({ length: widths[mode] }, (_, index) => `objective ${index}`)),
+      controls: CONTROLS,
+    }));
+    return evaluateResearchMemory({ plan: plan(), arms: all, l1Signal: l1Signal() });
+  }
+
+  test("L2 refuses to run without an L1 directional-benefit signal", () => {
+    const run = (signal: ResearchMemoryL1Signal | undefined) =>
+      evaluateResearchMemory({ plan: plan(), arms: arms(), l1Signal: signal as ResearchMemoryL1Signal });
+
+    expect(() => run(undefined)).toThrow(/requires an L1 directional-signal input/);
+    // A flat or negative L1 reading is not a signal to spend L2 budget on.
+    const directions = (direction: "treatment-higher" | "treatment-lower" | "flat") => [
+      { metric: "matched-action-taken" as const, baseline: "off" as const, treatment: "real" as const, direction },
+    ];
+    expect(() => run(l1Signal({ directions: directions("flat") }))).toThrow(/directional benefit/);
+    expect(() => run(l1Signal({ directions: directions("treatment-lower") }))).toThrow(/directional benefit/);
+    // An under-powered or significance-claiming L1 report cannot gate L2 either.
+    expect(() => run(l1Signal({ decisionPoints: DECISION_POINT_MIN_SAMPLE - 1 }))).toThrow(/at least 50/);
+    expect(() => run(l1Signal({ statisticalSignificance: "reported" as never }))).toThrow(/no significance/);
+    expect(() => run(l1Signal({ kind: "whole-mission-comparison" as never }))).toThrow(/decision-point/);
+
+    const report = run(l1Signal());
+    expect(report.l1).toEqual({ decisionPoints: DECISION_POINT_MIN_SAMPLE, overallBenefitDirection: "treatment-higher" });
+    // L2 inherits L1's sample floor rather than inventing a second one.
+    expect(RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS).toBe(DECISION_POINT_MIN_SAMPLE);
+    // The gate speaks L1's own kind, and a real L1 report satisfies the signal
+    // type structurally: a rename on either side is a type or test failure.
+    expect(l1Signal().kind).toBe(DECISION_POINT_EVALUATION_KIND);
+    const asSignal = (report: DecisionPointEvaluationReport): ResearchMemoryL1Signal => report;
+    expect(typeof asSignal).toBe("function");
+  });
+
+  test("a report mixing historical-replay arms with newly-run arms is rejected", () => {
+    const mixed = arms();
+    mixed[2] = { ...mixed[2]!, origin: "historical-replay" };
+    const mixedError = /historical-replay arms cannot be mixed with newly-run arms/;
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: mixed, l1Signal: l1Signal() })).toThrow(mixedError);
+    // The lower-level comparison seam refuses it too, so no reading escapes.
+    expect(() => compareResearchMemoryArms(mixed)).toThrow(mixedError);
+    // L2 is new Missions only: an all-replay report is not a comparison either.
+    const replayed = arms().map((arm) => ({ ...arm, origin: "historical-replay" as const }));
+    expect(() => evaluateResearchMemory({ plan: plan(), arms: replayed, l1Signal: l1Signal() })).toThrow(/needs newly-run Missions/);
+  });
+
+  test("both Director stages are counted in every arm, including off", () => {
+    const staged = arms().map((arm) => ({
+      ...arm,
+      record: armRecord(arm.record.id, {
+        experiments: [trail({ runId: `${arm.record.id}:exp:1`, at: AT.two, taskObjective: "materialize answer.txt", evaluation: { ok: true, score: 0.7 } })],
+        decisions: [
+          decision({ decisionId: `${arm.record.id}:d1:blind`, decisionGroupId: "d1", phase: "blind", at: AT.one, cost: 0.1 }),
+          decision({ decisionId: `${arm.record.id}:d1:revision`, decisionGroupId: "d1", phase: "revision", at: AT.two, cost: 0.2 }),
+        ],
+      }),
+    }));
+    const report = evaluateResearchMemory({ plan: plan(2), arms: staged, l1Signal: l1Signal() });
+    for (const arm of report.arms) {
+      expect(arm.stageCalls).toEqual({ blind: 1, revision: 1 });
+      expect(arm.stageCosts).toEqual({ blind: 0.1, revision: 0.2 });
+    }
+    // The Memory-denied arm pays for both stages too: a win from extra thinking
+    // is not a Memory result.
+    const off = report.arms.find((arm) => arm.mode === "off")!;
+    expect(off.stageCosts.blind).toBeGreaterThan(0);
+    expect(off.stageCosts.revision).toBeGreaterThan(0);
+    // Every cost delta is the sum of both stages, never one of them.
+    expect(report.comparisons.every((comparison) => comparison.delta.decisionCost === 0)).toBe(true);
+  });
+
+  test("only directional metrics are reported and a conclusion needs 2–3 agreeing Missions", () => {
+    const first = replicate("r1", { off: 1, sham: 1, real: 2 });
+    const second = replicate("r2", { off: 1, sham: 1, real: 2 });
+
+    // The reading itself never claims significance and carries both caveats.
+    expect(first.directionOnly).toBe(true);
+    expect(first.statisticalSignificance).toBe("none");
+    expect(first.assumptions).toContain(RESEARCH_MEMORY_CONTROL_CAVEAT);
+    expect(first.assumptions).toContain(RESEARCH_MEMORY_DIRECTION_CAVEAT);
+
+    const conclusion = concludeResearchMemory({ reports: [first, second] });
+    expect(conclusion.directionOnly).toBe(true);
+    expect(conclusion.statisticalSignificance).toBe("none");
+    expect(conclusion.replicates).toBe(2);
+    expect(conclusion.conclusion).toBe("stated");
+    expect(conclusion.agreed.every((entry) => entry.direction !== "flat")).toBe(true);
+    expect(conclusion.agreed.map((entry) => entry.metric)).toContain("hypothesisDiversity");
+    expect(conclusion.caveats).toContain(RESEARCH_MEMORY_CONTROL_CAVEAT);
+    expect(conclusion.caveats).toContain(RESEARCH_MEMORY_DIRECTION_CAVEAT);
+    // Direction words only: no effect size and no significance field anywhere.
+    expect(JSON.stringify(conclusion)).not.toMatch(/p-value|confidence|significan(?!ce)/);
+
+    // One replicate is not enough to state a direction; four is more than the
+    // declared 2–3 replicate budget.
+    expect(() => concludeResearchMemory({ reports: [first] })).toThrow(/2–3/);
+    expect(() => concludeResearchMemory({ reports: [first, second, replicate("r3", { off: 1, sham: 1, real: 2 }), replicate("r4", { off: 1, sham: 1, real: 2 })] })).toThrow(/2–3/);
+    // The same Mission reported twice is not a replicate.
+    expect(() => concludeResearchMemory({ reports: [first, first] })).toThrow(/distinct Missions/);
+
+    // Opposite directions across Missions state no conclusion at all.
+    const opposite = replicate("r5", { off: 2, sham: 1, real: 1 });
+    const split = concludeResearchMemory({ reports: [first, opposite] });
+    expect(split.conclusion).toBe("none");
+    expect(split.agreed).toEqual([]);
+    expect(split.statement).toContain("no conclusion is stated");
   });
 });
