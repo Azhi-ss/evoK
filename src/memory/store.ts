@@ -231,10 +231,21 @@ export function researchMemoryProviderFromStore(store: ResearchMemoryStore): Mem
 }
 
 /**
- * The default durable provider over the file store (the default store until M-c).
+ * The provider over the FILE store: the rollback path (M-c / #244). Runs are
+ * served through the default store, `defaultResearchMemoryProvider` in
+ * `default-store.ts`; this one reads exactly the pre-migration files.
  */
 export function createResearchMemoryProvider(dir: string): MemoryProvider {
   return researchMemoryProviderFromStore(createFileResearchMemoryStore(dir));
+}
+
+/**
+ * The snapshot the active pointer names, whichever store is live: one pointer
+ * read, then one pinned read (P6). Undefined means nothing was ever published.
+ */
+export async function loadActiveResearchMemorySnapshot(store: ResearchMemoryStore): Promise<ResearchMemorySnapshot | undefined> {
+  const digest = await store.loadActive();
+  return digest === undefined ? undefined : store.loadPinned(digest);
 }
 
 /**

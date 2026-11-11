@@ -106,11 +106,21 @@ export {
   RESEARCH_MEMORY_POINTER_SCHEMA,
   publishResearchMemorySnapshot,
   loadResearchMemorySnapshot,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryProviderFromStore,
   createFileResearchMemoryStore,
   createResearchMemoryProvider,
   createDelegatedResearchMemoryProvider,
 } from "./store";
 export type { ResearchMemoryStore } from "./store";
+export {
+  RESEARCH_MEMORY_DATABASE_FILENAME,
+  RESEARCH_MEMORY_STORE_ENV,
+  defaultResearchMemoryProvider,
+  researchMemoryStoreFor,
+  researchMemoryStoreName,
+} from "./default-store";
+export type { ResearchMemoryStoreName } from "./default-store";
 export {
   createSqliteResearchMemoryStore,
   createSqliteResearchMemoryProvider,

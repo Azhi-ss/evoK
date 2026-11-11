@@ -8,8 +8,9 @@
  * file execution through the SDK (write/read tools on the isolated workspace);
  * the evaluator is a trusted local function that computes the score itself.
  */
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
@@ -44,11 +45,13 @@ import { defaultSessionFactory, PiAgentRuntime, type AgentRuntimeSession, type S
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import { probeHostInventory } from "../../src/execution/host-inventory";
+import { createDelegatedResearchMemoryProvider } from "../../src/execution/research-memory-provider";
 import {
-  createDelegatedResearchMemoryProvider,
-  createResearchMemoryProvider,
-  loadResearchMemorySnapshot,
-} from "../../src/execution/research-memory-provider";
+  RESEARCH_MEMORY_DATABASE_FILENAME,
+  defaultResearchMemoryProvider,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryStoreFor,
+} from "../../src/memory";
 import { createMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "../../src/execution/memory-slice";
 import type { MemoryProvider, MemoryProviderRequest } from "../../src/execution/context-broker";
 import { ContextBroker, validateBrokeredContext } from "../../src/execution/context-broker";
@@ -106,6 +109,11 @@ async function tempProject(): Promise<string> {
   await writeFile(join(dir, "README.md"), "# t4 research project");
   return dir;
 }
+
+const exists = (path: string): Promise<boolean> => access(path).then(() => true, () => false);
+
+/** The snapshot a Run would be served today: the default store's active snapshot. */
+const activeMemory = (dir: string) => loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
 
 function completeDraft(id: string, overrides: Partial<MissionDraft> = {}): MissionDraft {
   return {
@@ -1129,13 +1137,11 @@ describe("Mission Research Memory at the authorized lifecycle seam (#210)", () =
     const active = outcome.record.researchMemory!;
     expect(active.cards.finding).toBe(2);
     expect(active.ledgerRevision).toBe(outcome.record.stateVersion);
-    const pointer = JSON.parse(await readFile(
-      join(project, ".evok", "missions", draft.id, "memory", "active.json"),
-      "utf8",
-    ));
-    expect(pointer.snapshotId).toBe(active.snapshotId);
-    expect(pointer.digest).toBe(active.snapshotDigest);
-    expect(await readdir(join(project, ".evok", "missions", draft.id, "memory", "snapshots"))).toContain(`${active.snapshotDigest}.json`);
+    // M-c: the default store is one SQLite database behind the same seam.
+    const store = researchMemoryStoreFor(researchMemoryDir(project, draft.id));
+    expect(await store.loadActive()).toBe(active.snapshotDigest);
+    expect((await store.loadPinned(active.snapshotDigest!)).snapshotId).toBe(active.snapshotId);
+    expect(await exists(join(researchMemoryDir(project, draft.id), RESEARCH_MEMORY_DATABASE_FILENAME))).toBe(true);
 
     // Status is read-only: ids and counts only, no card body or restricted refs.
     const summary = summarizeMission(outcome.record);
@@ -1816,7 +1822,7 @@ describe("Synthesis Proposals at the authorized lifecycle seam (#212)", () => {
 
     // The next deterministic snapshot carries the unverified hypothesis card.
     const memoryDir = join(project, ".evok", "missions", draft.id, "memory");
-    const snapshot = await loadResearchMemorySnapshot(memoryDir);
+    const snapshot = await activeMemory(memoryDir);
     expect(snapshot).toBeDefined();
     const card = snapshot!.cards.find((entry) => entry.kind === "hypothesis")!;
     expect(card).toMatchObject({
@@ -1856,7 +1862,7 @@ describe("Synthesis Proposals at the authorized lifecycle seam (#212)", () => {
         unknowns: ["whether other hosts share the limit"],
       }),
     });
-    const withPitfall = await loadResearchMemorySnapshot(memoryDir);
+    const withPitfall = await activeMemory(memoryDir);
     expect(withPitfall!.cards.find((entry) => entry.kind === "pitfall")).toMatchObject({
       cardId: "pitfall:synthesis:proposal-pitfall",
       conditions: ["batch size >= 32"],
@@ -1864,7 +1870,7 @@ describe("Synthesis Proposals at the authorized lifecycle seam (#212)", () => {
     });
 
     // Later bounded read: a fresh Run-bound slice from the pinned snapshot.
-    const provider = createResearchMemoryProvider(memoryDir);
+    const provider = defaultResearchMemoryProvider(memoryDir);
     const slice = await provider({
       missionId: draft.id,
       taskId: "task-exp-2",
@@ -1983,7 +1989,7 @@ describe("Research Memory applicability and lifecycle at the mission seam (#214)
     });
     expect(outcome.status).toBe("iteration-limit");
     const memoryDir = join(project, ".evok", "missions", draft.id, "memory");
-    const before = await loadResearchMemorySnapshot(memoryDir);
+    const before = await activeMemory(memoryDir);
     const evidenceBefore = outcome.record.experiments!.map((entry) => entry.evidenceRefs);
 
     // The card declares a condition the Mission record does not hold.
@@ -1996,7 +2002,7 @@ describe("Research Memory applicability and lifecycle at the mission seam (#214)
     });
 
     const record = await loadMissionRecord(project, draft.id);
-    const after = await loadResearchMemorySnapshot(memoryDir);
+    const after = await activeMemory(memoryDir);
     const stale = after!.cards.find((card) => card.kind === "hypothesis")!;
     expect(stale).toMatchObject({ lifecycle: "stale", revalidationRequired: true });
     expect(after!.digest).not.toBe(before!.digest);
@@ -2125,7 +2131,7 @@ describe("decision accountability and anti-collapse safeguards (#215)", () => {
     expect(h1Rejection.decisionRegret).toBeUndefined();
 
     // AC9: H2 survives in Memory with its contradicting refs intact.
-    const snapshot = await loadResearchMemorySnapshot(join(project, ".evok", "missions", draft.id, "memory"));
+    const snapshot = await activeMemory(join(project, ".evok", "missions", draft.id, "memory"));
     const h2 = snapshot!.cards.find((card) => card.cardId === H2_CARD)!;
     expect(h2).toMatchObject({
       kind: "hypothesis",
@@ -2337,13 +2343,17 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
         supportingRefs: [{ kind: "run", ref: started.experiments[0]!.runId }],
       }),
     });
-    const published = await loadResearchMemorySnapshot(memoryDirOf(project, draft.id));
+    const published = await activeMemory(memoryDirOf(project, draft.id));
     const authoritativeDigest = published!.digest;
     const before = await loadMissionRecord(project, draft.id);
     expect(before.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
 
     // Crash-style damage: the pointer survives, its snapshot bytes do not.
-    await writeFile(join(memoryDirOf(project, draft.id), "snapshots", `${authoritativeDigest}.json`), "{ corrupted");
+    const damaged = new Database(join(memoryDirOf(project, draft.id), RESEARCH_MEMORY_DATABASE_FILENAME));
+    damaged.exec("DROP TRIGGER snapshots_immutable_update");
+    damaged.prepare("UPDATE snapshots SET payload = '{ corrupted' WHERE digest = ?").run(authoritativeDigest);
+    damaged.close();
+    await expect(activeMemory(memoryDirOf(project, draft.id))).rejects.toThrow(/not valid JSON/);
     const { director } = twoStageDirector((input) => ({ proposal: { stateVersion: input.stateVersion, action: "stop", rationale: "recovered", stopReason: "done" } }));
     const resumed = await resumeAuthorizedMission({
       projectRoot: project, missionId: draft.id, authorization: resumeAuth,
@@ -2354,7 +2364,7 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
     });
     // Deterministic rebuild from Mission history + stored proposals: same digest.
     expect(resumed.record.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
-    const rebuilt = await loadResearchMemorySnapshot(memoryDirOf(project, draft.id));
+    const rebuilt = await activeMemory(memoryDirOf(project, draft.id));
     expect(rebuilt!.digest).toBe(authoritativeDigest);
     expect(rebuilt!.cards.filter((card) => card.kind === "hypothesis")).toHaveLength(1);
     // Both competing Branch outcomes and the stored Proposal survive recovery.
@@ -2382,7 +2392,7 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
       runtimeFactory: runtimeFactoryFor(resolver, resources, writes),
     });
     expect(again.record.researchMemory?.snapshotDigest).toBe(authoritativeDigest);
-    expect((await loadResearchMemorySnapshot(memoryDirOf(project, draft.id)))!.digest).toBe(authoritativeDigest);
+    expect((await activeMemory(memoryDirOf(project, draft.id)))!.digest).toBe(authoritativeDigest);
   }, 90_000);
 
   test("a rebuild that would serve less history than the Mission committed to fails closed", async () => {
@@ -2415,7 +2425,7 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
     expect(blocked).toBeInstanceOf(ReconciliationBlockedError);
     expect((blocked as Error).message).toMatch(/shrunken or empty/);
     // The shrunken rebuild is never published over the committed snapshot.
-    expect(await loadResearchMemorySnapshot(memoryDirOf(project, id))).toBeUndefined();
+    expect(await activeMemory(memoryDirOf(project, id))).toBeUndefined();
   }, 60_000);
 
   test("unrebuildable Memory corruption fails closed instead of serving an empty snapshot", async () => {
@@ -2449,7 +2459,7 @@ describe("frozen Director decisions and Memory recovery on resume (#216)", () =>
     expect((blocked as Error).message).toMatch(/Research Memory|research memory/);
     // Never an empty research history: no snapshot is published or served,
     // and the damaged authoritative record is left untouched.
-    expect(await loadResearchMemorySnapshot(memoryDirOf(project, id))).toBeUndefined();
+    expect(await activeMemory(memoryDirOf(project, id))).toBeUndefined();
     expect(JSON.parse(await readFile(join(dir, "mission.json"), "utf8")).status).toBe("director-stopped");
   }, 60_000);
 });
@@ -2491,7 +2501,7 @@ describe("Research Memory delegation at the authorized lifecycle seam (#217)", (
     // Pinned when the parent was dispatched: only the baseline card.
     expect(parentSlice.research!.cards).toHaveLength(1);
     // The active projection has already moved on to a wider snapshot.
-    const active = await loadResearchMemorySnapshot(researchMemoryDir(project, draft.id));
+    const active = await activeMemory(researchMemoryDir(project, draft.id));
     expect(active!.digest).not.toBe(parentSlice.research!.digest);
     expect(active!.cards.length).toBeGreaterThan(parentSlice.research!.cards.length);
 
@@ -2723,7 +2733,7 @@ describe("Research Memory delegation at the authorized lifecycle seam (#217)", (
     // An Evaluator (trusted) context is never injected with Research Memory.
     const evaluatorBroker = new ContextBroker({
       contract, policy: toyPolicy(contract),
-      memory: createResearchMemoryProvider(researchMemoryDir(project, draft.id)),
+      memory: defaultResearchMemoryProvider(researchMemoryDir(project, draft.id)),
       source: "mission-controller",
     });
     const evaluator = await evaluatorBroker.assemble({

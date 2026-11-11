@@ -3,7 +3,8 @@
  * not a derived index. Every property PRD §4.1 requires of the file design gets
  * a named test here, plus parity with the file store: for one fixed Mission
  * record both stores must serve identical snapshot digests and identical packet
- * projections. The file store stays the default (M-c switches it).
+ * projections. M-c (#244) then made this store the default; the file store is
+ * the rollback path (`default-store.test.ts`).
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";

@@ -102,10 +102,10 @@ import { checkHostCapabilities } from "../execution/host-capabilities";
 import type { HostInventory } from "../execution/host-inventory";
 import type { ResourceRequest } from "../execution/resource-lease";
 import {
-  createResearchMemoryProvider,
-  loadResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
-} from "../execution/research-memory-provider";
+  defaultResearchMemoryProvider,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryStoreFor,
+} from "../memory";
 import {
   assertMemorySafeText,
   assertPacketCardRefs,
@@ -768,7 +768,9 @@ function researchMemoryProviderFor(options: StartMissionOptions, missionId: stri
   if (options.competitionContext === undefined) return undefined;
   if (options.competitionContext.memory) return options.competitionContext.memory;
   if (mode === "off") return undefined;
-  return createResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
+  // M-c (#244): the default store is SQLite, migrated from this Mission's files
+  // on first use; the file reader stays the rollback path.
+  return defaultResearchMemoryProvider(researchMemoryDir(options.projectRoot, missionId));
 }
 
 /** Project-local derived-artifact namespace (under the git-ignored Mission dir). */
@@ -791,7 +793,7 @@ async function projectAndPublishResearchMemory(
   // M1-T9: the Sham arm publishes the SAME structural projection with control
   // slots only, so no research content reaches a comparison arm by accident.
   const snapshot = mode === "sham" ? shamResearchMemorySnapshot(projected) : projected;
-  await publishResearchMemorySnapshot(researchMemoryDir(projectRoot, record.id), snapshot);
+  await researchMemoryStoreFor(researchMemoryDir(projectRoot, record.id)).publish(snapshot);
   const next: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(snapshot) };
   await persist(projectRoot, next);
   return next;
@@ -2391,7 +2393,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         let pinnedPacket: ResearchDecisionPacket | undefined;
         if (researchMemoryEnabled) {
           try {
-            const snapshot = await loadResearchMemorySnapshot(memoryDir);
+            const snapshot = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(memoryDir));
             if (snapshot !== undefined) {
               const projected = projectResearchDecisionPacket(snapshot);
               // M1-T9: the Sham arm delivers the Schema-only control packet, not

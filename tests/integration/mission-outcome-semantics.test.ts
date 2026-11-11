@@ -26,7 +26,7 @@ import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
 import type { EvokResources } from "../../src/evok-resources";
 import type { PiAgentRuntime } from "../../src/pi-agent-runtime";
 import { OPERATIONAL_PITFALL_CARD_SCHEMA, RESEARCH_MEMORY_FINDING_CARD_SCHEMA } from "../../src/evidence/research-memory";
-import { loadResearchMemorySnapshot } from "../../src/execution/research-memory-provider";
+import { loadActiveResearchMemorySnapshot, researchMemoryStoreFor } from "../../src/memory";
 
 /** One scripted candidate Run: materialize a value, or fail operationally. */
 type Step = { readonly value: number } | { readonly fail: string } | { readonly empty: true };
@@ -146,7 +146,7 @@ async function runLifecycle(args: {
   project: string;
   record: Awaited<ReturnType<typeof loadMissionRecord>>;
   director: ScriptedDirector;
-  snapshot: Awaited<ReturnType<typeof loadResearchMemorySnapshot>>;
+  snapshot: Awaited<ReturnType<typeof loadActiveResearchMemorySnapshot>>;
 }> {
   const project = await mkdtemp(join(tmpdir(), "evok-outcomes-"));
   projectDirs.push(project);
@@ -169,7 +169,9 @@ async function runLifecycle(args: {
   };
   await startAuthorizedMission(options);
   const record = await loadMissionRecord(project, draft.id);
-  const snapshot = await loadResearchMemorySnapshot(join(project, ".evok", "missions", draft.id, "memory"));
+  const snapshot = await loadActiveResearchMemorySnapshot(
+    researchMemoryStoreFor(join(project, ".evok", "missions", draft.id, "memory")),
+  );
   return { project, record, director, snapshot };
 }
 

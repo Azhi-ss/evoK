@@ -5,6 +5,7 @@
  * tests/integration/mission-resume.test.ts.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,7 +30,12 @@ import {
   staleControllerLock,
 } from "./mission-resume";
 import { missionResearchSource, researchMemoryDir } from "./mission-start";
-import { loadResearchMemorySnapshot, publishResearchMemorySnapshot } from "../execution/research-memory-provider";
+import { publishResearchMemorySnapshot } from "../execution/research-memory-provider";
+import {
+  RESEARCH_MEMORY_DATABASE_FILENAME,
+  loadActiveResearchMemorySnapshot,
+  researchMemoryStoreFor,
+} from "../memory";
 import {
   RESEARCH_CONTROL_CARD_SCHEMA,
   projectResearchMemorySnapshot,
@@ -479,7 +485,7 @@ describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
     await publishResearchMemorySnapshot(dir, real);
 
     const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
-    const served = await loadResearchMemorySnapshot(dir);
+    const served = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
     const expected = shamResearchMemorySnapshot(real);
     expect(served?.digest).toBe(expected.digest);
     expect(served?.cards.every((card) => card.schema === RESEARCH_CONTROL_CARD_SCHEMA)).toBe(true);
@@ -488,5 +494,73 @@ describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
     expect(recovered.researchMemory?.cards.finding).toBe(0);
     // The arm itself is preserved, never silently switched to Real.
     expect(recovered.researchMemoryMode).toBe("sham");
+  });
+
+  const measuredBaseline = (id: string): MissionRecord["baseline"] => ({
+    runId: `${id}:baseline:1`,
+    candidateId: "candidate-baseline",
+    snapshotDigest: "snapshot-baseline",
+    evaluator: { id: EVAL_ID, version: "1" },
+    evaluation: m04,
+    evidenceRefs: ["evidence:baseline"],
+    measuredAt: "2026-09-11T00:05:00.000Z",
+  });
+
+  test("a pre-migration Run's pinned snapshot is served by digest after the store switches (M-c #244)", async () => {
+    const project = await tempProject();
+    const record = baseRecord("m-mc-pinned", { status: "interrupted", baseline: measuredBaseline("m-mc-pinned") });
+    const dir = researchMemoryDir(project, record.id);
+    // The pre-switch file store published it; the Run recorded this digest.
+    const expected = projectResearchMemorySnapshot(missionResearchSource(record));
+    await publishResearchMemorySnapshot(dir, expected);
+    const committed: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(expected) };
+
+    const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record: committed });
+    // Migration reproduces the exact bytes, so recovery has nothing to rebuild.
+    expect(recovered).toEqual(committed);
+    const served = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
+    expect(served?.digest).toBe(expected.digest);
+    expect(served).toEqual(expected);
+  });
+
+  test("recovery rebuilds from Mission history when the SQLite store is damaged, and records the damage", async () => {
+    const project = await tempProject();
+    const record = baseRecord("m-mc-damaged", { status: "interrupted", baseline: measuredBaseline("m-mc-damaged") });
+    const dir = researchMemoryDir(project, record.id);
+    const expected = projectResearchMemorySnapshot(missionResearchSource(record));
+    const store = researchMemoryStoreFor(dir);
+    await store.publish(expected);
+
+    // Damage: the payload survives but its query projection lost a row.
+    const db = new Database(join(dir, RESEARCH_MEMORY_DATABASE_FILENAME));
+    db.prepare("DELETE FROM cards WHERE digest = ? AND ordinal = 0").run(expected.digest);
+    db.close();
+    await expect(researchMemoryStoreFor(dir).loadPinned(expected.digest)).rejects.toThrow(/cards projection/);
+
+    const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
+    const served = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
+    expect(served).toEqual(expected);
+    const rebuilt = recovered.history.find((event) => event.type === "RECOVERY_MEMORY_REBUILT");
+    expect(rebuilt?.detail?.reason).toMatch(/cards projection/);
+    expect(rebuilt?.detail?.snapshotDigest).toBe(expected.digest);
+  });
+
+  test("recovery rebuilds a database that is not a database at all, and records the damage", async () => {
+    const project = await tempProject();
+    const record = baseRecord("m-mc-dbfile", { status: "interrupted", baseline: measuredBaseline("m-mc-dbfile") });
+    const dir = researchMemoryDir(project, record.id);
+    const expected = projectResearchMemorySnapshot(missionResearchSource(record));
+    await researchMemoryStoreFor(dir).publish(expected);
+
+    const database = join(dir, RESEARCH_MEMORY_DATABASE_FILENAME);
+    await rm(`${database}-wal`, { force: true });
+    await rm(`${database}-shm`, { force: true });
+    await writeFile(database, "not a sqlite database at all", "utf8");
+
+    const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
+    // The derived store is rebuilt from authoritative Mission history (P4).
+    expect(await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir))).toEqual(expected);
+    expect(recovered.history.find((event) => event.type === "RECOVERY_MEMORY_REBUILT")?.detail?.reason)
+      .toMatch(/not a database/i);
   });
 });
