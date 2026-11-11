@@ -22,6 +22,7 @@ migration-period re-export shims of that entry point and are removed in M-e.
 | Bounded decision view | `src/memory/packet.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
 | Sham control input | `src/memory/sham.ts` | `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` (`RESEARCH_CONTROL_CARD_SCHEMA` lives in `schema.ts`) |
 | Durable snapshot + provider | `src/memory/store.ts` | `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `createResearchMemoryProvider`, `createDelegatedResearchMemoryProvider` |
+| Read-only serving tool (M-d) | `src/memory/tool.ts` | `MEMORY_READ_TOOL`, `MEMORY_READ_SCHEMA`, `readMemoryCard`, `createMemoryReadTool` |
 | Run-bound slice | `src/memory/slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice`, `MemorySliceError` |
 | Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
 | Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta`, `missionRetainedState`, `recordRetainedState`, `decisionRetainedState`, `assertOffRetainsMissionState` |
@@ -40,6 +41,31 @@ snapshot, packet, Sham and slice digest is unchanged, pinned by
 `src/memory/digests.test.ts`. A changed literal there is a served-content change
 and must be justified as one, not edited to match new code.
 
+## Two serving channels (M-d, #245)
+
+Injection is channel 1 and is unchanged: one pinned decision packet reaches the
+Revision stage in its prompt. `memory_read(ref)` is channel 2 and is registered
+through **execution's** seam — `PiAgentRuntime.execute` binds
+`createMemoryReadTool(memorySlice)` once per Run and adds it to that Run's
+`customTools` and tool allowlist (`src/execution/pi-agent-runtime.ts`), so the
+memory directory creates no second registration seam (ADR-0016).
+
+| Rule | Where it is enforced |
+|---|---|
+| Only a card id present in the packet this Run was served | `readMemoryCard` projects `projectResearchDecisionPacket` over the slice's pinned snapshot and refuses anything else |
+| Same pinned snapshot as injection, never "latest" | the tool is built from the validated `MemorySlice`; it holds no store handle and never reads the active pointer |
+| Body plus provenance refs | `MemoryReadBody.body` is the published card, `provenance` carries `snapshotId`, `snapshotDigest`, `ledgerRevision` and the card's provenance refs (its `sourceRefs`/claim refs plus its `lineage` revision chain) |
+| No enumeration / search / listing | the only argument is one `ref` (`additionalProperties: false`); there is no query or list parameter |
+| Never crosses Run, Mission or arm | one tool per Run, bound to that Run's slice; a slice with no `research` snapshot gets no tool at all |
+| Ledger-visible read event | the runtime reports `AgentRuntimeResult.memoryReads`; `runMissionController` appends one `MEMORY_READ` history event per delivered **and** refused attempt of a Run that reaches a confirmed result (a Run that fails first keeps them in its durable tool-intent record) |
+| Sham parity | the Sham arm's slice carries the Sham snapshot, so the same factory exposes the same tool (same name, description, parameters) returning control-slot bodies — an arm comparison measures memory, not tool access |
+
+A read is context, never Evidence: it changes no measurement, gate, budget or
+promotion, and it does not alter packet, snapshot or slice bytes. The slice's
+fixed `readPolicy` denies raw bodies inside the slice; this tool returns the card
+body the pinned snapshot already published, so it cannot reach any content the
+Run was not served.
+
 ## Lookup by question
 
 - Which card schemas and fields exist? `src/memory/schema.ts` (card interfaces near the top).
@@ -54,6 +80,7 @@ and must be justified as one, not edited to match new code.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
 - What is stored on disk today? `snapshots/<digest>.json` plus `active.json`, written by `store.ts` (immutable snapshot first, then an atomic pointer switch). SQLite is the decided primary store and lands behind the same provider interface in M-b (#243).
+- Can an agent ask for a card body? Only for a card the packet it was served already names, and only from that same pinned snapshot: `memory_read(ref)` (M-d, `src/memory/tool.ts`). It cannot search or list, never crosses a Run/Mission/arm, and every attempt is a `MEMORY_READ` ledger event. The Sham arm exposes the same tool over control slots.
 
 ## Adjacent: Human Insight (#238)
 
@@ -91,6 +118,7 @@ Tests: `src/mission/insight-inbox.test.ts`, `src/mission/director-insight-sideca
 ## Tests
 
 - Digests (M-a pin): `src/memory/digests.test.ts`
+- Read tool (M-d): `src/memory/tool.test.ts`, plus the registration case in `src/execution/pi-agent-runtime.test.ts` and the `MEMORY_READ` ledger case in `tests/integration/mission-start.test.ts`
 - Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`, `src/execution/memory-slice.test.ts`, `src/execution/research-memory-provider.test.ts`
 - Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
 - Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218`, `#240` blocks), `tests/integration/memory-evaluation.test.ts`

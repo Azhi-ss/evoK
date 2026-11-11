@@ -1048,6 +1048,30 @@ function memorySliceFromPrompt(prompt: string): Record<string, any> {
   return JSON.parse(prompt.slice(jsonStart, end)) as Record<string, any>;
 }
 
+/**
+ * M-d (#245): a broker session that also uses `memory_read` when the Run was
+ * served the tool — one delivered read of a card the packet carries, and one
+ * refused attempt outside it.
+ */
+function memoryReadingSession(writes: { prompts: string[]; answer: string }) {
+  const base = brokerSession(writes);
+  return async (options: Parameters<typeof base>[0] & { customTools?: readonly { name: string; execute: (...args: any[]) => Promise<unknown> }[] }): Promise<AgentRuntimeSession> => {
+    const session = await base(options);
+    const readTool = (options.customTools ?? []).find((tool) => tool.name === "memory_read");
+    return {
+      ...session,
+      async prompt(text: string) {
+        if (readTool) {
+          const served = memorySliceFromPrompt(text);
+          await readTool.execute("read-1", { ref: served.research.cards[0].cardId }, undefined, undefined, undefined);
+          await readTool.execute("read-2", { ref: "finding:not-in-this-packet" }, undefined, undefined, undefined).catch(() => {});
+        }
+        await session.prompt(text);
+      },
+    };
+  };
+}
+
 describe("Mission Research Memory at the authorized lifecycle seam (#210)", () => {
   test("a later fresh Researcher Run receives the bounded finding card from the pinned snapshot", async () => {
     const project = await tempProject();
@@ -1123,6 +1147,50 @@ describe("Mission Research Memory at the authorized lifecycle seam (#210)", () =
       omittedCards: 0,
     });
     expect(JSON.stringify(summary.researchMemory)).not.toContain(draft.id);
+  });
+
+  test("every served-card read is a Mission ledger event, including a refused one (#245)", async () => {
+    const project = await tempProject();
+    tempDirs.push(project);
+    const draft = await seedDraft(project, completeDraft("m-memory-read"));
+    const { resolver, resources } = await controlledHarness(project);
+    const contract = toyContract("toy-memory-read");
+    const writes = { prompts: [] as string[], answer: "0.75" };
+
+    const outcome = await startAuthorizedMission({
+      projectRoot: project, missionId: draft.id, authorization: auth(),
+      resolver, resources, evaluator: fileEvaluator, budgetUnits: "model-USD",
+      priceModelCost: () => priceTokens,
+      director: oneExperimentDirector(),
+      maxExperiments: 1,
+      competitionContext: { contract, policy: toyPolicy(contract) },
+      runtimeFactory: (workspaceRoot) => new PiAgentRuntime({
+        workspaceRoot, modelResolver: resolver, resources, sandbox: { allowBash: true },
+        sessionFactory: memoryReadingSession(writes),
+      }),
+    });
+
+    // The Memory-Off baseline never had a packet, so it never had the tool.
+    expect(writes.prompts[0]).not.toContain("MEMORY SLICE");
+    const served = memorySliceFromPrompt(writes.prompts[1]!);
+    const reads = outcome.record.history.filter((event) => event.type === "MEMORY_READ");
+    expect(reads.map((event) => event.detail)).toMatchObject([
+      {
+        runId: `${draft.id}:exp:2`,
+        cardId: `finding:${draft.id}:baseline:1`,
+        snapshotId: served.research.snapshotId,
+        snapshotDigest: served.research.digest,
+        outcome: "delivered",
+      },
+      {
+        runId: `${draft.id}:exp:2`,
+        cardId: "finding:not-in-this-packet",
+        outcome: "refused",
+      },
+    ]);
+    expect(reads[1]!.detail!.reason).toContain("is not part of the delivered packet");
+    // A read is not Evidence: the measurement and the Run accounting are unchanged.
+    expect(outcome.record.runs[`${draft.id}:exp:2`]!.researchMemory?.snapshotDigest).toBe(served.research.digest);
   });
 
   test("the trusted switch disables projection and injection while keeping legacy behavior", async () => {

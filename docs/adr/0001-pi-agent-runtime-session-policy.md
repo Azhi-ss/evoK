@@ -82,7 +82,7 @@ compaction.enabled === false
 retry.enabled === false
 ```
 
-`resourceLoader`、tools、cwd 和 `sessionManager` 的安全约束仍由现有 sandbox/runtime contract 管理；本 ADR 不扩大其配置面。
+`resourceLoader`、tools、cwd 和 `sessionManager` 的安全约束仍由现有 sandbox/runtime contract 管理；本 ADR 不扩大其配置面。`memory_read`（M-d）就是这样一个 runtime 注册的受信任只读工具：每次 Run 由 execution 绑定到该 Run 自己的 pinned memory slice，随 Run 的 `customTools` 与 tool allowlist 下发，不新增配置面，也不允许 role plan 自行扩大工具集。
 
 ### 3.3 Normalized event contract
 

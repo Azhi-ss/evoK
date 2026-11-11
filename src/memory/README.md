@@ -6,10 +6,14 @@ retires or promotes anything there, and a snapshot can be rebuilt from the
 Mission record at any time. What lives here is the deterministic projection
 (`schema.ts`, `projection.ts`, `packet.ts`, `sham.ts`), the durable derived
 storage (`store.ts`, currently the immutable snapshot files plus an atomically
-switched pointer; SQLite becomes the primary store in M-b), and Run-bound slice
-assembly (`slice.ts`). Serving today is injection only: the Director's revision
-is bound to one pinned decision packet, never to whatever the pointer names
-later. Gates, promotion, admission, budget,
+switched pointer; SQLite becomes the primary store in M-b), Run-bound slice
+assembly (`slice.ts`), and the read-only serving tool (`tool.ts`). Serving is two
+channels: the Director's revision is bound to one pinned decision packet, never
+to whatever the pointer names later; and `memory_read(ref)` (M-d, #245) returns
+the body of a card that packet already names, resolved against that same pinned
+snapshot. The tool is registered through execution's Run-tool seam, not a memory
+seam, cannot search or enumerate, and each read is a `MEMORY_READ` ledger event.
+Gates, promotion, admission, budget,
 T48, hang and submission authority stay where ADR-0007 put them; this directory
 is a seventh physical home, not a seventh logical owner (ADR-0016).
 

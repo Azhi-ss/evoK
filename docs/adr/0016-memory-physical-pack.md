@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-11-11
 amends: 0007-six-pack-ownership, 0013-six-pack-physical-closeout
-implements: docs/memory-subsystem-prd.md (spec #235); delivered by #242 (M-a)
+implements: docs/memory-subsystem-prd.md (spec #235); delivered by #242 (M-a), #245 (M-d)
 ---
 
 # 0016 — `src/memory/` as the physical home of the Research Memory projection
@@ -38,7 +38,7 @@ It owns exactly four things:
 | Deterministic projection from Mission history, card and packet schemas | `projection.ts`, `schema.ts`, `packet.ts`, `sham.ts` |
 | Durable derived storage (currently the immutable snapshot files; SQLite is the decided primary store, M-b/#243) | `store.ts` |
 | Run-bound slice assembly and delegation | `slice.ts` |
-| Read-only serving: injection support and, from M-d/#245, `memory_read(ref)` | `query.ts`, `tool.ts` |
+| Read-only serving: injection support in `packet.ts` and, from M-d/#245, `memory_read(ref)` | `tool.ts` |
 
 It owns **no write path to Mission history**, and no gate, promotion, admission,
 budget, T48, hang, or submission authority.

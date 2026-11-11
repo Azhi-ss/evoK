@@ -32,6 +32,7 @@ import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
 import { isShellToolName, resolveUserBash } from "./user-bash";
 import { RoleContextError, validateRoleContext, type RoleTaskContext } from "./role-context";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { createMemoryReadTool, MEMORY_READ_TOOL, type MemoryReadRecord } from "../memory";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
 export { MissingAuthenticationError } from "../evok-model";
 
@@ -400,6 +401,8 @@ export interface AgentRuntimeResult {
   readonly usage: RuntimeUsage;
   readonly stopReason: string;
   readonly text?: string;
+  /** M-d (#245): `memory_read` attempts of this Run, for a ledger-visible read event. */
+  readonly memoryReads?: readonly MemoryReadRecord[];
   /** Actual model that executed the Run (canonical provider/model identity). */
   readonly model?: ModelConfigView;
 }
@@ -944,6 +947,14 @@ export class PiAgentRuntime {
     // Fail closed before any workspace use, session, or intent dispatch: a
     // tampered or foreign role context/memory slice never reaches a model.
     const { roleContext, memorySlice } = boundContextFor(input);
+    // M-d (#245): the read-only memory tool is bound to THIS Run's validated
+    // slice, so it resolves against the same pinned snapshot the Run was served
+    // and can never reach another Run, Mission, arm, or "latest". A slice with
+    // no pinned research snapshot has nothing to read, so it gets no tool.
+    const memoryReadTool = memorySlice?.research === undefined ? undefined : createMemoryReadTool(memorySlice);
+    const configuredTools = memoryReadTool === undefined
+      ? this.configuredTools
+      : [...this.configuredTools, memoryReadTool.definition];
 
     const redactor = this.redactorFor(input);
     const requestedPolicy: SandboxPolicy = restrictSandboxPolicy(this.sandboxPolicy, input.workspace.sandbox ?? {});
@@ -952,7 +963,10 @@ export class PiAgentRuntime {
     if (this.usedWorkspaces.has(requestedRoot)) throw new Error("workspace/session reuse is not allowed");
     const rootBoundary = new SandboxBoundary({ ...requestedPolicy, root: this.root });
     await rootBoundary.assertPathAsync(input.workspace.path, "write");
-    const tools = toolsFor(input.role, input.workspace, requestedPolicy, this.configuredTools);
+    const tools = toolsFor(input.role, input.workspace, requestedPolicy, configuredTools);
+    // Execution grants its own read-only tool; the role plan still cannot
+    // widen itself, because every other name goes through `toolsFor`.
+    if (memoryReadTool !== undefined && !tools.includes(MEMORY_READ_TOOL)) tools.push(MEMORY_READ_TOOL);
     await mkdir(requestedRoot, { recursive: true });
     const approvedRoot = await realpath(requestedRoot);
     const approvedWorkspaceRoot = await realpath(this.root);
@@ -1064,7 +1078,7 @@ export class PiAgentRuntime {
         // Trusted configured tools only; caller session options cannot inject
         // tools (#111). The per-Run `tools` allowlist still hides any
         // unselected capability from the model.
-        customTools: [...this.configuredTools],
+        customTools: [...configuredTools],
         settingsManager: SettingsManager.inMemory(RUNTIME_SESSION_POLICY),
         cwd: workspace,
         tools,
@@ -1212,7 +1226,8 @@ export class PiAgentRuntime {
         throw new RuntimeCrashError("fault injection: crash before result confirmation");
       }
       add({ type: "session_end", sessionId, reason: stopReason });
-      const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText, model: resolvedModel?.model };
+      const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText, model: resolvedModel?.model,
+        ...(memoryReadTool === undefined || memoryReadTool.reads().length === 0 ? {} : { memoryReads: memoryReadTool.reads() }) };
       await this.intentStore.updateIntent(intentId, {
         status: "COMPLETED",
         result,

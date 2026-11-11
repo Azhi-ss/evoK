@@ -228,6 +228,10 @@ _Avoid_: Memory output, second opinion, Memory-approved action
 The bounded Memory view one Memory-informed decision stage receives: cards from exactly one pinned Research Memory snapshot, an omission count, and that snapshot's identity. It is a presentation projection, never a new ledger, and a decision may only cite card ids it actually received.
 _Avoid_: Memory dump, second snapshot, full history
 
+**Memory Read**:
+The read-only second serving channel: `memory_read(ref)` returns the body and provenance refs of ONE card whose id was present in the packet that Run was served. It resolves against the same pinned snapshot as injection, cannot enumerate, search, or cross a Run/Mission/arm boundary, and each attempt (delivered or refused) of a Run that reaches a confirmed result is a `MEMORY_READ` Mission ledger event — a Run that fails first keeps its attempts in its durable tool-intent record. The Sham arm exposes the same tool returning control-slot bodies, so an arm comparison measures memory, not tool access.
+_Avoid_: Semantic search, free-text retrieval, memory dump
+
 **Delegated Memory Slice**:
 The Research Memory slice a delegated child agent receives: newly generated for the child's own Mission/Task/Run/targetAgent from the parent's pinned Research Memory snapshot. It is never the parent's, a sibling's, or a previous Run's slice, and it can never carry a wider packet than the parent was shown.
 _Avoid_: Inherited slice, parent memory, copied snapshot

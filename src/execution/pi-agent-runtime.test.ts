@@ -24,6 +24,7 @@ import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { RoleContextError, assembleRoleContext, type RoleTaskContext } from "./role-context";
 import { createMemorySlice } from "./memory-slice";
+import { createResearchMemorySlice, projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../memory";
 import { OrchestraValidationError } from "./model-orchestra";
 import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "../toy-harness";
 
@@ -1335,5 +1336,111 @@ describe("PiAgentRuntime role-scoped context injection", () => {
       }))).rejects.toBeInstanceOf(RoleContextError); // fail-closed: binding or memory digest mismatch
       expect(created()).toBe(0);
     }
+  });
+
+  // ── M-d (#245): memory_read on execution's tool seam ─────────────────────
+  const researchSlice = (runId: string, targetAgentId: string) => createResearchMemorySlice({
+    sliceId: `slice-${runId}-research`,
+    missionId: "m-unit",
+    taskId: "task-1",
+    runId,
+    targetAgentId,
+    findings: [],
+    research: projectResearchMemorySnapshot({
+      missionId: "m-unit",
+      ledgerRevision: 3,
+      runs: [{ runId: "m-unit:exp:1", taskId: "task-1", ok: true, score: 0.9, evidenceRefs: ["runs/1/result.json"] }],
+    }),
+  });
+
+  test("a Run served a pinned packet gets memory_read, and its reads come back for the ledger", async () => {
+    const slice = researchSlice(identity.runId, "researcher@m-unit:exp:2");
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: slice.digest });
+    const cardId = projectResearchDecisionPacket(slice.research!).cards[0]!.cardId;
+    let tools: string[] = [];
+    let customTools: string[] = [];
+    const runtime = new PiAgentRuntime({
+      sessionFactory: async (sessionOptions) => {
+        tools = [...sessionOptions.tools!];
+        customTools = (sessionOptions.customTools ?? []).map((tool) => tool.name);
+        const readTool = (sessionOptions.customTools ?? []).find((tool) => tool.name === "memory_read")!;
+        const fake = fakeSession([completeEnd]);
+        return {
+          ...fake.session,
+          sessionId: "memory-read-session",
+          async prompt(text: string) {
+            await readTool.execute("call-1", { ref: cardId }, undefined, undefined, undefined as never);
+            await fake.session.prompt(text);
+          },
+        };
+      },
+    });
+
+    const result = await runtime.execute(request({
+      role: { name: "evok-experiment-repair", audience: "researcher" },
+      workspace: approvedWorkspace,
+      identity,
+      targetAgentId: "researcher@m-unit:exp:2",
+      roleContext: context,
+      memorySlice: slice,
+    }));
+
+    expect(customTools).toContain("memory_read");
+    expect(tools).toContain("memory_read");
+    expect(result.memoryReads).toEqual([
+      { cardId, snapshotId: slice.research!.snapshotId, snapshotDigest: slice.research!.digest, outcome: "delivered" },
+    ]);
+  });
+
+  test("a live memory_read tool call passes the Run's sandbox allowlist", async () => {
+    const slice = researchSlice(identity.runId, "researcher@m-unit:exp:2");
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: slice.digest });
+    const cardId = projectResearchDecisionPacket(slice.research!).cards[0]!.cardId;
+    const fake = fakeSession([
+      // The SDK event the runtime re-checks against the sandbox boundary: an
+      // un-granted name would abort the Run as a SandboxViolation.
+      { type: "tool_execution_start", toolCallId: "live-1", toolName: "memory_read", args: { ref: cardId } },
+      { type: "tool_execution_end", toolCallId: "live-1", toolName: "memory_read", result: { text: "{}" }, isError: false },
+      completeEnd,
+    ]);
+    const runtime = new PiAgentRuntime({ sessionFactory: async () => ({ ...fake.session, sessionId: "live-memory-read-session" }) });
+
+    const result = await runtime.execute(request({
+      role: { name: "evok-experiment-repair", audience: "researcher" },
+      workspace: approvedWorkspace,
+      identity,
+      targetAgentId: "researcher@m-unit:exp:2",
+      roleContext: context,
+      memorySlice: slice,
+    }));
+
+    expect(result.stopReason).toBe("stop");
+    expect(result.events.filter((event) => event.toolName === "memory_read").length).toBeGreaterThan(0);
+  });
+
+  test("a Run with no research snapshot gets no memory_read tool at all", async () => {
+    const context = boundContext({ targetAgentId: "researcher@m-unit:exp:2", runId: identity.runId, memoryDigest: memorySlice.digest });
+    let customTools: string[] = [];
+    let tools: string[] = [];
+    const runtime = new PiAgentRuntime({
+      sessionFactory: async (sessionOptions) => {
+        tools = [...sessionOptions.tools!];
+        customTools = (sessionOptions.customTools ?? []).map((tool) => tool.name);
+        return fakeSession([completeEnd]).session;
+      },
+    });
+
+    const result = await runtime.execute(request({
+      role: { name: "researcher" },
+      workspace: approvedWorkspace,
+      identity,
+      targetAgentId: "researcher@m-unit:exp:2",
+      roleContext: context,
+      memorySlice,
+    }));
+
+    expect(tools).not.toContain("memory_read");
+    expect(customTools).not.toContain("memory_read");
+    expect(result.memoryReads).toBeUndefined();
   });
 });
