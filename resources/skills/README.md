@@ -23,6 +23,11 @@ Shipped accepted skills: `mission-intake` (`intake`), `experiment`
 `search` (`search`), `method-improvement` (`method-improvement`),
 `recovery` (`recovery`), and `pitfalls` (`pitfalls`).
 
+Candidate, held out of default context: `charter` (`intake`) — pre-Mission
+research scoping bound to `evok.research-charter/v1`. Its procedure is the
+global `evok-charter` skill; it stays `candidate` until the NOSE pilot in
+`docs/research-charter-prd.md` §11 has been judged.
+
 ## Tags (same Pi root)
 
 evoK product skills in the Pi tree carry:
