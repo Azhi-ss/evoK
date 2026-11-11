@@ -36,12 +36,11 @@ import { validateRoleContext } from "./role-context";
 import { digestValue } from "./security-boundary";
 import {
   cancellationOutcome,
-  closeExecution,
   type ExecutionOutcome,
   type ExecutionReceipt,
   type ExecutionRequest,
-  type ExecutionUsage,
 } from "./execution-protocol";
+import { closeHarnessExecution, createEnvironmentSnapshot, environmentRefsOf } from "../harness";
 import type { SubagentDelegation, SubagentDelegationResult } from "./subagents-adapter";
 
 interface Host {
@@ -335,6 +334,15 @@ export async function dispatchPiChild(
   deadline = setTimeout(() => cancel("EvoK child timed out"), timeoutMs);
   try {
     const cwd = await prepareWorkspace(options.cwd, workspace);
+    // B1: the child's execution environment is frozen before the execution is
+    // declared; the Mission's authorization conditions are never part of it.
+    const environment = createEnvironmentSnapshot({
+      backend: "pi-child-dispatch",
+      workspace: cwd,
+      tools,
+      runtime: "pi-subagents",
+      model: options.model,
+    });
     // B4: the same protocol the main Run path uses. The child declares what it is
     // before it launches, and every terminal answer below closes the same identity.
     const execution = Object.freeze<ExecutionRequest>({
@@ -349,7 +357,7 @@ export async function dispatchPiChild(
           memorySlice: memory.digest,
         }),
       },
-      environment: { backend: "pi-child-dispatch", workspace: cwd, modelId: options.model },
+      environment: environmentRefsOf(environment),
       capabilities: { tools: [...tools] },
       limits: { timeoutMs, toolTurns: remainingToolTurns },
     });
@@ -367,17 +375,20 @@ export async function dispatchPiChild(
         }),
       );
     // Only what this backend alone knows: the turns the child's own installer
-    // spent, what the plugin reported, and how it failed.
+    // spent, what the plugin reported, and how it failed. Measurement and
+    // assembly are the harness's.
     const close = (
       outcome: ExecutionOutcome,
-      detail: { usage?: ExecutionUsage; diagnostics?: { status: string; error?: string } } = {},
+      detail: { usage?: PiChildResult["usage"]; diagnostics?: { status: string; error?: string } } = {},
     ): ExecutionReceipt =>
-      closeExecution(execution, {
+      closeHarnessExecution(execution, environment, {
         outcome,
         // The installer already spent these turns by the one rule; the receipt
         // reports that number instead of counting a second way (C7, B4).
         toolTurns: { spent: spentToolTurns(cwd, memory.runId), limit: remainingToolTurns },
-        ...(detail.usage === undefined ? {} : { usage: detail.usage }),
+        // `own`: the child is metered by its own relay, so the parent session's
+        // reported usage never contains it and this number must be added once (B3).
+        ...(detail.usage === undefined ? {} : { usage: detail.usage, usageAttribution: "own" }),
         ...(detail.diagnostics === undefined ? {} : { diagnostics: detail.diagnostics }),
       });
     // A granted tool only exists if the child is pointed at the installer entry,
@@ -534,7 +545,7 @@ export async function dispatchPiChild(
               agent: delegation.agent,
               value: { text, runId: e.runId, usage: e.usage },
               receipt: close("succeeded", {
-                ...(e.usage === undefined ? {} : { usage: usageOf(e.usage) }),
+                ...(e.usage === undefined ? {} : { usage: e.usage }),
               }),
             }),
           );
@@ -569,25 +580,6 @@ export async function dispatchPiChild(
     finish(() => {});
     throw error;
   }
-}
-
-/**
- * The child's metered usage is its own: it travels through the controller's
- * `evok-meter-*` relay, so the parent session's own reported usage never
- * contains it (B3). Attribution stays one line, owned by the receipt.
- */
-function usageOf(usage: NonNullable<PiChildResult["usage"]>): ExecutionUsage {
-  return {
-    tokens: {
-      input: usage.input,
-      output: usage.output,
-      cacheRead: 0,
-      cacheWrite: 0,
-      total: usage.input + usage.output,
-    },
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost },
-    attribution: "own",
-  };
 }
 
 /** The turns the child's own installer already wrote, by the one tool-turn rule. */

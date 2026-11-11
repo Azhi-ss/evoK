@@ -21,10 +21,10 @@
  *
  * B2 — collection versus adoption. The `artifacts` field has ONE shape
  * (`producer` = execution id, optional `parentExecutionId`, content `digest`).
- * Collecting and content-addressing artifacts is the harness's job and lands in
- * Stage 3, so both paths declare the field and today report no artifacts: a
- * child answers in text only, and a Run's workspace snapshot is adopted by the
- * Mission, never by the backend that ran it.
+ * Collecting and content-addressing a workspace is the harness's
+ * (`harness/artifacts.ts`, at snapshot commit), so a backend declares only what
+ * it itself produced — nothing on both paths today. A Run's workspace snapshot
+ * is adopted by the Mission, never by the backend that ran it.
  *
  * Credentials: `closeExecution` is the one write rule. It redacts free text and
  * refuses a structurally credential-shaped record, using the same guard the
@@ -55,6 +55,12 @@ export interface ExecutionEnvironmentRefs {
   readonly backend: ExecutionBackend;
   readonly workspace: string;
   readonly modelId?: string;
+  /**
+   * B1: content address of the execution environment the harness froze before
+   * the execution was declared (`harness/snapshot.ts`). Mission conditions —
+   * plan version, authorization, budget, memory — never appear here.
+   */
+  readonly environmentDigest?: string;
 }
 
 /** What the execution may do, as granted — a role plan cannot widen it later. */
@@ -77,8 +83,12 @@ export interface ExecutionRequest {
   readonly limits: ExecutionLimits;
 }
 
-/** Raw usage, in the shape both backends already measure (B3). */
-export interface ExecutionUsage {
+/**
+ * What one execution consumed, before anyone attributes it (B3). It lives with
+ * the receipt contract because a receipt carries it; the harness measures into
+ * this shape (`harness/metering.ts`) instead of owning a second copy.
+ */
+export interface RawUsage {
   readonly tokens: {
     readonly input: number;
     readonly output: number;
@@ -93,6 +103,10 @@ export interface ExecutionUsage {
     readonly cacheWrite: number;
     readonly total: number;
   };
+}
+
+/** Raw usage plus whose number it is (B3). */
+export interface ExecutionUsage extends RawUsage {
   /**
    * `own`: this number is not inside any parent aggregate and must be added.
    * `included-in-parent`: the parent already reports this usage; adding it again

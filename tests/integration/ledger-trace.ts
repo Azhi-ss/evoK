@@ -14,6 +14,12 @@
  * at the review base BEFORE the change and are never updated to match new code:
  * a changed pin is a behaviour change and must be justified as one.
  *
+ * NOT captured: the per-intent execution receipt. It is durable state on the
+ * intent record rather than a ledger event, so an additive receipt field (the
+ * Stage 3 environment digest, #256) cannot reach this trace. A change to what a
+ * receipt *asserts* about an existing event still has to be justified, not
+ * assumed away by this exclusion.
+ *
  * NOTE: this is Mission-side test infrastructure, not the execution harness of
  * PRD §4 Stage 3. It deliberately drives the real controller, because that is
  * what must stay equivalent; the import-boundary rule "harness never imports

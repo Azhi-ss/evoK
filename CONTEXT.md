@@ -66,6 +66,10 @@ _Avoid_: Experiment (when referring to the scientific activity rather than one a
 The protocol record of one backend run: a declared execution request (frozen input and environment refs, capability grant, limits, optional parent execution id) closed by one receipt whose terminal outcome is `succeeded`, `failed`, `cancelled`, or `unknown`. A Run is an Execution, and a delegated child is its own Execution with a parent execution id. `unknown` means the terminal state was never confirmed; only a confirmed cancellation is `cancelled`, and neither is ever success.
 _Avoid_: Run (when the protocol record is meant), job, call
 
+**Harness**:
+The capability that executes without evaluating. It freezes the **execution environment** (runtime, model, tools, sandbox image, filesystem — never a Mission authorization condition), collects, validates and content-addresses artifacts and issues their receipt, and measures raw usage. Its physical home is `src/harness/` — an eighth directory, not a seventh logical owner — with one public export surface (`index.ts`), and it never imports `src/mission/`. Adopting an artifact into the Ledger, attributing usage to a Run/agent, and budget reserve/settle stay Mission-owned.
+_Avoid_: Mission controller, evaluator, second control plane
+
 ## Teamwork and Execution
 
 **Team**:

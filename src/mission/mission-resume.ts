@@ -27,10 +27,10 @@
  * the reconciled projection; it cannot declare a lost Run successful, replay
  * it silently, or widen the objective/permissions/budget.
  */
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { collectArtifacts, digestArtifacts } from "../harness";
 import type { MissionDraft } from "./mission-draft";
 import { isMissionId, missionsDir } from "./mission-draft";
 import {
@@ -291,28 +291,6 @@ function snapshotDir(projectRoot: string, missionId: string, runId: string): str
   return join(missionsDir(projectRoot), missionId, RUNS_DIRNAME, runId, SNAPSHOT_DIRNAME);
 }
 
-function collectFiles(root: string): Record<string, string> {
-  const files: Record<string, string> = {};
-  const walk = (dir: string, prefix: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full, rel);
-      else if (entry.isFile()) files[rel] = readFileSync(full, "utf8");
-    }
-  };
-  if (existsSync(root)) walk(root, "");
-  return files;
-}
-
-function digestFiles(files: Readonly<Record<string, string>>): string {
-  const hash = createHash("sha256");
-  for (const name of Object.keys(files).sort()) {
-    hash.update(name); hash.update("\0"); hash.update(files[name]!); hash.update("\0");
-  }
-  return hash.digest("hex");
-}
-
 async function readResultJson(projectRoot: string, missionId: string, runId: string): Promise<BaselineResultRecord | undefined> {
   try {
     const raw = await readFile(baselineResultPath(projectRoot, missionId, runId), "utf8");
@@ -449,8 +427,10 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     let snapshotFiles: Record<string, string> | undefined;
     let snapshotDigest: string | undefined;
     if (existsSync(snapDir)) {
-      snapshotFiles = collectFiles(snapDir);
-      snapshotDigest = digestFiles(snapshotFiles);
+      // B2: the same harness collection/receipt the Run commit used, so recovery
+      // re-derives exactly the address the confirmed result recorded.
+      snapshotFiles = await collectArtifacts(snapDir);
+      snapshotDigest = digestArtifacts(snapshotFiles);
     }
 
     const isBaselineRun = run.runId === baselineRunId || run.runId.includes(":baseline:");

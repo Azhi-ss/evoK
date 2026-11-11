@@ -29,21 +29,11 @@
  * terminal status; an interrupted in-flight execution is reported blocked
  * until the recovery slice (#114) — never silently re-dispatched.
  */
-import { createHash } from "node:crypto";
-import {
-  cp,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { cp, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { collectArtifactCollection } from "../harness";
 import type { EvokResources } from "../evok-resources";
 import {
   isMissionId,
@@ -900,17 +890,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function digestFiles(files: Readonly<Record<string, string>>): string {
-  const hash = createHash("sha256");
-  for (const name of Object.keys(files).sort()) {
-    hash.update(name);
-    hash.update("\0");
-    hash.update(files[name]);
-    hash.update("\0");
-  }
-  return hash.digest("hex");
-}
-
 /** Validation shared by disk loads: untrustworthy bytes are never a new Mission. */
 function validateRecord(value: unknown, expectedId: string): MissionRecord {
   if (!isRecord(value)) throw new MissionRecordCorruptionError(`mission.json for ${expectedId} must be a JSON object`);
@@ -1249,30 +1228,13 @@ export function withEvent(record: MissionRecord, event: HistoryEvent, patch: Par
  * path→content map. Directory traversal stays lexical: the workspace is the
  * controller's freshly created temp dir, and every path is relative to it.
  */
-async function collectFiles(root: string): Promise<Record<string, string>> {
-  const files: Record<string, string> = {};
-  async function walk(dir: string, prefix: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full, rel);
-      } else if (entry.isFile()) {
-        files[rel] = await readFile(full, "utf8");
-      }
-      // sockets/symlinks/etc. are not candidate artifacts and are skipped.
-    }
-  }
-  await walk(root, "");
-  return files;
-}
-
 /** Copy immutable snapshot bytes into controller-owned storage. */
 async function commitSnapshot(
   projectRoot: string,
   missionId: string,
   runId: string,
+  /** The execution that ran in the workspace: the receipt's producer (B2). */
+  executionId: string,
   workspace: string,
 ): Promise<{ files: Record<string, string>; digest: string; ref: string }> {
   const target = snapshotPath(projectRoot, missionId, runId);
@@ -1280,9 +1242,11 @@ async function commitSnapshot(
   await mkdir(join(target, ".."), { recursive: true });
   // cp, not rename: the Run workspace is disposable and removed by the runtime.
   await cp(workspace, target, { recursive: true, errorOnExist: false, force: true });
-  const files = await collectFiles(target);
-  const digest = digestFiles(files);
-  return { files, digest, ref: join(RUNS_DIRNAME, runId, SNAPSHOT_DIRNAME) };
+  // B2: the harness collects, validates and content-addresses the workspace and
+  // issues its receipt; copying it here and deciding it belongs to this Run is
+  // the Mission's adoption.
+  const artifact = await collectArtifactCollection(target, executionId);
+  return { files: artifact.files, digest: artifact.receipt.digest, ref: join(RUNS_DIRNAME, runId, SNAPSHOT_DIRNAME) };
 }
 
 /** Outcome of one candidate dispatch (shared by baseline and each Experiment). */
@@ -1641,7 +1605,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
     };
     r = withEvent(r, { type: "RUN_DISPATCHED", at: now(), detail: { runId: args.runId, sessionId: result.sessionId, model: result.model?.id, cost: runCost } });
 
-    const snapshot = await commitSnapshot(options.projectRoot, draft.id, args.runId, result.workspace);
+    const snapshot = await commitSnapshot(options.projectRoot, draft.id, args.runId, intentId, result.workspace);
     await disposeWorkspace();
     r = withEvent(r, { type: "SNAPSHOT_COMMITTED", at: now(), detail: { runId: args.runId, snapshotDigest: snapshot.digest, files: Object.keys(snapshot.files).length } }, {
       runs: { ...r.runs, [args.runId]: { ...r.runs[args.runId], snapshotRef: snapshot.ref } },

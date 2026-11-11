@@ -79,6 +79,18 @@ describe("import boundaries (PRD §5, S1)", () => {
     expect(resolveSpecifier("src/memory/store.ts", "@earendil-works/pi-coding-agent")).toBeUndefined();
   });
 
+  test("the real tree's harness directory is covered, not merely named", async () => {
+    const harness = (await collectSources(ROOT))
+      .map((file) => file.path)
+      .filter((path) => path.startsWith("src/harness/"));
+    // Stage 3 (#256): the directory exists, so rule 1 now constrains real files.
+    expect(harness.length).toBeGreaterThan(0);
+    for (const path of harness)
+      expect(findViolations([{ path, text: 'import { runMissionController } from "../mission/mission-start";' }])[0]?.rule).toBe(
+        "harness-never-imports-mission",
+      );
+  });
+
   test("the rules name the PRD's three hard rules", () => {
     expect(BOUNDARY_RULES.map((rule) => rule.id).sort()).toEqual([
       "capability-never-imports-research-object",
