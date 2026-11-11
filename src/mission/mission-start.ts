@@ -97,6 +97,7 @@ import {
   isExplicitResumeRequest,
   type ReconciliationReport,
 } from "./mission-resume";
+import { prepareAuthorizedStart, prepareResumeRun, type PreparedRun } from "./run-preparation";
 import { ContextBroker, type MemoryProvider } from "../execution/context-broker";
 import { checkHostCapabilities } from "../execution/host-capabilities";
 import type { HostInventory } from "../execution/host-inventory";
@@ -134,7 +135,7 @@ import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 
 export const MISSION_SCHEMA_VERSION = 1 as const;
 const MISSION_FILENAME = "mission.json";
-const LOCK_FILENAME = "controller.lock";
+export const LOCK_FILENAME = "controller.lock";
 /** Serializes Synthesis Proposal read-modify-write (never a data-losing race). */
 const SUBMISSION_LOCK_FILENAME = "synthesis.lock";
 const RUNS_DIRNAME = "runs";
@@ -729,12 +730,12 @@ function resourceRequestForCompetition(context: MissionCompetitionContext): Reso
   };
 }
 
-interface PreparedCompetitionContext {
+export interface PreparedCompetitionContext {
   readonly broker?: ContextBroker;
   readonly resourceRequest?: ResourceRequest;
 }
 
-function prepareCompetitionContext(context: MissionCompetitionContext | undefined, memory?: MemoryProvider): PreparedCompetitionContext {
+export function prepareCompetitionContext(context: MissionCompetitionContext | undefined, memory?: MemoryProvider): PreparedCompetitionContext {
   if (context === undefined) return {};
   const resourceRequest = resourceRequestForCompetition(context);
   if (resourceRequest !== undefined && context.inventory === undefined) {
@@ -764,7 +765,7 @@ function prepareCompetitionContext(context: MissionCompetitionContext | undefine
  * role-context/ContextBroker path. A legacy no-role-context Run keeps no broker
  * and therefore no injection; an explicit custom provider is never displaced.
  */
-function researchMemoryProviderFor(options: StartMissionOptions, missionId: string, mode: ResearchMemoryEvaluationMode): MemoryProvider | undefined {
+export function researchMemoryProviderFor(options: StartMissionOptions, missionId: string, mode: ResearchMemoryEvaluationMode): MemoryProvider | undefined {
   if (options.competitionContext === undefined) return undefined;
   if (options.competitionContext.memory) return options.competitionContext.memory;
   if (mode === "off") return undefined;
@@ -844,7 +845,7 @@ export interface StartMissionOutcome {
   readonly experiments: readonly ExperimentTrailEntry[];
 }
 
-function missionDir(projectRoot: string, missionId: string): string {
+export function missionDir(projectRoot: string, missionId: string): string {
   return join(missionsDir(projectRoot), missionId);
 }
 
@@ -852,7 +853,7 @@ export function missionRecordPath(projectRoot: string, missionId: string): strin
   return join(missionDir(projectRoot, missionId), MISSION_FILENAME);
 }
 
-function lockPath(projectRoot: string, missionId: string): string {
+export function lockPath(projectRoot: string, missionId: string): string {
   return join(missionDir(projectRoot, missionId), LOCK_FILENAME);
 }
 
@@ -1166,7 +1167,7 @@ export function isExplicitStartRequest(text: string): boolean {
     || /\b(?:begin|launch|dispatch|kick\s?off)\b[^?]*\b(?:mission|baseline|experiment|run)\b/.test(t);
 }
 
-function assertStartable(draft: MissionDraft, options: StartMissionOptions): void {
+export function assertStartable(draft: MissionDraft, options: StartMissionOptions): void {
   const auth = options.authorization;
   if (!auth.requested || !isExplicitStartRequest(auth.token)) {
     throw new MissionStartRejectedError("start intent is ambiguous or absent; discussing a Mission does not dispatch work");
@@ -1202,7 +1203,7 @@ function assertStartable(draft: MissionDraft, options: StartMissionOptions): voi
   }
 }
 
-function contractFromDraft(draft: MissionDraft): MissionStartContract {
+export function contractFromDraft(draft: MissionDraft): MissionStartContract {
   return {
     objective: draft.objective,
     expectedOutputs: draft.outputs,
@@ -1222,7 +1223,7 @@ async function persist(projectRoot: string, record: MissionRecord): Promise<void
  * Shadowing the module-level `persist` with this wrapper needs no call-site
  * changes in the start/controller scopes.
  */
-function makePersistNotifier(options: StartMissionOptions): (projectRoot: string, record: MissionRecord) => Promise<void> {
+export function makePersistNotifier(options: StartMissionOptions): (projectRoot: string, record: MissionRecord) => Promise<void> {
   let lastNotified: HistoryEvent | undefined;
   return async (projectRoot, record) => {
     await persist(projectRoot, record);
@@ -1234,7 +1235,7 @@ function makePersistNotifier(options: StartMissionOptions): (projectRoot: string
   };
 }
 
-function withEvent(record: MissionRecord, event: HistoryEvent, patch: Partial<MissionRecord> = {}): MissionRecord {
+export function withEvent(record: MissionRecord, event: HistoryEvent, patch: Partial<MissionRecord> = {}): MissionRecord {
   return {
     ...record,
     ...patch,
@@ -1309,135 +1310,15 @@ type AttemptOutcome =
  * stops, and AbortError on user interruption.
  */
 export async function startAuthorizedMission(options: StartMissionOptions): Promise<StartMissionOutcome> {
-  if (!isAbsolute(options.projectRoot)) throw new TypeError("projectRoot must be an absolute path");
-  if (options.signal?.aborted) {
-    const error = new Error("mission start aborted before dispatch");
-    error.name = "AbortError";
-    throw error;
-  }
-  const draft = await loadMissionDraft(options.projectRoot, options.missionId);
-  assertStartable(draft, options);
-  const preparedCompetitionContext = prepareCompetitionContext(options.competitionContext, researchMemoryProviderFor(options, draft.id, researchMemoryModeOf(options.researchMemory)));
-  const dir = missionDir(options.projectRoot, draft.id);
-  await mkdir(dir, { recursive: true });
-
-  const reserveCost = options.reserveCost ?? 0;
-  if (!Number.isFinite(reserveCost) || reserveCost < 0) {
-    throw new MissionStartRejectedError("reserveCost must be a finite non-negative number; unknown cost is not zero");
-  }
-  const maxExperiments = options.maxExperiments ?? DEFAULT_MAX_EXPERIMENTS;
-  if (!Number.isInteger(maxExperiments) || maxExperiments < 0) {
-    throw new MissionStartRejectedError("maxExperiments must be a non-negative integer");
-  }
-  // #114 observability seam (shadows the module writer; no call-site churn).
-  const persist = makePersistNotifier(options);
-
-  // Ownership fencing BEFORE any accepted record can be reused.
-  let previous: MissionRecord | undefined;
-  try {
-    previous = await loadMissionRecord(options.projectRoot, draft.id);
-  } catch (error) {
-    if (error instanceof MissionRecordCorruptionError) throw error;
-    if (!(error instanceof MissionStartRejectedError)) throw error;
-  }
-  let lockExists = false;
-  try {
-    await stat(lockPath(options.projectRoot, draft.id));
-    lockExists = true;
-  } catch {
-    lockExists = false;
-  }
-  if (lockExists) {
-    throw new MissionControllerConflictError(
-      `mission ${draft.id} already has an active controller (${LOCK_FILENAME}); a second controller cannot dispatch it`,
-      "active-controller-lock",
-    );
-  }
-  if (previous) {
-    if (previous.status === "interrupted" || Object.values(previous.runs).some((run) => run.status === "interrupted")) {
-      throw new MissionControllerConflictError(
-        `mission ${draft.id} has an interrupted, unconfirmed execution; it stays blocked until the recovery slice reconciles it`,
-        "uncertain interrupted execution awaits recovery",
-      );
-    }
-    throw new MissionStartRejectedError(
-      `mission ${draft.id} was already started (status ${previous.status}); start is not idempotent — resume through the recovery path; the existing record was not overwritten`,
-    );
-  }
-
-  const now = () => new Date().toISOString();
-  const baselineRunId = `${draft.id}:baseline:1`;
-  const baselineIntentId = `${baselineRunId}:intent`;
-
-  // Acquire the controller lock BEFORE any accepted record is persisted.
-  const lock = lockPath(options.projectRoot, draft.id);
-  try {
-    await writeFile(lock, JSON.stringify({ pid: process.pid, runId: baselineRunId, since: now() }, null, 2), { flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new MissionControllerConflictError(
-        `mission ${draft.id} already has an active controller (${LOCK_FILENAME}); a second controller cannot dispatch it`,
-        "active-controller-lock",
-      );
-    }
-    throw error;
-  }
-  const releaseLock = async () => {
-    if (!options.leaveLock) await rm(lock, { force: true }).catch(() => {});
-  };
-
-  let record: MissionRecord = {
-    schemaVersion: MISSION_SCHEMA_VERSION,
-    id: draft.id,
-    status: "accepted",
-    objective: draft.objective,
-    contract: contractFromDraft(draft),
-    budget: { total: draft.budget.total, units: draft.budget.units, consumed: draft.usage.cost.total, remaining: draft.budget.total - draft.usage.cost.total },
-    reserved: 0,
-    usage: { intake: { tokens: { ...draft.usage.tokens }, cost: { ...draft.usage.cost } }, runs: [] },
-    runs: {},
-    history: [],
-    stopReason: undefined,
-    // #113: the single authoritative state; the director only reads a
-    // projection of it and proposes bounded changes validated by this module.
-    stateVersion: 0,
-    tasks: draft.plan.tasks.map((task) => ({ ...task, source: "intake" as const })) as MissionTaskRecord[],
-    // #114: the accepted execution policy is authoritative; a resume enforces
-    // these values rather than re-reading the mutable draft.
-    permissions: draft.constraints.permissions ?? [],
-    stopConditions: draft.stopConditions,
-    modelTier: options.tier ?? "default",
-    // M1-T9: the trusted evaluation arm is captured at acceptance like the
-    // execution policy, so recovery preserves it.
-    researchMemoryMode: researchMemoryModeOf(options.researchMemory),
-    decisions: [],
-    experiments: [],
-    createdAt: now(),
-    updatedAt: now(),
-  };
-
-  record = withEvent(record, { type: "MISSION_ACCEPTED", at: now(), detail: { authorizationToken: options.authorization.token, source: options.authorization.source ?? "user" } });
-  record = withEvent(record, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: baselineRunId, intentId: baselineIntentId, attempt: 1 } }, {
-    runs: { ...record.runs, [baselineRunId]: { runId: baselineRunId, intentId: baselineIntentId, attempt: 1, status: "dispatched", workspace: "", dispatchedAt: now() } },
-  });
-
-  // Reserve/check the declared baseline bound before further dispatch.
-  const initialAvailable = record.budget.remaining - record.reserved;
-  if (initialAvailable < reserveCost) {
-    record = withEvent(record, { type: "BUDGET_EXHAUSTED", at: now(), detail: { available: initialAvailable, requested: reserveCost } }, {
-      status: "budget-exhausted",
-      stopReason: `budget exhausted before dispatch: ${initialAvailable} ${record.budget.units} available, ${reserveCost} reserved`,
-    });
-    await persist(options.projectRoot, record);
-    await releaseLock();
-    throw new BudgetExhaustedError(record.stopReason!);
-  }
-  record = withEvent(record, { type: "BUDGET_RESERVED", at: now(), detail: { reserveCost } }, {
-    reserved: record.reserved + reserveCost,
-  });
-  await persist(options.projectRoot, record);
-
-  const baselineTask = draft.plan.tasks[0]!;
+  // Stage 1 (#254): authorization + permission checks, the Mission lock, the
+  // budget reservation, the plan-version freeze and the Mission-owned
+  // authorization snapshot happen in ONE place (run-preparation.ts) before any
+  // execution. Everything after this point is the unchanged dispatch path.
+  const prepared = await prepareAuthorizedStart(options);
+  const { draft } = prepared;
+  // The dispatch input is the FROZEN plan preparation authorized, not the
+  // mutable draft: re-saving the draft after preparation changes nothing.
+  const baselineTask = prepared.record.tasks![0]!;
   const baselineInstructions = [
     "You are executing the BASELINE Task of one authorized evoK Mission. Work only inside your isolated run workspace; it is the current working directory.",
     `Mission objective: ${draft.objective}`,
@@ -1454,8 +1335,9 @@ export async function startAuthorizedMission(options: StartMissionOptions): Prom
   ].filter((line) => line !== "").join("\n");
 
   return runMissionController({
-    options, draft, record, reserveCost, releaseLock, competition: preparedCompetitionContext,
-    mode: { kind: "start", baselineRunId, baselineTask, baselineInstructions },
+    prepared,
+    options,
+    mode: { kind: "start", baselineTask, baselineInstructions },
   });
 }
 
@@ -1476,20 +1358,23 @@ function candidateNetworkInstruction(network: readonly string[] | undefined): st
  * any intake; consumed budget and confirmed results are already on record.
  */
 export interface ControllerInit {
+  /**
+   * Stage 1 (#254): the frozen authorization this Run executes under. The
+   * controller consumes it instead of re-deriving lock, reservation, plan and
+   * snapshot from the live options.
+   */
+  readonly prepared: PreparedRun;
   readonly options: StartMissionOptions;
-  readonly draft: MissionDraft;
-  readonly record: MissionRecord;
-  readonly reserveCost: number;
-  readonly releaseLock: () => Promise<void>;
-  readonly competition: PreparedCompetitionContext;
   readonly mode:
-    | { readonly kind: "start"; readonly baselineRunId: string; readonly baselineTask: DraftPlanTask; readonly baselineInstructions: string }
+    | { readonly kind: "start"; readonly baselineTask: DraftPlanTask; readonly baselineInstructions: string }
     | { readonly kind: "resume" };
 }
 
 export async function runMissionController(init: ControllerInit): Promise<StartMissionOutcome> {
-  const { options, draft, reserveCost, releaseLock, competition } = init;
-  let record: MissionRecord = init.record;
+  const { options, prepared } = init;
+  const { draft, competition, releaseLock, snapshot } = prepared;
+  const reserveCost = snapshot.budget.requested;
+  let record: MissionRecord = prepared.record;
   // #114 observability seam (shadows the module writer; no call-site churn).
   const persist = makePersistNotifier(options);
   // Mode-derived baseline context: a fresh start names its baseline Run; a
@@ -1497,7 +1382,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
   const now = () => new Date().toISOString();
   const maxExperiments = options.maxExperiments ?? DEFAULT_MAX_EXPERIMENTS;
   const startMode = init.mode.kind === "start" ? init.mode : undefined;
-  const baselineRunId = startMode?.baselineRunId ?? record.baselineRunId ?? `${draft.id}:baseline:1`;
+  const baselineRunId = prepared.runId;
   const allowBash = (record.permissions ?? draft.constraints.permissions ?? []).includes("local-shell-in-workspace");
   const roleTools = [...READ_ONLY_TOOLS, "write", "edit", ...(allowBash ? ["bash"] : [])];
   // Per-competition context broker. Construction validates that the policy is
@@ -2874,12 +2759,10 @@ export async function resumeAuthorizedMission(options: ResumeMissionOptions): Pr
   await persistRecovered(options.projectRoot, record);
 
   const outcome = await runMissionController({
+    // Stage 1 (#254): recovery already established authority and reconciled
+    // the durable state; this freezes exactly what it proved.
+    prepared: prepareResumeRun({ draft, record, options, competition: preparedCompetitionContext, releaseLock }),
     options,
-    draft,
-    record,
-    reserveCost: options.reserveCost ?? 0,
-    releaseLock,
-    competition: preparedCompetitionContext,
     mode: { kind: "resume" },
   });
   return { ...outcome, reconciliation };
