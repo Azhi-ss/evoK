@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { driveCappedLoop, LOOP_CAPS } from "./loop-driver";
+import { resolvePython } from "./python";
 
 const RELAY = fileURLToPath(new URL("../../relay", import.meta.url));
 const ROUND0_PATH = "heldout/hb003/seed0/.../trace.jsonl";
 const ROUND0_SHA = "3e4f857cfbaae07c3901c379bcdcdd681c15f2438881ad943a6ab6cc957b1a76";
 
 function python(code: string): string {
-  const proc = spawnSync("python3", ["-c", code], { encoding: "utf8", cwd: RELAY });
+  const proc = spawnSync(resolvePython(), ["-c", code], { encoding: "utf8", cwd: RELAY });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "python failed").trim());
   return proc.stdout.trim();
 }

@@ -4,6 +4,7 @@ import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePython } from "./python";
 
 /** Frozen externally. Under EWI-relay-v1 this number is not yet calibrated. */
 export const DEFAULT_EWI_THRESHOLD_SEC = 600;
@@ -191,7 +192,7 @@ export function measureRunEwi(input: RunEwiInput, thresholdSec: number): EwiMetr
     copyFileSync(input.batchLogPath, join(temp, "batch.log"));
     const timed = input.timedOut ? "True" : "False";
     writeFileSync(join(temp, "summary.csv"), `task,seed,n,timed_out,trace\n${input.task},${input.seed},${input.runNumber ?? 1},${timed},${input.tracePath}\n`);
-    const proc = spawnSync("python3", [script, temp], { encoding: "utf8" });
+    const proc = spawnSync(resolvePython(), [script, temp], { encoding: "utf8" });
     if (proc.status !== 0) {
       throw new Error(`${proc.stderr || ""}${proc.stdout || ""}`.trim() || "ewi_idle.py failed");
     }
@@ -223,7 +224,7 @@ export function scoreRelayEwi(input: RelayEwiInput): Omit<ScoredRelayEwi, "ewi_t
     throw new Error("EWI threshold must be a positive number of seconds");
   }
   const script = fileURLToPath(new URL("../../relay/ewi_relay.py", import.meta.url));
-  const proc = spawnSync("python3", [script], {
+  const proc = spawnSync(resolvePython(), [script], {
     input: JSON.stringify({
       t_first: input.tFirst,
       t_last_write: input.tLastWrite,

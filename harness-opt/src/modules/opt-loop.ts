@@ -15,6 +15,7 @@ import {
   type VerifiedAttestation,
 } from "./attestation";
 import { assertNoHeldOutLeak } from "./proposer";
+import { resolvePython } from "./python";
 import {
   absentResultWatcher,
   DEFAULT_EWI_THRESHOLD_SEC,
@@ -1148,7 +1149,7 @@ const REGISTRY_CAS_PY = [
 function casAppendLine(file: string, line: string): boolean {
   mkdirSync(dirname(file), { recursive: true });
   const current = existsSync(file) && isRegularFile(file) ? readFileSync(file) : Buffer.alloc(0);
-  const proc = spawnSync("python3", ["-c", REGISTRY_CAS_PY], {
+  const proc = spawnSync(resolvePython(), ["-c", REGISTRY_CAS_PY], {
     input: JSON.stringify({ path: resolve(file), sha256: sha256(current), line }),
     encoding: "utf8",
   });
@@ -4635,7 +4636,7 @@ export function stubOptRoles(key: Buffer): OptRoles {
 export function realRunCommand(harnessPin: string = DEFAULT_HARNESS_PIN): readonly string[] {
   const script = fileURLToPath(new URL("../../relay/devii_docker_v2.py", import.meta.url));
   return [
-    "python3", script, "once",
+    resolvePython(), script, "once",
     "--task", "{taskPath}",
     "--seed", "{seed}",
     "--arm", "{arm}",
@@ -4869,7 +4870,7 @@ export function reconcilePrereg(
 ): { readonly accepted: boolean; readonly purpose: string | null; readonly exclude: boolean } {
   if (expectedTask.trim() === "") throw new Error("reconcile task");
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  const proc = spawnSync("python3", [
+  const proc = spawnSync(resolvePython(), [
     "-c",
     [
       "import hashlib, json, sys",
@@ -4931,7 +4932,7 @@ function unscoredRun(
 
 function readEvaluatorNullScore(runDir: string, checkerDir: string): string | null {
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  const proc = spawnSync("python3", [
+  const proc = spawnSync(resolvePython(), [
     "-c",
     [
       "import json, sys",
@@ -5127,7 +5128,7 @@ function loopRelayRoot(options: OptLoopOptions, env: NodeJS.ProcessEnv): string 
 
 function defaultRelayRoot(): string {
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  const proc = spawnSync("python3", ["-c", "import hooks; print(hooks.DEFAULT_RELAY_ROOT, end='')"], {
+  const proc = spawnSync(resolvePython(), ["-c", "import hooks; print(hooks.DEFAULT_RELAY_ROOT, end='')"], {
     cwd: relayDir,
     encoding: "utf8",
   });
@@ -5530,7 +5531,7 @@ class RelayControl {
     const script = fileURLToPath(new URL("../../relay/harness_relay.py", import.meta.url));
     const args = [script, "control", "--log-root", root, "--port", port, "--bind", bindHost, "--mode", mode, "--carried-tokens", String(carriedTokens)];
     if (upstreamUrl !== "") args.push("--upstream", upstreamUrl);
-    this.child = spawn("python3", args, {
+    this.child = spawn(resolvePython(), args, {
       cwd: relayDir,
       env: {
         ...process.env,
@@ -5923,7 +5924,7 @@ function hostPreRun(runDir: string, attestDir: string, configPath: string, harne
     { source: configPath, target: "/opt/config.json" },
     { source: harnessPath, target: "/opt/harness.mjs" },
   ]);
-  const proc = spawnSync("python3", ["-c", PRE_RUN_PY, relayDir, runDir, mounts, keyFile], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), ["-c", PRE_RUN_PY, relayDir, runDir, mounts, keyFile], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error((proc.stderr || proc.stdout || "pre-run failed").trim());
   const sealed = JSON.parse(proc.stdout) as { ok?: boolean };
   mkdirSync(attestDir, { recursive: true });
@@ -5996,12 +5997,12 @@ const RUN_RECORD_PY = [
 /** Argv of the run-record child. The HMAC key is read from HARNESS_ATTEST_KEY_FILE, not from this list. */
 export function runRecordArgv(checkerDir: string, containerDir: string, mode: string, extra: string): readonly string[] {
   const relayDir = fileURLToPath(new URL("../../relay", import.meta.url));
-  return ["python3", "-c", RUN_RECORD_PY, relayDir, checkerDir, containerDir, mode, extra];
+  return [resolvePython(), "-c", RUN_RECORD_PY, relayDir, checkerDir, containerDir, mode, extra];
 }
 
 function runRecord(keyFile: string, mode: "sign" | "verify" | "notes", checkerDir: string, containerDir: string, extra: string, input?: string): { ok?: boolean; sig?: Record<string, unknown> } | null {
   const argv = runRecordArgv(checkerDir, containerDir, mode, extra);
-  const proc = spawnSync(argv[0] ?? "python3", argv.slice(1), {
+  const proc = spawnSync(argv[0], argv.slice(1), {
     encoding: "utf8",
     env: { ...process.env, HARNESS_ATTEST_KEY_FILE: keyFile },
     ...(input !== undefined ? { input } : {}),
@@ -6062,7 +6063,7 @@ function relayCited(logPath: string, hostFile: string, sha: string, roleCwd: str
 function readEvidence(logPath: string, hostFile: string, sha: string, roleCwd: string): CiteEvidence {
   if (!existsSync(logPath) || !existsSync(hostFile)) return { ok: false, reason: "missing" };
   const script = fileURLToPath(new URL("../../relay/ledger.py", import.meta.url));
-  const proc = spawnSync("python3", [script, "read-evidence", "--log", logPath, "--file", hostFile, "--sha", sha, "--cwd", roleCwd], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), [script, "read-evidence", "--log", logPath, "--file", hostFile, "--sha", sha, "--cwd", roleCwd], { encoding: "utf8" });
   if (!proc.stdout) return { ok: false, reason: "no_segment" };
   try {
     const parsed = JSON.parse(proc.stdout) as { ok?: unknown; reason?: unknown; startLine?: unknown; endLine?: unknown };

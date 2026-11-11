@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_EWI_THRESHOLD_SEC, EWI_IDLE_SHA, measureEwi, measureRunEwi, resolveEwiIdleScript, roundTenth } from "./ewi";
+import { resolvePython } from "./python";
 
 const EWI_SCRIPT = resolveEwiIdleScript();
 
@@ -235,7 +236,7 @@ describe("EWI metric", () => {
       const dir = edgeDir(row.name, row.trace, row.link);
       if (row.idle === undefined) {
         expect(() => measureCase(dir)).toThrow(row.error ?? /missing ts|JSONDecodeError|has no attribute 'get'/);
-        const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
+        const proc = spawnSync(resolvePython(), [EWI_SCRIPT, dir], { encoding: "utf8" });
         expect(proc.status).not.toBe(0);
         continue;
       }
@@ -284,7 +285,7 @@ function edgeDir(name: string, trace: string, link = false): string {
 }
 
 function pythonIdle(dir: string): number {
-  const proc = spawnSync("python3", [EWI_SCRIPT, dir], { encoding: "utf8" });
+  const proc = spawnSync(resolvePython(), [EWI_SCRIPT, dir], { encoding: "utf8" });
   if (proc.status !== 0) throw new Error(proc.stderr || proc.stdout || "ewi_idle.py failed");
   const line = proc.stdout.split("\n").find((item) => item.startsWith("{"));
   if (!line) throw new Error(proc.stdout || "ewi_idle.py printed nothing");

@@ -13,6 +13,7 @@ import {
   verifyHostAttestation,
   writeHostAttestation,
 } from "./attestation";
+import { resolvePython } from "./python";
 
 function keyFile(dir: string): { readonly file: string; readonly key: Buffer } {
   const file = join(dir, "attest.key");
@@ -47,7 +48,7 @@ function layout(name: string): { readonly root: string; readonly runDir: string;
 describe("devii-opt-attest/v1", () => {
   test("a Python-written attestation verifies, and a changed artifact does not", () => {
     const host = layout("py");
-    const written = spawnSync("python3", ["-c", PYTHON_WRITE, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    const written = spawnSync(resolvePython(), ["-c", PYTHON_WRITE, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
     expect(written.status).toBe(0);
     const verified = verifyHostAttestation({
       attestDir: host.attestDir,
@@ -97,7 +98,7 @@ describe("devii-opt-attest/v1", () => {
         at: "2026-10-21T00:00:00+09:00",
       },
     });
-    const checked = spawnSync("python3", ["-c", PYTHON_CHECK, join(host.attestDir, ATTEST_FILENAME), join(host.root, "attest.key")], { encoding: "utf8" });
+    const checked = spawnSync(resolvePython(), ["-c", PYTHON_CHECK, join(host.attestDir, ATTEST_FILENAME), join(host.root, "attest.key")], { encoding: "utf8" });
     expect(checked.status).toBe(0);
     expect(checked.stdout.trim()).toBe("ok");
     const body = JSON.parse(readFileSync(join(host.attestDir, ATTEST_FILENAME), "utf8")) as Record<string, unknown>;
@@ -196,7 +197,7 @@ describe("devii-opt-attest/v1", () => {
     });
     expect(hijacked.ok).toBe(false);
     if (!hijacked.ok) expect(hijacked.reasons).toContain("runPath");
-    const missing = spawnSync("python3", ["-c", PYTHON_WRITE_NO_RUNPATH, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    const missing = spawnSync(resolvePython(), ["-c", PYTHON_WRITE_NO_RUNPATH, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
     expect(missing.status).toBe(0);
     const bare = verifyHostAttestation({
       attestDir: host.attestDir,
@@ -276,7 +277,7 @@ describe("devii-opt-attest/v1", () => {
         at: "2026-10-21T00:00:00+09:00",
       },
     })).toThrow(/escapes the out dir/);
-    const escaped = spawnSync("python3", ["-c", PYTHON_WRITE_ESCAPE, host.runDir, join(host.root, "escape-signed"), host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    const escaped = spawnSync(resolvePython(), ["-c", PYTHON_WRITE_ESCAPE, host.runDir, join(host.root, "escape-signed"), host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
     expect(escaped.status).toBe(0);
     const outside = verifyHostAttestation({
       attestDir: join(host.root, "escape-signed"),
@@ -292,7 +293,7 @@ describe("devii-opt-attest/v1", () => {
 
   test("a copied legacy absolute attestation verifies when the relative remainder matches", () => {
     const host = layout("legacy-copy");
-    const written = spawnSync("python3", ["-c", PYTHON_WRITE, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
+    const written = spawnSync(resolvePython(), ["-c", PYTHON_WRITE, host.runDir, host.attestDir, host.harness, host.config, join(host.root, "attest.key")], { encoding: "utf8" });
     expect(written.status).toBe(0);
     const inPlace = verifyHostAttestation({
       attestDir: host.attestDir,

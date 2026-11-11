@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { addUsage, EMPTY_USAGE, usageTokens, type UsageParts } from "../pi/usage";
 import type { TaskRef } from "../types";
 import { ExecutorUnavailable, type ExecutionTrace, type HarnessExecutor, type TraceStep } from "./executor";
+import { resolvePython } from "./python";
 
 interface RunSpawnOptions {
   readonly encoding: "utf8";
@@ -205,7 +206,7 @@ export class DeviiExecutor implements HarnessExecutor {
     const taskRoot = this.options.taskRoot ?? env.HARNESS_OPT_TASK_ROOT ?? "";
     const taskPath = taskRoot ? join(taskRoot, task.path) : task.path;
     const taskDir = limitsDirectory(taskPath);
-    const python = this.options.python ?? "python3";
+    const python = resolvePython(this.options.python, env);
     if (!existsSync(defaultScript)) throw new Error(`task limit reader is missing: ${defaultScript}`);
     const limits = readTaskLimits(python, defaultScript, taskDir);
     const memoryPath = this.options.memoryPath ?? env.HARNESS_MEMORY_PATH;

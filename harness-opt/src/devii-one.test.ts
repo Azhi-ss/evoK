@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePython } from "./modules/python";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -35,7 +36,7 @@ describe("devii_one dry plan", () => {
     writeFileSync(config, `${JSON.stringify({ parts: { "agent-loop": { maxSteps: 3 } } })}\n`);
     writeFileSync(memory, `${JSON.stringify({ text: "tool errors repeat", scope: "all" })}\n`);
     const runRoot = join(dir, "runs");
-    const result = spawnSync("python3", [
+    const result = spawnSync(resolvePython(), [
       join(here, "../scripts/devii_one.py"),
       "--task-id", "tasks2/i006",
       "--task-dir", task,

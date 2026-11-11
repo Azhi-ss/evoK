@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { assertScoredRelayLog, CommandOptExecutor, hostRunId, renderExecutorCommand, tokenCap, writeRunArtifacts, type OptRunRequest, type OptTask } from "./opt-executor";
+import { resolvePython } from "./python";
 
 const TASK: OptTask = {
   id: "002",
@@ -44,7 +45,7 @@ writeFileSync(run + "/base-url.txt", process.env.BASE_URL ?? "");
 writeFileSync(run + "/result.json", JSON.stringify({
   reward: 1, tokens: 999, wall_s: 2, timed_out: false, score_status: "scored"
 }));
-const plant = spawnSync("python3", ["-c", \`
+const plant = spawnSync(${JSON.stringify(resolvePython())}, ["-c", \`
 import sys
 sys.path.insert(0, sys.argv[1])
 import plant
@@ -129,7 +130,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
 
   test("a marker placeholder is refused before spawn", () => {
     expect(() => renderExecutorCommand(
-      ["python3", "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--marker", "{marker}"],
+      [resolvePython(), "--task", "{task}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}", "--marker", "{marker}"],
       request("/tmp"),
       "driver.py",
     )).toThrow(/marker/);
@@ -163,7 +164,7 @@ writeFileSync(run + "/result.json", JSON.stringify({
       tokenW: 9_024_166,
     };
     const argv = renderExecutorCommand(
-      ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
+      [resolvePython(), "--task", "{taskPath}", "--run-dir", "{runDir}", "--network", "{network}", "--attest-dir", "{attestDir}"],
       { ...request(dir), task, tokenCap: tokenCap(task) },
     );
     expect(task.network).toBe("devii-004-int");
@@ -194,7 +195,7 @@ describe("scored relay log", () => {
     mkdirSync(join(dir, "run"), { recursive: true });
     writeFileSync(join(dir, "run", "result.json"), `${JSON.stringify({ reward: 1, tokens: 1, wall_s: 1, timed_out: false, score_status: "scored" })}\n`);
     const executor = new CommandOptExecutor({
-      command: ["python3", "--task", "{taskPath}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
+      command: [resolvePython(), "--task", "{taskPath}", "--run-dir", "{runDir}", "--attest-dir", "{attestDir}"],
       spawn: () => ({ status: 0, stdout: "", stderr: "" }),
     });
     await expect(executor.run(missing)).rejects.toThrow(/relayLogRoot/);

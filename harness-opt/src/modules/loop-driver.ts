@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { resolvePython } from "./python";
 
 const SCRIPT = fileURLToPath(new URL("../../relay/loop_mode.py", import.meta.url));
 
@@ -101,7 +102,7 @@ export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown,
     throw new Error("pre_round1 needs round0 path and sha");
   }
   if (!/^[0-9a-f]{32}$/.test(campaignNonce)) throw new Error("campaignNonce");
-  const proc = spawnSync("python3", [SCRIPT, "pre-round1"], {
+  const proc = spawnSync(resolvePython(), [SCRIPT, "pre-round1"], {
     input: JSON.stringify({
       seed: randomBytes(32).toString("hex"),
       ranker,
@@ -120,7 +121,7 @@ export function signPreRound1(keyFile: string, ranker: unknown, critic: unknown,
 }
 
 function loopMode(command: string, payload: unknown): Record<string, unknown> {
-  const proc = spawnSync("python3", [SCRIPT, command], {
+  const proc = spawnSync(resolvePython(), [SCRIPT, command], {
     input: JSON.stringify(payload),
     encoding: "utf8",
   });
