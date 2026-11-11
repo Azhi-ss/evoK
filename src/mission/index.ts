@@ -34,6 +34,32 @@ export {
   researchMemoryArmMetrics,
 } from "./memory-evaluation";
 export {
+  BASELINE_CATEGORIES,
+  RESEARCH_CHARTER_SCHEMA,
+  ResearchCharterValidationError,
+  assertResearchCharter,
+  charterDigest,
+  validateResearchCharter,
+} from "./research-charter";
+export type {
+  BaselineCategory,
+  BaselineCategorySlot,
+  BaselinePortfolio,
+  CharterAmbition,
+  CharterBaseline,
+  CharterConstraints,
+  CharterEvaluationProtocol,
+  CharterIssue,
+  CharterObjective,
+  CharterResearchGap,
+  CharterSource,
+  CharterValidation,
+  CharterVerdict,
+  ResearchCharter,
+  ResearchCharterInput,
+  ReproductionStatus,
+} from "./research-charter";
+export {
   HUMAN_INSIGHT_DRAFT_SCHEMA,
   INSIGHT_DISPOSITIONS,
   INSIGHT_INBOX_SCHEMA,
