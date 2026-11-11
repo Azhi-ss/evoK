@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCompetitionContract } from "../competition/competition-contract";
@@ -9,12 +10,14 @@ import { createMemorySlice } from "./memory-slice";
 import { buildResearcherContext } from "./researcher-context";
 import {
   dispatchPiChild,
+  PiChildCancelledError,
   PiChildFailureError,
   PiChildTerminationUnconfirmedError,
   type PiChildTransportOptions,
 } from "./pi-child-dispatch";
 import { createPiSubagentsAdapter, type SubagentDelegation } from "./subagents-adapter";
 import { assertNoCredentials } from "./pi-child-records";
+import { CHILD_STATE_DIR } from "./pi-child-tools";
 import { PiSubagentsProtocolError } from "./pi-subagents-protocol";
 
 const contract = createCompetitionContract({
@@ -218,6 +221,7 @@ test("a native crash reports the child's retained stream tail, exit code and nat
   try {
     const failed = await dispatchPiChild({ events }, delegation, options(cwd)).catch((error) => error);
     expect(failed).toBeInstanceOf(PiChildFailureError);
+    expect(failed.receipt).toMatchObject({ outcome: "failed", artifacts: [], toolTurns: { spent: 0, limit: 8 } });
     // What actually happened, not a bare "failed".
     expect(failed.message).toMatch(/delegation failed/);
     expect(failed.message).toContain("exit 3");
@@ -351,9 +355,14 @@ test("aborting waits for the plugin to acknowledge cancellation before disposing
     });
   });
   try {
-    await expect(
-      dispatchPiChild({ events }, delegation, options(cwd, { signal: controller.signal })),
-    ).rejects.toThrow(/cancelled/);
+    const cancelled = await dispatchPiChild(
+      { events },
+      delegation,
+      options(cwd, { signal: controller.signal }),
+    ).catch((error) => error);
+    expect(cancelled).toBeInstanceOf(PiChildCancelledError);
+    // The plugin confirmed the terminal state, so this is a real cancellation.
+    expect(cancelled.receipt.outcome).toBe("cancelled");
     expect(order).toEqual(["cancel", "acknowledged", "disposed"]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -703,6 +712,87 @@ test("fork is refused when the parent snapshot is absent, and a shared workspace
     await writeFile(join(cwd, "already-here"), "");
     await expect(dispatchPiChild({ events }, delegation, options(cwd))).rejects.toThrow(/empty workspace/);
     expect(seen).toEqual([]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a delegated child answers one execution receipt in the shared shape", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-child-receipt-"));
+  const events = bus();
+  let executionId = "";
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) => {
+    executionId = v.requestId;
+    // The child's own turn receipt is what the installer writes; the delegation
+    // receipt reports the same number rather than counting turns a second way.
+    mkdirSync(join(cwd, CHILD_STATE_DIR), { recursive: true });
+    writeFileSync(join(cwd, CHILD_STATE_DIR, identity.runId + ".turns.json"), "2");
+    events.emit(response, {
+      requestId: v.requestId,
+      ownerRunId: v.ownerRunId,
+      nodeId: v.nodeId,
+      agent: v.agent,
+      status: "completed",
+      model: v.model + ":max",
+      thinking: "max",
+      result: { kind: "text", text: "granted" },
+      usage: { input: 7, output: 3, cost: 0.002 },
+    });
+  });
+  try {
+    const result = await dispatchPiChild(
+      { events },
+      { ...delegation, parentBinding: { runId: "parent-execution" }, roleContext: roleContextWith(["evok_read_evidence"]) },
+      options(cwd, { remainingToolTurns: 4 }),
+    );
+    expect(result.receipt).toMatchObject({
+      executionId,
+      parentExecutionId: "parent-execution",
+      outcome: "succeeded",
+      environment: { backend: "pi-child-dispatch", workspace: await realpath(cwd), modelId: model },
+      capabilities: { tools: ["evok_read_evidence"] },
+      limits: { toolTurns: 4 },
+      usage: { tokens: { input: 7, output: 3, total: 10 }, attribution: "own" },
+      toolTurns: { spent: 2, limit: 4 },
+      artifacts: [],
+    });
+    // The same durable-record rule as the Run path.
+    expect(() => assertNoCredentials(result.receipt, "receipt")).not.toThrow();
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("the child's unconfirmed or confirmed terminal outcome is never a success", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "evok-child-outcomes-"));
+  const events = bus();
+  const controller = new AbortController();
+  let requestId = "";
+  events.on(register, (registration: any) => {
+    registration.result = { ok: true, registration: { dispose() {} } };
+  });
+  events.on(request, (v: any) => {
+    requestId = v.requestId;
+    controller.abort();
+  });
+  events.on("prompt-template:subagent:cancel", () => {});
+  try {
+    const unconfirmed = await dispatchPiChild(
+      { events },
+      delegation,
+      options(cwd, { signal: controller.signal, timeoutMs: 20 }),
+    ).catch((error) => error);
+    expect(unconfirmed).toBeInstanceOf(PiChildTerminationUnconfirmedError);
+    expect(unconfirmed.receipt).toMatchObject({
+      executionId: requestId,
+      outcome: "unknown",
+      toolTurns: { spent: 0, limit: 8 },
+      artifacts: [],
+    });
+    expect(unconfirmed.receipt.outcome).not.toBe("succeeded");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

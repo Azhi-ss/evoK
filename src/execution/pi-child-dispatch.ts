@@ -18,6 +18,7 @@
  * never disposed while the child may still be running.
  */
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { cp, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, sep } from "node:path";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
@@ -32,6 +33,15 @@ import {
 } from "./pi-child-tools";
 import { probePiSubagentsProtocol, type PiSubagentsVersionProbe } from "./pi-subagents-protocol";
 import { validateRoleContext } from "./role-context";
+import { digestValue } from "./security-boundary";
+import {
+  cancellationOutcome,
+  closeExecution,
+  type ExecutionOutcome,
+  type ExecutionReceipt,
+  type ExecutionRequest,
+  type ExecutionUsage,
+} from "./execution-protocol";
 import type { SubagentDelegation, SubagentDelegationResult } from "./subagents-adapter";
 
 interface Host {
@@ -75,6 +85,8 @@ export interface PiChildResult {
 
 export interface PiChildDelegationResult extends SubagentDelegationResult {
   readonly value: PiChildResult;
+  /** The one execution protocol's receipt for this child execution (B4, #255). */
+  readonly receipt: ExecutionReceipt;
 }
 
 /** What the native child was doing when it failed; already redacted (C8). */
@@ -92,10 +104,22 @@ export interface PiChildDiagnostics {
 /** A native failure carrying the bounded redacted record behind its message (C8). */
 export class PiChildFailureError extends Error {
   readonly diagnostics: PiChildDiagnostics;
-  constructor(role: RuleAudienceRole, diagnostics: PiChildDiagnostics) {
+  readonly receipt: ExecutionReceipt;
+  constructor(role: RuleAudienceRole, diagnostics: PiChildDiagnostics, receipt: ExecutionReceipt) {
     super("EvoK " + role + " delegation " + describeFailure(diagnostics));
     this.name = "PiChildFailureError";
     this.diagnostics = diagnostics;
+    this.receipt = receipt;
+  }
+}
+
+/** A cancellation the transport or the plugin confirmed: terminal, never success. */
+export class PiChildCancelledError extends Error {
+  readonly receipt: ExecutionReceipt;
+  constructor(message: string, receipt: ExecutionReceipt) {
+    super(message);
+    this.name = "PiChildCancelledError";
+    this.receipt = receipt;
   }
 }
 
@@ -104,11 +128,13 @@ export class PiChildTerminationUnconfirmedError extends Error {
   readonly code = "termination_unconfirmed" as const;
   readonly requestId: string;
   readonly diagnostics: PiChildDiagnostics;
-  constructor(requestId: string, reason: string, diagnostics: PiChildDiagnostics) {
+  readonly receipt: ExecutionReceipt;
+  constructor(requestId: string, reason: string, diagnostics: PiChildDiagnostics, receipt: ExecutionReceipt) {
     super(reason + "; child termination is unconfirmed" + describeTrace(diagnostics));
     this.name = "PiChildTerminationUnconfirmedError";
     this.requestId = requestId;
     this.diagnostics = diagnostics;
+    this.receipt = receipt;
   }
 }
 
@@ -309,6 +335,51 @@ export async function dispatchPiChild(
   deadline = setTimeout(() => cancel("EvoK child timed out"), timeoutMs);
   try {
     const cwd = await prepareWorkspace(options.cwd, workspace);
+    // B4: the same protocol the main Run path uses. The child declares what it is
+    // before it launches, and every terminal answer below closes the same identity.
+    const execution = Object.freeze<ExecutionRequest>({
+      executionId: requestId,
+      ...(delegation.parentBinding?.runId === undefined
+        ? {}
+        : { parentExecutionId: delegation.parentBinding.runId }),
+      inputs: {
+        inputDigest: digestValue({
+          task: delegation.task,
+          roleContext: context.digest,
+          memorySlice: memory.digest,
+        }),
+      },
+      environment: { backend: "pi-child-dispatch", workspace: cwd, modelId: options.model },
+      capabilities: { tools: [...tools] },
+      limits: { timeoutMs, toolTurns: remainingToolTurns },
+    });
+    // A native failure and its receipt close together, so `diagnostics.status`
+    // means the same thing on both paths.
+    const failureOf = (diagnostics: PiChildDiagnostics): PiChildFailureError =>
+      new PiChildFailureError(
+        role,
+        diagnostics,
+        close("failed", {
+          diagnostics: {
+            status: diagnostics.status,
+            ...(diagnostics.error === undefined ? {} : { error: diagnostics.error }),
+          },
+        }),
+      );
+    // Only what this backend alone knows: the turns the child's own installer
+    // spent, what the plugin reported, and how it failed.
+    const close = (
+      outcome: ExecutionOutcome,
+      detail: { usage?: ExecutionUsage; diagnostics?: { status: string; error?: string } } = {},
+    ): ExecutionReceipt =>
+      closeExecution(execution, {
+        outcome,
+        // The installer already spent these turns by the one rule; the receipt
+        // reports that number instead of counting a second way (C7, B4).
+        toolTurns: { spent: spentToolTurns(cwd, memory.runId), limit: remainingToolTurns },
+        ...(detail.usage === undefined ? {} : { usage: detail.usage }),
+        ...(detail.diagnostics === undefined ? {} : { diagnostics: detail.diagnostics }),
+      });
     // A granted tool only exists if the child is pointed at the installer entry,
     // which carries the grant list and the turn budget it must enforce.
     if (tools.length)
@@ -323,11 +394,14 @@ export async function dispatchPiChild(
       ];
     // A budget already spent while preparing never registers or launches a child.
     if (Date.now() >= deadlineAt) cancel("EvoK child timed out");
-    if (cancelReason !== undefined) throw Error(cancelReason + "; child never started");
+    if (cancelReason !== undefined)
+      throw new PiChildCancelledError(
+        cancelReason + "; child never started",
+        close(cancellationOutcome(true)),
+      );
     pi.events.emit(REGISTER, registration);
     if (!registration.result?.ok)
-      throw new PiChildFailureError(
-        role,
+      throw failureOf(
         diagnosticsRecord(requestId, "registration_failed", trace, {
           error: registration.result
             ? registration.result.error.message
@@ -336,10 +410,17 @@ export async function dispatchPiChild(
       );
     handle = registration.result.registration;
     // A cancel during registration never launched anything: dispose is safe.
-    if (cancelReason !== undefined) throw Error(cancelReason + "; child never started");
+    if (cancelReason !== undefined)
+      throw new PiChildCancelledError(
+        cancelReason + "; child never started",
+        close(cancellationOutcome(true)),
+      );
     return await new Promise<PiChildDelegationResult>((resolve, reject) => {
       settleCancel = (reason) => {
-        if (!started) return finish(() => reject(Error(reason + "; child never started")));
+        if (!started)
+          return finish(() =>
+            reject(new PiChildCancelledError(reason + "; child never started", close(cancellationOutcome(true)))),
+          );
         pi.events.emit(CHANNEL + "cancel", identity);
         // Bounded wait for the terminal native state. The outcome never becomes a
         // success and the child may still run, so the registration stays put.
@@ -353,6 +434,10 @@ export async function dispatchPiChild(
                       requestId,
                       reason,
                       diagnosticsRecord(requestId, "termination_unconfirmed", trace, { error: reason }),
+                      // The plugin never proved the child terminal: unknown, never success.
+                      close(cancellationOutcome(false), {
+                        diagnostics: { status: "termination_unconfirmed", error: reason },
+                      }),
                     ),
                   ),
                 true,
@@ -389,8 +474,7 @@ export async function dispatchPiChild(
             const reason = (raw as { error?: unknown }).error;
             return finish(() =>
               reject(
-                new PiChildFailureError(
-                  role,
+                failureOf(
                   diagnosticsRecord(requestId, "invalid_request", trace, {
                     ...(typeof reason === "string" ? { error: reason } : {}),
                   }),
@@ -411,7 +495,10 @@ export async function dispatchPiChild(
           // The plugin emits this only once its own run for this request id is
           // terminal, which is the terminal native state this transport can see.
           const cancelled = cancelReason;
-          if (cancelled !== undefined) return finish(() => reject(Error(cancelled)));
+          if (cancelled !== undefined)
+            return finish(() =>
+              reject(new PiChildCancelledError(cancelled, close(cancellationOutcome(true)))),
+            );
           // Native status, error text, exit code and the retained stream tail: a
           // crash reports what happened instead of a bare "failed" (C8).
           if (e.status !== "completed")
@@ -419,8 +506,7 @@ export async function dispatchPiChild(
               // The terminal response can carry the only provider diagnostics there were.
               retainProgress(trace, e);
               reject(
-                new PiChildFailureError(
-                  role,
+                failureOf(
                   diagnosticsRecord(requestId, e.status ?? "failed", trace, {
                     ...(typeof e.error === "string" ? { error: e.error } : {}),
                     ...(typeof e.exitCode === "number" ? { exitCode: e.exitCode } : {}),
@@ -429,13 +515,29 @@ export async function dispatchPiChild(
               );
             });
           // A bare model here would be a violation of the negotiated protocol.
+          // It is a failed execution, so it closes with a receipt like any other.
           if (e.agent !== name || e.model !== protocol.modelIdentity(options.model, THINKING) || e.thinking !== THINKING) {
-            return finish(() => reject(Error("unexpected child agent, model or thinking level")));
+            const reason = "unexpected child agent, model or thinking level";
+            return finish(() =>
+              reject(failureOf(diagnosticsRecord(requestId, "identity_mismatch", trace, { error: reason }))),
+            );
           }
-          if (e.result?.kind !== "text" || !e.result.text?.trim())
-            return finish(() => reject(Error("child returned no text result")));
+          if (e.result?.kind !== "text" || !e.result.text?.trim()) {
+            const reason = "child returned no text result";
+            return finish(() =>
+              reject(failureOf(diagnosticsRecord(requestId, "no_result", trace, { error: reason }))),
+            );
+          }
           const text = e.result.text;
-          finish(() => resolve({ agent: delegation.agent, value: { text, runId: e.runId, usage: e.usage } }));
+          finish(() =>
+            resolve({
+              agent: delegation.agent,
+              value: { text, runId: e.runId, usage: e.usage },
+              receipt: close("succeeded", {
+                ...(e.usage === undefined ? {} : { usage: usageOf(e.usage) }),
+              }),
+            }),
+          );
         }),
       );
       started = true;
@@ -459,15 +561,43 @@ export async function dispatchPiChild(
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         finish(() =>
-          reject(
-            new PiChildFailureError(role, diagnosticsRecord(requestId, "launch_failed", trace, { error: reason })),
-          ),
+          reject(failureOf(diagnosticsRecord(requestId, "launch_failed", trace, { error: reason }))),
         );
       }
     });
   } catch (error) {
     finish(() => {});
     throw error;
+  }
+}
+
+/**
+ * The child's metered usage is its own: it travels through the controller's
+ * `evok-meter-*` relay, so the parent session's own reported usage never
+ * contains it (B3). Attribution stays one line, owned by the receipt.
+ */
+function usageOf(usage: NonNullable<PiChildResult["usage"]>): ExecutionUsage {
+  return {
+    tokens: {
+      input: usage.input,
+      output: usage.output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: usage.input + usage.output,
+    },
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost },
+    attribution: "own",
+  };
+}
+
+/** The turns the child's own installer already wrote, by the one tool-turn rule. */
+function spentToolTurns(cwd: string, roleRunId: string): number {
+  try {
+    const turns: unknown = JSON.parse(readFileSync(join(cwd, CHILD_STATE_DIR, roleRunId + ".turns.json"), "utf8"));
+    return typeof turns === "number" && Number.isInteger(turns) && turns >= 0 ? turns : 0;
+  } catch {
+    // No granted tool, or no tool message: nothing was spent.
+    return 0;
   }
 }
 

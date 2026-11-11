@@ -849,6 +849,16 @@ describe("PiAgentRuntime crash-safety (#23)", () => {
       },
       stopReason: "stop",
       text: "verified result adopted",
+      receipt: {
+        executionId: "adopted-run",
+        inputs: { inputDigest: "adopted-input" },
+        environment: { backend: "pi-agent-runtime", workspace: "/tmp/evok-approved-adopt-1/run-adopted" },
+        capabilities: { tools: [] },
+        limits: {},
+        outcome: "succeeded",
+        toolTurns: { spent: 0 },
+        artifacts: [],
+      },
     };
     await runtime.reconcileIntent(intent.intentId, { action: "adopt_result", result: adoptedResult, note: "human verified disk artifact" });
 
@@ -1088,6 +1098,16 @@ describe("PiAgentRuntime crash-safety (#23)", () => {
         },
         stopReason: "stop",
         text: "disk persisted",
+        receipt: {
+          executionId: "disk-intent-1",
+          inputs: { inputDigest: "1111111111111111111111111111111111111111111111111111111111111111" },
+          environment: { backend: "pi-agent-runtime", workspace: "/tmp/disk-workspace" },
+          capabilities: { tools: [] },
+          limits: {},
+          outcome: "succeeded",
+          toolTurns: { spent: 0 },
+          artifacts: [],
+        },
       },
     });
 
@@ -1442,5 +1462,90 @@ describe("PiAgentRuntime role-scoped context injection", () => {
     expect(tools).not.toContain("memory_read");
     expect(customTools).not.toContain("memory_read");
     expect(result.memoryReads).toBeUndefined();
+  });
+});
+
+describe("PiAgentRuntime one execution protocol (#255)", () => {
+  test("a Run answers one execution receipt and persists the same one, credential-free", async () => {
+    const secret = "sk-live-0123456789abcdef0123456789";
+    const fake = fakeSession([
+      // One tool turn is one assistant message containing tool calls; two calls
+      // in one message are one turn, exactly as the delegated child counts it.
+      { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read" }, { type: "toolCall", name: "grep" }] } },
+      { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read" }] } },
+      completeEnd,
+    ]);
+    const store = new InMemoryDurableIntentStore();
+    const root = await mkdtemp(join(tmpdir(), "evok-run-receipt-"));
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: root,
+      sessionFactory: async () => fake.session,
+      intentStore: store,
+      secrets: [secret],
+    });
+    const req = request({ intentId: "run-receipt", secrets: [secret], workspace: workspace(join(root, "evok-approved-receipt")) });
+    const result = await runtime.execute(req);
+
+    expect(result.receipt).toMatchObject({
+      executionId: "run-receipt",
+      outcome: "succeeded",
+      inputs: { inputDigest: computeInputDigest(req) },
+      environment: { backend: "pi-agent-runtime" },
+      capabilities: { tools: ["read", "grep", "find", "ls"] },
+      toolTurns: { spent: 2 },
+      artifacts: [],
+      usage: { tokens: { total: 5 }, attribution: "own" },
+    });
+    expect(result.receipt.parentExecutionId).toBeUndefined();
+
+    // The durable record carries the same receipt, and no credential anywhere in it.
+    const intent = await store.getIntent("run-receipt");
+    expect(intent?.receipt).toEqual(result.receipt);
+    expect(JSON.stringify(intent)).not.toContain(secret);
+  });
+
+  test("an awaited abort is a confirmed cancellation, never a success", async () => {
+    const controller = new AbortController();
+    const store = new InMemoryDurableIntentStore();
+    const root = await mkdtemp(join(tmpdir(), "evok-run-cancel-"));
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: root,
+      intentStore: store,
+      sessionFactory: async () => ({
+        sessionId: "abort-session",
+        subscribe: () => () => {},
+        prompt: async () => controller.abort(),
+        abort: async () => {},
+        dispose: () => {},
+      }),
+    });
+
+    const failed = await runtime
+      .execute(request({ intentId: "run-cancelled", workspace: workspace(join(root, "evok-approved-cancel")) }), controller.signal)
+      .catch((error) => error);
+    expect(failed.name).toBe("AbortError");
+    expect((await store.getIntent("run-cancelled"))?.receipt).toMatchObject({
+      executionId: "run-cancelled",
+      outcome: "cancelled",
+    });
+  });
+
+  test("an execution that was never confirmed terminal is unknown, not failed or succeeded", async () => {
+    const store = new InMemoryDurableIntentStore();
+    const root = await mkdtemp(join(tmpdir(), "evok-run-crash-"));
+    const runtime = new PiAgentRuntime({
+      workspaceRoot: root,
+      sessionFactory: async () => fakeSession([completeEnd]).session,
+      intentStore: store,
+      faultInjection: { crashBeforeResultConfirmation: true },
+    });
+
+    await expect(
+      runtime.execute(request({ intentId: "run-crash", workspace: workspace(join(root, "evok-approved-crash")) })),
+    ).rejects.toBeInstanceOf(RuntimeCrashError);
+    expect((await store.getIntent("run-crash"))?.receipt).toMatchObject({
+      executionId: "run-crash",
+      outcome: "unknown",
+    });
   });
 });

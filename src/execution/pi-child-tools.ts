@@ -7,11 +7,12 @@
  * that installs it, and `dispatchPiChild` declares both on the wire — so the
  * installer has a production path and an ungranted tool is never registered.
  *
- * Tool turns are counted in one place (`createToolTurnGate`): a tool turn is one
- * model message containing tool calls, a control action is exempt from the
- * budget but must be alone in its batch, and the budget is only spent by the
- * batches that actually ran. Nothing here persists credentials; the transport
- * validates every record through `pi-child-records.ts`.
+ * Tool turns are counted by the protocol's one rule (`createToolTurnGate`,
+ * re-exported below): a tool turn is one model message containing tool calls, a
+ * control action is exempt from the budget but must be alone in its batch, and
+ * the budget is only spent by the batches that actually ran. Nothing here
+ * persists credentials; the transport validates every record through
+ * `pi-child-records.ts`.
  *
  * `ChildToolBinding.controls` is for a host that lets its child end the turn by
  * acting (`evok_deliver` and friends). The delegation transport does not: its
@@ -25,6 +26,11 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
 import { assertNoCredentials } from "./pi-child-records";
+import { createToolTurnGate } from "./execution-protocol";
+
+// The one tool-turn rule is the execution protocol's; a backend may not own a
+// second counter. Re-exported here so the child-side installer keeps one import.
+export { createToolTurnGate, type ToolTurnGate } from "./execution-protocol";
 import {
   controlSchemas,
   hostToolSchemas,
@@ -96,61 +102,6 @@ export function childToolGrants(role: RuleAudienceRole, exposed: readonly string
         CHILD_SCOPED_TOOLS.join(", "),
     );
   return declared;
-}
-
-export interface ToolTurnGate {
-  /** Record one assistant message: the tool names it called. */
-  turn(calls: readonly string[]): void;
-  /** Decide one call in the current batch. */
-  call(name: string): { block: true; terminate: true; reason: string } | undefined;
-  /** Non-control tool turns spent so far. */
-  readonly used: number;
-  /** The batch that just ran exceeded the budget or mixed in a control action. */
-  overBudget(): boolean;
-}
-
-/**
- * C7, in one rule. A tool turn is a model message containing tool calls; only
- * non-control turns spend the budget, so the last allowed batch always executes
- * and the terminal control action still runs alone afterwards. The batch after
- * the budget is blocked and ends the turn — never before.
- */
-export function createToolTurnGate(
-  remainingToolTurns: number,
-  granted: readonly string[],
-  isControl: (name: string) => boolean,
-): ToolTurnGate {
-  if (!Number.isSafeInteger(remainingToolTurns) || remainingToolTurns < 0)
-    throw Error("remaining tool turns must be a non-negative integer");
-  let used = 0;
-  let mixed = false;
-  let spending = false;
-  let refused = false;
-  const blocked = (reason: string) => {
-    refused = true;
-    return { block: true, terminate: true, reason } as const;
-  };
-  return {
-    turn(calls) {
-      const controls = calls.filter(isControl).length;
-      // A control action must be alone in its batch, including next to another one.
-      mixed = controls > 0 && calls.length > 1;
-      // A batch the budget already refuses never runs, so it never spends a turn.
-      spending = calls.length > controls && !mixed && used < remainingToolTurns;
-      if (spending) used++;
-    },
-    call(name) {
-      if (!granted.includes(name)) return blocked("This child was not granted " + name + ".");
-      if (mixed) return blocked("A control action must be the only call in its batch.");
-      if (!isControl(name) && !spending && used >= remainingToolTurns)
-        return blocked("The child has used its " + remainingToolTurns + " tool turns.");
-      return undefined;
-    },
-    get used() {
-      return used;
-    },
-    overBudget: () => mixed || refused,
-  };
 }
 
 /** Write the child's binding and the extension entry that installs it in that child. */

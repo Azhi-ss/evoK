@@ -62,6 +62,10 @@ _Avoid_: Run (a Run is one execution attempt)
 One execution attempt for a Task or Candidate under a fixed input, environment, policy, and attempt identity.
 _Avoid_: Experiment (when referring to the scientific activity rather than one attempt)
 
+**Execution**:
+The protocol record of one backend run: a declared execution request (frozen input and environment refs, capability grant, limits, optional parent execution id) closed by one receipt whose terminal outcome is `succeeded`, `failed`, `cancelled`, or `unknown`. A Run is an Execution, and a delegated child is its own Execution with a parent execution id. `unknown` means the terminal state was never confirmed; only a confirmed cancellation is `cancelled`, and neither is ever success.
+_Avoid_: Run (when the protocol record is meant), job, call
+
 ## Teamwork and Execution
 
 **Team**:

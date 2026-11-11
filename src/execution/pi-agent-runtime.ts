@@ -31,6 +31,15 @@ import type { EvokResources } from "../evok-resources";
 import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
 import { isShellToolName, resolveUserBash } from "./user-bash";
 import { RoleContextError, validateRoleContext, type RoleTaskContext } from "./role-context";
+import {
+  cancellationOutcome,
+  closeExecution,
+  createToolTurnGate,
+  type ExecutionOutcome,
+  type ExecutionReceipt,
+  type ExecutionRequest,
+  type ExecutionUsage,
+} from "./execution-protocol";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
 import { createMemoryReadTool, MEMORY_READ_TOOL, type MemoryReadRecord } from "../memory";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
@@ -151,6 +160,8 @@ export interface DurableIntentRecord {
   readonly error?: string;
   readonly uncertainReason?: string;
   readonly reconcile?: IntentReconcileRecord;
+  /** The one execution protocol's receipt for this execution (B4, #255). */
+  readonly receipt?: ExecutionReceipt;
 }
 
 export interface DurableIntentStore {
@@ -405,6 +416,8 @@ export interface AgentRuntimeResult {
   readonly memoryReads?: readonly MemoryReadRecord[];
   /** Actual model that executed the Run (canonical provider/model identity). */
   readonly model?: ModelConfigView;
+  /** One receipt for this execution: outcome, raw usage, tool turns, artifacts. */
+  readonly receipt: ExecutionReceipt;
 }
 
 /** Minimal model identity view (structurally compatible with evok-model ModelConfig). */
@@ -1019,6 +1032,34 @@ export class PiAgentRuntime {
     this.usedWorkspaces.add(approvedRoot);
     const intentId = input.repair && existing ? `${baseIntentId}:repair:${Date.now()}` : baseIntentId;
 
+    // B4: one execution protocol. The Run declares what it is BEFORE it runs, and
+    // the receipt below closes that same identity, on every outcome.
+    const execution = Object.freeze<ExecutionRequest>({
+      executionId: intentId,
+      inputs: { inputDigest },
+      environment: {
+        backend: "pi-agent-runtime",
+        workspace: approvedRoot,
+        ...(resolvedModel === undefined ? {} : { modelId: resolvedModel.model.id }),
+      },
+      capabilities: { tools: [...tools] },
+      // The Run path does not bound tool turns; it still counts them by the one rule.
+      limits: {},
+    });
+    const toolTurns = createToolTurnGate(undefined, tools, () => false);
+    // Only what this backend alone knows: how many turns it spent, what it
+    // measured, and how it failed. Assembly is the protocol's.
+    const close = (
+      outcome: ExecutionOutcome,
+      detail: { usage?: ExecutionUsage; error?: string } = {},
+    ): ExecutionReceipt =>
+      closeExecution(execution, {
+        outcome,
+        toolTurns: { spent: toolTurns.used },
+        ...(detail.usage === undefined ? {} : { usage: detail.usage }),
+        ...(detail.error === undefined ? {} : { diagnostics: { status: outcome, error: detail.error } }),
+      });
+
     await this.intentStore.recordIntent({
       intentId,
       role: input.role.name,
@@ -1038,6 +1079,10 @@ export class PiAgentRuntime {
     dispatched = true;
 
     if (this.faultInjection?.crashAfterDispatch) {
+      // Sent and never answered: the outcome is unconfirmed, which is `unknown`.
+      await this.intentStore
+        .updateIntent(intentId, { receipt: close("unknown", { error: "crash after intent sent" }) })
+        .catch(() => {});
       throw new RuntimeCrashError("fault injection: crash after intent sent before result confirmed");
     }
 
@@ -1145,6 +1190,15 @@ export class PiAgentRuntime {
             abortPromise ??= session?.abort();
           }
         }
+        if (type === "message_end") {
+          // The one tool-turn rule counts model messages containing tool calls.
+          const message = isRecord(raw.message) ? raw.message : undefined;
+          const content = Array.isArray(message?.content) ? message.content : [];
+          const calls = content.flatMap((part) =>
+            isRecord(part) && part.type === "toolCall" ? [String(part.name)] : [],
+          );
+          if (calls.length) toolTurns.turn(calls);
+        }
         if (type === "agent_end") {
           const messages = Array.isArray(raw.messages) ? raw.messages : [];
           for (const message of messages) {
@@ -1227,10 +1281,21 @@ export class PiAgentRuntime {
       }
       add({ type: "session_end", sessionId, reason: stopReason });
       const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText, model: resolvedModel?.model,
+        receipt: close("succeeded", {
+          usage: {
+            tokens: { ...completionUsage.tokens },
+            cost: { ...completionUsage.cost },
+            // The backend measured its own execution; attributing it to a parent
+            // aggregate stays the Mission's decision (B3).
+            attribution: "own",
+          },
+        }),
         ...(memoryReadTool === undefined || memoryReadTool.reads().length === 0 ? {} : { memoryReads: memoryReadTool.reads() }) };
       await this.intentStore.updateIntent(intentId, {
         status: "COMPLETED",
         result,
+        // The durable copy of `result.receipt`: the same object, so they cannot diverge.
+        receipt: result.receipt,
         toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
       });
       if (input.repair && existing) {
@@ -1240,17 +1305,32 @@ export class PiAgentRuntime {
       }
       return result;
     } catch (error) {
+      const aborted = error instanceof Error && error.name === "AbortError";
+      // A cancellation is confirmed only once the session abort has been awaited;
+      // an abort the SDK never confirmed is `unknown`, never success.
+      if (aborted && abortPromise) await abortPromise.catch(() => undefined);
+      // B4: one terminal outcome, the same vocabulary on every path. A crash with
+      // work in flight could not be confirmed → unknown; a confirmed abort is a
+      // cancellation; everything else failed.
+      const outcome: ExecutionOutcome = error instanceof RuntimeCrashError
+        ? "unknown"
+        : aborted
+          ? cancellationOutcome(true)
+          : "failed";
+      const receipt = close(outcome, { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof RuntimeCrashError) {
         // Crash with work in flight: side effects are uncertain. Persist the
         // in-flight tool intents but leave the intent DISPATCHED so the startup
         // audit / restart detects the uncertain state — never silent success.
         await this.intentStore.updateIntent(intentId, {
+          receipt,
           toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
         }).catch(() => {});
       } else if (!(error instanceof UncertainExecutionError)) {
         await this.intentStore.updateIntent(intentId, {
           status: "FAILED",
           error: error instanceof Error ? error.message : String(error),
+          receipt,
           toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
         }).catch(() => {});
       }

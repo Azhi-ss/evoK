@@ -118,6 +118,28 @@ export type {
   ExecutionAudience,
   ExecutionContext,
 } from "./execution-context";
+export {
+  aggregateUsage,
+  cancellationOutcome,
+  closeExecution,
+  createToolTurnGate,
+} from "./execution-protocol";
+export type {
+  ArtifactProvenance,
+  ExecutionBackend,
+  ExecutionClose,
+  ExecutionCapabilityGrant,
+  ExecutionEnvironmentRefs,
+  ExecutionInputRefs,
+  ExecutionLimits,
+  ExecutionOutcome,
+  ExecutionReceipt,
+  ExecutionRequest,
+  ExecutionToolTurns,
+  ExecutionUsage,
+  ExecutionUsageTotals,
+  ToolTurnGate,
+} from "./execution-protocol";
 export { createChildMetering } from "./pi-child-metering";
 export type {
   ChildMetering,
