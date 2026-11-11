@@ -4,7 +4,7 @@ Status: implementation pointer for the contract/resource/context seam landed in
 `src/competition/competition-contract.ts`, `src/competition/rule-visibility.ts`,
 `src/execution/host-inventory.ts`, `src/execution/resource-lease.ts`,
 `src/execution/run-manifest.ts`, `src/execution/execution-context.ts`,
-`src/execution/researcher-context.ts`, `src/execution/role-context.ts`, `src/execution/memory-slice.ts`,
+`src/execution/researcher-context.ts`, `src/execution/role-context.ts`, `src/memory/slice.ts`,
 `src/execution/context-broker.ts`, `src/execution/subagents-adapter.ts`,
 `src/execution/pi-child-dispatch.ts`, and `src/execution/pi-child-metering.ts`. `RoleTaskContext` (optionally with a
 `MemorySlice`) is assembled per Run by the `ContextBroker`, bound to that Run's

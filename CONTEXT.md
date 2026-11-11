@@ -193,7 +193,7 @@ A conclusion drawn from one or more Evidence items within stated conditions and 
 _Avoid_: Claim (a Claim may communicate a Finding externally)
 
 **Research Memory**:
-A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it.
+A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it. Its physical home is `src/memory/` ([ADR-0016](docs/adr/0016-memory-physical-pack.md)): a seventh directory, not a seventh logical owner. The durable derived snapshot and its active pointer are served by `src/memory/store.ts` (immutable snapshot files today; SQLite becomes the primary store in M-b, and a storage change must not alter the bytes a Run was served).
 _Avoid_: Transcript memory, second evidence ledger, session memory
 
 **Finding Card**:

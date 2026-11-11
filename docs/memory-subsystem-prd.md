@@ -83,9 +83,9 @@ six-pack cuts did (ADR-0013 kept flat `src/*.ts` shims for one release):
 
 | Old path | Becomes |
 |---|---|
-| `src/evidence/research-memory.ts` | shim → `src/memory/{schema,projection,packet,sham}.ts` |
-| `src/execution/research-memory-provider.ts` | shim → `src/memory/store.ts` |
-| `src/execution/memory-slice.ts` | shim → `src/memory/slice.ts` |
+| `src/evidence/research-memory.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
+| `src/execution/research-memory-provider.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
+| `src/execution/memory-slice.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
 
 ### 3.1 Relationship to ADR-0007 / ADR-0013 — needs an ADR amendment
 

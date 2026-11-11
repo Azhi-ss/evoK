@@ -102,6 +102,17 @@ T48 / Broker / Admission / Budget Gate predicates. Recorded in
 [ADR-0009](0009-search-physical-pack.md) and
 [ADR-0014](0014-prd-rsi-baseline.md).
 
+## Amendment (Memory / #242)
+
+Research Memory gets one physical home, `src/memory/`, recorded in
+[ADR-0016](0016-memory-physical-pack.md). It is a seventh **directory**, not a
+seventh logical owner: `evidence` still owns ledger truth, card semantics and
+promotion gates; `execution` still owns runtime, role context, policy guard and
+the tool-registration seam; `mission` still owns the Director, the two-phase
+decision, the Run loop and when a snapshot is published or pinned. The
+directory owns no write path to Mission history, and this logical ownership
+map is unchanged.
+
 ## Out of scope / freezes
 
 - No change to gate, T48, hang, or #40 semantics.
