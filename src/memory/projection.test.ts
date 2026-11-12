@@ -16,9 +16,9 @@ import {
   type ResearchFindingCard,
   type ResearchMemorySource,
   type ResearchRunFinding,
-} from "./research-memory";
-import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal, type SynthesisProposal } from "./synthesis-proposal";
-import { digestValue } from "../security-boundary";
+} from "./index";
+import { SYNTHESIS_PROPOSAL_SCHEMA, validateSynthesisProposal, type SynthesisProposal } from "../evidence/synthesis-proposal";
+import { digestValue } from "../execution/security-boundary";
 
 function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
   return {

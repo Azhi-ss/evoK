@@ -20,7 +20,7 @@
  * An Insight never dispatches: a disposition is a ledger event, and only an
  * ordinary Revised Proposal can create an Experiment through the existing path.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   INSIGHT_DISPOSITIONS,
   InsightInboxError,

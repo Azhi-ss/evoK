@@ -27,7 +27,7 @@
  */
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import { assertPacketCardRefs, projectResearchDecisionPacket } from "./packet";
 import { ResearchMemoryError, type ResearchMemoryCard } from "./schema";
 import type { MemorySlice } from "./slice";

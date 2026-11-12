@@ -13,7 +13,7 @@
  * (that flag still cannot bypass Human Acceptance).
  * Does not weld `#40` / Progressive as the product default.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   budgetDecisionIsPass,
   evaluateBudgetGate,

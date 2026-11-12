@@ -11,8 +11,8 @@
  * Rejections are auditable by reason code only; the rejected payload (which may
  * contain restricted content) is never part of the record.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
-import { ResearchMemoryError, assertMemorySafeText } from "./research-memory";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
+import { ResearchMemoryError, assertMemorySafeText } from "../memory";
 
 export const SYNTHESIS_PROPOSAL_SCHEMA = "evok.synthesis-proposal/v1" as const;
 

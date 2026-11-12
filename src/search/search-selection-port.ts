@@ -15,7 +15,7 @@
  * scores never become promotion keys. Failure memory is parent lineage plus
  * an optional short `fail_note` only (no FAISS transplant).
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 
 export const SEARCH_SELECTION_SCHEMA_VERSION = "1" as const;
 export const DEFAULT_SEARCH_SELECTION_ID = "fixed_uct" as const;

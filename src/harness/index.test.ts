@@ -8,8 +8,8 @@ import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RuntimeUsage as MissionStartRuntimeUsage } from "../mission-start";
-import type { RuntimeUsage } from "../pi-agent-runtime";
+import type { RuntimeUsage as MissionStartRuntimeUsage } from "../mission/mission-start";
+import type { RuntimeUsage } from "../execution/pi-agent-runtime";
 import * as harness from "./index";
 import type { RawUsage } from "./index";
 

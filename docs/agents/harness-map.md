@@ -47,7 +47,7 @@ fixtures and tests. `src/harness/` is product execution.
 ## Old paths
 
 `RuntimeUsage` was public from `src/execution/pi-agent-runtime.ts` (and re-exported
-by the `src/pi-agent-runtime.ts` and `src/mission/mission-start.ts` shims); it is
-now the harness's measured shape and still exported under that name. The measuring
+at the time by the then-existing flat shims, deleted in M-e / #246); it is now the
+harness's measured shape and still exported under that name. The measuring
 helpers it replaced (`usageFrom`, `usageFromSdk`, `usageFromStats`, `addUsage`,
 `usageOf`, `countUsage`) were module-private and are now `metering.ts`.

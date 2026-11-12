@@ -16,10 +16,10 @@ import {
 import {
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "../toy-harness";
-import { MissionDirector } from "../research-loop";
+} from "../search/fixtures/toy-harness";
+import { MissionDirector } from "../mission/research-loop";
 import { RESEARCH_TASKS as tasks, RESEARCH_PREDICTION as prediction } from "../fixtures/research";
-import { SEARCH_SPACE_BINDING } from "../search-space-profile";
+import { SEARCH_SPACE_BINDING } from "../search/search-space-profile";
 
 const contract = { objective: "maximize the score" };
 const proposeInput = {

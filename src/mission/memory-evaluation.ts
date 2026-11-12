@@ -20,7 +20,7 @@
  * measures nothing, and changes no evaluator, Promotion, Admission, Budget, hang
  * or Broker rule.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   RESEARCH_MEMORY_EVALUATION_MODES,
   projectResearchDecisionPacket,
@@ -28,7 +28,7 @@ import {
   shamResearchDecisionPacket,
   shamResearchMemorySnapshot,
   type ResearchMemoryEvaluationMode,
-} from "../evidence/research-memory";
+} from "../memory";
 import { projectDecisionAccountability } from "./decision-accountability";
 import type { DecisionPointDirection } from "./decision-point-evaluation";
 import {
@@ -68,7 +68,7 @@ export const RESEARCH_MEMORY_DIRECTION_CAVEAT =
 export const RESEARCH_MEMORY_INTEGRITY_NOTE =
   "Offline replay is integrity evidence only: it shows no Run saw information produced after it began and that projection is deterministic. It is not value evidence and says nothing about whether Memory helped.";
 
-export type { ResearchMemoryEvaluationMode } from "../evidence/research-memory";
+export type { ResearchMemoryEvaluationMode } from "../memory";
 
 /**
  * The one honest limit of the three-arm design: a Sham can match structure and

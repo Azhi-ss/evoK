@@ -5,7 +5,7 @@
  * global budgets. Also covers MemoryWriteProposal and AgentResult binding.
  */
 import { describe, expect, test } from "bun:test";
-import { projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { projectResearchMemorySnapshot } from "./index";
 import {
   AGENT_RESULT_SCHEMA,
   MEMORY_SLICE_SCHEMA,
@@ -18,7 +18,7 @@ import {
   validateMemorySlice,
   validateMemoryWriteProposal,
   type MemorySliceInput,
-} from "./memory-slice";
+} from "./index";
 
 function input(overrides: Partial<MemorySliceInput> = {}): MemorySliceInput {
   return {

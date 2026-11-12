@@ -7,7 +7,7 @@
  *
  * Pins: effective ≠ optimal; inconclusive ≠ pass; hang is not a silent pass.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 
 export type ExperimentValidityOutcome = "pass" | "fail" | "inconclusive";
 

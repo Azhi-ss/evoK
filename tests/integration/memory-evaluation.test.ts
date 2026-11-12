@@ -22,25 +22,25 @@ import {
   summarizeMission,
   type BaselineEvaluator,
   type MissionRecord,
-} from "../../src/mission-start";
+} from "../../src/mission/mission-start";
 import {
   buildDirectorPrompt,
   missionRetainedState,
   type DirectorInput,
   type DirectorProposal,
   type MissionDirector,
-} from "../../src/mission-director";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
+} from "../../src/mission/mission-director";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
-import { PiAgentRuntime, type AgentRuntimeSession } from "../../src/pi-agent-runtime";
+import { PiAgentRuntime, type AgentRuntimeSession } from "../../src/execution/pi-agent-runtime";
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import {
   RESEARCH_CONTROL_CARD_SCHEMA,
   RESEARCH_MEMORY_FINDING_CARD_SCHEMA,
   researchMemoryModeOf,
-} from "../../src/evidence/research-memory";
+} from "../../src/memory";
 import {
   RESEARCH_MEMORY_CONTROL_CAVEAT,
   RESEARCH_MEMORY_L2_MIN_L1_DECISION_POINTS,

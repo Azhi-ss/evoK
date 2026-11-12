@@ -25,7 +25,7 @@
  * before it starts: no approved charter or no frozen protocol is a refusal, not
  * a default. Wiring it into `runMissionController` belongs to #248.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   BASELINE_CATEGORIES,
   RESEARCH_CHARTER_SCHEMA,

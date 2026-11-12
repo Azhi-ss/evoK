@@ -44,8 +44,10 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 ## Residual flat shims
 
 Dead shims deleted in P6: `src/file-blueprint.ts`, `src/evok-cli.ts`,
-`src/second-toy-adapter.ts`. Remaining pack-shim flat `src/*.ts`
-re-exports are migration-period (one more release). Inventory: ADR-0013.
+`src/second-toy-adapter.ts`. The remaining pack-shim flat `src/*.ts`
+re-exports were deleted in M-e (#246); `src/` root now holds shared modules,
+the ambient `*.d.ts` declarations and two top-level drivers. Inventory:
+ADR-0013.
 
 ## Frozen (unchanged)
 

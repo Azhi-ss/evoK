@@ -5,9 +5,9 @@
  * Wires the existing Kill-test hang into `ToyCompetitionHarness.verification.killTestHang`.
  * Does not wrap T48 / Broker, call UCT, or thaw #40.
  */
-import { createKillTestHangHook, type KillTestHangInput } from "../kill-test-hang";
-import type { KillTestOutcome } from "../hypothesis-ledger";
-import type { MethodologyContracts, MethodologyEvidence } from "../methodology";
+import { createKillTestHangHook, type KillTestHangInput } from "../evidence/kill-test-hang";
+import type { KillTestOutcome } from "../evidence/hypothesis-ledger";
+import type { MethodologyContracts, MethodologyEvidence } from "../evidence/methodology";
 import {
   OUTER_MIN_KILL_EVIDENCE_ID,
   createOuterMinFixture,
@@ -19,8 +19,8 @@ import {
 import {
   buildOuterSearchSpaceFixtures,
   type OuterSearchSpaceFixtures,
-} from "../outer-search-space-fixtures";
-import type { VerificationHook } from "../verification-gates";
+} from "../search/outer-search-space-fixtures";
+import type { VerificationHook } from "../evidence/verification-gates";
 
 export interface AssembleOuterE2eMinPathInput {
   readonly outcome?: KillTestOutcome;

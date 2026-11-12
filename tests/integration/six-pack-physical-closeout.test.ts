@@ -1,7 +1,7 @@
 /**
  * ET-A6 / P6 closeout seam: six physical packs are in place, barrels are
- * consistent, ToyHarness is fixtures/tests only, and leftover flat
- * `src/*.ts` shims are either gone or an explicit one-release re-export.
+ * consistent, ToyHarness is fixtures/tests only, and no flat `src/*.ts`
+ * re-export shim is left (M-e / #246 removed the one-release migration set).
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -27,54 +27,22 @@ const DELETED_DEAD_SHIMS = [
 ] as const;
 
 /**
- * Migration-period re-exports that stay one more release: production modules,
- * integration tests, examples, the recovery driver, or the ToyHarness fixture
- * barrel still import these flat paths. Retargeting them is a second big move.
+ * Flat modules that were never part of a six-pack cut and are not shims, so they
+ * stay at `src/`; everything else that lived at `src/*.ts` as a re-export is
+ * gone (#246).
  */
-const KEPT_MIGRATION_SHIMS = {
-  mission: [
-    "baseline-track.ts",
-    "branch-recovery.ts",
-    "llm-propose-outer-min.ts",
-    "mission-director.ts",
-    "mission-draft.ts",
-    "mission-intake.ts",
-    "mission-resume.ts",
-    "mission-start.ts",
-    "outer-e2e-min-path.ts",
-    "outer-min-path.ts",
-    "research-loop.ts",
-    "v1-golden-path.ts",
-  ],
-  evidence: [
-    "hypothesis-ledger.ts",
-    "kill-test-hang.ts",
-    "ledger-kinds.ts",
-    "methodology-acceptance.ts",
-    "methodology-contracts.ts",
-    "methodology.ts",
-    "submission-broker.ts",
-    "validation-ladder.ts",
-    "verification-gates.ts",
-  ],
-  execution: [
-    "dag-scheduler.ts",
-    "model-orchestra.ts",
-    "pi-agent-runtime.ts",
-    "security-boundary.ts",
-    "team-execution.ts",
-  ],
-  search: [
-    "outer-search-space-fixtures.ts",
-    "search-selection-port.ts",
-    "search-space-profile.ts",
-    "toy-harness.ts",
-  ],
-  competition: [
-    "llm-comp-arm-before-promotion.ts",
-    "llm-competition-runtime.ts",
-  ],
-} as const;
+const SHARED_ROOT_MODULES = [
+  "data-honesty.ts",
+  "evaluation-noise.ts",
+  "evok-model.ts",
+  "evok-resources.ts",
+  "idea-types.ts",
+  "local-file-evaluator.ts",
+  "newapi-client.ts",
+  "predict-reconcile.ts",
+  "project-evaluator.ts",
+  "recovery-lifecycle-driver.ts",
+] as const;
 
 function runtimeKeys(mod: object): string[] {
   return Object.keys(mod).sort();
@@ -196,33 +164,21 @@ describe("P6 six-pack physical closeout", () => {
     expect(runtimeKeys(competition)).not.toContain("createKillTestHangHook");
   });
 
-  test("dead flat shims are gone; remaining shims are re-export-only for one more release", () => {
+  test("no flat re-export shim is left at src/", () => {
     for (const name of DELETED_DEAD_SHIMS) {
       expect({ name, exists: existsSync(join(SRC, name)) }).toEqual({ name, exists: false });
     }
 
-    const expectedKept = Object.entries(KEPT_MIGRATION_SHIMS).flatMap(([pack, files]) =>
-      files.map((file) => ({ pack, file })),
-    );
+    const flatTs = readdirSync(SRC).filter((name) => name.endsWith(".ts")).sort();
+    // Ambient declarations and shared non-pack modules are not shims.
+    const allowed = new Set<string>([...SHARED_ROOT_MODULES, "bun-sqlite.d.ts", "bun-test.d.ts"]);
+    const unexpected = flatTs.filter((name) => !allowed.has(name) && !name.endsWith(".test.ts"));
+    expect(unexpected).toEqual([]);
 
-    for (const { pack, file } of expectedKept) {
-      const path = join(SRC, file);
-      expect({ file, exists: existsSync(path) }).toEqual({ file, exists: true });
-      const body = readSrc(file);
-      expect({ file, reexport: /Compatibility re-export/.test(body) }).toEqual({ file, reexport: true });
-      expect({ file, target: body.includes(`export * from "./${pack}/`) }).toEqual({ file, target: true });
-      expect(body.trim().split("\n").length).toBeLessThanOrEqual(3);
+    for (const name of flatTs.filter((entry) => !entry.endsWith(".d.ts") && !entry.endsWith(".test.ts"))) {
+      const body = readSrc(name);
+      expect({ name, shim: /Compatibility re-export/.test(body) }).toEqual({ name, shim: false });
+      expect({ name, barrel: /^export \* from "\.\//m.test(body) }).toEqual({ name, barrel: false });
     }
-
-    const leftoverFlatShims = readdirSync(SRC)
-      .filter((name) => name.endsWith(".ts"))
-      .filter((name) => {
-        if (!existsSync(join(SRC, name)) || statSync(join(SRC, name)).isDirectory()) return false;
-        const body = readSrc(name);
-        return /export \* from "\.\//.test(body) && /Compatibility re-export/.test(body);
-      })
-      .sort();
-
-    expect(leftoverFlatShims).toEqual(expectedKept.map(({ file }) => file).sort());
   });
 });

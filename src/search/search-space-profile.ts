@@ -10,12 +10,12 @@
  * already-mapped artifacts; it does not change gates or auto-kill.
  * Side-slot adapters remain out of scope.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   T48MappedCatalog,
   type Hypothesis,
   type T48MappedRef,
-} from "../hypothesis-ledger";
+} from "../evidence/hypothesis-ledger";
 
 export const SEARCH_SPACE_BINDING = "diagnostic_only" as const;
 export type SearchSpaceBindingMode = typeof SEARCH_SPACE_BINDING;

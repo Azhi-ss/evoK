@@ -1,7 +1,7 @@
 /**
- * SQLite Research Memory store (M-b / #243), the DEFAULT store since M-c (#244).
- * A second implementation of the store-neutral seam in `store.ts`, behind the
- * same provider; the file store is still the rollback path.
+ * SQLite Research Memory store (M-b / #243), the default store since M-c (#244)
+ * and the ONLY store since M-e (#246, ADR-0017). It implements the store-neutral
+ * seam in `store.ts`; the file store and its one-shot migration are gone.
  *
  * It preserves the six properties of the file design (PRD §4.1):
  *
@@ -23,17 +23,12 @@
  */
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { canonicalJson } from "../execution/security-boundary";
 import type { MemoryProvider } from "../execution/context-broker";
 import { RESEARCH_CONTROL_CARD_SCHEMA, validateResearchMemorySnapshot, type ResearchMemorySnapshot } from "./schema";
 import { MemorySliceError } from "./slice";
-import {
-  loadFileResearchMemorySnapshots,
-  loadResearchMemorySnapshot,
-  researchMemoryProviderFromStore,
-  type ResearchMemoryStore,
-} from "./store";
+import { researchMemoryProviderFromStore, type ResearchMemoryStore } from "./store";
 
 const TABLES = `
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -115,8 +110,8 @@ function withDatabase<T>(file: string, fn: (db: Database) => T): T {
 
 /**
  * A database that is not a readable database at all. Everything in it is a
- * derived projection (P4), so the file store's "corrupt snapshot file" case is
- * repaired the same way it was: rebuild the artifact from Mission history.
+ * derived projection (P4), so the artifact is repaired by rebuilding it from
+ * Mission history.
  */
 function isUnreadableDatabase(error: unknown): boolean {
   return /not a database|malformed|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(error instanceof Error ? error.message : String(error));
@@ -125,12 +120,6 @@ function isUnreadableDatabase(error: unknown): boolean {
 /** The database file and its WAL sidecars: no readable content, nothing to keep. */
 function discardDatabase(file: string): void {
   for (const suffix of ["", "-wal", "-shm"]) rmSync(`${file}${suffix}`, { force: true });
-}
-
-/** True once the database holds any published state; an empty file is unseeded. */
-function hasContent(db: Database): boolean {
-  const row = db.prepare("SELECT (SELECT COUNT(*) FROM snapshots) + (SELECT COUNT(*) FROM active) AS n").get() as { n: number };
-  return row.n > 0;
 }
 
 /** A payload that no longer hashes to its address is damage, not content. */
@@ -143,9 +132,9 @@ function payloadIsCorrupt(payload: string, digest: string): boolean {
 }
 
 /**
- * Restores the bytes a content address names, which the file store does by
- * rewriting the snapshot file. Valid published content is never rewritten: P5
- * still holds for every row that really is the content its digest names.
+ * Restores the bytes a content address names. Valid published content is never
+ * rewritten: P5 still holds for every row that really is the content its digest
+ * names.
  */
 function repairCorruptSnapshotRow(db: Database, snapshot: ResearchMemorySnapshot, payload: string): void {
   db.exec("DROP TRIGGER IF EXISTS snapshots_immutable_update");
@@ -207,7 +196,7 @@ function insertSnapshot(db: Database, snapshot: ResearchMemorySnapshot, payload:
 function setActive(db: Database, snapshot: ResearchMemorySnapshot): void {
   // One Mission owns one namespace, so it has exactly ONE active pointer: a
   // publication supersedes its own previous pointer, including one that named
-  // the other arm (a migrated or repaired store may start there). Another
+  // the other arm (a repaired store may start there). Another
   // Mission's rows are left alone and make the database foreign, which reads
   // refuse rather than repair by deletion.
   db.prepare("DELETE FROM active WHERE mission_id = ?").run(snapshot.missionId);
@@ -278,47 +267,11 @@ function activeDigest(db: Database): string | undefined {
   return rows[0].digest;
 }
 
-/** The SQLite store: same seam as the file store, one database file. */
-export function createSqliteResearchMemoryStore(file: string, migrateFrom?: string): ResearchMemoryStore {
-  /**
-   * One-shot migration of a Mission's file store (M-c / #244). A populated
-   * database is never re-seeded, so leftover files cannot drag serving
-   * backwards; an empty one is seeded once, and a damaged file store is
-   * reported instead of being mistaken for "nothing was ever published".
-   */
-  let migration: Promise<Error | undefined> | undefined;
-  const ensureMigrated = (): Promise<Error | undefined> => (migration ??= (async () => {
-    try {
-      if (migrateFrom === undefined) return undefined;
-      if (existsSync(file)) {
-        if (withDatabase(file, hasContent)) return undefined;
-      } else if (!existsSync(join(migrateFrom, "snapshots")) && !existsSync(join(migrateFrom, "active.json"))) {
-        // Nothing to migrate: do not create a database just to read it.
-        return undefined;
-      }
-      await migrateFileResearchMemory(migrateFrom, file);
-      return undefined;
-    } catch (error) {
-      // Recorded, never thrown: a caller that is about to rebuild from Mission
-      // history must still be able to publish, and a missing pinned digest
-      // reports this damage instead of "never published".
-      return error instanceof Error ? error : new Error(String(error));
-    }
-  })());
-
-  /** A read never creates a database; a failed migration explains a missing one. */
-  const readable = async (): Promise<boolean> => {
-    const failed = await ensureMigrated();
-    if (existsSync(file)) return true;
-    // Never "nothing was published" when the seed files themselves are damaged.
-    if (failed !== undefined) throw failed;
-    return false;
-  };
-
+/** The SQLite store: one database file, the one durable memory artifact. */
+export function createSqliteResearchMemoryStore(file: string): ResearchMemoryStore {
   return {
     async publish(snapshot): Promise<void> {
       const validated = validateResearchMemorySnapshot(snapshot);
-      await ensureMigrated();
       const payload = canonicalJson(validated);
       const write = (): void => {
         withDatabase(file, (db) => {
@@ -339,21 +292,15 @@ export function createSqliteResearchMemoryStore(file: string, migrateFrom?: stri
       }
     },
     async loadActive(): Promise<string | undefined> {
-      if (!await readable()) return undefined;
+      // A read never creates a database: a missing file means nothing was published.
+      if (!existsSync(file)) return undefined;
       return withDatabase(file, activeDigest);
     },
     async loadPinned(digest: string): Promise<ResearchMemorySnapshot> {
-      if (!await readable()) {
+      if (!existsSync(file)) {
         throw new MemorySliceError("research memory snapshot is missing; refusing to serve an empty history");
       }
-      const failed = await ensureMigrated();
-      return withDatabase(file, (db) => {
-        const row = db.prepare("SELECT digest FROM snapshots WHERE digest = ?").get(digest) as { digest: string } | null;
-        // This address is one the one-shot migration would have supplied, so a
-        // failed migration is the real reason it is missing (never an empty history).
-        if (row === null && failed !== undefined) throw failed;
-        return readPinned(db, digest);
-      });
+      return withDatabase(file, (db) => readPinned(db, digest));
     },
   };
 }
@@ -361,25 +308,4 @@ export function createSqliteResearchMemoryStore(file: string, migrateFrom?: stri
 /** The SQLite provider: one Run-bound slice from the pinned active snapshot. */
 export function createSqliteResearchMemoryProvider(file: string): MemoryProvider {
   return researchMemoryProviderFromStore(createSqliteResearchMemoryStore(file));
-}
-
-/**
- * One-shot migration of a Mission's `snapshots/*.json` + `active.json` into the
- * SQLite store (PRD §4.4). Every file is re-validated before anything is
- * written, so a corrupt directory migrates nothing; re-running is a no-op.
- */
-export async function migrateFileResearchMemory(dir: string, databaseFile: string): Promise<{ snapshots: number }> {
-  // Every file is re-verified against its content address before anything is
-  // written; a stray or corrupt name refuses the whole migration (P3).
-  const snapshots = await loadFileResearchMemorySnapshots(dir);
-  // The file store's pointer is the published state; a damaged pointer fails
-  // the migration (P3).
-  const active = await loadResearchMemorySnapshot(dir);
-  withDatabase(databaseFile, (db) => {
-    db.transaction(() => {
-      for (const snapshot of snapshots) insertSnapshot(db, snapshot, canonicalJson(snapshot));
-      if (active !== undefined) setActive(db, active);
-    })();
-  });
-  return { snapshots: snapshots.length };
 }

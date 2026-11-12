@@ -11,7 +11,7 @@
  * hang / Broker, does not change EXP Admission or Budget Gate predicates,
  * and does not treat Elite / MMD / near-dup / side-slot as Promotion keys.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
   SELECTION_POLICY_40,

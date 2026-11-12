@@ -25,7 +25,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { BaselineEvaluator, BaselineMeasurement } from "./mission-start";
+import type { BaselineEvaluator, BaselineMeasurement } from "./mission/mission-start";
 
 export const EVALUATION_CONTRACT_FILENAME = "evaluation.json";
 

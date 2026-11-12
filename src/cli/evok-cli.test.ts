@@ -7,7 +7,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { runEvok, parseEvokArgs, EVOK_EXIT, EVOK_USAGE, type EvokRunOptions } from "./evok-cli";
 import { createEvokModelResolver } from "../evok-model";
-import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission-start";
+import { isExplicitResumeRequest, isExplicitStartRequest } from "../mission/mission-start";
 import { parseResearchCommand } from "../mission/research-entry";
 import { parseSkillsCommand } from "../mission/skills-routing";
 import { DEMO_START_RELATIVE_PATH, DEMO_SUITE_RELATIVE_PATH, EVALUATION_TEMPLATE_RELATIVE_PATH } from "../mission/start-hard-gates";
@@ -652,7 +652,7 @@ describe("runEvok Mission start (#112)", () => {
       modelRuntime,
       catalog: catalogFrom(modelRuntime, [ref], ref),
     });
-    const { MissionStartRejectedError } = await import("../mission-start");
+    const { MissionStartRejectedError } = await import("../mission/mission-start");
     const stderr = new CollectStream();
     const code = await runEvok({
       args: { request: "/start", project, tier: "default", timeoutMs: 600000, mission: "m-x" },

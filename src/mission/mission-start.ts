@@ -48,8 +48,8 @@ import {
   type ModelConfigView,
   type RuntimeUsage,
   type SessionModelResolver,
-} from "../pi-agent-runtime";
-export type { RuntimeUsage } from "../pi-agent-runtime";
+} from "../execution/pi-agent-runtime";
+export type { RuntimeUsage } from "../execution/pi-agent-runtime";
 import {
   assertOffRetainsMissionState,
   buildDirectorInput,
@@ -108,7 +108,7 @@ import {
   type ResearchMemorySource,
   type ResearchMemorySummary,
   type ResearchRunFinding,
-} from "../evidence/research-memory";
+} from "../memory";
 import { classifyRunOutcome, type RunOutcomeClassification } from "../evidence/run-outcome";
 import {
   validateSynthesisProposal,
@@ -116,7 +116,7 @@ import {
   type SynthesisProposalContext,
   type SynthesisRejectionReason,
 } from "../evidence/synthesis-proposal";
-import { digestValue, type SandboxPolicy } from "../security-boundary";
+import { digestValue, type SandboxPolicy } from "../execution/security-boundary";
 import type { CompetitionContract } from "../competition/competition-contract";
 import type { RuleVisibilityPolicy } from "../competition/rule-visibility";
 

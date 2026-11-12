@@ -9,7 +9,7 @@
  * filter checks. Admission / Budget / hang / T48 predicates are not loosened.
  */
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search-selection-port";
+import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search/search-selection-port";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
   OUTER_MIN_KILL_EVIDENCE_ID,
@@ -19,7 +19,7 @@ import { RESEARCH_PREDICTION as prediction } from "../fixtures/research";
 import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
-} from "../toy-harness";
+} from "../search/fixtures/toy-harness";
 import { BudgetLedger } from "./budget-gate";
 import {
   InMemoryContestAutoSubmitLedger,

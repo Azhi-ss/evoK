@@ -30,10 +30,10 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { PiAgentRuntime, type AgentRuntimeResult } from "../pi-agent-runtime";
+import { PiAgentRuntime, type AgentRuntimeResult } from "../execution/pi-agent-runtime";
 import type { ContextBroker } from "../execution/context-broker";
 import type { ResourceRequest } from "../execution/resource-lease";
-import type { SandboxPolicy } from "../security-boundary";
+import type { SandboxPolicy } from "../execution/security-boundary";
 import {
   BudgetExhaustedError,
   EvaluatorFailureError,

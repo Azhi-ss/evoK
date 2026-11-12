@@ -53,9 +53,9 @@ import {
   shamResearchDecisionPacket,
   type ResearchDecisionPacket,
   type ResearchMemoryEvaluationMode,
-} from "../evidence/research-memory";
+} from "../memory";
 import type { RejectedDirectionApplicability } from "./decision-accountability";
-import type { ModelConfigView, RuntimeUsage } from "../pi-agent-runtime";
+import type { ModelConfigView, RuntimeUsage } from "../execution/pi-agent-runtime";
 import {
   BudgetExhaustedError,
   DirectorBlockedError,

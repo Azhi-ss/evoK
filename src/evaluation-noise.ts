@@ -1,5 +1,5 @@
-import { clone, digestValue, deepFreeze, type SnapshotManifest } from "./security-boundary";
-import type { CandidateSnapshot, ScoreFact } from "./toy-harness";
+import { clone, digestValue, deepFreeze, type SnapshotManifest } from "./execution/security-boundary";
+import type { CandidateSnapshot, ScoreFact } from "./search/fixtures/toy-harness";
 
 export type EvaluationStage = "single" | "best-of-n" | "symmetric-a-b";
 export type EvaluationSide = "candidate" | "control";

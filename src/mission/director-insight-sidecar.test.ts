@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { digestValue } from "../security-boundary";
-import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { digestValue } from "../execution/security-boundary";
+import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../memory";
 import {
   InsightInboxError,
   recordInsightDisposition,

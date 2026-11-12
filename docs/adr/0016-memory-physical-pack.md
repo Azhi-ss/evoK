@@ -36,7 +36,7 @@ It owns exactly four things:
 | Concern | Module |
 |---|---|
 | Deterministic projection from Mission history, card and packet schemas | `projection.ts`, `schema.ts`, `packet.ts`, `sham.ts` |
-| Durable derived storage: the SQLite database is the default store from M-c/#244, with the immutable snapshot files kept as the rollback reader | `store.ts`, `sqlite-store.ts`, `default-store.ts` |
+| Durable derived storage: one SQLite database per Mission, the default store from M-c/#244 and the only store from M-e/#246 ([ADR-0017](0017-single-memory-store-closeout.md)) | `store.ts`, `sqlite-store.ts`, `default-store.ts` |
 | Run-bound slice assembly and delegation | `slice.ts` |
 | Read-only serving: injection support in `packet.ts` and, from M-d/#245, `memory_read(ref)` | `tool.ts` |
 
@@ -59,7 +59,7 @@ The six-pack logical map in ADR-0007 is unchanged:
 ## Consequences
 
 - Existing modules became re-export shims in M-a (#242), following the ADR-0013
-  pattern, and are removed once no importer remains (M-e).
+  pattern, and were removed once no importer remained (M-e, #246).
 - `src/memory/index.ts` is the only public export surface. Other packages import
   from it, not from individual memory modules, so the projection cannot grow a
   second back channel into the ledger. The old paths re-export that same entry

@@ -47,16 +47,19 @@ not a seventh logical owner; the six-pack table above, its ownership, and the
 - `src/evok-cli.ts`
 - `src/second-toy-adapter.ts`
 
-**Kept as migration-period re-exports for one more release.** Production
-modules, integration tests, examples, the recovery driver, or the
-ToyHarness fixture barrel still import these flat paths. Retargeting
-every `../foo` import is a second big move and is out of P6.
+**Kept as migration-period re-exports for one release — since DELETED (M-e,
+#246; [ADR-0016](0016-memory-physical-pack.md) / [ADR-0017](0017-single-memory-store-closeout.md)).**
+Production modules, integration tests, examples, the recovery driver, and the
+ToyHarness fixture barrel imported these flat paths, so P6 left the retargeting
+for later. M-e retargeted all 121 importer specifiers to the physical modules and
+deleted every shim below; no flat re-export remains at `src/`
+(`tests/integration/six-pack-physical-closeout.test.ts` now asserts that).
 
-| Pack | Flat shim |
+| Pack | Flat shims (deleted in M-e) |
 |---|---|
 | mission | `baseline-track`, `branch-recovery`, `llm-propose-outer-min`, `mission-director`, `mission-draft`, `mission-intake`, `mission-resume`, `mission-start`, `outer-e2e-min-path`, `outer-min-path`, `research-loop`, `v1-golden-path` |
 | evidence | `hypothesis-ledger`, `kill-test-hang`, `ledger-kinds`, `methodology-acceptance`, `methodology-contracts`, `methodology`, `submission-broker`, `validation-ladder`, `verification-gates` |
-| execution | `dag-scheduler`, `model-orchestra`, `pi-agent-runtime`, `security-boundary`, `team-execution` |
+| execution | `dag-scheduler`, `model-orchestra`, `pi-agent-runtime`, `security-boundary`, `team-execution`, `memory-slice`, `research-memory-provider` |
 | search | `outer-search-space-fixtures`, `search-selection-port`, `search-space-profile`, `toy-harness` |
 | competition | `llm-comp-arm-before-promotion`, `llm-competition-runtime` |
 

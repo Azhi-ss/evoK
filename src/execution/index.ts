@@ -173,41 +173,6 @@ export type {
   SubagentTransport,
 } from "./subagents-adapter";
 export {
-  AGENT_RESULT_SCHEMA,
-  DEFAULT_MEMORY_READ_POLICY,
-  MEMORY_SENSITIVE_FIELDS,
-  MEMORY_SLICE_RESEARCH_SCHEMA,
-  MEMORY_SLICE_SCHEMA,
-  MEMORY_WRITE_PROPOSAL_SCHEMA,
-  MemorySliceError,
-  createMemorySlice,
-  createMemoryWriteProposal,
-  createResearchMemorySlice,
-  deriveDelegatedMemorySlice,
-  validateAgentResult,
-  validateMemorySlice,
-  validateMemoryWriteProposal,
-} from "./memory-slice";
-export type {
-  AgentResult,
-  DelegatedMemorySliceInput,
-  MemoryFact,
-  MemoryFinding,
-  MemoryReadPolicy,
-  MemorySlice,
-  MemorySliceInput,
-  MemoryWriteProposal,
-  MemoryWriteProposalInput,
-  ResearchMemorySliceInput,
-} from "./memory-slice";
-export {
-  RESEARCH_MEMORY_POINTER_SCHEMA,
-  createDelegatedResearchMemoryProvider,
-  createResearchMemoryProvider,
-  loadResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
-} from "./research-memory-provider";
-export {
   BROKERED_CONTEXT_SCHEMA,
   CONTEXT_ROLES,
   ContextBroker,

@@ -9,9 +9,9 @@ import { describe, expect, test } from "bun:test";
 import { evaluateExperimentValidity } from "../evidence/experiment-validity";
 import { evaluateMethodAdmission } from "../evidence/method-admission";
 import { BudgetLedger } from "../evidence/budget-gate";
-import { HypothesisLedger, T48MappedCatalog } from "../hypothesis-ledger";
-import { runKillTestHang } from "../kill-test-hang";
-import { EvidenceMemory } from "../research-loop";
+import { HypothesisLedger, T48MappedCatalog } from "../evidence/hypothesis-ledger";
+import { runKillTestHang } from "../evidence/kill-test-hang";
+import { EvidenceMemory } from "../mission/research-loop";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
   DEFAULT_UCT_EXPLORATION,
@@ -22,7 +22,7 @@ import {
   type SearchParentCandidate,
   type SearchSelectionContext,
 } from "./search-selection-port";
-import type { ToyCompetitionAdapter } from "../toy-harness";
+import type { ToyCompetitionAdapter } from "./fixtures/toy-harness";
 import {
   SeaPluginNotMountedError,
   SeaPluginSelectionNotOpenedError,
