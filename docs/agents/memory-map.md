@@ -26,7 +26,7 @@ migration-period re-export shims of that entry point and are removed in M-e.
 | Which store is live, and the rollback switch | `src/memory/default-store.ts` | `researchMemoryStoreFor`, `defaultResearchMemoryProvider`, `researchMemoryStoreName`, `RESEARCH_MEMORY_STORE_ENV`, `RESEARCH_MEMORY_DATABASE_FILENAME` |
 | Read-only serving tool (M-d) | `src/memory/tool.ts` | `MEMORY_READ_TOOL`, `MEMORY_READ_SCHEMA`, `readMemoryCard`, `createMemoryReadTool` |
 | Run-bound slice | `src/memory/slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice`, `MemorySliceError` |
-| Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged` |
+| Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` (publish/status), `src/mission/director-phases.ts` (pin + revision stage, #257) | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged`; the decision-point pin and the blind/revision stages are `createDirectorPhases` |
 | Prompt assembly (blind vs revision) | `src/mission/mission-director.ts` | `buildDirectorPrompt`, `DirectorDecisionPhase`, `deriveDecisionDelta`, `missionRetainedState`, `recordRetainedState`, `decisionRetainedState`, `assertOffRetainsMissionState` |
 | Recovery rebuild | `src/mission/mission-resume.ts` | `reconcileResearchMemory` |
 | Accountability / diversity / counterfactuals | `src/mission/decision-accountability.ts` | `projectDecisionAccountability`, `ResearchDiversity` |
@@ -35,7 +35,7 @@ migration-period re-export shims of that entry point and are removed in M-e.
 
 F5 (#231): the off arm keeps the Mission's `Mission Retained State` (scoreboard +
 current best) in the prompt and at the decision point; `assertOffRetainsMissionState`
-is called where the Director input is built (`mission-start.ts`) and in the
+is called where the Director input is built (`mission-start.ts`, before the decision stage) and in the
 whole-Mission report.
 
 M-b (#243) added a SQLite implementation of the same `ResearchMemoryStore` seam
@@ -69,7 +69,7 @@ memory directory creates no second registration seam (ADR-0016).
 | Body plus provenance refs | `MemoryReadBody.body` is the published card, `provenance` carries `snapshotId`, `snapshotDigest`, `ledgerRevision` and the card's provenance refs (its `sourceRefs`/claim refs plus its `lineage` revision chain) |
 | No enumeration / search / listing | the only argument is one `ref` (`additionalProperties: false`); there is no query or list parameter |
 | Never crosses Run, Mission or arm | one tool per Run, bound to that Run's slice; a slice with no `research` snapshot gets no tool at all |
-| Ledger-visible read event | the runtime reports `AgentRuntimeResult.memoryReads`; `runMissionController` appends one `MEMORY_READ` history event per delivered **and** refused attempt of a Run that reaches a confirmed result (a Run that fails first keeps them in its durable tool-intent record) |
+| Ledger-visible read event | the runtime reports `AgentRuntimeResult.memoryReads`; `dispatchCandidateAttempt` (`src/mission/run-dispatch.ts`, #257) appends one `MEMORY_READ` history event per delivered **and** refused attempt of a Run that reaches a confirmed result (a Run that fails first keeps them in its durable tool-intent record) |
 | Sham parity | the Sham arm's slice carries the Sham snapshot, so the same factory exposes the same tool (same name, description, parameters) returning control-slot bodies — an arm comparison measures memory, not tool access |
 
 A read is context, never Evidence: it changes no measurement, gate, budget or
@@ -82,7 +82,7 @@ Run was not served.
 
 - Which card schemas and fields exist? `src/memory/schema.ts` (card interfaces near the top).
 - How are cards ordered, truncated, reserved, and omitted? `projectResearchMemorySnapshot` and `projectResearchDecisionPacket`.
-- What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `runMissionController`.
+- What does an Off/Sham/Real arm change? `researchMemoryModeOf` + `projectAndPublishResearchMemory` + the revision pin in `createDirectorPhases` (`src/mission/director-phases.ts`, PRD §4 Stage 4).
 - Why can't a Run see the future? `replayResearchMemory` (dispatch vs completion instants; it pins the ledger revision the Run was durably served — `MissionRunRecord.researchMemory.ledgerRevision` — and falls back to the prefix ordinal only for legacy records without it).
 - Is replay value evidence? No. `evaluateResearchMemory` labels the replay section `integrity` (`claim: integrity`) and labels its comparison `whole-mission-comparison` (`kind`); it refuses arms that all derive from one MissionRecord, because those deltas are zero by construction, and it refuses any arm whose `origin` is not `new-run`.
 - When may L2 run? Only with an `l1Signal` (`ResearchMemoryL1Signal`, satisfied by a `DecisionPointEvaluationReport`) whose off→real `matched-action-taken` direction is `treatment-higher` and whose sample meets L1's floor — no significance, no under-powered gate. Every arm must declare `origin: "new-run"`; a report mixing historical-replay arms with newly-run arms is refused, as is an all-replay report, and both Director-stage costs are counted in every arm including `off`.

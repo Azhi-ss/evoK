@@ -324,10 +324,13 @@ function assertIntact(record: MissionRecord): void {
   if (!Array.isArray(record.usage.runs) || !isRecord(record.usage.intake)) fail("usage ledger is damaged");
   const meteredSessions = new Set(record.usage.runs.map((line) => line.sessionId));
   for (const run of Object.values(record.runs)) {
-    // Only a run that ALREADY carries a confirmed resultRef must have its
-    // metered ledger line. A snapshot-only killed run has no result yet (its
-    // outcome is reconciled separately) and is not "measured" on this check.
-    if (run.resultRef) {
+    // Only a run that carries a confirmed resultRef must have its metered ledger
+    // line. Two exceptions are stated facts, never absorbed silences:
+    //  - a snapshot-only killed run has no result yet (reconciled separately);
+    //  - a run marked `metering: "unsettled"` was confirmed by recovery from its
+    //    durable artifacts after the crash beat the cost settlement, so no line
+    //    can exist (#257 §6 "after artifact write"). Its reservation stays held.
+    if (run.resultRef && run.metering !== "unsettled") {
       if (!run.sessionId || !meteredSessions.has(run.sessionId)) {
         fail(`confirmed run ${run.runId} has no matching metered usage line (damaged accounting)`);
       }
@@ -419,6 +422,12 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
   let stateVersion = record.stateVersion ?? 0;
   const events: Array<{ type: HistoryEventType; detail?: Record<string, unknown> }> = [];
 
+  // A Run confirmed from durable artifacts owes a metered usage line unless the
+  // crash beat the cost settlement; the marker says which, durably (#257 §6).
+  const meteredSessions = new Set(record.usage.runs.map((line) => line.sessionId));
+  const settledOf = (run: { readonly sessionId?: string }): { readonly metering?: "unsettled" } =>
+    run.sessionId !== undefined && meteredSessions.has(run.sessionId) ? {} : { metering: "unsettled" as const };
+
   const runsOrdered = Object.values(runs).sort((a, b) => a.attempt - b.attempt || a.runId.localeCompare(b.runId));
   for (const runOriginal of runsOrdered) {
     const run = runOriginal;
@@ -448,7 +457,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
         fail(`run ${run.runId} was measured by ${claimed.evaluator.id} but recovery loaded ${options.evaluator.id}`);
       }
       adoptedRunIds.push(run.runId);
-      runs[run.runId] = { ...run, status: "measured", resultRef: run.resultRef ?? `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: run.snapshotRef ?? `runs/${run.runId}/${SNAPSHOT_DIRNAME}` };
+      runs[run.runId] = { ...run, status: "measured", resultRef: run.resultRef ?? `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: run.snapshotRef ?? `runs/${run.runId}/${SNAPSHOT_DIRNAME}`, ...settledOf(run) };
       if (isBaselineRun) {
         baselineRunId = run.runId;
         baseline = claimed;
@@ -479,7 +488,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
       const runDir = join(missionsDir(projectRoot), draft.id, RUNS_DIRNAME, run.runId);
       await mkdir(runDir, { recursive: true });
       await atomicWriteJson(join(runDir, RESULT_FILENAME), rebuilt);
-      runs[run.runId] = { ...run, status: "measured", resultRef: `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: `runs/${run.runId}/${SNAPSHOT_DIRNAME}` };
+      runs[run.runId] = { ...run, status: "measured", resultRef: `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: `runs/${run.runId}/${SNAPSHOT_DIRNAME}`, ...settledOf(run) };
       remeasuredRunIds.push(run.runId);
       stateVersion += 1;
       if (isBaselineRun && !baseline) {

@@ -19,6 +19,29 @@ start hard-gate inventory (`start-hard-gates`, ET-OPS-START), and
 golden-path / outer-min orchestration glue (`v1-golden-path`,
 `outer-*-path`, `llm-propose-outer-min`).
 
+## Mission controller stages (PRD §4 Stage 4, #257)
+
+`runMissionController` (`mission-start.ts`) only composes named stages; it holds
+no execution mechanics of its own.
+
+| Stage | Module | Responsibility |
+|---|---|---|
+| prepareRun | `run-preparation.ts` | authorization, lock, budget reservation, plan freeze, the Mission-owned snapshot, the memory pin → immutable `PreparedRun` |
+| Director decision | `director-phases.ts` | blind → pinned Research Memory packet + Insight sidecar → revision; one durable `DecisionRecord` per priced call; then the accepted proposal becomes an applied Task (`applyDirectorProposal`) and renders the next Experiment's instructions (`experimentInstructions`); research judgement stays the Director's |
+| execute | `run-dispatch.ts` | one bounded candidate Run: fresh runtime/workspace/intent, snapshot adoption, independent measurement, per-Run metering |
+| finalizeRun | `run-finalization.ts` | adopt the outcome into Mission state: baseline record, Experiment trail entry, state version, concentration review, derived Memory |
+| recover-or-terminate | `recovery.ts` | reuse already-durable decision stages/applications and attempt numbers; terminate on budget, Experiment bound or interruption |
+
+Rules the split keeps: dispatch never decides, finalization never measures,
+recovery only reads durable state, and a terminal condition persists its
+truthful status before it throws. The stages import the shared record
+vocabulary (`withEvent`, path helpers, typed errors) from `mission-start.ts`,
+which imports them back — the same intra-package direction
+`run-preparation.ts` has taken since Stage 1; no stage imports another stage's
+internals, and only `mission-start.ts` composes them. Behaviour is pinned by
+`tests/integration/ledger-trace.test.ts` (trace digests) and, at the PRD §6
+commit points, by `tests/integration/mission-recovery-faults.test.ts`.
+
 P6: physical pack is in place. Remaining flat `src/*.ts` files are
 migration-period re-exports for one more release
 ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
