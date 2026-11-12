@@ -128,6 +128,40 @@ rebuilt from events alone and its digest is byte-stable.
 
 Tests: `src/mission/insight-inbox.test.ts`, `src/mission/director-insight-sidecar.test.ts`.
 
+## The charter-reference seam (#251 / C2; spec #249)
+
+A Research Charter is **not** a memory source: it is a forward-looking,
+**human-authorized input** (`docs/research-charter-prd.md`), while Memory is a
+derived, backward-looking projection. They are never merged. The only seam is that
+a Run records which approved charter and frozen protocol version it executed
+under — a reference pair, not charter content. This section exists because that
+reference is what a memory projection or replay needs in order to say which study
+design a result belonged to; it never lets a Run read the charter itself.
+
+| Step | Module | Symbols |
+|---|---|---|
+| Charter schema, validation, content digest (`evok.research-charter/v1`) | `src/mission/research-charter.ts` | `validateResearchCharter`, `assertResearchCharter`, `ResearchCharterValidationError`, `charterDigest` |
+| Ledger events, replay, start gate | `src/mission/charter-ledger.ts` | `proposeResearchCharter`, `approveResearchCharter`, `freezeBenchmarkProtocol`, `addBenchmarkExtension`, `projectCharterLedger`, `requireApprovedCharter`, `CharterLedgerError` / `CharterApprovalRejectedError` / `CharterApprovalRequiredError` |
+
+Event kinds `RESEARCH_CHARTER_PROPOSED`, `RESEARCH_CHARTER_APPROVED`,
+`BENCHMARK_PROTOCOL_FROZEN`, `BENCHMARK_EXTENSION_ADDED` live on the research
+Mission ledger (`src/mission/research-loop.ts`, `ResearchEventType`), so they
+follow the same append, validation and monotonic-sequence rules; they carry no
+Approval/Evidence/Evaluation kind (`ledgerEventKind` → `null`).
+
+| Rule | Where it is enforced |
+|---|---|
+| The ledger stores versions, digests, approvals and artifact references only | closed payloads in `projectCharterLedger`; the full charter/evidence text stays in the referenced artifact |
+| Approval is human authorization | `approveResearchCharter` refuses `source: "model"` and requires `requested` plus a matching mission selector; replay refuses an approval event whose payload `source` is not `"user"`. A writer that fabricates `source: "user"` is fabricating a human event, which no ledger can authenticate — that guard lives at the append path, not in replay |
+| Approval pins a version and digest | an approval must name a proposed `charterId`+`charterVersion`+`charterDigest`; a same-version proposal with a different digest is refused, and a later charter version never rewrites the recorded approval |
+| Freezing records protocol version and digest | `freezeBenchmarkProtocol` derives `protocolDigest` from the approved charter's `charterDigest` and the frozen `baselineIds` from its portfolio; a charter that is not the currently approved one cannot be frozen |
+| Primary-protocol change is versioned and reasoned; old results keep their version | every freeze stays in `frozenHistory`; a later freeze needs a new `protocolVersion` plus a recorded `reason`; re-freezing an existing version with different content is refused |
+| Extensions never move the frozen set or digest | `addBenchmarkExtension` copies the frozen `protocolVersion`/`protocolDigest`, refuses a `baselineId` already in the frozen set, and leaves `frozenProtocol.baselineIds` untouched |
+| No research loop on an unapproved charter | `requireApprovedCharter` refuses a proposal-only ledger, an approved charter with no frozen protocol, and an approval newer than the frozen protocol. #248 calls it before the long-running loop starts |
+| Deterministic replay | `projectCharterLedger` rebuilds proposals, the current approval, `frozenProtocol`, `frozenHistory` and extensions from events alone; the same events produce the same state digest (byte-stable) |
+
+Tests: `src/mission/charter-ledger.test.ts`, `src/mission/research-charter.test.ts`.
+
 ## Tests
 
 - Digests (M-a pin): `src/memory/digests.test.ts`
@@ -137,6 +171,7 @@ Tests: `src/mission/insight-inbox.test.ts`, `src/mission/director-insight-sideca
 - Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`, `src/execution/memory-slice.test.ts`, `src/execution/research-memory-provider.test.ts`
 - Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
 - Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218`, `#240` blocks), `tests/integration/memory-evaluation.test.ts`
+- Charter reference seam (C2): `src/mission/charter-ledger.test.ts`
 
 ## Boundaries
 

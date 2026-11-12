@@ -30,6 +30,10 @@ _Avoid_: RSI project, reflection-only improvement, research-equals-improvement
 The outcome the human wants the Mission to pursue; it defines what counts as relevant progress and cannot be changed implicitly by an agent.
 _Avoid_: Prompt, task goal
 
+**Research Charter**:
+The versioned, human-approved pre-Mission study design: objective and boundaries, ambition bars, the sourced research gap, the baseline portfolio, the frozen evaluation protocol, and constraints. It is a forward-looking **human-authorized input**, not a derived projection of what happened, and the Mission ledger keeps only its versions, approvals and artifact references — full charter text and literature evidence stay in artifacts. Approval pins one charter version and content digest; a primary-protocol change is a new protocol version with a recorded reason, and earlier results keep the version they ran under rather than being re-scored.
+_Avoid_: Research plan (that is the Mission's task plan), baseline list, Memory snapshot
+
 **Task**:
 A scoped piece of research or engineering work that contributes evidence or an artifact toward a Mission objective.
 _Avoid_: Mission, step

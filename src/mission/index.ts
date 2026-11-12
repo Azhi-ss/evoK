@@ -60,6 +60,34 @@ export type {
   ReproductionStatus,
 } from "./research-charter";
 export {
+  CHARTER_EVENT_SCHEMA,
+  CHARTER_LEDGER_SCHEMA,
+  CharterApprovalRejectedError,
+  CharterApprovalRequiredError,
+  CharterLedgerError,
+  addBenchmarkExtension,
+  approveResearchCharter,
+  freezeBenchmarkProtocol,
+  projectCharterLedger,
+  proposeResearchCharter,
+  requireApprovedCharter,
+} from "./charter-ledger";
+export type {
+  AddBenchmarkExtensionInput,
+  ApprovedCharterReference,
+  ApproveResearchCharterInput,
+  BenchmarkExtension,
+  CharterApproval,
+  CharterApprovalAuthorization,
+  CharterEventType,
+  CharterLedger,
+  CharterLedgerState,
+  CharterProposal,
+  FreezeBenchmarkProtocolInput,
+  FrozenProtocol,
+  ProposeResearchCharterInput,
+} from "./charter-ledger";
+export {
   HUMAN_INSIGHT_DRAFT_SCHEMA,
   INSIGHT_DISPOSITIONS,
   INSIGHT_INBOX_SCHEMA,
