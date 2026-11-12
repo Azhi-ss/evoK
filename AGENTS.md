@@ -14,6 +14,7 @@ Default five-label vocabulary kept as-is. See `docs/agents/triage-labels.md`.
 
 Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 Memory subsystem (projection, decision packet, Run injection, recovery, evaluation): `docs/agents/memory-map.md`.
+Harness capability (environment snapshot, artifact receipts, raw metering, execution close): `docs/agents/harness-map.md`.
 
 ## Source and test layout
 

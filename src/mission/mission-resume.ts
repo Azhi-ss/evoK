@@ -27,10 +27,10 @@
  * the reconciled projection; it cannot declare a lost Run successful, replay
  * it silently, or widen the objective/permissions/budget.
  */
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { collectArtifacts, digestArtifacts } from "../harness";
 import type { MissionDraft } from "./mission-draft";
 import { isMissionId, missionsDir } from "./mission-draft";
 import {
@@ -291,28 +291,6 @@ function snapshotDir(projectRoot: string, missionId: string, runId: string): str
   return join(missionsDir(projectRoot), missionId, RUNS_DIRNAME, runId, SNAPSHOT_DIRNAME);
 }
 
-function collectFiles(root: string): Record<string, string> {
-  const files: Record<string, string> = {};
-  const walk = (dir: string, prefix: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full, rel);
-      else if (entry.isFile()) files[rel] = readFileSync(full, "utf8");
-    }
-  };
-  if (existsSync(root)) walk(root, "");
-  return files;
-}
-
-function digestFiles(files: Readonly<Record<string, string>>): string {
-  const hash = createHash("sha256");
-  for (const name of Object.keys(files).sort()) {
-    hash.update(name); hash.update("\0"); hash.update(files[name]!); hash.update("\0");
-  }
-  return hash.digest("hex");
-}
-
 async function readResultJson(projectRoot: string, missionId: string, runId: string): Promise<BaselineResultRecord | undefined> {
   try {
     const raw = await readFile(baselineResultPath(projectRoot, missionId, runId), "utf8");
@@ -346,10 +324,13 @@ function assertIntact(record: MissionRecord): void {
   if (!Array.isArray(record.usage.runs) || !isRecord(record.usage.intake)) fail("usage ledger is damaged");
   const meteredSessions = new Set(record.usage.runs.map((line) => line.sessionId));
   for (const run of Object.values(record.runs)) {
-    // Only a run that ALREADY carries a confirmed resultRef must have its
-    // metered ledger line. A snapshot-only killed run has no result yet (its
-    // outcome is reconciled separately) and is not "measured" on this check.
-    if (run.resultRef) {
+    // Only a run that carries a confirmed resultRef must have its metered ledger
+    // line. Two exceptions are stated facts, never absorbed silences:
+    //  - a snapshot-only killed run has no result yet (reconciled separately);
+    //  - a run marked `metering: "unsettled"` was confirmed by recovery from its
+    //    durable artifacts after the crash beat the cost settlement, so no line
+    //    can exist (#257 §6 "after artifact write"). Its reservation stays held.
+    if (run.resultRef && run.metering !== "unsettled") {
       if (!run.sessionId || !meteredSessions.has(run.sessionId)) {
         fail(`confirmed run ${run.runId} has no matching metered usage line (damaged accounting)`);
       }
@@ -441,6 +422,12 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
   let stateVersion = record.stateVersion ?? 0;
   const events: Array<{ type: HistoryEventType; detail?: Record<string, unknown> }> = [];
 
+  // A Run confirmed from durable artifacts owes a metered usage line unless the
+  // crash beat the cost settlement; the marker says which, durably (#257 §6).
+  const meteredSessions = new Set(record.usage.runs.map((line) => line.sessionId));
+  const settledOf = (run: { readonly sessionId?: string }): { readonly metering?: "unsettled" } =>
+    run.sessionId !== undefined && meteredSessions.has(run.sessionId) ? {} : { metering: "unsettled" as const };
+
   const runsOrdered = Object.values(runs).sort((a, b) => a.attempt - b.attempt || a.runId.localeCompare(b.runId));
   for (const runOriginal of runsOrdered) {
     const run = runOriginal;
@@ -449,8 +436,10 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     let snapshotFiles: Record<string, string> | undefined;
     let snapshotDigest: string | undefined;
     if (existsSync(snapDir)) {
-      snapshotFiles = collectFiles(snapDir);
-      snapshotDigest = digestFiles(snapshotFiles);
+      // B2: the same harness collection/receipt the Run commit used, so recovery
+      // re-derives exactly the address the confirmed result recorded.
+      snapshotFiles = await collectArtifacts(snapDir);
+      snapshotDigest = digestArtifacts(snapshotFiles);
     }
 
     const isBaselineRun = run.runId === baselineRunId || run.runId.includes(":baseline:");
@@ -468,7 +457,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
         fail(`run ${run.runId} was measured by ${claimed.evaluator.id} but recovery loaded ${options.evaluator.id}`);
       }
       adoptedRunIds.push(run.runId);
-      runs[run.runId] = { ...run, status: "measured", resultRef: run.resultRef ?? `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: run.snapshotRef ?? `runs/${run.runId}/${SNAPSHOT_DIRNAME}` };
+      runs[run.runId] = { ...run, status: "measured", resultRef: run.resultRef ?? `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: run.snapshotRef ?? `runs/${run.runId}/${SNAPSHOT_DIRNAME}`, ...settledOf(run) };
       if (isBaselineRun) {
         baselineRunId = run.runId;
         baseline = claimed;
@@ -499,7 +488,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
       const runDir = join(missionsDir(projectRoot), draft.id, RUNS_DIRNAME, run.runId);
       await mkdir(runDir, { recursive: true });
       await atomicWriteJson(join(runDir, RESULT_FILENAME), rebuilt);
-      runs[run.runId] = { ...run, status: "measured", resultRef: `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: `runs/${run.runId}/${SNAPSHOT_DIRNAME}` };
+      runs[run.runId] = { ...run, status: "measured", resultRef: `runs/${run.runId}/${RESULT_FILENAME}`, snapshotRef: `runs/${run.runId}/${SNAPSHOT_DIRNAME}`, ...settledOf(run) };
       remeasuredRunIds.push(run.runId);
       stateVersion += 1;
       if (isBaselineRun && !baseline) {

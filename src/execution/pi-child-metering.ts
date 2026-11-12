@@ -17,6 +17,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
+import { measureResponseUsage } from "../harness";
 
 /** The extension surface the controller owns; a Pi `ExtensionAPI` satisfies it. */
 export interface ChildMeteringHost {
@@ -111,7 +112,7 @@ export async function createChildMetering(
         body: Buffer.concat(chunks),
       });
       const text = await forwarded.text();
-      const served = countUsage(text);
+      const served = measureResponseUsage(text);
       usage.input += served.input;
       usage.output += served.output;
       response.writeHead(forwarded.status, {
@@ -175,30 +176,4 @@ function childModelConfig(model: Model<Api>): NonNullable<ProviderConfig["models
     ...(model.samplingParams ? { samplingParams: model.samplingParams } : {}),
     ...(model.compat ? { compat: model.compat } : {}),
   };
-}
-
-/** Within one request the counts are cumulative, so the highest seen is that request's. */
-function countUsage(text: string): { input: number; output: number } {
-  const served = { input: 0, output: 0 };
-  for (const line of text.split("\n")) {
-    const raw = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
-    if (!raw.startsWith("{")) continue;
-    let body: {
-      usage?: Record<string, unknown>;
-      message?: { usage?: Record<string, unknown> };
-      response?: { usage?: Record<string, unknown> };
-    };
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    const counts = body?.usage ?? body?.message?.usage ?? body?.response?.usage;
-    if (!counts) continue;
-    const input = counts.input_tokens ?? counts.prompt_tokens;
-    const output = counts.output_tokens ?? counts.completion_tokens;
-    if (typeof input === "number" && Number.isFinite(input)) served.input = Math.max(served.input, input);
-    if (typeof output === "number" && Number.isFinite(output)) served.output = Math.max(served.output, output);
-  }
-  return served;
 }

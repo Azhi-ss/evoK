@@ -7,18 +7,33 @@
  * Usage:
  *   bun src/recovery-lifecycle-driver.ts <project> <mode> [boundary]
  *     mode=start   run a fresh start; kill/self-abort at `boundary`
- *                  (before-confirmation | after-confirmation | none)
+ *                  (before-confirmation | after-confirmation | none
+ *                   | after-budget-reservation | after-execution-start
+ *                   | after-artifact-write | before-receipt-persistence)
  *     mode=resume  resume the single Mission in the project and continue
  *     mode=list    print the reopen listing as JSON
  *
- * Boundaries are observed from the onPersistedEvent seam (durable events),
- * not fixed timers, so the interruption is deterministic.
+ * Boundaries are observed from the onPersistedEvent seam (durable events) and
+ * from the execution harness's own fault-injection vocabulary, not fixed
+ * timers, so each fault is deterministic. The four PRD §6 commit points are:
+ *
+ *   after-budget-reservation   the Mission committed a reservation, nothing ran
+ *                              → the process dies right after BUDGET_RESERVED
+ *   after-execution-start      the Run was dispatched and never answered
+ *                              → the runtime crashes after intent dispatch
+ *   after-artifact-write       the snapshot bytes are durable, no result yet
+ *                              → the process dies in the evaluator call
+ *   before-receipt-persistence the Run finished but its receipt/result was
+ *                              never persisted → the runtime crashes before
+ *                              result confirmation
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver } from "./evok-model";
+import { PiAgentRuntime, type RuntimeFaultInjection } from "./execution/pi-agent-runtime";
+import type { SandboxPolicy } from "./security-boundary";
 import { discoverEvokResources } from "./evok-resources";
 import { saveMissionDraft, type MissionDraft } from "./mission-draft";
 import {
@@ -185,6 +200,21 @@ async function main(): Promise<void> {
     // baseline 0.4, experiment 0.9; the interruption decides whether the
     // experiment's confirmation is ever observed.
     const { resolver, resources } = await buildResolver(project, [0.4, 0.9]);
+    // PRD §6: the execution harness's own fault vocabulary injects the two
+    // in-Run commit points; the process then continues and reports the truth.
+    const faultInjection: RuntimeFaultInjection | undefined =
+      boundary === "after-execution-start" ? { crashAfterDispatch: true }
+        : boundary === "before-receipt-persistence" ? { crashBeforeResultConfirmation: true }
+          : undefined;
+    // A faulted start stops at the baseline, so the recovery under test is the
+    // controller's, not a retry the same process happens to run.
+    const faultedStart = faultInjection !== undefined;
+    // "after artifact write": the snapshot bytes are already durable when the
+    // evaluator is called, and the result record is not, so dying HERE leaves
+    // exactly that state (never a fabricated measurement).
+    const startEvaluator: BaselineEvaluator = boundary === "after-artifact-write"
+      ? { ...evaluator, evaluate: () => process.exit(137) }
+      : evaluator;
     const startAuth: StartAuthorization = { requested: true, token: "/start", missionSelector: "displayed" };
     // Interrupt after the experiment intent is durably persisted but BEFORE
     // its snapshot/measurement confirmation; or AFTER the experiment is
@@ -212,14 +242,25 @@ async function main(): Promise<void> {
         authorization: startAuth,
         resolver,
         resources,
-        evaluator,
+        evaluator: startEvaluator,
         budgetUnits: "model-USD",
         reserveCost: 0.0001,
         priceModelCost: () => priceTokens,
         director: scriptedDirector(boundary === "after-confirmation" ? controller : undefined),
-        maxExperiments: 3,
+        maxExperiments: faultedStart ? 0 : 3,
+        ...(faultInjection === undefined
+          ? {}
+          : {
+              runtimeFactory: (workspaceRoot: string, sandbox: SandboxPolicy) =>
+                new PiAgentRuntime({ workspaceRoot, modelResolver: resolver, resources, sandbox, faultInjection }),
+            }),
         signal: controller.signal,
-        onPersistedEvent,
+        onPersistedEvent: (event) => {
+          // PRD §6 "after budget reservation": die with the reservation durable
+          // and nothing executed (the baseline intent exists; no artifact does).
+          if (boundary === "after-budget-reservation" && event.type === "BUDGET_RESERVED") process.exit(137);
+          onPersistedEvent(event);
+        },
       });
       console.log(JSON.stringify({ ok: true, status: outcome.status, runId: outcome.runId, experimentIntentSeen, experimentConfirmed }));
     } catch (error) {

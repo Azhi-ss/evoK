@@ -66,6 +66,14 @@ _Avoid_: Run (a Run is one execution attempt)
 One execution attempt for a Task or Candidate under a fixed input, environment, policy, and attempt identity.
 _Avoid_: Experiment (when referring to the scientific activity rather than one attempt)
 
+**Execution**:
+The protocol record of one backend run: a declared execution request (frozen input and environment refs, capability grant, limits, optional parent execution id) closed by one receipt whose terminal outcome is `succeeded`, `failed`, `cancelled`, or `unknown`. A Run is an Execution, and a delegated child is its own Execution with a parent execution id. `unknown` means the terminal state was never confirmed; only a confirmed cancellation is `cancelled`, and neither is ever success.
+_Avoid_: Run (when the protocol record is meant), job, call
+
+**Harness**:
+The capability that executes without evaluating. It freezes the **execution environment** (runtime, model, tools, sandbox image, filesystem — never a Mission authorization condition), collects, validates and content-addresses artifacts and issues their receipt, and measures raw usage. Its physical home is `src/harness/` — an eighth directory, not a seventh logical owner — with one public export surface (`index.ts`), and it never imports `src/mission/`. Adopting an artifact into the Ledger, attributing usage to a Run/agent, and budget reserve/settle stay Mission-owned.
+_Avoid_: Mission controller, evaluator, second control plane
+
 ## Teamwork and Execution
 
 **Team**:
@@ -79,6 +87,10 @@ _Avoid_: Persona, specialist (unless the responsibility is explicit)
 **Mission Director**:
 The Mission-level decision maker that selects research Tasks, maintains alignment with the Research Objective, allocates Task scope, and decides whether to continue, revise, scale, or stop.
 _Avoid_: Team Coordinator, manager
+
+**Mission Controller**:
+The composition that runs one authorized Mission: `prepareRun` (the frozen `PreparedRun`), the Director decision (blind, pinned Memory/Insight, revision), execute (one bounded candidate Run), `finalizeRun` (adopting a measured outcome into Mission state), and recover-or-terminate (durable progress reuse plus budget, Experiment-bound and interruption limits). Each stage has one home under `src/mission/`; the controller itself only composes them. Execution mechanics live in the execute stage and research judgement stays the Director's, so the controller is never a second state model or a pipeline of re-discovered capabilities.
+_Avoid_: God function, pipeline, Mission Director (the decision maker, not the composition)
 
 **Team Coordinator**:
 The Task-level planner that proposes how Roles, topology, verification, and resources should be arranged for a Task; it does not own the Research Objective or final acceptance.

@@ -31,9 +31,25 @@ import type { EvokResources } from "../evok-resources";
 import { acceptedSkillFilesFromDiscovered } from "../mission/skills-routing";
 import { isShellToolName, resolveUserBash } from "./user-bash";
 import { RoleContextError, validateRoleContext, type RoleTaskContext } from "./role-context";
+import {
+  cancellationOutcome,
+  createToolTurnGate,
+  type ExecutionOutcome,
+  type ExecutionReceipt,
+  type ExecutionRequest,
+  type ExecutionUsage,
+} from "./execution-protocol";
 import { validateMemorySlice, type MemorySlice } from "./memory-slice";
 import { createMemoryReadTool, MEMORY_READ_TOOL, type MemoryReadRecord } from "../memory";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
+import {
+  addUsage,
+  closeHarnessExecution,
+  createEnvironmentSnapshot,
+  environmentRefsOf,
+  measureUsage,
+  type RawUsage,
+} from "../harness";
 export { MissingAuthenticationError } from "../evok-model";
 
 export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
@@ -151,6 +167,8 @@ export interface DurableIntentRecord {
   readonly error?: string;
   readonly uncertainReason?: string;
   readonly reconcile?: IntentReconcileRecord;
+  /** The one execution protocol's receipt for this execution (B4, #255). */
+  readonly receipt?: ExecutionReceipt;
 }
 
 export interface DurableIntentStore {
@@ -359,22 +377,11 @@ export class RuntimeCrashError extends Error {
   }
 }
 
-export interface RuntimeUsage {
-  readonly tokens: {
-    readonly input: number;
-    readonly output: number;
-    readonly cacheRead: number;
-    readonly cacheWrite: number;
-    readonly total: number;
-  };
-  readonly cost: {
-    readonly input: number;
-    readonly output: number;
-    readonly cacheRead: number;
-    readonly cacheWrite: number;
-    readonly total: number;
-  };
-}
+/**
+ * Raw usage as the runtime measured it. Harness-owned shape, re-exported here
+ * so the old path keeps its public name (PRD §4 Stage 3, #256).
+ */
+export type RuntimeUsage = RawUsage;
 
 export type RuntimeEvent = {
   readonly type:
@@ -405,6 +412,8 @@ export interface AgentRuntimeResult {
   readonly memoryReads?: readonly MemoryReadRecord[];
   /** Actual model that executed the Run (canonical provider/model identity). */
   readonly model?: ModelConfigView;
+  /** One receipt for this execution: outcome, raw usage, tool turns, artifacts. */
+  readonly receipt: ExecutionReceipt;
 }
 
 /** Minimal model identity view (structurally compatible with evok-model ModelConfig). */
@@ -484,10 +493,6 @@ function isRecord(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function finite(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
 function within(root: string, child: string): boolean {
   const path = relative(root, child);
   return path === "" || (path !== ".." && !path.startsWith("../") && !isAbsolute(path));
@@ -497,56 +502,6 @@ function abortError(): Error {
   const error = new Error("agent run aborted");
   error.name = "AbortError";
   return error;
-}
-
-function usageFrom(value: unknown): RuntimeUsage | undefined {
-  if (!isRecord(value) || !isRecord(value.tokens) || !isRecord(value.cost)) return undefined;
-  const tokenKeys = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
-  const costKeys = ["input", "output", "cacheRead", "cacheWrite", "total"] as const;
-  if (!tokenKeys.every((key) => finite(value.tokens[key])) || !costKeys.every((key) => finite(value.cost[key]))) return undefined;
-  return {
-    tokens: Object.fromEntries(tokenKeys.map((key) => [key, value.tokens[key]])) as RuntimeUsage["tokens"],
-    cost: Object.fromEntries(costKeys.map((key) => [key, value.cost[key]])) as RuntimeUsage["cost"],
-  };
-}
-
-function usageFromSdk(value: unknown): RuntimeUsage | undefined {
-  if (!isRecord(value) || !isRecord(value.usage)) return undefined;
-  const u = value.usage;
-  if (!isRecord(u.cost)) return undefined;
-  return usageFrom({
-    tokens: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, total: u.totalTokens },
-    cost: u.cost,
-  });
-}
-
-function usageFromStats(value: unknown): RuntimeUsage | undefined {
-  if (!isRecord(value) || !isRecord(value.tokens)) return undefined;
-  const tokens = value.tokens;
-  if (!(["input", "output", "cacheRead", "cacheWrite", "total"] as const).every((key) => finite(tokens[key]))) return undefined;
-  const cost = value.cost;
-  if (finite(cost)) return { tokens: tokens as RuntimeUsage["tokens"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } };
-  return usageFrom({ tokens, cost });
-}
-
-function addUsage(left: RuntimeUsage | undefined, right: RuntimeUsage): RuntimeUsage {
-  if (!left) return right;
-  return {
-    tokens: {
-      input: left.tokens.input + right.tokens.input,
-      output: left.tokens.output + right.tokens.output,
-      cacheRead: left.tokens.cacheRead + right.tokens.cacheRead,
-      cacheWrite: left.tokens.cacheWrite + right.tokens.cacheWrite,
-      total: left.tokens.total + right.tokens.total,
-    },
-    cost: {
-      input: left.cost.input + right.cost.input,
-      output: left.cost.output + right.cost.output,
-      cacheRead: left.cost.cacheRead + right.cost.cacheRead,
-      cacheWrite: left.cost.cacheWrite + right.cost.cacheWrite,
-      total: left.cost.total + right.cost.total,
-    },
-  };
 }
 
 function textFromMessage(message: Record<string, unknown>): string {
@@ -1019,6 +974,41 @@ export class PiAgentRuntime {
     this.usedWorkspaces.add(approvedRoot);
     const intentId = input.repair && existing ? `${baseIntentId}:repair:${Date.now()}` : baseIntentId;
 
+    // B1: the harness freezes the execution environment BEFORE the Run is
+    // declared, so the receipt states the environment this execution really ran
+    // in. Mission conditions (plan version, authorization, budget, memory) are
+    // deliberately absent: those are the authorization snapshot's.
+    const environment = createEnvironmentSnapshot({
+      backend: "pi-agent-runtime",
+      workspace: approvedRoot,
+      tools,
+      runtime: "pi-coding-agent",
+      ...(resolvedModel === undefined ? {} : { model: resolvedModel.model.id }),
+    });
+    // B4: one execution protocol. The Run declares what it is BEFORE it runs, and
+    // the receipt below closes that same identity, on every outcome.
+    const execution = Object.freeze<ExecutionRequest>({
+      executionId: intentId,
+      inputs: { inputDigest },
+      environment: environmentRefsOf(environment),
+      capabilities: { tools: [...tools] },
+      // The Run path does not bound tool turns; it still counts them by the one rule.
+      limits: {},
+    });
+    const toolTurns = createToolTurnGate(undefined, tools, () => false);
+    // Only what this backend alone knows: how many turns it spent, what it
+    // measured, and how it failed. Measurement and assembly are the harness's.
+    const close = (
+      outcome: ExecutionOutcome,
+      detail: { usage?: ExecutionUsage; error?: string } = {},
+    ): ExecutionReceipt =>
+      closeHarnessExecution(execution, environment, {
+        outcome,
+        toolTurns: { spent: toolTurns.used },
+        ...(detail.usage === undefined ? {} : { usage: detail.usage, usageAttribution: detail.usage.attribution }),
+        ...(detail.error === undefined ? {} : { diagnostics: { status: outcome, error: detail.error } }),
+      });
+
     await this.intentStore.recordIntent({
       intentId,
       role: input.role.name,
@@ -1038,6 +1028,10 @@ export class PiAgentRuntime {
     dispatched = true;
 
     if (this.faultInjection?.crashAfterDispatch) {
+      // Sent and never answered: the outcome is unconfirmed, which is `unknown`.
+      await this.intentStore
+        .updateIntent(intentId, { receipt: close("unknown", { error: "crash after intent sent" }) })
+        .catch(() => {});
       throw new RuntimeCrashError("fault injection: crash after intent sent before result confirmed");
     }
 
@@ -1145,12 +1139,21 @@ export class PiAgentRuntime {
             abortPromise ??= session?.abort();
           }
         }
+        if (type === "message_end") {
+          // The one tool-turn rule counts model messages containing tool calls.
+          const message = isRecord(raw.message) ? raw.message : undefined;
+          const content = Array.isArray(message?.content) ? message.content : [];
+          const calls = content.flatMap((part) =>
+            isRecord(part) && part.type === "toolCall" ? [String(part.name)] : [],
+          );
+          if (calls.length) toolTurns.turn(calls);
+        }
         if (type === "agent_end") {
           const messages = Array.isArray(raw.messages) ? raw.messages : [];
           for (const message of messages) {
             if (!isRecord(message) || message.role !== "assistant") continue;
             const key = JSON.stringify(message);
-            const usage = usageFromSdk(message);
+            const usage = measureUsage(message);
             if (usage && !accountedMessages.has(key)) {
               accountedMessages.add(key);
               completionUsage = addUsage(completionUsage, usage);
@@ -1219,7 +1222,7 @@ export class PiAgentRuntime {
       if (eventError) throw eventError;
       if (abortPromise || signal?.aborted) throw abortError();
       const stats = session.getSessionStats?.();
-      completionUsage = usageFromStats(stats) ?? completionUsage;
+      completionUsage = measureUsage(stats) ?? completionUsage;
       if (!completionUsage) throw new Error("agent completion is missing usage/cost data");
       if (!stopReason) throw new Error("agent completion is missing stop reason");
       if (this.faultInjection?.crashBeforeResultConfirmation) {
@@ -1227,10 +1230,21 @@ export class PiAgentRuntime {
       }
       add({ type: "session_end", sessionId, reason: stopReason });
       const result: AgentRuntimeResult = { sessionId, workspace, events, ledger: events, usage: completionUsage, stopReason, text: completionText, model: resolvedModel?.model,
+        receipt: close("succeeded", {
+          usage: {
+            tokens: { ...completionUsage.tokens },
+            cost: { ...completionUsage.cost },
+            // The backend measured its own execution; attributing it to a parent
+            // aggregate stays the Mission's decision (B3).
+            attribution: "own",
+          },
+        }),
         ...(memoryReadTool === undefined || memoryReadTool.reads().length === 0 ? {} : { memoryReads: memoryReadTool.reads() }) };
       await this.intentStore.updateIntent(intentId, {
         status: "COMPLETED",
         result,
+        // The durable copy of `result.receipt`: the same object, so they cannot diverge.
+        receipt: result.receipt,
         toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
       });
       if (input.repair && existing) {
@@ -1240,17 +1254,32 @@ export class PiAgentRuntime {
       }
       return result;
     } catch (error) {
+      const aborted = error instanceof Error && error.name === "AbortError";
+      // A cancellation is confirmed only once the session abort has been awaited;
+      // an abort the SDK never confirmed is `unknown`, never success.
+      if (aborted && abortPromise) await abortPromise.catch(() => undefined);
+      // B4: one terminal outcome, the same vocabulary on every path. A crash with
+      // work in flight could not be confirmed → unknown; a confirmed abort is a
+      // cancellation; everything else failed.
+      const outcome: ExecutionOutcome = error instanceof RuntimeCrashError
+        ? "unknown"
+        : aborted
+          ? cancellationOutcome(true)
+          : "failed";
+      const receipt = close(outcome, { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof RuntimeCrashError) {
         // Crash with work in flight: side effects are uncertain. Persist the
         // in-flight tool intents but leave the intent DISPATCHED so the startup
         // audit / restart detects the uncertain state — never silent success.
         await this.intentStore.updateIntent(intentId, {
+          receipt,
           toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
         }).catch(() => {});
       } else if (!(error instanceof UncertainExecutionError)) {
         await this.intentStore.updateIntent(intentId, {
           status: "FAILED",
           error: error instanceof Error ? error.message : String(error),
+          receipt,
           toolIntents: recordedToolIntents.length > 0 ? recordedToolIntents : undefined,
         }).catch(() => {});
       }

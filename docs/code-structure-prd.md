@@ -1,9 +1,9 @@
 ---
-status: spec
-version: 1.0
+status: delivered
+version: 1.1
 date: 2026-11-11
 related: "#235 (memory, delivered except M-e), #248 (research program), #249 (charter)"
-implements: none yet — spec; tickets separate
+implements: "#253 (Stage 1 #254, Stage 2 #255, Stage 3 #256, Stage 4 #257)"
 reviewed-by: external adversarial second opinion; its objections and their dispositions in §9
 ---
 
@@ -69,6 +69,13 @@ B3 has one too: a parent reporting 10,000 tokens that already include the child'
 
 ## 4. Four stages
 
+> **Delivery.** All four stages landed: Stage 1 #254 (`run-preparation.ts`),
+> Stage 2 #255 (one `ExecutionRequest`/`ExecutionReceipt` protocol), Stage 3 #256
+> (`src/harness/` with B1–B4 mechanical, `docs/agents/harness-map.md`), Stage 4
+> #257 (`run-dispatch.ts`, `director-phases.ts`, `run-finalization.ts`,
+> `recovery.ts`, and a controller that only composes them). The accepted
+> measures are §6, not line counts: S6/S7 stand as written.
+
 ### Stage 1 — Mission-owned Run preparation
 
 Extract `src/mission/run-preparation.ts`, returning an **immutable `PreparedRun`**:
@@ -100,15 +107,33 @@ Only now create `src/harness/{contracts,snapshot,execution,artifacts,metering,in
 with B1–B4 honoured: environment snapshots only, artifact receipts only, raw usage
 only, no research decisions.
 
-### Stage 4 — Remaining Mission decomposition
+### Stage 4 — Remaining Mission decomposition — delivered (#257)
 
 `run-finalization.ts`, `director-phases.ts`, `recovery.ts`, and a thin research
 controller that composes them.
 
+As delivered, the controller body is the composition itself:
+
+```text
+prepareRun (run-preparation.ts, immutable PreparedRun)
+  → Director decision (director-phases.ts: blind → pinned Memory/Insight → revision)
+  → execute (run-dispatch.ts: one bounded candidate Run)
+  → finalizeRun (run-finalization.ts: adopt the outcome into Mission state)
+  → recover-or-terminate (recovery.ts: durable progress reuse, budget/iteration/interrupt bounds)
+```
+
+`execute` needed its own home: the dispatch closure held every execution mechanic
+(runtime/workspace/sandbox, intent, snapshot adoption, metering, evaluation), so
+leaving it inline would have kept the controller a pipeline. Research judgement
+stays the Director's; finalization never measures, dispatch never decides, and
+recovery only reads durable state. `mission-start.ts` keeps the entry points and
+the composition.
+
 ## 5. Mechanical dependency enforcement
 
 A CI check on import statements, added in Stage 1 (it is cheap and prevents the
-structure from rotting immediately):
+structure from rotting immediately) and live in `bun run check` as
+`scripts/import-boundaries.ts`:
 
 | Module | May depend on |
 |---|---|
@@ -137,6 +162,13 @@ execution through harness.**
 | Dependencies | CI blocks a reversed import |
 
 Stage 1 must ship the trace-equivalence harness itself; later stages reuse it.
+
+| Row | Where it is pinned |
+|---|---|
+| Ledger trace equivalence, content addressing, snapshot pinning, evaluation comparability | `tests/integration/ledger-trace.test.ts` (trace digest pins from the review base) + `src/memory/digests.test.ts` |
+| Authorization, budget, cancellation | `tests/integration/mission-start.test.ts`, `mission-outcome-semantics.test.ts` |
+| Recovery at the §6 commit points | `tests/integration/mission-recovery-faults.test.ts` (after budget reservation, after execution start, after artifact write, before receipt persistence) |
+| Dependencies | `scripts/import-boundaries.ts` |
 
 ## 7. Relationship to other work
 
