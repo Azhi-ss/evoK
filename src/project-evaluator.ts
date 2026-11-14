@@ -26,10 +26,18 @@ import {
   normalizeSuiteMetricContract,
   type SuiteMetricContract,
 } from "./competition/suite-metric";
+import {
+  AUTO_RESEARCH_ARENA_ID,
+  AutoArenaContractError,
+  loadProjectAutoArenaEvaluator,
+  normalizeAutoArenaEvaluationContract,
+  type AutoArenaEvaluationContract,
+} from "./competition/auto-research-arena";
 
 export type ProjectEvaluationContract =
   | { readonly kind: "file-metric"; readonly contract: FileMetricContract }
-  | { readonly kind: "suite-metric"; readonly contract: SuiteMetricContract };
+  | { readonly kind: "suite-metric"; readonly contract: SuiteMetricContract }
+  | { readonly kind: "auto-research-arena"; readonly contract: AutoArenaEvaluationContract };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -67,6 +75,16 @@ export async function loadProjectEvaluationContract(projectRoot: string): Promis
       throw error;
     }
   }
+  if (isRecord(parsed) && parsed.id === AUTO_RESEARCH_ARENA_ID) {
+    try {
+      return { kind: "auto-research-arena", contract: normalizeAutoArenaEvaluationContract(parsed) };
+    } catch (error) {
+      if (error instanceof AutoArenaContractError) {
+        throw new EvaluationContractError(error.message);
+      }
+      throw error;
+    }
+  }
   return { kind: "file-metric", contract: normalizeFileMetricContract(parsed) };
 }
 
@@ -87,6 +105,16 @@ export async function loadTrustedSuiteFiles(
 export async function createProjectBaselineEvaluator(projectRoot: string): Promise<BaselineEvaluator> {
   const loaded = await loadProjectEvaluationContract(projectRoot);
   if (loaded.kind === "file-metric") return createFileMetricEvaluator(loaded.contract);
+  if (loaded.kind === "auto-research-arena") {
+    try {
+      return await loadProjectAutoArenaEvaluator(projectRoot, loaded.contract);
+    } catch (error) {
+      if (error instanceof AutoArenaContractError) {
+        throw new EvaluationContractError(error.message);
+      }
+      throw error;
+    }
+  }
   const suiteFiles = await loadTrustedSuiteFiles(projectRoot, loaded.contract.suite.cases_glob_or_manifest);
   return createSuiteMetricEvaluator(loaded.contract, { suiteFiles });
 }

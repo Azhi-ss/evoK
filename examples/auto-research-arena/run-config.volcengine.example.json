@@ -1,0 +1,13 @@
+{
+  "task": "params",
+  "method": "examples/evok/interface.json",
+  "run_dir": "runs/evok-params-pilot",
+  "research_llm": {
+    "provider": "pi-configured-provider",
+    "model": "gemini-4-carbon-high"
+  },
+  "compute": {
+    "backend": "local",
+    "visible_devices": [0]
+  }
+}
