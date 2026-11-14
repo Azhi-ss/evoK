@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { PiAgentRuntime } from "../../src/pi-agent-runtime";
+import { PiAgentRuntime } from "../../src/execution/pi-agent-runtime";
 import { createEvokModelResolver, type SessionModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
 

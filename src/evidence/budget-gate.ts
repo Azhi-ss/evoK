@@ -12,7 +12,7 @@
  * reopen EXP Admission predicates, or weld #40 / default fixed_uct.
  * Does not replace MissionRecord operational accounting.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 
 export type BudgetAction = "continue" | "writeback";
 export type BudgetSpendKind = "research" | "method_improvement";

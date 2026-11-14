@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DeterministicScheduler, PolicyGuard, type ExecutionPlan } from "../toy-harness";
+import { DeterministicScheduler, PolicyGuard, type ExecutionPlan } from "../search/fixtures/toy-harness";
 
 const plan: ExecutionPlan = {
   version: 1,

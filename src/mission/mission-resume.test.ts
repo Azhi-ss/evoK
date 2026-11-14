@@ -30,7 +30,7 @@ import {
   staleControllerLock,
 } from "./mission-resume";
 import { missionResearchSource, researchMemoryDir } from "./mission-start";
-import { publishResearchMemorySnapshot } from "../execution/research-memory-provider";
+import { publishResearchMemorySnapshot } from "../memory";
 import {
   RESEARCH_MEMORY_DATABASE_FILENAME,
   loadActiveResearchMemorySnapshot,
@@ -41,7 +41,7 @@ import {
   projectResearchMemorySnapshot,
   shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
-} from "../evidence/research-memory";
+} from "../memory";
 
 const dirs: string[] = [];
 afterEach(async () => {

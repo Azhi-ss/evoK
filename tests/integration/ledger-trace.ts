@@ -27,7 +27,7 @@
  */
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { digestValue } from "../../src/security-boundary";
+import { digestValue } from "../../src/execution/security-boundary";
 import {
   baselineResultPath,
   loadMissionRecord,
@@ -37,11 +37,11 @@ import {
   type MissionRecord,
   type StartAuthorization,
   type StartMissionOptions,
-} from "../../src/mission-start";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
-import type { DirectorInput, MissionDirector } from "../../src/mission-director";
+} from "../../src/mission/mission-start";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
 import type { EvokResources } from "../../src/evok-resources";
-import type { PiAgentRuntime } from "../../src/pi-agent-runtime";
+import type { PiAgentRuntime } from "../../src/execution/pi-agent-runtime";
 import { loadActiveResearchMemorySnapshot, researchMemoryStoreFor } from "../../src/memory";
 
 export const LEDGER_TRACE_SCHEMA = "evok.ledger-trace/v1";

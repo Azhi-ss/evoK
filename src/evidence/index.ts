@@ -164,7 +164,7 @@ export {
   shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   validateResearchMemorySnapshot,
-} from "./research-memory";
+} from "../memory";
 export type {
   ResearchApplicabilityDimension,
   ResearchCardLifecycle,
@@ -188,10 +188,10 @@ export type {
   ResearchRetrieval,
   ResearchRunFinding,
   ResearchSynthesisFindingCard,
-} from "./research-memory";
+} from "../memory";
 export { RUN_FAILURE_KINDS, classifyRunOutcome } from "./run-outcome";
 export type { RunFailureKind, RunOutcomeClassification, RunOutcomeInput, RunOutcomeState } from "./run-outcome";
-export { SYNTHESIS_FINDING_CARD_SCHEMA, SYNTHESIS_HYPOTHESIS_CARD_SCHEMA, SYNTHESIS_PITFALL_CARD_SCHEMA } from "./research-memory";
+export { SYNTHESIS_FINDING_CARD_SCHEMA, SYNTHESIS_HYPOTHESIS_CARD_SCHEMA, SYNTHESIS_PITFALL_CARD_SCHEMA } from "../memory";
 export {
   SYNTHESIS_APPLICABILITY_DIMENSIONS,
   SYNTHESIS_PROPOSAL_SCHEMA,

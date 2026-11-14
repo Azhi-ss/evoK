@@ -19,7 +19,7 @@ import {
   validateResearchMemorySnapshot,
   type ResearchMemorySource,
   type ResearchRunFinding,
-} from "./research-memory";
+} from "../memory";
 import {
   SYNTHESIS_APPLICABILITY_DIMENSIONS,
   SYNTHESIS_PROPOSAL_SCHEMA,

@@ -16,7 +16,7 @@ import {
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
   shamResearchDecisionPacket,
-} from "../evidence/research-memory";
+} from "../memory";
 import { digestValue } from "../execution/security-boundary";
 import { missionResearchSource, type ExperimentTrailEntry, type MissionRecord } from "./mission-start";
 import {

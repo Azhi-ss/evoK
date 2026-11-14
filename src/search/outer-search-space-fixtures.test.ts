@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   HypothesisLedger,
   T48MappedCatalog,
-} from "../hypothesis-ledger";
-import { runKillTestHang } from "../kill-test-hang";
+} from "../evidence/hypothesis-ledger";
+import { runKillTestHang } from "../evidence/kill-test-hang";
 import {
   OUTER_SEARCH_SPACE_ATTACH_HOOKS,
   OUTER_SEARCH_SPACE_SEED,
@@ -13,7 +13,7 @@ import {
 import {
   EvidenceMemory,
   MissionDirector,
-} from "../research-loop";
+} from "../mission/research-loop";
 import { RESEARCH_TASKS as tasks } from "../fixtures/research";
 import {
   SEARCH_SPACE_BINDING,

@@ -25,15 +25,10 @@ catalog and is not authorization. The TUI is an entry mirror, not
 Mission authority.
 Authorize / budget / continue · repair · stop stay in `src/mission/`.
 The user-facing Pi extension is the single `evok` entry at
-`../../extensions/evok.ts`. It loads the three internal Chord seats through
+`../../extensions/evok.ts`. It loads the three internal domain seats through
 `evok-plugin.ts`: platform (Mission / orchestration / TUI·CLI), research
 (选点 / Harness / SelectionPolicy; default `fixed_uct`), and eval (promotion /
-Broker; fail-closed). The per-seat loaders
-(`evok-platform-plugin.ts`, `evok-research-plugin.ts`, and
-`evok-eval-plugin.ts`) remain compatibility seams for focused tests and module
-ownership; they are not separate Pi extensions or user install targets.
-Install / load / limits for the unified plugin and its internal seats:
-[docs/chord-plugins.md](../../docs/chord-plugins.md).
+Broker; fail-closed). See [docs/chord-plugins.md](../../docs/chord-plugins.md).
 Hang / T48 / Admission / Budget Gate stay in `src/evidence/`.
 `--start` without an injected runner lists remaining hard gates when the
 start path is not ready (`src/mission/start-hard-gates.ts`). Prefer an
@@ -41,10 +36,9 @@ absolute `--project`. Copyable contract: `templates/evaluation.json`. Demo:
 `examples/demo-start/`. True-domain suite-metric demo: `examples/demo-suite/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).
 
-P6: physical pack is in place. The dead `src/evok-cli.ts` shim is gone;
-import `src/cli` / `src/cli/evok-cli` instead. Remaining Mission flat
-shims used by this shell stay migration-period re-exports
-([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+P6: physical pack is in place. The dead `src/evok-cli.ts` shim and all
+migration-period flat `src/*.ts` shims are retired; import `src/cli` or
+`src/cli/evok-cli` directly.
 
 Secrets are read from the environment / Pi stores only; never copy or
 print credentials. Model/resource wiring (`evok-model`, `evok-resources`)

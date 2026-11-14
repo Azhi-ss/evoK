@@ -11,11 +11,11 @@ import {
   asKillTestPass,
   killTestOutcomeIsPass,
   type KillTestOutcome,
-} from "../hypothesis-ledger";
+} from "../evidence/hypothesis-ledger";
 import {
   createKillTestHangHook,
   killTestOutcomeBlocksBroker,
-} from "../kill-test-hang";
+} from "../evidence/kill-test-hang";
 import { runLlmCompArmBeforePromotion } from "./llm-comp-arm-before-promotion";
 import {
   LiveLlmCompetitionRuntime,
@@ -26,13 +26,13 @@ import {
 import {
   assembleLlmCompArmSetup,
   mapLlmProposalArtifact,
-} from "../llm-propose-outer-min";
+} from "../mission/llm-propose-outer-min";
 import {
   auditMethodology,
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "../methodology";
+} from "../evidence/methodology";
 import {
   DEFAULT_NEWAPI_MODEL,
   LiveLlmKeyMissingError,
@@ -42,12 +42,12 @@ import {
   resolveDefaultNewapiModel,
   type FetchLike,
 } from "../newapi-client";
-import { MissionDirector } from "../research-loop";
+import { MissionDirector } from "../mission/research-loop";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "../search-space-profile";
-import { verificationRoleContract } from "../verification-gates";
+} from "../search/search-space-profile";
+import { verificationRoleContract } from "../evidence/verification-gates";
 
 import { RESEARCH_TASKS as TASKS } from "../fixtures/research";
 

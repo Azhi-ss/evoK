@@ -13,7 +13,7 @@ import {
   MethodWritebackSession,
   evaluateMethodAdmission,
 } from "./method-admission";
-import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search-selection-port";
+import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search/search-selection-port";
 
 function validityPass() {
   return evaluateExperimentValidity({

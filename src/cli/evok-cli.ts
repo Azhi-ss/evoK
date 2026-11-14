@@ -26,14 +26,14 @@ import { realpath, rm } from "node:fs/promises";
 import { isatty } from "node:tty";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { PiAgentRuntime } from "../pi-agent-runtime";
+import { PiAgentRuntime } from "../execution/pi-agent-runtime";
 import { isPlainSshHost } from "../execution/security-boundary";
 import { launchPiNativeTui, type NativeTuiLaunch } from "./pi-native-tui";
 import { calculateCost } from "@earendil-works/pi-ai";
 import type { SessionModelResolver } from "../evok-model";
 import { discoverEvokResources, EvokResourceError, type EvokResources } from "../evok-resources";
-import { MissionDraftCorruptionError } from "../mission-draft";
-import { runIntakeTurn } from "../mission-intake";
+import { MissionDraftCorruptionError } from "../mission/mission-draft";
+import { runIntakeTurn } from "../mission/mission-intake";
 import {
   isExplicitStartRequest,
   loadMissionRecord,
@@ -54,8 +54,8 @@ import {
   type StartMissionOutcome,
   type StartMissionOptions,
   DEFAULT_MAX_EXPERIMENTS,
-} from "../mission-start";
-import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission-director";
+} from "../mission/mission-start";
+import { createPiMissionDirector, DirectorDecisionFailedError, type MissionDirector } from "../mission/mission-director";
 import { EvaluationContractError } from "../local-file-evaluator";
 import { createProjectBaselineEvaluator } from "../project-evaluator";
 import {
@@ -65,7 +65,7 @@ import {
   formatStartHardGateReport,
   inspectStartHardGates,
 } from "../mission/start-hard-gates";
-import { loadMissionDraft, missionsDir } from "../mission-draft";
+import { loadMissionDraft, missionsDir } from "../mission/mission-draft";
 import {
   continueResearch,
   formatResearchStatus,
@@ -392,7 +392,7 @@ export interface EvokRunOptions {
   /** Workspace root for isolated per-Run workspaces (default: OS tmpdir). */
   readonly workspaceRoot?: string;
   /** #111: operator-configured retrieval capability for intake (default: none). */
-  readonly retrieval?: import("../mission-intake").RetrievalCapability;
+  readonly retrieval?: import("../mission/mission-intake").RetrievalCapability;
   /** Override the intake turn runner (tests); defaults to the skill-led runtime. */
   readonly intakeRunner?: typeof runIntakeTurn;
   /** Independent evaluator contract for the declared Competition (#112). */

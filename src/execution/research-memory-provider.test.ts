@@ -2,16 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { projectResearchMemorySnapshot } from "../memory";
 import {
   MEMORY_SLICE_RESEARCH_SCHEMA, MemorySliceError, createMemorySlice, createResearchMemorySlice, validateMemorySlice,
-} from "./memory-slice";
+} from "../memory";
 import {
   createDelegatedResearchMemoryProvider,
   createResearchMemoryProvider,
   loadResearchMemorySnapshot,
   publishResearchMemorySnapshot,
-} from "./research-memory-provider";
+} from "../memory";
 
 const dirs: string[] = [];
 async function memoryDir(): Promise<string> {

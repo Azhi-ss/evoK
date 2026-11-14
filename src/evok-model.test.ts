@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OrchestraValidationError, createEvokModelResolver, type ModelConfig } from "./evok-model";
-import { createPiModelCatalog } from "./model-orchestra";
+import { createPiModelCatalog } from "./execution/model-orchestra";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

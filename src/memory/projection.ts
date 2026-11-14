@@ -12,7 +12,7 @@
  * "which card may be REUSED as a direct prior under these conditions". Neither
  * read grants authority, and neither can widen visibility.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { classifyRunOutcome, type RunOutcomeState } from "../evidence/run-outcome";
 import type { SynthesisProposal } from "../evidence/synthesis-proposal";
 import {

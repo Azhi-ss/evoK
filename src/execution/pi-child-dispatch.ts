@@ -22,7 +22,7 @@ import { readFileSync } from "node:fs";
 import { cp, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, sep } from "node:path";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
-import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { validateMemorySlice, type MemorySlice } from "../memory";
 import { redactedRecord } from "./pi-child-records";
 import {
   CHILD_STATE_DIR,

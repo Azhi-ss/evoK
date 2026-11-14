@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { validateRoleContext } from "./role-context";
-import { validateMemorySlice } from "./memory-slice";
+import { validateMemorySlice } from "../memory";
 import { assertNoCredentials } from "./pi-child-records";
 import { validateWorkerAction, type WorkerAction, type WorkerProfile } from "./pi-child-protocol";
 

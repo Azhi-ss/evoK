@@ -5,7 +5,7 @@
  * attachments → KillTestPlan. Does not run hang, Broker, UCT, or #40.
  * Side-slot / MMD / near-dup scalars never enter evidence_refs.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   HypothesisLedger,
   T48MappedCatalog,
@@ -14,8 +14,8 @@ import {
   type HypothesisEvent,
   type KillTestPlan,
   type T48MappedRef,
-} from "../hypothesis-ledger";
-import type { MethodologyContracts } from "../methodology";
+} from "../evidence/hypothesis-ledger";
+import type { MethodologyContracts } from "../evidence/methodology";
 import { EvidenceMemory } from "./research-loop";
 import {
   attachDiversityDiag,
@@ -27,7 +27,7 @@ import {
   type SearchSpaceArtifact,
   type SearchSpaceCandidate,
   type SearchSpaceProfile,
-} from "../search-space-profile";
+} from "../search/search-space-profile";
 
 export const OUTER_MIN_HYPOTHESIS_ID = "h-outer-min";
 export const OUTER_MIN_PLAN_ID = "kt-outer-min";

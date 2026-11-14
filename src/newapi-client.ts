@@ -8,7 +8,7 @@
  * Allowlist: DeepSeek* / Gemini* only. GPT* and every other name is rejected
  * at construct (or before propose via the runtime factory).
  */
-import { SecretRedactor } from "./security-boundary";
+import { SecretRedactor } from "./execution/security-boundary";
 
 export const NEWAPI_BASE_URL = "https://newapi.ai-modeling.top/v1";
 /** Read-only secret. Never commit a value; never echo it. */

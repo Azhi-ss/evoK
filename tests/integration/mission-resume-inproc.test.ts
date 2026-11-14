@@ -17,11 +17,11 @@ import {
   resumeAuthorizedMission,
   type BaselineEvaluator,
   type ResumeAuthorization,
-} from "../../src/mission-start";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
+} from "../../src/mission/mission-start";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
-import type { DirectorInput, MissionDirector } from "../../src/mission-director";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
 
 const MODEL_COST = { input: 0.0001, output: 0.0002, cacheRead: 0, cacheWrite: 0 };
 const EVAL_ID = "inproc-answer";

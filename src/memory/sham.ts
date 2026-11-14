@@ -7,7 +7,7 @@
  * accident, and marked `control: "sham"` so no reader can mistake it for
  * Research Memory.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   RESEARCH_CONTROL_CARD_SCHEMA,
   ResearchMemoryError,

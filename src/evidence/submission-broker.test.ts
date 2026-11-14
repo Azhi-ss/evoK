@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createTrustedSnapshot } from "../security-boundary";
-import { ToyCompetitionHarness, type ToyCompetitionAdapter, type ToyAgentRuntime } from "../toy-harness";
+import { createTrustedSnapshot } from "../execution/security-boundary";
+import { ToyCompetitionHarness, type ToyCompetitionAdapter, type ToyAgentRuntime } from "../search/fixtures/toy-harness";
 
 const prediction = {
   predictionId: "toy-prediction",

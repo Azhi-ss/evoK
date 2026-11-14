@@ -28,14 +28,14 @@ import {
   type BaselineEvaluator,
   type StartAuthorization,
   type StartMissionOptions,
-} from "../../src/mission-start";
+} from "../../src/mission/mission-start";
 import {
   DirectorDecisionFailedError,
   DirectorProposalRejectedError,
   type DirectorInput,
   type MissionDirector,
-} from "../../src/mission-director";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
+} from "../../src/mission/mission-director";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
 

@@ -43,7 +43,7 @@
  */
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { loadMissionDraft, type MissionDraft } from "./mission-draft";
 import {
   DEFAULT_MAX_EXPERIMENTS,

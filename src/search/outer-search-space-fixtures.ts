@@ -9,9 +9,9 @@
 import {
   T48MappedCatalog,
   type T48MappedRef,
-} from "../hypothesis-ledger";
-import { EvidenceMemory, type ResearchTask } from "../research-loop";
-import { deepFreeze } from "../security-boundary";
+} from "../evidence/hypothesis-ledger";
+import { EvidenceMemory, type ResearchTask } from "../mission/research-loop";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   attachDiversityDiag,
   attachSearchSpaceDiagnosis,

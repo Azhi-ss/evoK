@@ -14,7 +14,7 @@
  * execution is declared, its digest is what the request carries, and
  * `assertEnvironmentRefs` refuses a close that reports anything else.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import type { ExecutionEnvironmentRefs } from "../execution/execution-protocol";
 import type { EnvironmentSnapshot, EnvironmentSnapshotInput } from "./contracts";
 

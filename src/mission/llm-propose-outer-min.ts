@@ -17,16 +17,16 @@
  * `methodology.json` (also `manifest.json` / `methodology`) is parsed through
  * `readMethodologyEvidence` and forwarded to hang. Explicit inject wins.
  */
-import { createKillTestHangHook, type KillTestHangInput } from "../kill-test-hang";
+import { createKillTestHangHook, type KillTestHangInput } from "../evidence/kill-test-hang";
 import {
   T48MappedCatalog,
   type KillTestOutcome,
   type T48MappedRef,
-} from "../hypothesis-ledger";
+} from "../evidence/hypothesis-ledger";
 import {
   createLlmCompetitionRuntime,
   type LlmCompetitionRuntimeOptions,
-} from "../llm-competition-runtime";
+} from "../competition/llm-competition-runtime";
 import {
   resolveDefaultNewapiModel,
   type FetchLike,
@@ -35,7 +35,7 @@ import {
   readMethodologyEvidence,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "../methodology";
+} from "../evidence/methodology";
 import {
   OUTER_MIN_HOLD_OUT_EVIDENCE_ID,
   OUTER_MIN_KILL_EVIDENCE_ID,
@@ -48,10 +48,10 @@ import {
 import {
   buildOuterSearchSpaceFixtures,
   type OuterSearchSpaceFixtures,
-} from "../outer-search-space-fixtures";
-import { deepFreeze, digestValue } from "../security-boundary";
-import type { ToyAgentRuntime } from "../toy-harness";
-import type { VerificationHook } from "../verification-gates";
+} from "../search/outer-search-space-fixtures";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
+import type { ToyAgentRuntime } from "../search/fixtures/toy-harness";
+import type { VerificationHook } from "../evidence/verification-gates";
 
 export const LLM_COMP_HYPOTHESIS_ID = "h-llm-comp";
 export const LLM_COMP_PLAN_ID = "kt-llm-comp";

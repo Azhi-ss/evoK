@@ -4,8 +4,8 @@ import {
   type ModelCatalog,
   type ModelConfig,
   type OrchestraConfig,
-} from "../../src/model-orchestra";
-import { ToyCompetitionHarness, type CrossModelCheckInput, type CrossModelCheckResult, type ToyAgentRuntime, type ToyMissionOptions } from "../../src/toy-harness";
+} from "../../src/execution/model-orchestra";
+import { ToyCompetitionHarness, type CrossModelCheckInput, type CrossModelCheckResult, type ToyAgentRuntime, type ToyMissionOptions } from "../../src/search/fixtures/toy-harness";
 
 /**
  * Mission main seam (#30): a fake AgentRuntime records which ModelConfig/tier
