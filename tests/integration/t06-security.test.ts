@@ -3,8 +3,8 @@ import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "./toy-harness";
-import { createTrustedSnapshot } from "./security-boundary";
+} from "../../src/search/fixtures/toy-harness";
+import { createTrustedSnapshot } from "../../src/execution/security-boundary";
 
 const prediction = {
   predictionId: "toy-prediction",

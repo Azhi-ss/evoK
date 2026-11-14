@@ -154,9 +154,9 @@ Expected, matching the ET-CHORD-SPLIT handoffs:
 
 Handoffs with the original smoke write-ups:
 
-- [2026-09-21-et-chord-split-platform.md](../handoffs/2026-09-21-et-chord-split-platform.md)
-- [2026-09-21-et-chord-split-research.md](../handoffs/2026-09-21-et-chord-split-research.md)
-- [2026-09-22-et-chord-split-eval.md](../handoffs/2026-09-22-et-chord-split-eval.md)
+- [2026-09-21-et-chord-split-platform.md](handoffs/2026-09-21-et-chord-split-platform.md)
+- [2026-09-21-et-chord-split-research.md](handoffs/2026-09-21-et-chord-split-research.md)
+- [2026-09-22-et-chord-split-eval.md](handoffs/2026-09-22-et-chord-split-eval.md)
 
 ## Known limits
 

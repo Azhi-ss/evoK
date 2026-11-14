@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const DRIVER = join(here, "..", "..", "src", "recovery-lifecycle-driver.ts");
+const DRIVER = join(here, "recovery-lifecycle-driver.ts");
 const MISSION_ID = "m-t6lifecycle";
 
 const dirs: string[] = [];
