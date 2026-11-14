@@ -14,9 +14,9 @@ Promotion hardening (ledger hang before Broker) is
 Deploy Arena thick orchestration is an orthogonal API
 (`competitionId=deploy-arena`) — see [deploy-arena.md](deploy-arena.md).
 It is not a CLI mainline and not a commercial contest OS.
-Chord multi-plugin install / load / limits (experimental local pilot;
-**not changelog-official** hot-plug; rollback to a single extension
-entry is OK): [chord-plugins.md](chord-plugins.md). Per-seat notes:
+One Pi extension (`extensions/evok.ts`); the experimental seat packages
+are rolled back. **Not changelog-official** hot-plug. Locks:
+[chord-plugins.md](chord-plugins.md). Per-seat notes:
 [evok-platform-chord.md](evok-platform-chord.md),
 [evok-research-chord.md](evok-research-chord.md) (default `fixed_uct`),
 [evok-eval-chord.md](evok-eval-chord.md) (gates stay **fail-closed**).

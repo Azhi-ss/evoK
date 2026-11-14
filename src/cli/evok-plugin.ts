@@ -173,6 +173,9 @@ export function declareEvokPlugin(): EvokPluginDeclaration {
 }
 
 export async function loadEvokPlugin(options: LoadEvokPluginOptions = {}): Promise<LoadedEvokPlugin> {
+  // Seat records are compiled into this module. repoRoot keeps the old options
+  // shape for callers and is not read.
+  void options.repoRoot;
   const includeTui = (options.facets ?? "session+tui") === "session+tui";
   const noopDispose = async () => {};
   const platform: LoadedEvokSeat<EvokPlatformSeat> = {

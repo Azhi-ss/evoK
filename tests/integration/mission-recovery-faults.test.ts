@@ -13,7 +13,7 @@
  * | before receipt persistence | the runtime crashes before result confirmation | Run finished, receipt/result never durable |
  *
  * Every scenario runs the REAL start/resume operations in an independent bun
- * subprocess (`src/recovery-lifecycle-driver.ts`), so recovery reconstructs
+ * subprocess (`tests/integration/recovery-lifecycle-driver.ts`), so recovery reconstructs
  * everything from durable records and confirmed artifacts only. Each resume must
  * then: never adopt what was not confirmed, never restore spent budget, never
  * re-dispatch the same attempt, and continue with a FRESH Run.

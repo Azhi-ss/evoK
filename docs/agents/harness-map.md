@@ -11,7 +11,7 @@ directory imports from `src/harness`, never from a module in it, and the names
 are listed explicitly (the `src/memory/` precedent) so a new file cannot become
 public by existing.
 
-Do not confuse it with **ToyHarness** (`src/toy-harness.ts`), which is offline
+Do not confuse it with **ToyHarness** (`src/search/fixtures/toy-harness.ts`), which is offline
 fixtures and tests. `src/harness/` is product execution.
 
 ## The seam, in order
@@ -46,8 +46,8 @@ fixtures and tests. `src/harness/` is product execution.
 
 ## Old paths
 
-`RuntimeUsage` was public from `src/execution/pi-agent-runtime.ts` (and re-exported
-by the `src/pi-agent-runtime.ts` and `src/mission/mission-start.ts` shims); it is
-now the harness's measured shape and still exported under that name. The measuring
+`RuntimeUsage` was public from `src/execution/pi-agent-runtime.ts`. The flat
+forwarding file is retired. It is now the harness's measured shape and still
+exported under that name. The measuring
 helpers it replaced (`usageFrom`, `usageFromSdk`, `usageFromStats`, `addUsage`,
 `usageOf`, `countUsage`) were module-private and are now `metering.ts`.

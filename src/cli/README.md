@@ -36,9 +36,8 @@ absolute `--project`. Copyable contract: `templates/evaluation.json`. Demo:
 `examples/demo-start/`. True-domain suite-metric demo: `examples/demo-suite/`.
 Product baseline: [ADR-0014](../../docs/adr/0014-prd-rsi-baseline.md).
 
-P6: physical pack is in place. The dead `src/evok-cli.ts` shim and all
-migration-period flat `src/*.ts` shims are retired; import `src/cli` or
-`src/cli/evok-cli` directly.
+P6: physical pack is in place. Flat pack re-exports are retired; import
+`src/cli` or `src/cli/evok-cli.ts` directly.
 
 Secrets are read from the environment / Pi stores only; never copy or
 print credentials. Model/resource wiring (`evok-model`, `evok-resources`)

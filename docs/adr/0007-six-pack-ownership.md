@@ -76,6 +76,10 @@ ownership map is unchanged. Remaining pack-shim flat `src/*.ts` files
 (not shared wiring such as `evok-model`) are migration-period re-exports
 for one more release.
 
+Later note (2026-11-14 layout simplification): the pack-shim files named in
+the previous sentence are retired. Import the pack directory. The logical
+ownership map is unchanged. See ADR-0013.
+
 ## Amendment (ET-ADR-PRD / #136)
 
 Product baseline is the task-internal RSI PRD v1.0. Recorded in

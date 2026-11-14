@@ -28,6 +28,8 @@ The thin CLI shell lives under `src/cli/`:
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
+Later note (2026-11-14 layout simplification): those flat re-exports are deleted. Import this pack. See ADR-0013.
+
 **Boundary:** Mission owns authorize / budget / continue · repair · stop.
 CLI is not a second control plane. Hang / T48 stay in `src/evidence/`
 (already cut in ET-A1). Search structure stays in `src/search/` (ET-A2).

@@ -27,14 +27,16 @@ kinds, cross-Mission memory (M2), retrieval ranking, embeddings.
 
 ## 1. Problem
 
-Research Memory is one concept spread across three packages with no single entry
-point. A new contributor cannot find "the memory module":
+Research Memory was one concept spread across evidence, execution, and mission.
+M-a gathered the projection, the store, and the slice into `src/memory`.
+The forwarding files left by that move are retired. Lifecycle, prompt assembly,
+recovery, and offline evaluation stay in `src/mission/`.
 
 | Concern | Lives in |
 |---|---|
-| Projection, card schemas, decision packet | `src/evidence/research-memory.ts` (63 KB, single file) |
-| Durable snapshot + provider | `src/execution/research-memory-provider.ts` |
-| Run-bound slice | `src/execution/memory-slice.ts` |
+| Projection, card schemas, decision packet | `src/memory/schema.ts`, `src/memory/projection.ts`, `src/memory/packet.ts` |
+| Durable snapshot + provider | `src/memory/store.ts` |
+| Run-bound slice | `src/memory/slice.ts` |
 | Lifecycle, publish, revision stage | `src/mission/mission-start.ts` |
 | Prompt assembly | `src/mission/mission-director.ts` |
 | Recovery rebuild | `src/mission/mission-resume.ts` |
@@ -78,14 +80,10 @@ src/memory/
   index.ts         the only public export surface
 ```
 
-Existing modules become **re-export shims** during migration, exactly as the
-six-pack cuts did (ADR-0013 kept flat `src/*.ts` shims for one release):
-
-| Old path | Becomes |
-|---|---|
-| `src/evidence/research-memory.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
-| `src/execution/research-memory-provider.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
-| `src/execution/memory-slice.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
+M-a moved those modules into `src/memory` and left forwarding files behind,
+the same shape ADR-0013 used for its flat pack files. Those forwarding files
+are retired. Importers use `src/memory`. The file store is still the rollback
+target; this note does not delete it.
 
 ### 3.1 Relationship to ADR-0007 / ADR-0013 — needs an ADR amendment
 
@@ -246,7 +244,7 @@ must name the final seam rather than guessing now.
 | M-b | SQLite store behind the provider interface, with migration and parity tests | M-a | both stores live; parity proven; file store still the default |
 | M-c | Switch primary store to SQLite, keep file reader as rollback | M-b | SQLite serves; digests unchanged; P1–P6 each have a named test |
 | M-d | `memory_read(ref)` on the mainline Run seam, with read events and Sham parity | M-a, #221 | agent can fetch a referenced body; evaluation arms stay comparable |
-| M-e | Delete the file store and the migration shims | M-c, M-d, plus one release of soak | single store, single layout, stale docs removed |
+| M-e | Delete the file store | M-c, M-d, plus one release of soak | single store; forwarding files are already gone |
 
 M-b and M-c are split on purpose: introducing a store and making it authoritative
 are different risks, and the parity evidence belongs between them.
@@ -278,16 +276,17 @@ A single review, not a feature ticket. Checklist:
    no barrel still exports a removed symbol. (`collaboration-scheduler.ts` and
    `pi-child-work/owner.ts` are already deleted by #221, so only these three are
    still open.)
-2. **Shims**: flat `src/*.ts` re-exports kept by ADR-0013 plus the new memory
-   shims; remove any with no remaining importer.
+2. **Forwarding files**: the flat pack re-exports and the memory forwarding
+   files are gone. Do not delete `dag-scheduler` or `team-execution` in this
+   pass; each still has in-repo callers through the execution barrel or the
+   fixture seam. Confirm a module has no remaining importer before removing it.
 3. **Docs drift**: every row of §8 re-read against the code.
 4. **Spec files**: `docs/subagent-fanout-consolidation.md` (v1) is superseded by
    v2 and should be deleted or marked superseded; the two v2 specs should be
    committed rather than left untracked.
-5. **God files**: `src/mission/mission-start.ts` (2000+ lines) and
-   `src/evidence/research-memory.ts` (63 KB) — decide whether M-a already split
-   the latter, and open a separate ticket for the former only if the Run loop is
-   still unreadable.
+5. **God files**: `src/mission/mission-start.ts` remains large. The projection
+   that used to sit in one evidence file now lives under `src/memory/`. Open a
+   ticket for `mission-start.ts` only if the Run loop is still unreadable.
 6. **Baseline flakiness**: on 2026-11-11 a pre-commit run in the main worktree
    reported 124 current failures against 42 accepted, with ~82 NEW failures all in
    the `harness-opt` optimize / search-tree suites, and refused the commit. The

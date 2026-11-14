@@ -5,9 +5,9 @@ Does not own gate override or replace the Evaluator.
 
 Physical home of `team-execution`, `model-orchestra`, `pi-agent-runtime`,
 `security-boundary`, `dag-scheduler`, and the `pi-security*` /
-`team-security*` contracts. P6: physical pack is in place. Remaining
-flat `src/*.ts` files are migration-period re-exports for one more
-release ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+`team-security*` contracts. P6: physical pack is in place. Flat pack
+re-exports are retired; import this directory
+([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 **Thin execution default (B)** stays in force:
 

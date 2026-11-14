@@ -53,8 +53,8 @@ evoK 缺的不是持久聊天，而是**可审查、可演化、有适用边界�
 | Evidence / Finding / Negative Evidence / Pitfall | `src/mission/research-loop.ts` | 类型、scope、证据引用、基本搜索 | 缺少当前研究状态、生命周期和默认决策注入 |
 | Hypothesis / KillTest ledger | `src/evidence/hypothesis-ledger.ts` | Hypothesis 状态和 append-only events | 当前 store 是 in-memory，缺少持久研究连续性 |
 | ClaimCard / objections | `src/predict-reconcile.ts` | 预测、状态和反对意见 | 缺少 applicability、竞争解释和下一判别实验的完整投影 |
-| MemorySlice / MemoryProvider | `src/execution/memory-slice.ts`、`context-broker.ts` | 引用优先、敏感字段拒绝、Run/agent 绑定、digest 审计 | provider 是可选 seam，没有默认 durable provider |
-| MemoryWriteProposal / AgentResult | `src/execution/memory-slice.ts` | agent 可提议，不可自行生效 | 缺少完整性校验、版本化和 snapshot projection |
+| MemorySlice / MemoryProvider | `src/memory/slice.ts`、`src/execution/context-broker.ts` | 引用优先、敏感字段拒绝、Run/agent 绑定、digest 审计 | provider 是可选 seam，没有默认 durable provider |
+| MemoryWriteProposal / AgentResult | `src/memory/slice.ts` | agent 可提议，不可自行生效 | 缺少完整性校验、版本化和 snapshot projection |
 | fresh child session + child-bound slice | `src/execution/subagents-adapter.ts` | 不继承父 session，父子记忆不可错绑 | 需要由真实 provider 为 child 生成新 slice |
 | Director trusted projection | `src/mission/mission-director.ts` | 每次基于当前 measured evidence 决策 | 当前输入不含 Research Memory projection，也无法审计 Memory 改变了什么 |
 
@@ -531,4 +531,4 @@ Pin revisions
 - Run/session 边界：`docs/adr/0001-pi-agent-runtime-session-policy.md`。
 - Mission 存储与恢复：`docs/adr/0004-evok-autonomous-research-entrypoint.md`。
 - Pi 执行边界：`docs/adr/0005-pi-sdk-execution-path.md`。
-- 当前 agent memory 契约：`docs/multi-agent-architecture.md`、`src/execution/memory-slice.ts`、`src/execution/context-broker.ts`。
+- 当前 agent memory 契约：`docs/multi-agent-architecture.md`、`src/memory/slice.ts`、`src/execution/context-broker.ts`。

@@ -1,60 +1,39 @@
-# evok-eval Chord plugin (pilot)
+# evok eval seat (internal)
 
-Independent Chord plugin for the **评测发布** seat: eval / promotion /
-Broker. Ticket: ET-CHORD-SPLIT-EVAL / #192. Authority:
+Internal seat of the single evoK Pi plugin: eval / promotion / Broker.
+Ticket: ET-CHORD-SPLIT-EVAL / #192. Authority:
 `approved/2026-09-21-decision-pi-086-chord-plugins.md`.
 
-This is an **experimental local pilot**. Pi `0.86.0` / `0.86.1` changelogs
-did **not** advertise Chord hot-plug. Do not treat this path as a
-changelog-official or production multi-environment capability. Failure
-may roll back to a single extension entry.
+This seat is **not** a separate package and **not** changelog-official Chord
+hot-plug. Pi `0.86.0` / `0.86.1` changelogs did not advertise that capability.
+The product entry is `extensions/evok.ts`. The seat record lives in
+`src/cli/evok-plugin.ts`.
 
 Admission / Budget / hang / T48 / Broker predicates stay **fail-closed**.
-This plugin does **not** loosen those gates. Contest-arm auto-submit
-remains fail-closed. Elite ≠ 晋级 / Promotion / Admission / Broker.
+This seat does **not** loosen those gates. Contest-arm auto-submit remains
+fail-closed. Elite ≠ 晋级 / Promotion / Admission / Broker.
 
-Full how-to / limits write-up: [chord-plugins.md](chord-plugins.md)
+Full how-to / limits: [chord-plugins.md](chord-plugins.md)
 (ET-DOC-CHORD / #193).
 
-## Declare
-
-`plugins/evok-eval/package.json` follows the pi 0.86 conventional
-plugin shape (`chord.facets.session` + `chord.facets.tui`, peer
-`@earendil-works/chord@^0.86`).
+## Load
 
 ```ts
-import { declareEvokEvalPlugin } from "../src/cli/evok-eval-plugin";
+import { loadEvokPlugin } from "../src/cli/evok-plugin";
 
-declareEvokEvalPlugin();
-// pluginId: "evok-eval"
-// seat: "eval-promotion-broker"
-// failClosed: true
-// changelogOfficialHotPlug: false
-```
-
-## Load (local pilot)
-
-In-process Chord `FacetHost` + static facet loader. Session facet
-provides `evok.eval`. TUI facet consumes it and lists a smoke
-command. Neither facet owns scoring math, Promotion, Admission,
-Budget, hang, T48, or Broker. Promotion ≠ Admission.
-
-```ts
-import { loadEvokEvalPlugin } from "../src/cli/evok-eval-plugin";
-
-const loaded = await loadEvokEvalPlugin();
-// loaded.seat.failClosed === true
-// loaded.seat.autoSubmitFailClosed === true
-// loaded.seat.eliteIsPromotion === false
+const loaded = await loadEvokPlugin({ facets: "session" });
+// loaded.modules.eval.seat.pluginId === "evok-eval"
+// loaded.modules.eval.seat.seat === "eval-promotion-broker"
+// loaded.modules.eval.seat.failClosed === true
+// loaded.modules.eval.seat.autoSubmitFailClosed === true
+// loaded.modules.eval.seat.eliteIsPromotion === false
+// loaded.modules.eval.seat.changelogOfficialHotPlug === false
 await loaded.dispose();
 ```
 
-`evok-platform` (#190) and `evok-research` (#191) are other seats. This
-package does not declare or load them.
+The seat does not own scoring math, Promotion, Admission, Budget, hang, T48,
+or Broker. Promotion ≠ Admission. Platform and research are sibling records
+on the same load.
 
-The package uses the same `chord.facets` convention as pi 0.86 example
-plugins. That does **not** make Pi experimental `-e` a shipped evoK
-product path, and it is **not** changelog-official Chord hot-plug.
-
-Seat declaration only. Auto-submit policy is unchanged. Elite ranking
-is not a Promotion key.
+Seat declaration only. Auto-submit policy is unchanged. Elite ranking is
+not a Promotion key.

@@ -5,7 +5,7 @@
  * start/resume operations and interrupts at a durable boundary.
  *
  * Usage:
- *   bun src/recovery-lifecycle-driver.ts <project> <mode> [boundary]
+ *   bun tests/integration/recovery-lifecycle-driver.ts <project> <mode> [boundary]
  *     mode=start   run a fresh start; kill/self-abort at `boundary`
  *                  (before-confirmation | after-confirmation | none
  *                   | after-budget-reservation | after-execution-start

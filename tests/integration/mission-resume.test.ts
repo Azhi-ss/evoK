@@ -2,7 +2,7 @@
  * Separate-process recovery tests for T6 (#114 AC1/AC3/AC4/AC5/AC6).
  *
  * Each scenario runs the REAL start/resume operations in an INDEPENDENT bun
- * subprocess (src/recovery-lifecycle-driver.ts), so the interruption is a
+ * subprocess (tests/integration/recovery-lifecycle-driver.ts), so the interruption is a
  * genuine process boundary — not an in-process AbortController that keeps its
  * memory. The second process must reconstruct everything from durable records
  * and confirmed artifacts only.
