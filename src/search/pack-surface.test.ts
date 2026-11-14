@@ -1,39 +1,12 @@
 /**
- * ET-A2 compatibility seam: `src/search/` implementations and the flat
- * `src/*.ts` re-exports must stay isomorphic. Default selection literals
- * here are independent of the moved module bodies.
+ * ET-A2 pack surface seam: `src/search/` is importable and keeps
+ * default fixed_uct / #40 off.
  */
 import { describe, expect, test } from "bun:test";
-import * as fixturesPacked from "./fixtures/second-toy-adapter";
-import * as outerFlat from "../outer-search-space-fixtures";
-import * as outerPacked from "./outer-search-space-fixtures";
 import * as searchPacked from "./index";
-import * as selectionFlat from "../search-selection-port";
 import * as selectionPacked from "./search-selection-port";
-import * as spaceFlat from "../search-space-profile";
-import * as spacePacked from "./search-space-profile";
-import * as toyFlat from "../toy-harness";
-import * as toyPacked from "./fixtures/toy-harness";
 
-function runtimeKeys(mod: object): string[] {
-  return Object.keys(mod).sort();
-}
-
-function expectSameRuntimeSurface(flat: object, packed: object): void {
-  expect(runtimeKeys(flat)).toEqual(runtimeKeys(packed));
-  for (const key of runtimeKeys(flat)) {
-    expect((packed as Record<string, unknown>)[key]).toBe((flat as Record<string, unknown>)[key]);
-  }
-}
-
-describe("search pack re-export isomorphism", () => {
-  test("flat src/*.ts re-exports the same runtime bindings as src/search/", () => {
-    expectSameRuntimeSurface(selectionFlat, selectionPacked);
-    expectSameRuntimeSurface(spaceFlat, spacePacked);
-    expectSameRuntimeSurface(outerFlat, outerPacked);
-    expectSameRuntimeSurface(toyFlat, toyPacked);
-    expect(typeof fixturesPacked.BinaryAccuracyToyCompetitionAdapter).toBe("function");
-  });
+describe("search pack surface", () => {
 
   test("src/search/ is importable and keeps default fixed_uct / #40 off", () => {
     expect(searchPacked.DEFAULT_SEARCH_SELECTION_ID).toBe("fixed_uct");
@@ -60,7 +33,7 @@ describe("search pack re-export isomorphism", () => {
       else process.env.EVOK_SEARCH_SELECTION = previous;
     }
 
-    expect(selectionFlat.DEFAULT_SEARCH_SELECTION_ID).toBe(searchPacked.DEFAULT_SEARCH_SELECTION_ID);
-    expect(selectionFlat.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
+    expect(selectionPacked.DEFAULT_SEARCH_SELECTION_ID).toBe(searchPacked.DEFAULT_SEARCH_SELECTION_ID);
+    expect(selectionPacked.createDefaultSearchSelectionPort().id).toBe("fixed_uct");
   });
 });

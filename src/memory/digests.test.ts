@@ -19,12 +19,6 @@ import {
 } from "./index";
 import type { SynthesisProposal } from "../evidence/synthesis-proposal";
 
-// The old paths stay re-export shims during migration; the same values must be
-// reachable through them, so importers keep working unchanged.
-import * as evidenceShim from "../evidence/research-memory";
-import * as providerShim from "../execution/research-memory-provider";
-import * as sliceShim from "../execution/memory-slice";
-
 const PINNED = {
   snapshot: "dfe9a8f80f6d9b3eb46fb99fe5bdaf425cfcaac15e019634abf23b0919c0eb88",
   narrowSnapshot: "d505adf160e6c75a16683e2ad0729ada8ad9f8a819436dc05eaca5817b2c17c4",
@@ -144,16 +138,5 @@ describe("research memory content addresses are unchanged by the move (#242)", (
     expect(shamResearchMemorySnapshot(snapshot).digest).toBe(PINNED.shamSnapshot);
     expect(shamResearchDecisionPacket(packet).digest).toBe(PINNED.shamPacket);
     expect(slice.digest).toBe(PINNED.slice);
-  });
-
-  test("the old module paths are the same symbols, not copies", () => {
-    expect(evidenceShim.projectResearchMemorySnapshot).toBe(projectResearchMemorySnapshot);
-    expect(evidenceShim.projectResearchDecisionPacket).toBe(projectResearchDecisionPacket);
-    expect(evidenceShim.shamResearchMemorySnapshot).toBe(shamResearchMemorySnapshot);
-    expect(providerShim.loadResearchMemorySnapshot).toBeTypeOf("function");
-    expect(providerShim.createResearchMemoryProvider).toBeTypeOf("function");
-    expect(providerShim.createDelegatedResearchMemoryProvider).toBeTypeOf("function");
-    expect(sliceShim.createResearchMemorySlice).toBe(createResearchMemorySlice);
-    expect(sliceShim.MemorySliceError).toBeTypeOf("function");
   });
 });

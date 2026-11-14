@@ -1,13 +1,10 @@
 /**
- * ET-A5 compatibility seam: `src/competition/` implementations and the flat
- * `src/*.ts` re-exports must stay isomorphic. Live / allowlist / no-submit
- * literals here are independent of the moved module bodies.
+ * ET-A5 pack surface seam: `src/competition/` is importable, live stays
+ * explicit, and no true submit path grows.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import * as armFlat from "../llm-comp-arm-before-promotion";
 import * as armPacked from "./llm-comp-arm-before-promotion";
 import * as competitionPacked from "./index";
-import * as runtimeFlat from "../llm-competition-runtime";
 import * as runtimePacked from "./llm-competition-runtime";
 import {
   LiveLlmKeyMissingError,
@@ -33,20 +30,7 @@ function runtimeKeys(mod: object): string[] {
   return Object.keys(mod).sort();
 }
 
-function expectSameRuntimeSurface(flat: object, packed: object): void {
-  expect(runtimeKeys(flat)).toEqual(runtimeKeys(packed));
-  for (const key of runtimeKeys(flat)) {
-    expect((packed as Record<string, unknown>)[key]).toBe((flat as Record<string, unknown>)[key]);
-  }
-}
-
-describe("competition pack re-export isomorphism", () => {
-  test("flat src/*.ts re-exports the same runtime bindings as src/competition/", () => {
-    expectSameRuntimeSurface(runtimeFlat, runtimePacked);
-    expectSameRuntimeSurface(armFlat, armPacked);
-    expect(competitionPacked.createLlmCompetitionRuntime).toBe(runtimePacked.createLlmCompetitionRuntime);
-    expect(competitionPacked.runLlmCompArmBeforePromotion).toBe(armPacked.runLlmCompArmBeforePromotion);
-  });
+describe("competition pack surface", () => {
 
   test("src/competition/ is importable; live stays explicit; GPT* stay banned", async () => {
     delete process.env[NEWAPI_API_KEY_ENV];
@@ -83,8 +67,8 @@ describe("competition pack re-export isomorphism", () => {
     expect(() => competitionPacked.createLlmCompetitionRuntime({ model: "DeepSeek-V3" })).not.toThrow();
     expect(() => competitionPacked.createLlmCompetitionRuntime({ model: "Gemini-2.5-pro" })).not.toThrow();
 
-    expect(runtimeFlat.createLlmCompetitionRuntime).toBe(competitionPacked.createLlmCompetitionRuntime);
-    expect(armFlat.runLlmCompArmBeforePromotion).toBe(competitionPacked.runLlmCompArmBeforePromotion);
+    expect(runtimePacked.createLlmCompetitionRuntime).toBe(competitionPacked.createLlmCompetitionRuntime);
+    expect(armPacked.runLlmCompArmBeforePromotion).toBe(competitionPacked.runLlmCompArmBeforePromotion);
   });
 
   test("competition pack does not swallow evidence gates or grow a true submit path", () => {

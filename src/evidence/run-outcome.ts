@@ -10,7 +10,7 @@
  * The classification is pure and derived from authoritative Run fields, so it
  * adds no new write authority and cannot drift from the recorded outcome.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 
 export const RUN_FAILURE_KINDS = ["out-of-memory", "timeout", "invalid-measurement", "protocol-failure"] as const;
 

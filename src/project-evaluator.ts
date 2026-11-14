@@ -11,7 +11,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BaselineEvaluator } from "./mission-start";
+import type { BaselineEvaluator } from "./mission/mission-start";
 import {
   EvaluationContractError,
   createFileMetricEvaluator,

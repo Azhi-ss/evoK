@@ -24,7 +24,7 @@ import {
   type DirectorInput,
   type DirectorProposal,
 } from "./mission-director";
-import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../memory";
 import { emptyDirectorInsightSidecar } from "./director-insight-sidecar";
 import type { MissionRecord } from "./mission-start";
 

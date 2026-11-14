@@ -1,4 +1,4 @@
-import { TrustViolation, digestValue } from "./security-boundary";
+import { TrustViolation, digestValue } from "./execution/security-boundary";
 
 /**
  * Data honesty gate (T40, spec #1 research gap G1): detects and prevents

@@ -13,7 +13,7 @@
  * byte-identical digest. Submission only appends an event, so it never
  * interrupts, aborts or pre-empts a running Run.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import type { ResearchEvent, ResearchLedger } from "./research-loop";
 
 export const HUMAN_INSIGHT_DRAFT_SCHEMA = "human-insight-draft/1";

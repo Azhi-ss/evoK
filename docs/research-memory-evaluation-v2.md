@@ -1,6 +1,8 @@
 # Research Memory Evaluation: Spec v2
 
-status: revised design (implementation not yet authorized)
+status: DELIVERED (marked in M-e / #246). Implemented by #230–#234 and closed with
+        parent spec #222; the code lives in `src/mission/memory-evaluation.ts` and
+        `src/mission/decision-point-evaluation.ts`.
 scope: proving whether Mission Research Memory is worth its cost
 scoring contract: `evok.l1-hindsight-scoring/v1` (see §3, "Hindsight scoring rule")
 reviewed: `src/mission/memory-evaluation.ts`, `src/mission/mission-director.ts`,

@@ -15,7 +15,7 @@ import {
   createResearchMemorySlice,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
+  researchMemoryStoreFor,
   readMemoryCard,
   shamResearchMemorySnapshot,
   type MemorySlice,
@@ -149,7 +149,7 @@ describe("memory_read resolves against the pinned snapshot, never latest", () =>
   test("a newer published snapshot cannot change or extend what this Run can read", async () => {
     const dir = await mkdtemp(join(tmpdir(), "evok-memory-read-"));
     const pinned = projectResearchMemorySnapshot(source());
-    await publishResearchMemorySnapshot(dir, pinned);
+    await researchMemoryStoreFor(dir).publish(pinned);
     const tool = createMemoryReadTool(sliceFor("m-demo", pinned));
     const pinnedCardId = projectResearchDecisionPacket(pinned).cards[0]!.cardId;
 
@@ -158,7 +158,7 @@ describe("memory_read resolves against the pinned snapshot, never latest", () =>
       ...source().runs,
       { runId: "m-demo:exp:5", taskId: "t-1", ok: false, score: 0.6, evidenceRefs: ["runs/5/result.json"] },
     ] }));
-    await publishResearchMemorySnapshot(dir, newer);
+    await researchMemoryStoreFor(dir).publish(newer);
 
     const served = await tool.definition.execute("call-1", { ref: pinnedCardId }, undefined, undefined, undefined as never);
     expect(JSON.parse((served.content[0] as unknown as { text: string }).text)).toEqual(readMemoryCard(sliceFor("m-demo", pinned), pinnedCardId));

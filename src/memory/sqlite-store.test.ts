@@ -1,26 +1,20 @@
 /**
- * M-b (#243): the SQLite store is a second implementation of the provider seam,
- * not a derived index. Every property PRD §4.1 requires of the file design gets
- * a named test here, plus parity with the file store: for one fixed Mission
- * record both stores must serve identical snapshot digests and identical packet
- * projections. M-c (#244) then made this store the default; the file store is
- * the rollback path (`default-store.test.ts`).
+ * M-b (#243): the SQLite store is a store, not a derived index. Every property
+ * PRD §4.1 requires of the file design gets a named test here — and since M-e
+ * (#246, ADR-0017) this is the ONLY store, so these tests are the whole
+ * durability contract rather than half of a parity pair.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalJson } from "../execution/security-boundary";
 import {
-  createFileResearchMemoryStore,
-  createResearchMemoryProvider,
   createSqliteResearchMemoryProvider,
   createSqliteResearchMemoryStore,
-  migrateFileResearchMemory,
   projectResearchDecisionPacket,
   projectResearchMemorySnapshot,
-  publishResearchMemorySnapshot,
   shamResearchMemorySnapshot,
   type ResearchMemorySource,
 } from "./index";
@@ -294,64 +288,6 @@ describe("SQLite research memory store (#243)", () => {
     expect(rows.map((row) => row.kind)).toEqual(published.cards.map((card) => card.kind));
     expect(rows.map((row) => row.ordinal)).toEqual(published.cards.map((_card, index) => index));
     expect(rows.map((row) => JSON.parse(row.applicability))).toEqual(published.cards.map((card) => card.applicability));
-  });
-
-  test("one-shot migration copies snapshots/*.json and the active pointer with digest verification", async () => {
-    const root = await temp();
-    const dir = join(root, "memory");
-    const file = join(dir, "memory.sqlite");
-    const first = snapshot({ ledgerRevision: 5 });
-    const second = snapshot({ ledgerRevision: 6 });
-    await publishResearchMemorySnapshot(dir, first);
-    await publishResearchMemorySnapshot(dir, second);
-
-    expect(await migrateFileResearchMemory(dir, file)).toEqual({ snapshots: 2 });
-    const store = createSqliteResearchMemoryStore(file);
-    expect(await store.loadPinned((await store.loadActive())!)).toEqual(second);
-    expect(await store.loadPinned(first.digest)).toEqual(first);
-    // Idempotent: a second run verifies and re-writes nothing new.
-    expect(await migrateFileResearchMemory(dir, file)).toEqual({ snapshots: 2 });
-    expect(rowCount(file, "SELECT COUNT(*) AS n FROM snapshots")).toBe(2);
-  });
-
-  test("migration refuses a file whose name is not its digest and writes nothing", async () => {
-    const root = await temp();
-    const dir = join(root, "memory");
-    const file = join(dir, "memory.sqlite");
-    const first = snapshot();
-    await publishResearchMemorySnapshot(dir, first);
-    await writeFile(join(dir, "snapshots", `${"a".repeat(64)}.json`), JSON.stringify(first), "utf8");
-
-    await expect(migrateFileResearchMemory(dir, file)).rejects.toThrow(/content address/);
-    expect(await createSqliteResearchMemoryStore(file).loadActive()).toBeUndefined();
-  });
-
-  test("parity: both stores serve identical snapshot digests and identical packet projections", async () => {
-    const root = await temp();
-    const dir = join(root, "memory");
-    const database = join(root, "memory.sqlite");
-    const fileStore = createFileResearchMemoryStore(dir);
-    const sqliteStore = createSqliteResearchMemoryStore(database);
-    // Both stores are driven from the SAME Mission record, each projecting it
-    // independently, so a parity pass cannot hide behind one shared object.
-    const fromRecordForFile = projectResearchMemorySnapshot(source());
-    const fromRecordForSqlite = projectResearchMemorySnapshot(source());
-    await fileStore.publish(fromRecordForFile);
-    await sqliteStore.publish(fromRecordForSqlite);
-
-    const fromFile = await fileStore.loadPinned((await fileStore.loadActive())!);
-    const fromSqlite = await sqliteStore.loadPinned((await sqliteStore.loadActive())!);
-    expect(fromSqlite.digest).toBe(fromFile.digest);
-    expect(fromSqlite).toEqual(fromFile);
-    expect(await sqliteStore.loadPinned(fromRecordForFile.digest)).toEqual(await fileStore.loadPinned(fromRecordForFile.digest));
-    expect(projectResearchDecisionPacket(fromSqlite)).toEqual(projectResearchDecisionPacket(fromFile));
-
-    // The providers are the same seam: one fixed Run request, identical slices.
-    const fileSlice = (await createResearchMemoryProvider(dir)(request("run-9")))!;
-    const sqliteSlice = (await createSqliteResearchMemoryProvider(database)(request("run-9")))!;
-    expect(sqliteSlice).toEqual(fileSlice);
-    expect(sqliteSlice.digest).toBe(fileSlice.digest);
-    expect(sqliteSlice.research!.digest).toBe(fileSlice.research!.digest);
   });
 
   test("no agent-facing mutation: the store surface and served slices are read-only", async () => {

@@ -20,12 +20,12 @@ import {
   type BaselineEvaluator,
   type StartAuthorization,
   type StartMissionOptions,
-} from "../../src/mission-start";
-import type { DirectorInput, MissionDirector } from "../../src/mission-director";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
+} from "../../src/mission/mission-start";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import type { EvokResources } from "../../src/evok-resources";
-import type { PiAgentRuntime } from "../../src/pi-agent-runtime";
-import { OPERATIONAL_PITFALL_CARD_SCHEMA, RESEARCH_MEMORY_FINDING_CARD_SCHEMA } from "../../src/evidence/research-memory";
+import type { PiAgentRuntime } from "../../src/execution/pi-agent-runtime";
+import { OPERATIONAL_PITFALL_CARD_SCHEMA, RESEARCH_MEMORY_FINDING_CARD_SCHEMA } from "../../src/memory";
 import { loadActiveResearchMemorySnapshot, researchMemoryStoreFor } from "../../src/memory";
 
 /** One scripted candidate Run: materialize a value, or fail operationally. */

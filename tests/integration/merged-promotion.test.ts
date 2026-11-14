@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { runLlmCompArmBeforePromotion } from "../../src/llm-comp-arm-before-promotion";
-import { MockLlmCompetitionRuntime } from "../../src/llm-competition-runtime";
+import { runLlmCompArmBeforePromotion } from "../../src/competition/llm-comp-arm-before-promotion";
+import { MockLlmCompetitionRuntime } from "../../src/competition/llm-competition-runtime";
 import { RESEARCH_PREDICTION as prediction } from "../../src/fixtures/research";
-import { MethodologyToyCompetitionAdapter, fakeInnerCandidate } from "../../src/methodology-acceptance";
-import { readMethodologyManifest, resolveMethodologyContracts as resolveManifestContracts } from "../../src/methodology";
-import { assembleOuterE2eMinPath } from "../../src/outer-e2e-min-path";
+import { MethodologyToyCompetitionAdapter, fakeInnerCandidate } from "../../src/evidence/methodology-acceptance";
+import { readMethodologyManifest, resolveMethodologyContracts as resolveManifestContracts } from "../../src/evidence/methodology";
+import { assembleOuterE2eMinPath } from "../../src/mission/outer-e2e-min-path";
 import {
   ToyCompetitionHarness,
   auditMethodology,
@@ -14,7 +14,7 @@ import {
   resolveMethodologyContracts,
   type CandidateSnapshot,
   type ValidationLevel,
-} from "../../src/toy-harness";
+} from "../../src/search/fixtures/toy-harness";
 
 const legacyContracts = resolveMethodologyContracts({
   split_contract: { id: "time-split", kind: "time", folds: 5, purge: 2, embargo: 1 },

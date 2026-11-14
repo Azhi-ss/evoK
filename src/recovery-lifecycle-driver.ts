@@ -33,18 +33,18 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver } from "./evok-model";
 import { PiAgentRuntime, type RuntimeFaultInjection } from "./execution/pi-agent-runtime";
-import type { SandboxPolicy } from "./security-boundary";
+import type { SandboxPolicy } from "./execution/security-boundary";
 import { discoverEvokResources } from "./evok-resources";
-import { saveMissionDraft, type MissionDraft } from "./mission-draft";
+import { saveMissionDraft, type MissionDraft } from "./mission/mission-draft";
 import {
   resumeAuthorizedMission,
   startAuthorizedMission,
   type BaselineEvaluator,
   type StartAuthorization,
   type ResumeAuthorization,
-} from "./mission-start";
-import type { DirectorInput, MissionDirector } from "./mission-director";
-import { listUnfinishedMissions } from "./mission-resume";
+} from "./mission/mission-start";
+import type { DirectorInput, MissionDirector } from "./mission/mission-director";
+import { listUnfinishedMissions } from "./mission/mission-resume";
 
 const MODEL_COST = { input: 0.0001, output: 0.0002, cacheRead: 0, cacheWrite: 0 };
 const MISSION_ID = "m-t6lifecycle";

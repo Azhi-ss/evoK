@@ -60,7 +60,7 @@ import {
   shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
   type ResearchMemorySnapshot,
-} from "../evidence/research-memory";
+} from "../memory";
 
 const LOCK_FILENAME = "controller.lock";
 const RUNS_DIRNAME = "runs";

@@ -40,14 +40,14 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
-import { runIntakeTurn } from "../../src/mission-intake";
+import { runIntakeTurn } from "../../src/mission/mission-intake";
 import {
   resumeAuthorizedMission,
   startAuthorizedMission,
   type BaselineEvaluator,
-} from "../../src/mission-start";
-import { listUnfinishedMissions } from "../../src/mission-resume";
-import type { DirectorInput, MissionDirector } from "../../src/mission-director";
+} from "../../src/mission/mission-start";
+import { listUnfinishedMissions } from "../../src/mission/mission-resume";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
 import type { SessionModelResolver } from "../../src/evok-model";
 
 const MODEL_COST = { input: 0.0001, output: 0.0002, cacheRead: 0, cacheWrite: 0 };

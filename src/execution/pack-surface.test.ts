@@ -1,36 +1,15 @@
 /**
- * ET-A4 compatibility seam: `src/execution/` implementations and the flat
- * `src/*.ts` re-exports must stay isomorphic. Thin-default (B) literals
- * here are independent of the moved module bodies.
+ * ET-A4 pack surface seam: `src/execution/` is importable and keeps
+ * the thin-default (B) contract.
  */
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as dagFlat from "../dag-scheduler";
-import * as dagPacked from "./dag-scheduler";
 import * as executionPacked from "./index";
-import * as orchestraFlat from "../model-orchestra";
-import * as orchestraPacked from "./model-orchestra";
-import * as runtimeFlat from "../pi-agent-runtime";
-import * as runtimePacked from "./pi-agent-runtime";
-import * as securityFlat from "../security-boundary";
-import * as securityPacked from "./security-boundary";
-import * as teamFlat from "../team-execution";
 import * as teamPacked from "./team-execution";
 
 const PACK_DIR = dirname(fileURLToPath(import.meta.url));
-
-function runtimeKeys(mod: object): string[] {
-  return Object.keys(mod).sort();
-}
-
-function expectSameRuntimeSurface(flat: object, packed: object): void {
-  expect(runtimeKeys(flat)).toEqual(runtimeKeys(packed));
-  for (const key of runtimeKeys(flat)) {
-    expect((packed as Record<string, unknown>)[key]).toBe((flat as Record<string, unknown>)[key]);
-  }
-}
 
 function ref(branchId: string, suffix = "1") {
   return Object.freeze({
@@ -41,14 +20,11 @@ function ref(branchId: string, suffix = "1") {
   });
 }
 
-describe("execution pack re-export isomorphism", () => {
-  test("flat src/*.ts re-exports the same runtime bindings as src/execution/", () => {
-    expectSameRuntimeSurface(teamFlat, teamPacked);
-    expectSameRuntimeSurface(dagFlat, dagPacked);
-    expectSameRuntimeSurface(orchestraFlat, orchestraPacked);
-    expectSameRuntimeSurface(runtimeFlat, runtimePacked);
-    expectSameRuntimeSurface(securityFlat, securityPacked);
-  });
+function runtimeKeys(mod: object): string[] {
+  return Object.keys(mod).sort();
+}
+
+describe("execution pack surface", () => {
 
   test("src/execution/ is importable and keeps thin default B", async () => {
     expect(executionPacked.DEFAULT_BRANCH_WIDTH).toBe(1);
@@ -83,7 +59,7 @@ describe("execution pack re-export isomorphism", () => {
     expect(rejected[0]?.objections).toEqual(["counterexample"]);
     expect(rejected[0]?.verification?.Falsifier).toBe(false);
 
-    expect(teamFlat.DEFAULT_BRANCH_WIDTH).toBe(executionPacked.DEFAULT_BRANCH_WIDTH);
+    expect(teamPacked.DEFAULT_BRANCH_WIDTH).toBe(executionPacked.DEFAULT_BRANCH_WIDTH);
   });
 
   test("Elite / fan-out width / role roster are not promotion keys", async () => {

@@ -3,7 +3,7 @@ import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
   type ToyAgentRuntime,
-} from "./toy-harness";
+} from "./search/fixtures/toy-harness";
 import {
   LeakageViolation,
   auditCandidateFiles,

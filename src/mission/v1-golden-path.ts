@@ -31,14 +31,14 @@ import {
   runKillTestHang,
   type KillTestHangDecision,
   type KillTestHangInput,
-} from "../kill-test-hang";
+} from "../evidence/kill-test-hang";
 import {
   killTestOutcomeIsPass,
   type HypothesisEvent,
   type HypothesisEventType,
   type HypothesisStatus,
   type T48MappedRef,
-} from "../hypothesis-ledger";
+} from "../evidence/hypothesis-ledger";
 import {
   assembleLlmCompArmSetup,
   type AssembleLlmCompArmSetupInput,

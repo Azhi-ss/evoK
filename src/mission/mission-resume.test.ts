@@ -30,7 +30,6 @@ import {
   staleControllerLock,
 } from "./mission-resume";
 import { missionResearchSource, researchMemoryDir } from "./mission-start";
-import { publishResearchMemorySnapshot } from "../execution/research-memory-provider";
 import {
   RESEARCH_MEMORY_DATABASE_FILENAME,
   loadActiveResearchMemorySnapshot,
@@ -41,7 +40,7 @@ import {
   projectResearchMemorySnapshot,
   shamResearchMemorySnapshot,
   summarizeResearchMemorySnapshot,
-} from "../evidence/research-memory";
+} from "../memory";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -482,7 +481,7 @@ describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
     const dir = researchMemoryDir(project, record.id);
     // A Real snapshot is what a pre-fix or tampered store would hold.
     const real = projectResearchMemorySnapshot(missionResearchSource(record));
-    await publishResearchMemorySnapshot(dir, real);
+    await researchMemoryStoreFor(dir).publish(real);
 
     const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record });
     const served = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
@@ -506,17 +505,17 @@ describe("Research Memory arm recovery (M1-T9 AC1/AC2)", () => {
     measuredAt: "2026-09-11T00:05:00.000Z",
   });
 
-  test("a pre-migration Run's pinned snapshot is served by digest after the store switches (M-c #244)", async () => {
+  test("a Run's pinned snapshot is still served by digest (M-c #244, single store since M-e #246)", async () => {
     const project = await tempProject();
     const record = baseRecord("m-mc-pinned", { status: "interrupted", baseline: measuredBaseline("m-mc-pinned") });
     const dir = researchMemoryDir(project, record.id);
-    // The pre-switch file store published it; the Run recorded this digest.
+    // The store published it and the Run recorded this digest.
     const expected = projectResearchMemorySnapshot(missionResearchSource(record));
-    await publishResearchMemorySnapshot(dir, expected);
+    await researchMemoryStoreFor(dir).publish(expected);
     const committed: MissionRecord = { ...record, researchMemory: summarizeResearchMemorySnapshot(expected) };
 
     const { record: recovered } = await reconcileResearchMemory({ projectRoot: project, record: committed });
-    // Migration reproduces the exact bytes, so recovery has nothing to rebuild.
+    // The served bytes already equal the deterministic projection, so recovery has nothing to rebuild.
     expect(recovered).toEqual(committed);
     const served = await loadActiveResearchMemorySnapshot(researchMemoryStoreFor(dir));
     expect(served?.digest).toBe(expected.digest);

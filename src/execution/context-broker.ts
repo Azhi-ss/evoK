@@ -31,7 +31,7 @@ import {
   type RuleVisibilityPolicy,
 } from "../competition/rule-visibility";
 import { validateExecutionContext, createExecutionContext, type EvaluationDataAccess, type ExecutionContext } from "./execution-context";
-import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { validateMemorySlice, type MemorySlice } from "../memory";
 import { assembleRoleContext, validateRoleContext, type RoleTaskContext } from "./role-context";
 import {
   grantResourceLease,

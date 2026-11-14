@@ -19,13 +19,13 @@ import {
   validateResearchMemorySnapshot,
   type ResearchMemorySource,
   type ResearchRunFinding,
-} from "./research-memory";
+} from "./index";
 import {
   SYNTHESIS_APPLICABILITY_DIMENSIONS,
   SYNTHESIS_PROPOSAL_SCHEMA,
   validateSynthesisProposal,
   type SynthesisProposal,
-} from "./synthesis-proposal";
+} from "../evidence/synthesis-proposal";
 
 const MISSION = "m-lifecycle";
 

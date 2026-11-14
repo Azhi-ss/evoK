@@ -13,7 +13,7 @@ import {
   type PromotionPolicy,
   type ToyAgentRuntime,
   type ToyCompetitionAdapter,
-} from "./toy-harness";
+} from "./search/fixtures/toy-harness";
 
 const prediction = {
   predictionId: "toy-prediction",

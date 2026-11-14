@@ -2,7 +2,7 @@
 status: delivered
 version: 1.1
 date: 2026-11-11
-related: "#235 (memory, delivered except M-e), #248 (research program), #249 (charter)"
+related: "#235 (memory, all five tickets including M-e delivered), #248 (research program), #249 (charter)"
 implements: "#253 (Stage 1 #254, Stage 2 #255, Stage 3 #256, Stage 4 #257)"
 reviewed-by: external adversarial second opinion; its objections and their dispositions in §9
 ---
@@ -25,10 +25,10 @@ metering). Those three have different change reasons and must not share a functi
 
 | Symptom | Evidence |
 |---|---|
-| God function | `src/mission/mission-start.ts` is **2886 lines**; `runMissionController` handles authorization, locking, budget, dispatch, snapshots, artifacts, metering, memory pinning, Director phases, recovery and terminal state |
+| God function | `src/mission/mission-start.ts` was **2886 lines** at spec time; `runMissionController` handled authorization, locking, budget, dispatch, snapshots, artifacts, metering, memory pinning, Director phases, recovery and terminal state. **Closed by #257**: 1881 lines, and the loop is a thin orchestration over `run-preparation.ts`, `director-phases.ts`, `run-dispatch.ts`, `run-finalization.ts`, `recovery.ts` |
 | Two execution paths | `src/execution/pi-agent-runtime.ts` and `pi-child-dispatch.ts` each maintain their own snapshot, metering and credential rules; #221's defects (credentials in records, unconfirmed cancellation, ambiguous metering ownership, tool-turn off-by-one) largely followed from that split |
 | No enforced boundaries | ADR-0007 assigns logical ownership, but nothing in the code stops `evidence` importing `execution` or a capability importing a research object |
-| Compatibility shims persist | 55 flat `src/*.ts` re-exports kept "for one release" by ADR-0013 |
+| Compatibility shims persist | 55 flat `src/*.ts` re-exports kept "for one release" by ADR-0013 — **closed by M-e (#246)**: all deleted, importers retargeted to the physical modules |
 
 ## 2. Locked decisions
 

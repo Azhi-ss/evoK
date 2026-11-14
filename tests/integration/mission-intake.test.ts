@@ -17,8 +17,8 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver, type SessionModelResolver } from "../../src/evok-model";
 import { discoverEvokResources } from "../../src/evok-resources";
-import { runIntakeTurn, type RetrievalCapability } from "../../src/mission-intake";
-import { loadMissionDraft, MissionDraftCorruptionError } from "../../src/mission-draft";
+import { runIntakeTurn, type RetrievalCapability } from "../../src/mission/mission-intake";
+import { loadMissionDraft, MissionDraftCorruptionError } from "../../src/mission/mission-draft";
 
 // Canonical temp dirs: the sandbox compares against real read roots, so a
 // macOS /var -> /private/var alias in the test layout would be denied for a

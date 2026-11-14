@@ -1,4 +1,4 @@
-import { deepFreeze, digestValue } from "./security-boundary";
+import { deepFreeze, digestValue } from "./execution/security-boundary";
 
 export type ReconcileStatus = "confirmed" | "refuted" | "inconclusive";
 

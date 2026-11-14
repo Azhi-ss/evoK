@@ -209,7 +209,7 @@ A conclusion drawn from one or more Evidence items within stated conditions and 
 _Avoid_: Claim (a Claim may communicate a Finding externally)
 
 **Research Memory**:
-A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it. Its physical home is `src/memory/` ([ADR-0016](docs/adr/0016-memory-physical-pack.md)): a seventh directory, not a seventh logical owner. The durable derived snapshot and its active pointer live in one SQLite database per Mission (`src/memory/sqlite-store.ts`), the default store behind the store-neutral seam in `src/memory/store.ts` since M-c/#244; that Mission's earlier snapshot files are migrated on first use and the file reader stays the rollback path (`EVOK_RESEARCH_MEMORY_STORE=file`). A storage change must never alter the bytes a Run was served.
+A deterministic, versioned, Mission-scoped projection of authoritative Mission history into bounded reading cards. It is derived and advisory — never a second write ledger — and a trusted Mission-level switch can disable it. Its physical home is `src/memory/` ([ADR-0016](docs/adr/0016-memory-physical-pack.md)): a seventh directory, not a seventh logical owner. The durable derived snapshot and its active pointer live in one SQLite database per Mission (`src/memory/sqlite-store.ts`), behind the store seam in `src/memory/store.ts`; it is the only store and the only layout since M-e/#246 ([ADR-0017](docs/adr/0017-single-memory-store-closeout.md)) deleted the file store and its migration. A storage change must never alter the bytes a Run was served.
 _Avoid_: Transcript memory, second evidence ledger, session memory
 
 **Finding Card**:
@@ -391,7 +391,7 @@ Logical packages pin authority. Physical packages are **in place** (P6 / [ADR-00
 | **competition** | `src/competition/` ([ADR-0012](docs/adr/0012-competition-physical-pack.md)) | 勾 |
 | **cli** | `src/cli/` ([ADR-0010](docs/adr/0010-mission-cli-physical-pack.md)) | 勾 |
 
-Remaining **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-model`) are migration-period re-exports for one more release (ADR-0013). Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+The **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-model`) were migration-period re-exports for one release; M-e/#246 deleted them all, so `src/` root now holds only shared modules, the ambient `*.d.ts` declarations and two top-level drivers. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
 
 | Package | Owns | Does not own |
 |---|---|---|

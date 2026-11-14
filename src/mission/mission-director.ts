@@ -31,15 +31,15 @@ import type {
   MissionRecord,
   MissionStartContract,
 } from "./mission-start";
-import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../pi-agent-runtime";
+import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../execution/pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
-import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../evidence/research-memory";
+import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../memory";
 import type { DirectorInsightSidecar, RevisionInsightDispositionInput } from "./director-insight-sidecar";
 import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
 import { classifyTrailEntry } from "./mission-start";
 import type { EvokResources } from "../evok-resources";
-import { READ_ONLY_TOOLS } from "../pi-agent-runtime";
-import { deepFreeze, digestValue } from "../security-boundary";
+import { READ_ONLY_TOOLS } from "../execution/pi-agent-runtime";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 
 /** Bounded actions the decision model may choose within an authorized Mission. */
 export const DIRECTOR_ACTIONS = [

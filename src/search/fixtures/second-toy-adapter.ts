@@ -2,7 +2,7 @@
  * Fixture/test adapter only (ET-A2 / #122). Physical home:
  * `src/search/fixtures/`. Not a product control plane.
  */
-import { deepFreeze, digestValue } from "../../security-boundary";
+import { deepFreeze, digestValue } from "../../execution/security-boundary";
 import type {
   CandidateSnapshot,
   CompetitionAdapterDescription,

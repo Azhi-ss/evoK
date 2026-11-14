@@ -1,4 +1,4 @@
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 
 /**
  * Outer methodology contracts (T44 shape) and a one-way compile/read seam

@@ -19,7 +19,7 @@ import {
   resolveDefaultNewapiModel,
   type FetchLike,
 } from "./newapi-client";
-import { SecretRedactor } from "./security-boundary";
+import { SecretRedactor } from "./execution/security-boundary";
 
 const LLM_LIVE_TEST_ENV = "EVOK_LLM_LIVE_TEST";
 const LIVE_TEST_TIMEOUT_MS = 25_000;

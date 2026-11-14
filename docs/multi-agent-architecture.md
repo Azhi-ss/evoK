@@ -178,7 +178,7 @@ it fails closed.
 
 ## MemorySlice: reference-first agent memory
 
-`MemorySlice` (`execution/memory-slice.ts`) is what one short-lived agent may
+`MemorySlice` (`src/memory/slice.ts`) is what one short-lived agent may
 remember from earlier Runs of the same Mission: `sliceId`, `missionId`,
 `taskId`, `runId`, `targetAgentId`, `sourceRefs` / `evidenceRefs` / `artifactRefs`, structured
 `facts` and `findings`, a fixed `readPolicy`, and a content digest. The read
@@ -288,7 +288,7 @@ Three injectable context types, all content-addressed and audit-stamped:
 | **Mission Controller** | (authority, not a context) | full CompetitionContract, Mission Policy, budget | — |
 | **Execution Broker** | HostInventory + ResourceLease/Usage | probed hardware, granted capacities, real usage, exit reasons | evaluation data, promotion authority |
 | **Trusted Executor/Evaluator** | `ExecutionContext` (`execution/execution-context.ts`) | contract version+digest, evaluation entry + data-access policy, inventory digest + lease, isolated workspace, network/time policy | holdout data for the **executor** (evaluator-only; requesting it fails closed) |
-| **Researcher / Critic / Reviewer** | `RoleTaskContext` (`execution/role-context.ts`) + optional `MemorySlice` (`execution/memory-slice.ts`) | objective, hypothesis, evidence refs, allowed paths, tools, lease resource summary, plus only the rule fields the competition's `RuleVisibilityPolicy` allowlists **for that role**, plus reference/summary memory bound to this Run | full rules, credentials, hidden data, global budget, transcripts, other agents' history, typed resource requirements, memory bodies |
+| **Researcher / Critic / Reviewer** | `RoleTaskContext` (`src/execution/role-context.ts`) + optional `MemorySlice` (`src/memory/slice.ts`) | objective, hypothesis, evidence refs, allowed paths, tools, lease resource summary, plus only the rule fields the competition's `RuleVisibilityPolicy` allowlists **for that role**, plus reference/summary memory bound to this Run | full rules, credentials, hidden data, global budget, transcripts, other agents' history, typed resource requirements, memory bodies |
 
 `RuleVisibilityPolicy` (`competition/rule-visibility.ts`) is
 per-competition, bound to one contract by `competitionId` + digest, and

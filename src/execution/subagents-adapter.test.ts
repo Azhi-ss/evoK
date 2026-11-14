@@ -7,8 +7,8 @@
 import { describe, expect, test } from "bun:test";
 import { buildResearcherContext, type ResearcherContext } from "./researcher-context";
 import { assembleRoleContext, type RoleTaskContext } from "./role-context";
-import { createMemorySlice, createResearchMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "./memory-slice";
-import { projectResearchMemorySnapshot } from "../evidence/research-memory";
+import { createMemorySlice, createResearchMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "../memory";
+import { projectResearchMemorySnapshot } from "../memory";
 import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import {

@@ -10,7 +10,7 @@
  * Does not assemble Outer E2E (#81), change gates, unfreeze #40, or change
  * default parent-selection A (tree+fixed_uct).
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   NewapiClient,
   assertAllowlistedModel,
@@ -18,7 +18,7 @@ import {
   resolveNewapiLive,
   type FetchLike,
 } from "../newapi-client";
-import type { ToyAgentRuntime } from "../toy-harness";
+import type { ToyAgentRuntime } from "../search/fixtures/toy-harness";
 import oofManifest from "../fixtures/methodology/manifest-oof.json";
 
 export const MOCK_LLM_CANDIDATE_FILES: Readonly<Record<string, string>> = deepFreeze({

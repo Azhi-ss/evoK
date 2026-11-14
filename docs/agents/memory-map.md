@@ -10,8 +10,9 @@ recovery, or the evaluation.
 `src/memory/index.ts` is the only public export surface: code outside the
 directory imports from `src/memory`, never from an individual module in it. The
 old paths (`src/evidence/research-memory.ts`,
-`src/execution/research-memory-provider.ts`, `src/execution/memory-slice.ts`) are
-migration-period re-export shims of that entry point and are removed in M-e.
+`src/execution/research-memory-provider.ts`, `src/execution/memory-slice.ts`) were
+M-a re-export shims of that entry point; M-e (#246) deleted them and retargeted
+every importer.
 
 ## The seam, in order
 
@@ -21,9 +22,9 @@ migration-period re-export shims of that entry point and are removed in M-e.
 | Projection (derived, no write authority) | `src/memory/projection.ts` | `projectResearchMemorySnapshot`, `evaluateResearchApplicability`, `retrieveResearchMemory` |
 | Bounded decision view | `src/memory/packet.ts` | `projectResearchDecisionPacket`, `assertPacketCardRefs` |
 | Sham control input | `src/memory/sham.ts` | `shamResearchMemorySnapshot`, `shamResearchDecisionPacket` (`RESEARCH_CONTROL_CARD_SCHEMA` lives in `schema.ts`) |
-| Durable snapshot + provider | `src/memory/store.ts` | `ResearchMemoryStore` seam, `publishResearchMemorySnapshot`, `loadResearchMemorySnapshot`, `loadActiveResearchMemorySnapshot`, `loadFileResearchMemorySnapshots`, `createFileResearchMemoryStore`, `createResearchMemoryProvider` (file/rollback), `createDelegatedResearchMemoryProvider` |
-| SQLite store behind the same seam (default since M-c) | `src/memory/sqlite-store.ts` | `createSqliteResearchMemoryStore` (migrates a Mission's files on first use when given its directory), `createSqliteResearchMemoryProvider`, `migrateFileResearchMemory` |
-| Which store is live, and the rollback switch | `src/memory/default-store.ts` | `researchMemoryStoreFor`, `defaultResearchMemoryProvider`, `researchMemoryStoreName`, `RESEARCH_MEMORY_STORE_ENV`, `RESEARCH_MEMORY_DATABASE_FILENAME` |
+| Store seam + provider (no file IO left) | `src/memory/store.ts` | `ResearchMemoryStore` seam, `researchMemoryProviderFromStore`, `loadActiveResearchMemorySnapshot`, `createDelegatedResearchMemoryProvider` |
+| The one store (default since M-c, only store since M-e) | `src/memory/sqlite-store.ts` | `createSqliteResearchMemoryStore`, `createSqliteResearchMemoryProvider` |
+| Which database file a Mission's memory is | `src/memory/default-store.ts` | `researchMemoryStoreFor`, `defaultResearchMemoryProvider`, `RESEARCH_MEMORY_DATABASE_FILENAME` |
 | Read-only serving tool (M-d) | `src/memory/tool.ts` | `MEMORY_READ_TOOL`, `MEMORY_READ_SCHEMA`, `readMemoryCard`, `createMemoryReadTool` |
 | Run-bound slice | `src/memory/slice.ts` | `createMemorySlice`, `createResearchMemorySlice`, `deriveDelegatedMemorySlice`, `MemorySliceError` |
 | Lifecycle: publish, pin, revision stage, status | `src/mission/mission-start.ts` (publish/status), `src/mission/director-phases.ts` (pin + revision stage, #257) | `projectAndPublishResearchMemory`, `researchMemoryDir`, `missionResearchSource`, `researchMemoryModeOf` use, `summarizeMission`, `submitSynthesisProposal`, `assertResearchMemoryArmUnchanged`; the decision-point pin and the blind/revision stages are `createDirectorPhases` |
@@ -42,11 +43,11 @@ M-b (#243) added a SQLite implementation of the same `ResearchMemoryStore` seam
 (snapshot rows + `cards` query projection + `active` pointer in one transaction,
 canonical-JSON `payload`, digest re-derived on every read). M-c (#244) made it
 **the default**: `default-store.ts` resolves a Mission's `memory/` namespace to
-one `research-memory.sqlite`, migrating that Mission's file store on first use,
-and `EVOK_RESEARCH_MEMORY_STORE=file` points the provider back at the file
-reader (rollback). Parity is judged on bytes: for one Mission record both stores
-return identical snapshot digests and identical packet projections
-(`src/memory/sqlite-store.test.ts`, `src/memory/default-store.test.ts`).
+one `research-memory.sqlite`. Parity was judged on bytes while both stores
+existed: for one Mission record both returned identical snapshot digests and
+identical packet projections. M-e (#246, ADR-0017) then deleted the file store,
+the file layout, the one-shot migration and the `EVOK_RESEARCH_MEMORY_STORE`
+rollback switch, so there is one store and one layout.
 
 M-a (#242) was a physical move with zero behaviour change: for a fixed input every
 snapshot, packet, Sham and slice digest is unchanged, pinned by
@@ -91,8 +92,8 @@ Run was not served.
 - Is human Insight allowed to differ across arms? No. Every arm reads the **same** Insight snapshot (same ids, versions, order) or Insight is `"disabled"` for the run; a point whose arms differ is refused before any priced call, and the result/report record the pinned ids+versions (or the disabled choice) so the control is auditable. `summarizeDecisionPoints` also refuses a sample that mixes Insight on and off, since that would measure the operator's intuition rather than Memory.
 - Where is the durable arm stored? `MissionRecord.researchMemoryMode` (captured at acceptance; restore/refuse in `assertResearchMemoryArmUnchanged`).
 - What does the status output expose? `summarizeMission` → `ResearchMemorySummary` (counts/ids only).
-- What is stored on disk today? `missions/<id>/memory/research-memory.sqlite`, one database per Mission: immutable snapshot rows (canonical-JSON `payload`), a `cards` query projection rebuilt from that payload, and ONE active pointer switched in the same transaction (M-c, #244). Publication order and the never-empty guarantee are the same as the file store's. The file layout (`snapshots/<digest>.json` + `active.json`) is still read and written by `store.ts` for rollback (`EVOK_RESEARCH_MEMORY_STORE=file`) and is what migration copies from; `migrateFileResearchMemory` verifies every digest before writing and a populated database is never re-seeded.
-- What happens when the store is damaged? The read throws (never "empty history"); `reconcileResearchMemory` records the reason, rebuilds the projection from Mission history, republishes and verifies the served digest. Repair is scoped to derived data only: a `cards` projection that disagrees with its `payload` is rebuilt from it; a `payload` that no longer hashes to its address holds no content there, so republication restores it; a file that is not a database holds nothing readable, so republication recreates it. A valid published `payload` is never rewritten (P5). A failed one-shot migration is never retried, so a pre-migration digest that only existed in damaged files reports that damage rather than "never published".
+- What is stored on disk today? `missions/<id>/memory/research-memory.sqlite`, one database per Mission and the ONLY memory artifact (M-e, #246): immutable snapshot rows (canonical-JSON `payload`), a `cards` query projection rebuilt from that payload, and ONE active pointer switched in the same transaction (M-c, #244). The old file layout (`snapshots/<digest>.json` + `active.json`), its reader and its one-shot migration are deleted; a Mission whose files predate M-c is not auto-migrated, because history is the only write authority and recovery rebuilds the identical bytes (ADR-0017).
+- What happens when the store is damaged? The read throws (never "empty history"); `reconcileResearchMemory` records the reason, rebuilds the projection from Mission history, republishes and verifies the served digest. Repair is scoped to derived data only: a `cards` projection that disagrees with its `payload` is rebuilt from it; a `payload` that no longer hashes to its address holds no content there, so republication restores it; a file that is not a database holds nothing readable, so republication recreates it. A valid published `payload` is never rewritten (P5). There is no migration any more, so there is no pre-migration digest to explain away (ADR-0017).
 - Can an agent ask for a card body? Only for a card the packet it was served already names, and only from that same pinned snapshot: `memory_read(ref)` (M-d, `src/memory/tool.ts`). It cannot search or list, never crosses a Run/Mission/arm, and every attempt is a `MEMORY_READ` ledger event. The Sham arm exposes the same tool over control slots.
 
 ## Adjacent: Human Insight (#238)
@@ -165,10 +166,11 @@ Tests: `src/mission/charter-ledger.test.ts`, `src/mission/research-charter.test.
 ## Tests
 
 - Digests (M-a pin): `src/memory/digests.test.ts`
-- Store parity and P1-P6 (M-b): `src/memory/sqlite-store.test.ts`
-- Default store, migration, rollback and damage (M-c): `src/memory/default-store.test.ts`, plus the recovery cases in `src/mission/mission-resume.test.ts` and `tests/integration/mission-start.test.ts` (#216 block)
+- P1-P6 (M-b, now the whole durability contract): `src/memory/sqlite-store.test.ts`
+- The store seam, provider and delegation: `src/memory/store.test.ts`
+- Default store, pinning and damage (M-c, single store since M-e): `src/memory/default-store.test.ts`, plus the recovery cases in `src/mission/mission-resume.test.ts` and `tests/integration/mission-start.test.ts` (#216 block)
 - Read tool (M-d): `src/memory/tool.test.ts`, plus the registration case in `src/execution/pi-agent-runtime.test.ts` and the `MEMORY_READ` ledger case in `tests/integration/mission-start.test.ts`
-- Unit: `src/evidence/research-memory.test.ts`, `research-memory-lifecycle.test.ts`, `research-memory-evaluation.test.ts`, `src/execution/memory-slice.test.ts`, `src/execution/research-memory-provider.test.ts`
+- Unit (moved into the physical home in M-e, #246): `src/memory/projection.test.ts`, `lifecycle.test.ts`, `sham.test.ts`, `slice.test.ts`
 - Mission unit: `src/mission/memory-evaluation.test.ts`, `decision-point-evaluation.test.ts`, `decision-accountability.test.ts`, `mission-resume.test.ts`
 - Lifecycle: `tests/integration/mission-start.test.ts` (`#210`–`#218`, `#240` blocks), `tests/integration/memory-evaluation.test.ts`
 - Charter reference seam (C2): `src/mission/charter-ledger.test.ts`

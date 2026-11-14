@@ -10,7 +10,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { saveMissionDraft, type MissionDraft } from "./mission-draft";
-import type { PiAgentRuntime } from "../pi-agent-runtime";
+import type { PiAgentRuntime } from "../execution/pi-agent-runtime";
 import {
   BudgetExhaustedError,
   MissionControllerConflictError,

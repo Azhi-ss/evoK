@@ -25,7 +25,7 @@ import {
   type MissionTaskRecord,
   type StartMissionOutcome,
 } from "./mission-start";
-import type { AgentRuntimeResult } from "../pi-agent-runtime";
+import type { AgentRuntimeResult } from "../execution/pi-agent-runtime";
 import { classifyRunOutcome } from "../evidence/run-outcome";
 import { projectDecisionAccountability } from "./decision-accountability";
 import type { DraftPlanTask } from "./mission-draft";

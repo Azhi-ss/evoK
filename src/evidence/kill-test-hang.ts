@@ -13,7 +13,7 @@
  * predicate checks may omit it. It does not invent a second store, skip the
  * hang, or relax T48 / Broker.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   T48MappedCatalog,
   asKillTestPass,

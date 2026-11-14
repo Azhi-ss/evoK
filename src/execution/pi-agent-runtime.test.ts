@@ -23,10 +23,10 @@ import { createEvokModelResolver } from "../evok-model";
 import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { RoleContextError, assembleRoleContext, type RoleTaskContext } from "./role-context";
-import { createMemorySlice } from "./memory-slice";
+import { createMemorySlice } from "../memory";
 import { createResearchMemorySlice, projectResearchDecisionPacket, projectResearchMemorySnapshot } from "../memory";
 import { OrchestraValidationError } from "./model-orchestra";
-import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "../toy-harness";
+import { ScoreFileToyCompetitionAdapter, ToyCompetitionHarness } from "../search/fixtures/toy-harness";
 
 const prediction = {
   predictionId: "toy-prediction",

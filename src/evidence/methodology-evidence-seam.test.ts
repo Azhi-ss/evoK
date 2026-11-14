@@ -18,11 +18,11 @@ import {
   MOCK_LLM_METHODOLOGY_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
-} from "../llm-competition-runtime";
+} from "../competition/llm-competition-runtime";
 import {
   assembleLlmCompArmSetup,
   readProposalMethodologyEvidence,
-} from "../llm-propose-outer-min";
+} from "../mission/llm-propose-outer-min";
 import {
   auditMethodology,
   oofEnsembleGate,
@@ -32,10 +32,10 @@ import {
   type MethodologyEvidence,
 } from "./methodology";
 import { runKillTestHang } from "./kill-test-hang";
-import { OUTER_MIN_KILL_EVIDENCE_ID } from "../outer-min-path";
-import type { ToyAgentRuntime } from "../toy-harness";
+import { OUTER_MIN_KILL_EVIDENCE_ID } from "../mission/outer-min-path";
+import type { ToyAgentRuntime } from "../search/fixtures/toy-harness";
 import { verificationRoleContract } from "./verification-gates";
-import { runGoldenPath } from "../v1-golden-path";
+import { runGoldenPath } from "../mission/v1-golden-path";
 
 const savedKey = process.env[NEWAPI_API_KEY_ENV];
 const savedLive = process.env[NEWAPI_LIVE_ENV];

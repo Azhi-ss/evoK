@@ -18,7 +18,7 @@
  * `evok.memory-slice/v3` additively carries a pinned Research Memory snapshot
  * (M1-T1); v2 payloads keep their exact shape and digest and stay valid.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { validateResearchMemorySnapshot, type ResearchMemorySnapshot } from "./schema";
 
 export const MEMORY_SLICE_SCHEMA = "evok.memory-slice/v2" as const;

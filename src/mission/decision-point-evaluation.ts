@@ -20,8 +20,8 @@
  * carries the Sham control caveat and the trajectory-steering caveat, and makes
  * no significance claim at any sample size.
  */
-import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../evidence/research-memory";
-import { RESEARCH_MEMORY_EVALUATION_MODES } from "../evidence/research-memory";
+import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../memory";
+import { RESEARCH_MEMORY_EVALUATION_MODES } from "../memory";
 import { deepFreeze, digestValue } from "../execution/security-boundary";
 import { RESEARCH_MEMORY_CONTROL_CAVEAT, assertNoFutureInformation } from "./memory-evaluation";
 import { emptyDirectorInsightSidecar, type DirectorInsightSidecar, type DirectorInsightSidecarItem } from "./director-insight-sidecar";

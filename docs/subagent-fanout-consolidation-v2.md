@@ -1,7 +1,8 @@
 # Subagent Fan-Out: Consolidation Spec v2
 
-status: diagnosis + cleanup plan; A1–A7 delivered (#223–#229). §8 keeps the answered
-        questions for reference; no ticket in this series remains open.
+status: DELIVERED (marked in M-e / #246). A1–A7 delivered by #223–#229 and the
+        parent spec #221 is closed; §8 keeps the answered questions for
+        reference, and no ticket in this series remains open.
 supersedes: `docs/subagent-fanout-consolidation.md` v1 (that file is superseded and
             should be replaced by this one)
 reviewed: `pi-child-dispatch.ts`, `pi-child-work.ts`, `pi-child-owner.ts`,
