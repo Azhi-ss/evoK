@@ -68,6 +68,7 @@ The six-pack logical map in ADR-0007 is unchanged:
   (for example the evidence shim also carries `store`/`slice` names). Only the
   old module paths could change which names they re-export, and M-e deletes them;
   nothing new may depend on the extra names.
+- Later note (2026-11-14 layout simplification): the three forwarding files named above are deleted. Importers use `src/memory`. The file-store rollback remains (`EVOK_RESEARCH_MEMORY_STORE=file`). Deleting that store is not part of deleting the forwarding files.
 - `src/memory/README.md` states the authority rule in one paragraph: derived
   projection, no write authority, injection plus pinned read.
 - A physical move changes no served byte. Every snapshot, packet, Sham and slice

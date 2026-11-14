@@ -18,6 +18,8 @@ Contest-arm runtime modules live under `src/competition/`:
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
+Later note (2026-11-14 layout simplification): those flat re-exports are deleted. Import this pack. See ADR-0013.
+
 **Boundary:** competition owns contest-arm runtime and local Evaluator
 adapters. It does not own evidence gates (hang / T48 / Broker) or Mission
 propose/assemble glue. `llm-propose-outer-min` stays in `src/mission/`

@@ -35,9 +35,9 @@ point. A new contributor cannot find "the memory module":
 
 | Concern | Lives in |
 |---|---|
-| Projection, card schemas, decision packet | `src/evidence/research-memory.ts` (63 KB, single file) |
-| Durable snapshot + provider | `src/execution/research-memory-provider.ts` |
-| Run-bound slice | `src/execution/memory-slice.ts` |
+| Projection, card schemas, decision packet | the pre-M-a 63 KB monolith, now `src/memory/{schema,projection,packet}.ts` |
+| Durable snapshot + provider | now `src/memory/store.ts` |
+| Run-bound slice | now `src/memory/slice.ts` |
 | Lifecycle, publish, revision stage | `src/mission/mission-start.ts` |
 | Prompt assembly | `src/mission/mission-director.ts` |
 | Recovery rebuild | `src/mission/mission-resume.ts` |
@@ -81,16 +81,10 @@ src/memory/
   index.ts         the only public export surface
 ```
 
-Existing modules became **re-export shims** during migration, exactly as the
-six-pack cuts did (ADR-0013 kept flat `src/*.ts` shims for one release). All
-three are **deleted** by M-e (#246); every importer was retargeted to
-`src/memory`:
-
-| Old path | Was |
-|---|---|
-| `src/evidence/research-memory.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
-| `src/execution/research-memory-provider.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
-| `src/execution/memory-slice.ts` | shim → `src/memory` (named re-exports of the pre-move surface) |
+M-a moved those modules into `src/memory` and temporarily left forwarding
+files behind, the same migration pattern ADR-0013 used for its flat pack files.
+M-e (#246) retired those files and retargeted every importer to `src/memory`;
+it also removed the file store and its rollback switch.
 
 ### 3.1 Relationship to ADR-0007 / ADR-0013 — needs an ADR amendment
 
@@ -290,7 +284,7 @@ A single review, not a feature ticket. Checklist:
    v2 and should be deleted or marked superseded; the two v2 specs should be
    committed rather than left untracked.
 5. **God files**: `src/mission/mission-start.ts` (2000+ lines) and
-   `src/evidence/research-memory.ts` (63 KB) — decide whether M-a already split
+   the pre-M-a 63 KB monolith — decide whether M-a already split
    the latter, and open a separate ticket for the former only if the Run loop is
    still unreadable.
 6. **Baseline flakiness**: on 2026-11-11 a pre-commit run in the main worktree
@@ -313,7 +307,7 @@ A single review, not a feature ticket. Checklist:
 | 2 | Shims | All 32 flat `src/*.ts` re-exports from ADR-0013 and the three memory shims are deleted; 121 importer specifiers were retargeted to the physical modules. `tests/integration/six-pack-physical-closeout.test.ts` now asserts that no flat re-export exists. |
 | 3 | Docs drift | Every row of §8 re-read and fixed: `memory-map.md` and `CONTEXT.md` rewritten around the single store; ADR-0013's shim table marked deleted; ADR-0016's storage row amended; ADR-0007 needed no further change (M-a landed its amendment) and ADR-0001 already records `memory_read` as a runtime-registered trusted tool (its M-d note); the three pack READMEs mention no memory path; `docs/long-term-memory-prd.md` already points here. Two pack barrels (`src/evidence/index.ts`, `src/execution/index.ts`) re-exported the memory surface as a second route; those blocks are removed so `src/memory` is the only one. |
 | 4 | Spec files | `docs/subagent-fanout-consolidation-v2.md` and `docs/research-memory-evaluation-v2.md` are tracked and now marked **delivered** (#221/#222 closed). No v1 fanout file survives to delete. |
-| 5 | God files | `src/evidence/research-memory.ts` no longer exists (M-a split it into `src/memory/`, 554-line projection plus schema/packet/sham). `src/mission/mission-start.ts` is 1881 lines, but the Run loop is no longer inside it: it is a ~100-line orchestration over `run-preparation.ts`, `director-phases.ts`, `run-dispatch.ts`, `run-finalization.ts`, `recovery.ts` (#257). **No separate ticket opened** — AC6's condition ("if the Run loop is still unreadable") is not met. |
+| 5 | God files | the pre-M-a monolith no longer exists (M-a split it into `src/memory/`, 554-line projection plus schema/packet/sham). `src/mission/mission-start.ts` is 1881 lines, but the Run loop is no longer inside it: it is a ~100-line orchestration over `run-preparation.ts`, `director-phases.ts`, `run-dispatch.ts`, `run-finalization.ts`, `recovery.ts` (#257). **No separate ticket opened** — AC6's condition ("if the Run loop is still unreadable") is not met. |
 | 6 | Baseline flakiness | Not reproducible at `641c443`: `bun run check` is green (39 current failures against 42 accepted) before and after this pass, in a fresh worktree with a lockfile install. No accepted-union change, no explanation added — the PRD's re-run-in-a-clean-worktree rule stays the advice. |
 
 ## 10. Explicitly out of scope

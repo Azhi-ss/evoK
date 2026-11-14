@@ -173,7 +173,7 @@ describe("orch-gap does not widen gates or start DeployArena", () => {
   });
 
   test("handoff / spec state #27 thin impl, #98 landed, #99 opt-in, no DeployArena", async () => {
-    const handoff = await readFile(join(process.cwd(), "handoffs", "2026-09-20-et-orch-gap.md"), "utf8");
+    const handoff = await readFile(join(process.cwd(), "docs", "handoffs", "2026-09-20-et-orch-gap.md"), "utf8");
     expect(handoff).toMatch(/thin impl/i);
     expect(handoff).toMatch(/#98/);
     expect(handoff).toMatch(/landed/i);

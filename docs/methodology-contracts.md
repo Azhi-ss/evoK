@@ -4,8 +4,8 @@ Three Kaggle-methodology objects promoted from "the inner search does whatever"
 to first-class harness/adapter contracts. Table competitions are won or lost on
 **feature engineering, ensembling, and the split**; editing a whole file blindly
 and splitting randomly produces fake CV (research gaps G4/G5/G6, spec #1).
-Implementation: `src/evidence/methodology-contracts.ts`; wired into the mission
-seam in `src/search/fixtures/toy-harness.ts` (fixtures/tests only).
+Implementation: `src/evidence/methodology-contracts.ts`; wired into the mission seam in
+`src/search/fixtures/toy-harness.ts` (fixtures/tests only).
 
 The three objects:
 

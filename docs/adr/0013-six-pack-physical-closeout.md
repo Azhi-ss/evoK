@@ -67,6 +67,14 @@ Shared non-pack modules stay at `src/` (`evok-model`, `evok-resources`,
 `newapi-client`, `idea-types`, `local-file-evaluator`, `evaluation-noise`,
 `data-honesty`, `predict-reconcile`). They were never part of a cut.
 
+## Later note (2026-11-14 layout simplification)
+
+The flat re-exports listed above, and the three ADR-0016 memory forwarding
+files, are deleted. Callers import the pack module or `src/memory`.
+`tests/integration/six-pack-physical-closeout.test.ts` pins their absence.
+Gate three-state, T48, hang, `#40`, Broker, and the C-thicken freeze are
+unchanged. This note does not delete modules that still have callers.
+
 ## Out of scope / freezes
 
 - No change to gate three-state, T48, hang, or Broker predicates.

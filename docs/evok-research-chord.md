@@ -1,60 +1,38 @@
-# evok-research Chord plugin (pilot)
+# evok research seat (internal)
 
-Independent Chord plugin for the **research engine** seat: 选点 / Harness /
-SelectionPolicy. Ticket: ET-CHORD-SPLIT-RESEARCH / #191. Authority:
+Internal seat of the single evoK Pi plugin: 选点 / Harness / SelectionPolicy.
+Ticket: ET-CHORD-SPLIT-RESEARCH / #191. Authority:
 `approved/2026-09-21-decision-pi-086-chord-plugins.md`.
 
-This is an **experimental local pilot**. Pi `0.86.0` / `0.86.1` changelogs
-did **not** advertise Chord hot-plug. Do not treat this path as a
-changelog-official or production multi-environment capability. Failure
-may roll back to a single extension entry.
+This seat is **not** a separate package and **not** changelog-official Chord
+hot-plug. Pi `0.86.0` / `0.86.1` changelogs did not advertise that capability.
+The product entry is `extensions/evok.ts`. The seat record lives in
+`src/cli/evok-plugin.ts`.
 
 Product default remains **`fixed_uct`**. `#40` Progressive / MCTS /
-StrongSearch stay **explicit Mission/config opt-in only**. This plugin
-does **not** flip those defaults. Elite ≠ 晋级 / Promotion / Admission.
+StrongSearch stay **explicit Mission/config opt-in only**. This seat does
+**not** flip those defaults. Elite ≠ 晋级 / Promotion / Admission.
 
-Full how-to / limits write-up: [chord-plugins.md](chord-plugins.md)
+Full how-to / limits: [chord-plugins.md](chord-plugins.md)
 (ET-DOC-CHORD / #193).
 
-## Declare
-
-`plugins/evok-research/package.json` follows the pi 0.86 conventional
-plugin shape (`chord.facets.session` + `chord.facets.tui`, peer
-`@earendil-works/chord@^0.86`).
+## Load
 
 ```ts
-import { declareEvokResearchPlugin } from "../src/cli/evok-research-plugin";
+import { loadEvokPlugin } from "../src/cli/evok-plugin";
 
-declareEvokResearchPlugin();
-// pluginId: "evok-research"
-// defaultSelectionId: "fixed_uct"
-// progressiveDefault: "off"
-// changelogOfficialHotPlug: false
-```
-
-## Load (local pilot)
-
-In-process Chord `FacetHost` + static facet loader. Session facet
-provides `evok.research`. TUI facet consumes it and lists a smoke
-command. Neither facet owns parent-selection math, Admission, Budget,
-hang, T48, or Broker.
-
-```ts
-import { loadEvokResearchPlugin } from "../src/cli/evok-research-plugin";
-
-const loaded = await loadEvokResearchPlugin();
-// loaded.seat.defaultSelectionId === "fixed_uct"
-// loaded.seat.progressiveDefault === "off"
+const loaded = await loadEvokPlugin({ facets: "session" });
+// loaded.modules.research.seat.pluginId === "evok-research"
+// loaded.modules.research.seat.defaultSelectionId === "fixed_uct"
+// loaded.modules.research.seat.progressiveDefault === "off"
+// loaded.modules.research.seat.selectionPolicy40 === "off"
+// loaded.modules.research.seat.eliteIsPromotion === false
+// loaded.modules.research.seat.changelogOfficialHotPlug === false
 await loaded.dispose();
 ```
 
-`evok-platform` (#190) and `evok-eval` (#192) are other seats. This
-package does not declare or load them.
+The seat does not own parent-selection math, Admission, Budget, hang, T48,
+or Broker. Platform and eval are sibling records on the same load.
 
-The package uses the same `chord.facets` convention as pi 0.86 example
-plugins. That does **not** make Pi experimental `-e` a shipped evoK
-product path, and it is **not** changelog-official Chord hot-plug.
-
-If a Progressive surface is ever exposed through this seat, it remains
-**opt-in only**. Elite ranking is inner selection only — not a Promotion
-key.
+If a Progressive surface is exposed through this seat, it remains
+**opt-in only**. Elite ranking is inner selection only — not a Promotion key.

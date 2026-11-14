@@ -48,6 +48,8 @@ delegation authority.
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
+Later note (2026-11-14 layout simplification): those flat re-exports are deleted. Import this pack. See ADR-0013.
+
 **Boundary:** execution owns dynamic Team — Pattern, Team Coordinator,
 Roles, runtime, Policy Guard. It does not own gate override or replace
 the Evaluator. Hang / T48 stay in `src/evidence/`. Search structure stays

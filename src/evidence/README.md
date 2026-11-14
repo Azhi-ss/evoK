@@ -6,8 +6,8 @@ Physical home of the Hypothesis ledger, Kill-test hang / T48, methodology
 gates, verification-gates, validation-ladder, experiment-validity,
 method Admission / writeback, Budget Gate (reserve → settle), Broker
 **simulation**, and contest-arm auto-submit (all-green / fail-closed).
-P6: physical pack is in place (barrel `index.ts`). Remaining flat
-`src/*.ts` files are migration-period re-exports for one more release
+P6: physical pack is in place (barrel `index.ts`). Flat pack re-exports
+are retired; import this directory
 ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 Contest-arm auto-submit (`contest-auto-submit`) is allowed only when every

@@ -11,7 +11,7 @@ directory imports from `src/harness`, never from a module in it, and the names
 are listed explicitly (the `src/memory/` precedent) so a new file cannot become
 public by existing.
 
-Do not confuse it with **ToyHarness** (`src/toy-harness.ts`), which is offline
+Do not confuse it with **ToyHarness** (`src/search/fixtures/toy-harness.ts`), which is offline
 fixtures and tests. `src/harness/` is product execution.
 
 ## The seam, in order

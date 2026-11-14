@@ -1,0 +1,13 @@
+{
+  "id": "evok",
+  "entry_type": "cli",
+  "workers": 1,
+  "environment": {
+    "setup": [
+      ["bash", "setup.sh"]
+    ],
+    "check": ["bash", "check.sh"]
+  },
+  "start": ["bash", "run.sh"],
+  "resume": ["bash", "run.sh", "--resume"]
+}

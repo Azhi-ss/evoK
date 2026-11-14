@@ -23,7 +23,7 @@ three internal seats.
 `bun install` at this repo root installs the `harness-opt` workspace, including `pi-subagents` 0.79.1. `bunfig.toml` keeps the hoisted linker so root packages still resolve transitive deps such as `@earendil-works/pi-ai`.
 
 - How to use: [docs/how-to-use.md](docs/how-to-use.md) — Explore → intake → review → start → research
-- Chord multi-plugin pilot (experimental; **not** a changelog promise): [docs/chord-plugins.md](docs/chord-plugins.md)
+- One Pi extension (experimental history; **not** a changelog promise): [docs/chord-plugins.md](docs/chord-plugins.md)
 - Spec: https://github.com/Azhi-ss/evoK/issues/1
 - Status: spec phase (阶段 0 契约固化)
 

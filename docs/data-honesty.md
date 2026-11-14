@@ -5,7 +5,7 @@ The data honesty gate detects and prevents **training/label leakage** and
 a public score). Kaggle/MLE-bench agents routinely cheat this way (research gap
 G1); honesty cannot rely on an agent "feeling honest".
 
-Implementation: `src/data-honesty.ts`; wired into the mission seam in
+Implementation: `src/data-honesty.ts`; wired into the fixture seam in
 `src/search/fixtures/toy-harness.ts` (fixtures/tests only; audit runs after candidate
 proposal, before any snapshot or evaluation); ledger event classification
 in `src/evidence/ledger-kinds.ts`.

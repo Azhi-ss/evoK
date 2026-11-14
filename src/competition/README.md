@@ -8,9 +8,8 @@ the local `suite-metric` Evaluator (measured `pass_rate`, never a
 model self-score), and DeployArena thick orchestration (`deploy-arena`:
 task/service graph, multi-worker aggregation, COI `submission.json`).
 DeployArena opens only when Mission hangs `competitionId=deploy-arena`.
-P6: physical pack is in place. Remaining flat `src/*.ts` files are
-migration-period re-exports for one more release
-([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+P6: physical pack is in place. Flat pack re-exports are retired; import
+this directory ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
 
 Mission keeps `llm-propose-outer-min` (orchestration glue: propose → T48
 map → assemble). Competition provides the runtime; mission keeps the

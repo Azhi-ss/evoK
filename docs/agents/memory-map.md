@@ -9,10 +9,9 @@ recovery, or the evaluation.
 
 `src/memory/index.ts` is the only public export surface: code outside the
 directory imports from `src/memory`, never from an individual module in it. The
-old paths (`src/evidence/research-memory.ts`,
-`src/execution/research-memory-provider.ts`, `src/execution/memory-slice.ts`) were
-M-a re-export shims of that entry point; M-e (#246) deleted them and retargeted
-every importer.
+former evidence and execution forwarding files were retired and every importer
+was retargeted to `src/memory`. M-e (#246) subsequently removed the file store
+and its rollback switch; SQLite is the only store.
 
 ## The seam, in order
 

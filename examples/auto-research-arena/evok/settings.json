@@ -1,0 +1,8 @@
+{
+  "maxExperiments": 15,
+  "modelBudgetUsd": 50,
+  "reserveCost": 0.25,
+  "tier": "deep",
+  "directorTier": "deep",
+  "thinking": "high"
+}

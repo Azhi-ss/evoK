@@ -18,8 +18,8 @@ T48, hang and submission authority stay where ADR-0007 put them; this directory
 is a seventh physical home, not a seventh logical owner (ADR-0016).
 
 `index.ts` is the only public export surface: other packages import from
-`src/memory`, never from an individual module here. The migration-period re-export
-shims at the old module paths are deleted (M-e, #246).
+`src/memory`, never from an individual module here. The former evidence and
+execution forwarding files are retired.
 
 ## The store (M-c #244, the only store since M-e #246)
 

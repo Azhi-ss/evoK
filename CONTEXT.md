@@ -391,7 +391,7 @@ Logical packages pin authority. Physical packages are **in place** (P6 / [ADR-00
 | **competition** | `src/competition/` ([ADR-0012](docs/adr/0012-competition-physical-pack.md)) | 勾 |
 | **cli** | `src/cli/` ([ADR-0010](docs/adr/0010-mission-cli-physical-pack.md)) | 勾 |
 
-The **pack-shim** flat `src/*.ts` files (not shared wiring such as `evok-model`) were migration-period re-exports for one release; M-e/#246 deleted them all, so `src/` root now holds only shared modules, the ambient `*.d.ts` declarations and two top-level drivers. Recorded in [ADR-0007](docs/adr/0007-six-pack-ownership.md).
+The flat pack re-exports named in [ADR-0013](docs/adr/0013-six-pack-physical-closeout.md) are retired. Import the pack directory or `src/memory`. Shared wiring such as `evok-model` stays at `src/`. Logical ownership stays [ADR-0007](docs/adr/0007-six-pack-ownership.md).
 
 | Package | Owns | Does not own |
 |---|---|---|

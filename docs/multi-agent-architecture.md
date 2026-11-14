@@ -18,10 +18,9 @@ promotion, or submit authority.
 This repository is an evoK application built on the Pi SDK with one Pi plugin
 entry at `extensions/evok.ts`. `src/execution/pi-agent-runtime.ts` is the Pi
 SDK adapter used by the Research Run. `ContextBroker`, `MemorySlice`, and
-`subagents-adapter` are core evoK modules. The three packages under
-`plugins/` are internal Chord seat modules loaded together by
-`src/cli/evok-plugin.ts`; the old `src/cli/*-plugin.ts` loaders remain as
-module-level compatibility seams, not separate Pi extensions.
+`subagents-adapter` are core evoK modules. The platform, research, and eval seats are internal records loaded together by
+`src/cli/evok-plugin.ts`. They are not separate packages and not separate Pi
+extensions.
 
 ## Topology
 
