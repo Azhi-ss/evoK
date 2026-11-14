@@ -7,6 +7,7 @@ This directory runs **locally/privately only** — it never submits to any publi
 ## 1. Host Prerequisites (Volcengine GPU VM)
 
 - **OS & packages**: Ubuntu 22.04/24.04 x86_64, `git`, `curl`, `bubblewrap` (`apt-get install -y bubblewrap build-essential pkg-config python3-venv`), NVIDIA driver with CUDA 12.8 support, `uv` (`>=0.6`), `bun` (`>=1.1`).
+  - On Volcengine MLP DevBoxes, verify userns/mount availability first with `bwrap --ro-bind / / true`.
 - **GPU**:
   - **Recommended (single-GPU parity with official baseline)**: 1 × **NVIDIA A800-80GB** or **NVIDIA A100-80GB** (reference `params` peak allocation is `45,012.5 MiB` / `47.20 GB`, so 24 GB / 40 GB cards OOM and 48 GB cards leave <3 GiB headroom).
   - **Alternative**: 1 × **NVIDIA H800-80GB** or **NVIDIA H20-96GB** (`train.py` auto-selects Hopper FA3 on SM90; note fixed `600s` wall-clock tasks perform different step counts than A100/A800, so compare against a fresh reference measured on the same GPU).
