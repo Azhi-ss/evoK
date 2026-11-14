@@ -33,6 +33,7 @@ import { isAbsolute, join } from "node:path";
 import { collectArtifacts, digestArtifacts } from "../harness";
 import type { MissionDraft } from "./mission-draft";
 import { isMissionId, missionsDir } from "./mission-draft";
+import { createTaskArtifactEvaluator } from "./task-evaluator";
 import {
   MISSION_SCHEMA_VERSION,
   atomicWriteJson,
@@ -443,7 +444,37 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     }
 
     const isBaselineRun = run.runId === baselineRunId || run.runId.includes(":baseline:");
-    const claimed: BaselineResultRecord | undefined = result ?? (isBaselineRun ? baseline : undefined);
+    const claimed: BaselineResultRecord | undefined = result
+      ?? (isBaselineRun ? baseline : undefined)
+      ?? (() => {
+        const prior = experiments.find((entry) => entry.runId === run.runId && entry.evaluator && entry.snapshotDigest);
+        return prior?.evaluator && prior.snapshotDigest && prior.evaluation
+          ? {
+              runId: prior.runId,
+              candidateId: prior.candidateId ?? `candidate:${prior.snapshotDigest.slice(0, 16)}`,
+              snapshotDigest: prior.snapshotDigest,
+              evaluator: prior.evaluator,
+              evaluation: prior.evaluation,
+              evidenceRefs: prior.evidenceRefs,
+              measuredAt: prior.at,
+            }
+          : undefined;
+      })();
+    const taskId = isBaselineRun ? (record.tasks?.[0]?.taskId ?? "baseline") : run.taskId;
+    let typedTask = taskId === undefined ? undefined : (record.tasks ?? []).find((entry) => entry.taskId === taskId);
+    if (typedTask?.kind === undefined && !isBaselineRun && !result) {
+      // Legacy records have no task kind: infer only from the retained outcome,
+      // never from the candidate's objective text or a guessed artifact name.
+      const previousOutcome = experiments.find((entry) => entry.runId === run.runId);
+      if (previousOutcome?.evaluator?.id === "task-investigate-artifacts" || previousOutcome?.evaluator?.id === "task-repair-artifacts") {
+        typedTask = {
+          ...(typedTask ?? { taskId: run.runId, objective: run.intentId }),
+          kind: previousOutcome.evaluator.id === "task-repair-artifacts" ? "repair" : "investigate",
+          artifacts: Object.keys(snapshotFiles ?? {}).filter((path) => !path.startsWith(".")),
+        };
+      }
+    }
+    const evaluator = createTaskArtifactEvaluator(typedTask ?? { taskId: taskId ?? run.runId, objective: run.intentId }) ?? options.evaluator;
 
     if (claimed) {
       // Adopt only if the immutable evidence chain is intact.
@@ -451,9 +482,20 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
       if (claimed.snapshotDigest !== snapshotDigest) {
         fail(`snapshot digest for ${run.runId} no longer matches its confirmed result (evidence tampering or damage)`);
       }
-      if (claimed.evaluator.id !== options.evaluator.id) {
-        // A different evaluator identity is an evaluation-contract change, not
-        // something recovery silently re-labels.
+      // Confirmed task results retain their recorded evaluator. For legacy
+      // task-artifact results, only a concrete snapshot artifact check can
+      // reconstruct the same evidence identity — never a Mission metric.
+      const claimedEvaluator = claimed.evaluator.id === options.evaluator.id
+        ? options.evaluator
+        : claimed.evaluator.id.startsWith("task-")
+          ? createTaskArtifactEvaluator({
+              taskId: run.taskId ?? run.runId,
+              objective: run.intentId,
+              kind: claimed.evaluator.id === "task-investigate-artifacts" ? "investigate" : "repair",
+              artifacts: Object.keys(snapshotFiles ?? {}).filter((path) => !path.startsWith(".")),
+            })
+          : undefined;
+      if (claimedEvaluator === undefined || claimed.evaluator.id !== claimedEvaluator.id) {
         fail(`run ${run.runId} was measured by ${claimed.evaluator.id} but recovery loaded ${options.evaluator.id}`);
       }
       adoptedRunIds.push(run.runId);
@@ -472,7 +514,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
     // No confirmed result. A durable snapshot is independently re-measured —
     // the model never asserts completion and the old session is never replayed.
     if (snapshotDigest && snapshotFiles) {
-      const measurement: BaselineMeasurement = await options.evaluator.evaluate(snapshotFiles, {
+      const measurement: BaselineMeasurement = await evaluator.evaluate(snapshotFiles, {
         missionId: draft.id, runId: run.runId, snapshotDigest, contract: record.contract,
       });
       const refs = [`runs/${run.runId}/${SNAPSHOT_DIRNAME}`, `runs/${run.runId}/${RESULT_FILENAME}`];
@@ -480,7 +522,7 @@ export async function reconcileInterruptedMission(options: ReconcileOptions): Pr
         runId: run.runId,
         candidateId: `candidate:${snapshotDigest.slice(0, 16)}`,
         snapshotDigest,
-        evaluator: { id: options.evaluator.id, version: options.evaluator.version },
+        evaluator: { id: evaluator.id, version: evaluator.version },
         evaluation: measurement,
         evidenceRefs: refs,
         measuredAt: new Date().toISOString(),

@@ -245,6 +245,52 @@ describe("reconcileInterruptedMission: reconstruction from durable records (#114
     expect(report.record.reserved).toBe(0);
   });
 
+  test("recovery preserves a typed investigate task's artifact evaluator instead of the Mission metric", async () => {
+    const project = await tempProject();
+    const id = "m-t6-investigate";
+    await seedDraft(project, id);
+    const runId = `${id}:exp:2`;
+    const seeded = await seedMeasuredRun(project, id, runId, { "notes.md": "evidence" }, { ok: true });
+    seeded.result = { ...seeded.result, evaluator: { id: "task-investigate-artifacts", version: "1" } };
+    await writeFile(join(project, ".evok", "missions", id, "runs", runId, "result.json"), JSON.stringify(seeded.result));
+    const record = baseRecord(id, {
+      runs: { [runId]: { ...seeded.run, taskId: "task-exp-2" } },
+      runSessions: [seeded.sessionId],
+    });
+    const typedRecord: MissionRecord = {
+      ...record,
+      tasks: [{ taskId: "task-exp-2", objective: "review evidence", kind: "investigate", artifacts: ["notes.md"], source: "director" }],
+    };
+    await writeRecord(project, typedRecord);
+    const report = await reconcileInterruptedMission({
+      projectRoot: project, draft: draft(id), record: typedRecord,
+      evaluator: { id: EVAL_ID, version: "1", async evaluate() { throw new Error("metric evaluator must not run for investigate"); } },
+    });
+    expect(report.adoptedRunIds).toEqual([runId]);
+    expect(report.record.experiments?.[0]?.evaluation?.ok).toBe(true);
+  });
+
+  test("legacy confirmed operational experiments keep their artifact evaluator during recovery", async () => {
+    const project = await tempProject();
+    const id = "m-t6-legacy-investigate";
+    await seedDraft(project, id);
+    const runId = `${id}:exp:2`;
+    const seeded = await seedMeasuredRun(project, id, runId, { "notes.md": "evidence" }, { ok: true });
+    seeded.result = { ...seeded.result, evaluator: { id: "task-repair-artifacts", version: "1" } };
+    await writeFile(join(project, ".evok", "missions", id, "runs", runId, "result.json"), JSON.stringify(seeded.result));
+    const record = baseRecord(id, {
+      runs: { [runId]: seeded.run },
+      experiments: [{ runId, attempt: 2, action: "repair", ok: false, taskObjective: "legacy repair", snapshotDigest: seeded.digest, evaluator: seeded.result.evaluator, evaluation: { ok: false, ruleViolations: ["protocol: missing artifact"] }, evidenceRefs: [], at: "2026-09-11T00:05:00.000Z" }],
+      runSessions: [seeded.sessionId],
+    });
+    await writeRecord(project, record);
+    const report = await reconcileInterruptedMission({
+      projectRoot: project, draft: draft(id), record,
+      evaluator: { id: EVAL_ID, version: "1", async evaluate() { throw new Error("Mission metric must not replace legacy task evaluator"); } },
+    });
+    expect(report.adoptedRunIds).toEqual([runId]);
+  });
+
   test("an unconfirmed dispatched intent with no durable result is abandoned and surfaced as an operational outcome, never silently replayed", async () => {
     const project = await tempProject();
     const id = "m-t6-noresult";

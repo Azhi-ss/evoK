@@ -60,9 +60,15 @@ export interface DraftSource {
 }
 
 /** Initial-plan Task entry using the existing Task Contract field names. */
+export const MISSION_TASK_KINDS = ["measure", "investigate", "repair"] as const;
+export type MissionTaskKind = (typeof MISSION_TASK_KINDS)[number];
+
 export interface DraftPlanTask {
   readonly taskId: string;
   readonly objective: string;
+  /** measure uses the Mission evaluator; investigate/repair use declared artifacts. */
+  readonly kind?: MissionTaskKind;
+  readonly artifacts?: readonly string[];
   readonly expectedOutputs?: readonly string[];
   readonly constraints?: Readonly<Record<string, unknown>>;
   readonly evidenceRequirements?: readonly string[];

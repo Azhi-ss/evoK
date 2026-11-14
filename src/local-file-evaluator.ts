@@ -113,7 +113,7 @@ export function createFileMetricEvaluator(contract: FileMetricContract): Baselin
     evaluate(snapshot, context): BaselineMeasurement {
       const raw = snapshot[contract.artifact];
       if (raw === undefined) {
-        return { ok: false, ruleViolations: [`required artifact ${contract.artifact} is missing from the candidate snapshot`] };
+        return { ok: false, ruleViolations: [`protocol: required artifact ${contract.artifact} is missing from the candidate snapshot`] };
       }
       const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? "";
       const value = Number(firstLine);

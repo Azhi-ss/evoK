@@ -640,6 +640,8 @@ export function applyDirectorProposal(
     task = {
       taskId,
       objective: proposal.task!.objective,
+      ...(proposal.task!.kind ? { kind: proposal.task!.kind } : {}),
+      ...(proposal.task!.artifacts ? { artifacts: proposal.task!.artifacts } : {}),
       ...(proposal.task!.expectedOutputs ? { expectedOutputs: proposal.task!.expectedOutputs } : {}),
       ...(proposal.task!.constraints ? { constraints: proposal.task!.constraints } : {}),
       ...(proposal.basedOn ? { dependencies: proposal.basedOn } : {}),
