@@ -31,6 +31,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { PiAgentRuntime, type AgentRuntimeResult } from "../execution/pi-agent-runtime";
+import type { DraftPlanTask } from "./mission-draft";
+import { createTaskArtifactEvaluator } from "./task-evaluator";
 import type { ContextBroker } from "../execution/context-broker";
 import type { ResourceRequest } from "../execution/resource-lease";
 import type { SandboxPolicy } from "../execution/security-boundary";
@@ -97,6 +99,7 @@ export interface DispatchAttemptArgs {
   readonly evidenceRefs?: readonly string[];
   readonly reserve: number;
   readonly kind: "baseline" | "experiment";
+  readonly task: DraftPlanTask;
 }
 
 /**
@@ -167,7 +170,7 @@ export async function dispatchCandidateAttempt(
   const intentId = `${args.runId}:intent`;
   r = withEvent(r, { type: "EXECUTION_INTENT_PERSISTED", at: now(), detail: { runId: args.runId, intentId, attempt: args.attempt } }, {
     runs: { ...r.runs, [args.runId]: {
-      runId: args.runId, intentId, attempt: args.attempt, status: "dispatched", workspace: "", dispatchedAt: now(),
+      runId: args.runId, intentId, attempt: args.attempt, taskId: args.task.taskId, status: "dispatched", workspace: "", dispatchedAt: now(),
       ...(consumedResearchMemory ? { researchMemory: consumedResearchMemory } : {}),
     } },
   });
@@ -310,8 +313,9 @@ export async function dispatchCandidateAttempt(
   });
 
   let measurement: BaselineMeasurement;
+  const evaluator = createTaskArtifactEvaluator(args.task) ?? options.evaluator;
   try {
-    measurement = await options.evaluator.evaluate(snapshot.files, {
+    measurement = await evaluator.evaluate(snapshot.files, {
       missionId: missionId, runId: args.runId, snapshotDigest: snapshot.digest, contract: r.contract,
     });
   } catch (error) {
@@ -331,7 +335,7 @@ export async function dispatchCandidateAttempt(
     runId: args.runId,
     candidateId: `candidate:${snapshot.digest.slice(0, 16)}`,
     snapshotDigest: snapshot.digest,
-    evaluator: { id: options.evaluator.id, version: options.evaluator.version },
+    evaluator: { id: evaluator.id, version: evaluator.version },
     evaluation: measurement,
     evidenceRefs,
     measuredAt: now(),

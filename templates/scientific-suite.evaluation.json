@@ -1,0 +1,19 @@
+{
+  "id": "scientific-suite",
+  "version": "1",
+  "artifact": "suite.json",
+  "metric": "scaffold_diversity",
+  "primaryGroup": "trained_nose",
+  "requiredGroups": ["trained_nose", "random", "shuffled", "text"],
+  "controls": ["random", "shuffled", "text"],
+  "requireTrainedAdapter": true,
+  "minRcsCoverage": 0.9,
+  "rcsTolerance": 0.05,
+  "mmd": {
+    "feature": "morgan",
+    "permutations": 1000,
+    "seed": 42,
+    "estimator": "unbiased",
+    "maxP": 0.05
+  }
+}

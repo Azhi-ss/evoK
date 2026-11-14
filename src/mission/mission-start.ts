@@ -291,6 +291,7 @@ export interface MissionRunRecord {
   readonly runId: string;
   readonly intentId: string;
   readonly attempt: number;
+  readonly taskId?: string;
   readonly status: "dispatched" | "measured" | "failed" | "interrupted";
   readonly sessionId?: string;
   readonly model?: ModelConfigView;
@@ -1440,6 +1441,7 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         expectedOutputs: draft.outputs,
         reserve: reserveCost,
         kind: "baseline",
+        task: baselineTask,
       });
       record = dispatched.record;
       track(runId, dispatched);
@@ -1580,6 +1582,13 @@ export async function runMissionController(init: ControllerInit): Promise<StartM
         evidenceRefs: directorInput.observations.flatMap((observation) => observation.evidenceRefs),
         reserve: decision.proposal.expectedCost ?? reserveCost,
         kind: "experiment",
+        task: {
+          taskId: applied.application.taskId,
+          objective: decision.proposal.task!.objective,
+          ...(decision.proposal.task!.kind ? { kind: decision.proposal.task!.kind } : {}),
+          ...(decision.proposal.task!.artifacts ? { artifacts: decision.proposal.task!.artifacts } : {}),
+          ...(decision.proposal.task!.expectedOutputs ? { expectedOutputs: decision.proposal.task!.expectedOutputs } : {}),
+        },
       });
       record = dispatched.record;
       track(runId, dispatched);

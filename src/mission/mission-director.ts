@@ -33,6 +33,7 @@ import type {
 } from "./mission-start";
 import type { ModelConfigView, PiAgentRuntime, RuntimeUsage } from "../execution/pi-agent-runtime";
 import type { DraftPlanTask } from "./mission-draft";
+import { taskContractErrors } from "./task-evaluator";
 import type { ResearchDecisionPacket, ResearchMemoryEvaluationMode } from "../memory";
 import type { DirectorInsightSidecar, RevisionInsightDispositionInput } from "./director-insight-sidecar";
 import { classifyRunOutcome, type RunFailureKind, type RunOutcomeState } from "../evidence/run-outcome";
@@ -61,6 +62,8 @@ export const MAX_DIRECTOR_ALTERNATIVES = 4;
 export interface DirectorAlternative {
   readonly action: Exclude<DirectorAction, "stop">;
   readonly objective: string;
+  readonly kind?: DraftPlanTask["kind"];
+  readonly artifacts?: readonly string[];
   readonly expectedOutputs?: readonly string[];
   readonly constraints?: Readonly<Record<string, string | number | boolean>>;
   readonly expectedCost?: number;
@@ -74,6 +77,8 @@ export interface DirectorProposal {
   readonly stopReason?: string;
   readonly task?: {
     readonly objective: string;
+    readonly kind?: DraftPlanTask["kind"];
+    readonly artifacts?: readonly string[];
     readonly expectedOutputs?: readonly string[];
     readonly constraints?: Readonly<Record<string, string | number | boolean>>;
   };
@@ -231,7 +236,7 @@ const FORBIDDEN_TOP_KEYS = new Set([
 ]);
 
 /** Task-subobject keys the model may set; anything else is refused. */
-const ALLOWED_TASK_KEYS = new Set(["objective", "expectedOutputs", "constraints"]);
+const ALLOWED_TASK_KEYS = new Set(["objective", "kind", "artifacts", "expectedOutputs", "constraints"]);
 
 /** Task-subobject keys that would assert a result instead of propose work. */
 const FORBIDDEN_TASK_KEYS = new Set([
@@ -239,7 +244,7 @@ const FORBIDDEN_TASK_KEYS = new Set([
 ]);
 
 /** Keys one ordered alternative may declare; anything else is refused. */
-const ALTERNATIVE_KEYS = new Set(["action", "objective", "expectedOutputs", "constraints", "expectedCost"]);
+const ALTERNATIVE_KEYS = new Set(["action", "objective", "kind", "artifacts", "expectedOutputs", "constraints", "expectedCost"]);
 
 /**
  * Validate and bound a raw model proposal against the current trusted state.
@@ -372,6 +377,15 @@ function boundedTask(taskRaw: Record<string, unknown>): NonNullable<DirectorProp
   if (taskRaw.objective.length > 2000) {
     throw new DirectorProposalRejectedError("proposed task objective is too long");
   }
+  const contractErrors = taskContractErrors({
+    ...(taskRaw.kind !== undefined ? { kind: taskRaw.kind as DraftPlanTask["kind"] } : {}),
+    ...(Array.isArray(taskRaw.artifacts) ? { artifacts: taskRaw.artifacts as string[] } : {}),
+  });
+  if (contractErrors.length > 0) throw new DirectorProposalRejectedError(contractErrors.join("; "));
+  if (taskRaw.artifacts !== undefined && (!Array.isArray(taskRaw.artifacts)
+    || taskRaw.artifacts.some((path) => typeof path !== "string" || path.trim() === ""))) {
+    throw new DirectorProposalRejectedError("task artifacts must be a list of relative workspace paths");
+  }
   if (taskRaw.expectedOutputs !== undefined && (
     !Array.isArray(taskRaw.expectedOutputs)
     || taskRaw.expectedOutputs.some((out) => typeof out !== "string" || out.trim() === "")
@@ -398,6 +412,8 @@ function boundedTask(taskRaw: Record<string, unknown>): NonNullable<DirectorProp
   }
   return {
     objective: (taskRaw.objective as string).trim(),
+    ...(taskRaw.kind !== undefined ? { kind: taskRaw.kind as DraftPlanTask["kind"] } : {}),
+    ...(Array.isArray(taskRaw.artifacts) ? { artifacts: [...taskRaw.artifacts] as string[] } : {}),
     ...(Array.isArray(taskRaw.expectedOutputs) ? { expectedOutputs: [...taskRaw.expectedOutputs] as string[] } : {}),
     ...(constraints ? { constraints } : {}),
   };
@@ -424,6 +440,8 @@ function boundedAlternatives(raw: unknown, available: number, units: string): Di
       action: action as Exclude<DirectorAction, "stop">,
       ...boundedTask({
         objective: entry.objective,
+        ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
+        ...(entry.artifacts !== undefined ? { artifacts: entry.artifacts } : {}),
         ...(entry.expectedOutputs !== undefined ? { expectedOutputs: entry.expectedOutputs } : {}),
         ...(entry.constraints !== undefined ? { constraints: entry.constraints } : {}),
       }),
@@ -754,9 +772,14 @@ Choose the single most useful NEXT action within the authorized objective:
   condition is met). Give stopReason.
 
 Respond with ONE minified JSON object and nothing else:
-{"stateVersion":<echo the input stateVersion exactly>,"action":<one of the actions>,"rationale":<short evidence-based reason>,"task":{"objective":<bounded task objective>,"expectedOutputs":[<required artifact names>]},"expectedCost":<finite non-negative number in the budget unit>,"basedOn":[<existing run ids/evidence refs>] }
+{"stateVersion":<echo the input stateVersion exactly>,"action":<one of the actions>,"rationale":<short evidence-based reason>,"task":{"kind":"measure|investigate|repair","objective":<bounded task objective>,"artifacts":[<relative artifact paths required for investigate/repair>],"expectedOutputs":[<required artifact names>]},"expectedCost":<finite non-negative number in the budget unit>,"basedOn":[<existing run ids/evidence refs>] }
 For action "stop" omit task/expectedCost and provide "stopReason" instead.
-You may add "alternatives":[{"action":<a non-stop action>,"objective":<bounded objective>,"expectedOutputs":[<names>]}] (at most ${MAX_DIRECTOR_ALTERNATIVES}) for bounded work you also considered; only your chosen action is executed.
+Task kind "measure" runs the Mission's independent numeric evaluator. Use it only
+for an actual controlled measurement. "investigate" and "repair" are evaluated
+only on their declared artifacts and never produce a scientific score; choose
+those kinds for diagnosis, literature review, or execution repair instead of
+forcing every task through the metric hill-climb.
+You may add "alternatives":[{"action":<a non-stop action>,"kind":"measure|investigate|repair","objective":<bounded objective>,"artifacts":[<paths required for investigate/repair>],"expectedOutputs":[<names>]}] (at most ${MAX_DIRECTOR_ALTERNATIVES}) for bounded work you also considered; only your chosen action is executed.
 
 Hard boundaries you cannot cross in a proposal:
 - Do not change the objective, policy, permissions, or budget. Do not request

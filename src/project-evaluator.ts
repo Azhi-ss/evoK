@@ -34,10 +34,18 @@ import {
   type AutoArenaEvaluationContract,
 } from "./competition/auto-research-arena";
 
+import {
+  SCIENTIFIC_SUITE_ID,
+  createScientificSuiteEvaluator,
+  normalizeScientificSuiteContract,
+  type ScientificSuiteContract,
+} from "./scientific-suite-evaluator";
+
 export type ProjectEvaluationContract =
   | { readonly kind: "file-metric"; readonly contract: FileMetricContract }
   | { readonly kind: "suite-metric"; readonly contract: SuiteMetricContract }
-  | { readonly kind: "auto-research-arena"; readonly contract: AutoArenaEvaluationContract };
+  | { readonly kind: "auto-research-arena"; readonly contract: AutoArenaEvaluationContract }
+  | { readonly kind: "scientific-suite"; readonly contract: ScientificSuiteContract };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -65,6 +73,9 @@ async function readEvaluationJson(projectRoot: string): Promise<unknown> {
 /** Read and classify the project's local evaluation contract. */
 export async function loadProjectEvaluationContract(projectRoot: string): Promise<ProjectEvaluationContract> {
   const parsed = await readEvaluationJson(projectRoot);
+  if (isRecord(parsed) && parsed.id === SCIENTIFIC_SUITE_ID) {
+    return { kind: "scientific-suite", contract: normalizeScientificSuiteContract(parsed) };
+  }
   if (isRecord(parsed) && parsed.id === SUITE_METRIC_ID) {
     try {
       return { kind: "suite-metric", contract: normalizeSuiteMetricContract(parsed) };
@@ -115,6 +126,7 @@ export async function createProjectBaselineEvaluator(projectRoot: string): Promi
       throw error;
     }
   }
+  if (loaded.kind === "scientific-suite") return createScientificSuiteEvaluator(loaded.contract);
   const suiteFiles = await loadTrustedSuiteFiles(projectRoot, loaded.contract.suite.cases_glob_or_manifest);
   return createSuiteMetricEvaluator(loaded.contract, { suiteFiles });
 }

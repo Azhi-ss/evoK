@@ -84,6 +84,21 @@ describe("validateDirectorProposal (#113 AC4)", () => {
     }
   });
 
+  test("investigate and repair proposals declare artifacts instead of forcing a metric", () => {
+    const proposal = validateDirectorProposal({
+      ...validTaskProposal,
+      action: "investigate",
+      task: { kind: "investigate", objective: "review the failed run and record findings", artifacts: ["notes.md"] },
+    }, input());
+    expect(proposal.task?.kind).toBe("investigate");
+    expect(proposal.task?.artifacts).toEqual(["notes.md"]);
+    expect(() => validateDirectorProposal({
+      ...validTaskProposal,
+      action: "investigate",
+      task: { kind: "investigate", objective: "review without a durable artifact" },
+    }, input())).toThrow(/protocol|artifacts/i);
+  });
+
   test("a stop proposal is bounded advice: it carries no task, cost, or self-asserted result", () => {
     const proposal = validateDirectorProposal({
       stateVersion: 1,

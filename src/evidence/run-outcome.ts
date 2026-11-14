@@ -60,6 +60,9 @@ export function classifyRunOutcome(input: RunOutcomeInput): RunOutcomeClassifica
         ? "timeout"
         : "protocol-failure", input.error);
   }
+  if (input.ruleViolations?.some((violation) => violation.startsWith("protocol:"))) {
+    return operational(input, "protocol-failure", input.ruleViolations!.join("; "));
+  }
   if (input.ok) {
     return deepFreeze({ state: "positive" as const, scientificNegativeEvidence: false, conditions: [] });
   }
