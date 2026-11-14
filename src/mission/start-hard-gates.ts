@@ -358,7 +358,9 @@ async function inspectEvaluation(projectRoot: string): Promise<StartHardGate> {
     const loaded = await loadProjectEvaluationContract(projectRoot);
     const detail = loaded.kind === "suite-metric"
       ? `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} runner=${loaded.contract.suite.runner} manifest=${loaded.contract.suite.cases_glob_or_manifest}`
-      : `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} artifact=${loaded.contract.artifact}`;
+      : loaded.kind === "auto-research-arena"
+        ? `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} contextFile=${loaded.contract.contextFile}`
+        : `${evaluationContractPath(projectRoot)} id=${loaded.contract.id} artifact=${loaded.contract.artifact}`;
     return gate(
       "evaluation-contract",
       "pass",

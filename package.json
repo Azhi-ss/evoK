@@ -11,6 +11,7 @@
   },
   "scripts": {
     "evok": "bun bin/evok.ts",
+    "evok:autoarena": "bun bin/evok-autoarena.ts",
     "harness-opt": "bun harness-opt/src/cli.ts",
     "phase2": "bun src/cli/phase2-cli.ts",
     "example:lifecycle": "bun examples/lifecycle/recovery-example.ts",
