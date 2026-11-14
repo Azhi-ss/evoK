@@ -1,4 +1,4 @@
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 
 /** Minimal Ravi-style workspace file set. Optional kinds are documented but not required to Stop. */
 export const BLUEPRINT_FILE_KINDS = ["GOAL", "RULES", "EXPERIMENTS", "SCOREBOARD"] as const;

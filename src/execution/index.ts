@@ -187,7 +187,7 @@ export {
   validateAgentResult,
   validateMemorySlice,
   validateMemoryWriteProposal,
-} from "./memory-slice";
+} from "../memory";
 export type {
   AgentResult,
   DelegatedMemorySliceInput,
@@ -199,14 +199,14 @@ export type {
   MemoryWriteProposal,
   MemoryWriteProposalInput,
   ResearchMemorySliceInput,
-} from "./memory-slice";
+} from "../memory";
 export {
   RESEARCH_MEMORY_POINTER_SCHEMA,
   createDelegatedResearchMemoryProvider,
   createResearchMemoryProvider,
   loadResearchMemorySnapshot,
   publishResearchMemorySnapshot,
-} from "./research-memory-provider";
+} from "../memory";
 export {
   BROKERED_CONTEXT_SCHEMA,
   CONTEXT_ROLES,

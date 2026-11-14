@@ -17,7 +17,7 @@ import {
   budgetDecisionIsPass,
   evaluateBudgetGate,
 } from "./budget-gate";
-import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search-selection-port";
+import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search/search-selection-port";
 
 function caps(total = 1, methodImprovement?: number) {
   return {

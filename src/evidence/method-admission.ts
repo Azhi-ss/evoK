@@ -13,7 +13,7 @@
  * or weld #40 / default fixed_uct. Budget Gate is orthogonal: a Budget
  * pass is not an Admission pass.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import { budgetDecisionIsPass, type BudgetDecision } from "./budget-gate";
 import {
   experimentValidityIsPass,

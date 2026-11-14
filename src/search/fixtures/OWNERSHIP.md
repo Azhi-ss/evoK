@@ -8,6 +8,5 @@ authorize, continue, repair, or stop a Mission.
 - `second-toy-adapter.ts` — second toy competition adapter
 
 Do not route new Mission / orchestration authority through this directory.
-Flat `src/toy-harness.ts` remains a migration-period re-export for one
-more release (P6 / ADR-0013). The dead `src/second-toy-adapter.ts` shim
-is gone — import `./second-toy-adapter` here.
+Flat pack re-exports of these fixtures are retired (P6 / ADR-0013). Import
+`toy-harness.ts` and `second-toy-adapter.ts` from this directory.

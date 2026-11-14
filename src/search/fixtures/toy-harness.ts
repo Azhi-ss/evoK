@@ -19,23 +19,23 @@ import {
   digestValue,
   evaluateTrustedSnapshot,
   type SandboxPolicy,
-} from "../../security-boundary";
+} from "../../execution/security-boundary";
 import {
   normalizeVerificationResult,
   verificationRoleContract,
   type VerificationContext,
   type VerificationHooks,
   type VerificationRole,
-} from "../../verification-gates";
+} from "../../evidence/verification-gates";
 import { requireIdeaType } from "../../idea-types";
-import type { HumanAcceptanceDecision } from "../../security-boundary";
+import type { HumanAcceptanceDecision } from "../../execution/security-boundary";
 import {
   SubmissionBroker,
   externalSubmissionsFromEvents,
   type SubmissionBrokerOptions,
   type SubmissionChampion,
   type SubmissionEventLike,
-} from "../../submission-broker";
+} from "../../evidence/submission-broker";
 import {
   aggregateEvaluationFacts,
   buildEvaluationLadder,
@@ -74,7 +74,7 @@ import {
   validateEnsemblePromotion,
   type MethodologyContracts,
   type MethodologyDeclaration,
-} from "../../methodology-contracts";
+} from "../../evidence/methodology-contracts";
 import {
   authorizePublicProbe,
   isValidationLadderContract,
@@ -87,7 +87,7 @@ import {
   type ValidationLadderInput,
   type ValidationLadderProvider,
   type ValidationLevel,
-} from "../../validation-ladder";
+} from "../../evidence/validation-ladder";
 import {
   authorizeHeavySearch,
   baselineSatisfied,
@@ -97,7 +97,7 @@ import {
   type BaselineTrackInput,
   type BaselineTrackProvider,
   type BaselineTrackResult,
-} from "../../baseline-track";
+} from "../../mission/baseline-track";
 import {
   normalizePrediction,
   normalizeReconcile,
@@ -119,7 +119,7 @@ import {
   type PatternModelPolicy,
   type RoleClass,
   type TierId,
-} from "../../model-orchestra";
+} from "../../execution/model-orchestra";
 
 export {
   aggregateEvaluationFacts,
@@ -153,8 +153,8 @@ export {
   normaliseValidationLevel,
   publicProbesUsedFromEvents,
   resolveValidationLadder,
-} from "../../validation-ladder";
-export type { ValidationLadderContract, ValidationLadderInput, ValidationLadderProvider, ValidationLevel, ValidationReaderRole } from "../../validation-ladder";
+} from "../../evidence/validation-ladder";
+export type { ValidationLadderContract, ValidationLadderInput, ValidationLadderProvider, ValidationLevel, ValidationReaderRole } from "../../evidence/validation-ladder";
 export {
   MethodologyViolation,
   applyComponentFanOut,
@@ -162,16 +162,16 @@ export {
   isMethodologyContracts,
   resolveMethodologyContracts,
   validateEnsemblePromotion,
-} from "../../methodology-contracts";
-export type { MethodologyContracts, MethodologyDeclaration, MethodologyProvider } from "../../methodology-contracts";
+} from "../../evidence/methodology-contracts";
+export type { MethodologyContracts, MethodologyDeclaration, MethodologyProvider } from "../../evidence/methodology-contracts";
 export {
   authorizeHeavySearch,
   baselineSatisfied,
   directorAuthorizeHeavyTask,
   isBaselineTrackContract,
   resolveBaselineTrack,
-} from "../../baseline-track";
-export type { BaselineTrackContract, BaselineTrackInput, BaselineTrackProvider, BaselineTrackResult, HeavySearchAuthorization } from "../../baseline-track";
+} from "../../mission/baseline-track";
+export type { BaselineTrackContract, BaselineTrackInput, BaselineTrackProvider, BaselineTrackResult, HeavySearchAuthorization } from "../../mission/baseline-track";
 
 export type MissionPhase = "CREATED" | "RUNNING" | "COMPLETED" | "STOPPED";
 
@@ -431,7 +431,7 @@ export type ToyCompetitionAdapter = {
     snapshot: Readonly<CandidateSnapshot>,
     contract: Readonly<NormalizedEvaluationContract>,
     context: EvaluationRunContext,
-    manifest?: Readonly<import("../../security-boundary").SnapshotManifest>,
+    manifest?: Readonly<import("../../execution/security-boundary").SnapshotManifest>,
   ) => EvaluationResult | Promise<EvaluationResult>;
   readonly evaluateRun?: (input: EvaluationRunInput) => EvaluationResult | Promise<EvaluationResult>;
 }
@@ -1871,7 +1871,7 @@ export class ToyCompetitionHarness {
     snapshot: Readonly<CandidateSnapshot>,
     contract: Readonly<NormalizedEvaluationContract>,
     context: EvaluationRunContext,
-    manifest: Readonly<import("../../security-boundary").SnapshotManifest>,
+    manifest: Readonly<import("../../execution/security-boundary").SnapshotManifest>,
   ): Promise<EvaluationResult> {
     const adapter = this.adapter;
     if (adapter.evaluateRun) {
@@ -2245,7 +2245,7 @@ export class ToyCompetitionHarness {
       append: (event: { readonly type: "SUBMISSION_REQUESTED" | "HUMAN_ACCEPTED" | "SUBMISSION_APPROVED" | "SUBMISSION_REJECTED" | "SUBMISSION_RESULT"; readonly payload: Record<string, unknown> }) => {
         this.append(event.type as MissionEventType, { ...event.payload });
       },
-      events: () => this.events() as unknown as import("../../submission-broker").SubmissionEvent[],
+      events: () => this.events() as unknown as import("../../evidence/submission-broker").SubmissionEvent[],
     };
     return new SubmissionBroker({
       ...options,
@@ -2868,24 +2868,24 @@ export function replayToyMission(events: readonly MissionEvent[]): MissionState 
 }
 
 export * from "../../idea-types";
-export * from "../../ledger-kinds";
-export * from "../../team-execution";
-export * from "../../pi-agent-runtime";
+export * from "../../evidence/ledger-kinds";
+export * from "../../execution/team-execution";
+export * from "../../execution/pi-agent-runtime";
 export * from "../../predict-reconcile";
-export * from "../../branch-recovery";
-export * from "../../dag-scheduler";
-export * from "../../security-boundary";
-export * from "../../submission-broker";
-export * from "../../verification-gates";
-export * from "../../research-loop";
+export * from "../../mission/branch-recovery";
+export * from "../../execution/dag-scheduler";
+export * from "../../execution/security-boundary";
+export * from "../../evidence/submission-broker";
+export * from "../../evidence/verification-gates";
+export * from "../../mission/research-loop";
 export * from "./second-toy-adapter";
-export * as methodologyManifest from "../../methodology";
+export * as methodologyManifest from "../../evidence/methodology";
 export {
   compileMethodologyBlock,
   readMethodologyManifest,
   readMethodologyEvidence,
   oofEnsembleGate,
-} from "../../methodology";
+} from "../../evidence/methodology";
 export type {
   MethodologyContracts as ManifestMethodologyContracts,
   FeaturePipelineContract as ManifestFeaturePipelineContract,
@@ -2896,7 +2896,7 @@ export type {
   PluginMethodologyBlock,
   MethodologyEvidence,
   MethodologyGateResult,
-} from "../../methodology";
-export * from "../../methodology-acceptance";
+} from "../../evidence/methodology";
+export * from "../../evidence/methodology-acceptance";
 export * from "../../newapi-client";
-export * from "../../llm-competition-runtime";
+export * from "../../competition/llm-competition-runtime";

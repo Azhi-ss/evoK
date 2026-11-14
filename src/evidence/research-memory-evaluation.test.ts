@@ -21,7 +21,7 @@ import {
   validateResearchMemorySnapshot,
   type ResearchMemorySnapshot,
   type ResearchMemorySource,
-} from "./research-memory";
+} from "../memory";
 
 function source(overrides: Partial<ResearchMemorySource> = {}): ResearchMemorySource {
   return {

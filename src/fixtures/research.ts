@@ -1,5 +1,5 @@
 import type { PredictionArtifact } from "../predict-reconcile";
-import type { ResearchTask } from "../research-loop";
+import type { ResearchTask } from "../mission/research-loop";
 
 /** Explicit test input; production callers must declare their own prediction. */
 export const RESEARCH_PREDICTION: PredictionArtifact = {

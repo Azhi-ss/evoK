@@ -9,9 +9,8 @@ recovery, or the evaluation.
 
 `src/memory/index.ts` is the only public export surface: code outside the
 directory imports from `src/memory`, never from an individual module in it. The
-old paths (`src/evidence/research-memory.ts`,
-`src/execution/research-memory-provider.ts`, `src/execution/memory-slice.ts`) are
-migration-period re-export shims of that entry point and are removed in M-e.
+evidence and execution forwarding files are retired. The file-store rollback
+remains; deleting that store is a separate decision.
 
 ## The seam, in order
 

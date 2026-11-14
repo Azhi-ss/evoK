@@ -20,7 +20,7 @@
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { PiAgentRuntime, type AgentRuntimeResult, type SessionModelResolver } from "../pi-agent-runtime";
+import { PiAgentRuntime, type AgentRuntimeResult, type SessionModelResolver } from "../execution/pi-agent-runtime";
 import type { EvokResources } from "../evok-resources";
 import {
   completeDraft,

@@ -42,11 +42,9 @@ internals, and only `mission-start.ts` composes them. Behaviour is pinned by
 `tests/integration/ledger-trace.test.ts` (trace digests) and, at the PRD §6
 commit points, by `tests/integration/mission-recovery-faults.test.ts`.
 
-P6: physical pack is in place. Remaining flat `src/*.ts` files are
-migration-period re-exports for one more release
-([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
-The dead `src/file-blueprint.ts` shim is gone; import
-`src/mission/file-blueprint` instead.
+P6: physical pack is in place. Flat pack re-exports are retired; import
+this directory ([ADR-0013](../../docs/adr/0013-six-pack-physical-closeout.md)).
+Import `src/mission/file-blueprint.ts` for the file-blueprint schema.
 
 `runGoldenPath` / assemble stay **mock default** (ET-ORCH-GAP / #98
 **landed**). `runOrchGap` may call that glue; omit / `false` does not

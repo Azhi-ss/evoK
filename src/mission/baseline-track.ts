@@ -1,4 +1,4 @@
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import { ideaTypeKind, requireIdeaType } from "../idea-types";
 
 /**

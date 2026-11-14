@@ -16,7 +16,7 @@
  * dispatch, reserve budget, force an action, impose an exploration quota or
  * change Search math.
  */
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import type { DecisionDelta, DirectorAction } from "./mission-director";
 import type { RunOutcomeState } from "../evidence/run-outcome";
 import { classifyTrailEntry, configurationLabel, type DecisionRecord, type ExperimentTrailEntry } from "./mission-start";

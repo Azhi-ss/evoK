@@ -21,7 +21,7 @@ node --version（需 ≥22.19）。装 Pi：`curl -fsSL https://pi.dev/install.s
 
 ## 5. Pi 插件最小骨架
 官方约定：扩展 = TS 模块 export default function (pi: ExtensionAPI) {...}，Pi 用 jiti 直接加载 TS 无需编译。入口 pi.registerTool() / pi.registerCommand() / pi.on(event) / pi.appendEntry() / pi.events。不要在工厂函数里起进程/socket/定时器，放到 session_start，session_shutdown 清理。包 = 目录或 npm 包；package.json 带 keywords:['pi-package'] 和 pi:{extensions:[...],skills:[...]}。@earendil-works/pi-ai、pi-coding-agent、typebox 由宿主提供 → 写 peerDependencies:'*' 不放 dependencies。本地未发布挂载 `pi install ./local-package`（不复制按路径加载）。
-evoK 里真正的 ExtensionAPI 写法在 src/cli/tui-mirror.ts（createEvokTuiMirrorExtension → pi.registerCommand）和 src/cli/prompt-mode.ts（pi.on('session_start') / pi.on('before_agent_start')）——拿这两个当工厂函数写法参考。evoK 的 plugins/evok-platform、evok-research 是 Chord facet（experimental、非正式 hot-plug），不是 pi install 那种插件模板，别照抄。我们的插件按 pi.extensions 官方约定写，不走 Chord。
+evoK 里真正的 ExtensionAPI 写法在 src/cli/tui-mirror.ts（createEvokTuiMirrorExtension → pi.registerCommand）和 src/cli/prompt-mode.ts（pi.on('session_start') / pi.on('before_agent_start')）——拿这两个当工厂函数写法参考。evoK 的 Pi 入口是 extensions/evok.ts。座位试点包已撤回，不要照抄那个形状。插件按 pi.extensions 官方约定写，不走 Chord。
 
 ## 6. 雏形目录骨架（按这个建）
 ```

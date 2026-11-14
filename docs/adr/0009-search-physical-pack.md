@@ -19,6 +19,8 @@ Search-structure modules live under `src/search/`:
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
+Later note (2026-11-14 layout simplification): those flat re-exports are deleted. Import this pack. See ADR-0013.
+
 **Boundary:** search 持结构；evidence 独占门权威；Mission 只读摘要。
 `ToyHarness` is fixtures and tests only — not a second control plane.
 Do not route new Mission / orchestration authority through it.

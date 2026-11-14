@@ -41,11 +41,9 @@ Tip is this W0 docs pin after P6 closeout and #134 / PR #135
 
 `ToyHarness` lives under `src/search/fixtures/` (fixtures/tests only).
 
-## Residual flat shims
+## Flat shims retired
 
-Dead shims deleted in P6: `src/file-blueprint.ts`, `src/evok-cli.ts`,
-`src/second-toy-adapter.ts`. Remaining pack-shim flat `src/*.ts`
-re-exports are migration-period (one more release). Inventory: ADR-0013.
+All migration-period flat `src/*.ts` re-exports (ADR-0013) and `src/{evidence,execution}` memory migration shims (ADR-0016) have been retired; callers import pack directories (`src/<pack>/...` and `src/memory`) directly.
 
 ## Frozen (unchanged)
 

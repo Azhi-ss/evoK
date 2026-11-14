@@ -5,7 +5,7 @@
  * start/resume operations and interrupts at a durable boundary.
  *
  * Usage:
- *   bun src/recovery-lifecycle-driver.ts <project> <mode> [boundary]
+ *   bun tests/integration/recovery-lifecycle-driver.ts <project> <mode> [boundary]
  *     mode=start   run a fresh start; kill/self-abort at `boundary`
  *                  (before-confirmation | after-confirmation | none
  *                   | after-budget-reservation | after-execution-start
@@ -31,20 +31,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createEvokModelResolver } from "./evok-model";
-import { PiAgentRuntime, type RuntimeFaultInjection } from "./execution/pi-agent-runtime";
-import type { SandboxPolicy } from "./security-boundary";
-import { discoverEvokResources } from "./evok-resources";
-import { saveMissionDraft, type MissionDraft } from "./mission-draft";
+import { createEvokModelResolver } from "../../src/evok-model";
+import { PiAgentRuntime, type RuntimeFaultInjection } from "../../src/execution/pi-agent-runtime";
+import type { SandboxPolicy } from "../../src/execution/security-boundary";
+import { discoverEvokResources } from "../../src/evok-resources";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import {
   resumeAuthorizedMission,
   startAuthorizedMission,
   type BaselineEvaluator,
   type StartAuthorization,
   type ResumeAuthorization,
-} from "./mission-start";
-import type { DirectorInput, MissionDirector } from "./mission-director";
-import { listUnfinishedMissions } from "./mission-resume";
+} from "../../src/mission/mission-start";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
+import { listUnfinishedMissions } from "../../src/mission/mission-resume";
 
 const MODEL_COST = { input: 0.0001, output: 0.0002, cacheRead: 0, cacheWrite: 0 };
 const MISSION_ID = "m-t6lifecycle";

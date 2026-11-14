@@ -8,7 +8,7 @@
  * contradicting-Evidence and competing-Hypothesis categories ahead of support
  * (#215), and explains every omission it makes.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   RESEARCH_DECISION_PACKET_SCHEMA,
   isCompetingHypothesisCard,

@@ -29,7 +29,7 @@ import {
   type CrossReviewRecord,
   type MissionBlueprint,
 } from "./file-blueprint";
-import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "../security-boundary";
+import { deepFreeze, digestValue, validEvaluationPublicKey, verifyEvaluationDigest } from "../execution/security-boundary";
 
 export type { ClaimCard, PredictionArtifact, ReconcileInput, ReconcileRecord, ReconcileStatus } from "../predict-reconcile";
 export type { BlueprintFile, BlueprintFileKind, BlueprintFileRef, CrossReviewRecord, MissionBlueprint } from "./file-blueprint";

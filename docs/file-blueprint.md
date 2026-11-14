@@ -5,8 +5,7 @@ Source: ticket #22 [T16], parent spec #1. Reference practice:
 (GOAL / RULES / experiments / SCOREBOARD as workspace-auditable files).
 
 Implementation: `src/mission/file-blueprint.ts` (schema), `src/mission/research-loop.ts`
-(`MissionDirector.commitBlueprintFile`, `recordCrossReview`, Stop gate;
-flat `src/research-loop.ts` remains a migration-period re-export).
+(`MissionDirector.commitBlueprintFile`, `recordCrossReview`, Stop gate).
 
 File-blueprint state is **Evidence**, not Evaluation and not Approval. Committing
 a SCOREBOARD row, naming a `championRef`, or finishing a Cross-review never

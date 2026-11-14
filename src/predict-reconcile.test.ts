@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./security-boundary";
-import { MissionDirector, type ResearchTask, type TaskCompletion } from "./research-loop";
+import { digestValue, generateEvaluationKeyPair, signEvaluationDigest } from "./execution/security-boundary";
+import { MissionDirector, type ResearchTask, type TaskCompletion } from "./mission/research-loop";
 
 const prediction = {
   predictionId: "hypothesis:better-split",

@@ -2,7 +2,7 @@
  * Separate-process recovery tests for T6 (#114 AC1/AC3/AC4/AC5/AC6).
  *
  * Each scenario runs the REAL start/resume operations in an INDEPENDENT bun
- * subprocess (src/recovery-lifecycle-driver.ts), so the interruption is a
+ * subprocess (tests/integration/recovery-lifecycle-driver.ts), so the interruption is a
  * genuine process boundary — not an in-process AbortController that keeps its
  * memory. The second process must reconstruct everything from durable records
  * and confirmed artifacts only.
@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const DRIVER = join(here, "..", "..", "src", "recovery-lifecycle-driver.ts");
+const DRIVER = join(here, "recovery-lifecycle-driver.ts");
 const MISSION_ID = "m-t6lifecycle";
 
 const dirs: string[] = [];

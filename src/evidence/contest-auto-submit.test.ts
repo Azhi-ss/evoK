@@ -11,8 +11,8 @@
  * fixed_uct. Elite ≠ 晋级.
  */
 import { describe, expect, test } from "bun:test";
-import { EvidenceMemory } from "../research-loop";
-import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search-selection-port";
+import { EvidenceMemory } from "../mission/research-loop";
+import { DEFAULT_SEARCH_SELECTION_ID, SELECTION_POLICY_40 } from "../search/search-selection-port";
 import { BudgetLedger } from "./budget-gate";
 import {
   InMemoryContestAutoSubmitLedger,

@@ -11,14 +11,14 @@ import {
   assembleLlmCompArmSetup,
   type AssembleLlmCompArmSetupInput,
   type LlmCompArmSetup,
-} from "../llm-propose-outer-min";
+} from "../mission/llm-propose-outer-min";
 import { createLlmCompetitionRuntime } from "./llm-competition-runtime";
 import type { PredictionArtifact } from "../predict-reconcile";
 import {
   ScoreFileToyCompetitionAdapter,
   ToyCompetitionHarness,
   type MissionState,
-} from "../toy-harness";
+} from "../search/fixtures/toy-harness";
 
 export interface RunLlmCompArmBeforePromotionInput extends AssembleLlmCompArmSetupInput {
   readonly missionId?: string;

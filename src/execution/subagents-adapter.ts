@@ -15,7 +15,7 @@
  */
 import { validateResearcherContext, type ResearcherContext } from "./researcher-context";
 import { validateRoleContext, type RoleTaskContext } from "./role-context";
-import { deriveDelegatedMemorySlice, validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { deriveDelegatedMemorySlice, validateMemorySlice, type MemorySlice } from "../memory";
 
 /** The only capabilities a delegated subagent may exercise. */
 export const DELEGATABLE_CAPABILITIES = ["research", "critique", "review"] as const;

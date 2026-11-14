@@ -4,7 +4,7 @@ import {
   ToyCompetitionHarness,
   type EvaluationFeedbackView,
   type ToyAgentRuntime,
-} from "./toy-harness";
+} from "./search/fixtures/toy-harness";
 
 const prediction = {
   predictionId: "feedback-prediction",

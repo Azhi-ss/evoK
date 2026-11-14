@@ -6,7 +6,7 @@
 import { DAGScheduler, MissionQueue, type DagRunResult, type DagSchedulerOptions, type DagTaskExecutor } from "./dag-scheduler";
 import { ideaTypeKind, requireIdeaType } from "../idea-types";
 import { SandboxViolation } from "./security-boundary";
-import { normalizeVerificationResult, type VerificationRole } from "../verification-gates";
+import { normalizeVerificationResult, type VerificationRole } from "../evidence/verification-gates";
 
 /** One typed branch declaration inside an ExecutionPlan: the idea direction a branch pursues. */
 export interface BranchPlan {

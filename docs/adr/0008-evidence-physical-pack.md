@@ -102,6 +102,8 @@ evaluator, Promotion, Admission, Budget, hang/T48 or Broker predicate.
 Flat `src/*.ts` files remain compatibility re-exports. Consumers may keep
 importing the old paths.
 
+Later note (2026-11-14 layout simplification): those flat re-exports are deleted. Import this pack. See ADR-0013.
+
 **Boundary:** evidence 独占门权威；search 持结构；mission 只读摘要 / 挂 hang.
 
 Methodology fixtures stay at `src/fixtures/methodology/` with an ownership

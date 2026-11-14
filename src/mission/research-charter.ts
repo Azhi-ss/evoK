@@ -20,7 +20,7 @@
  * Authority boundary: a charter is an original human-authorized input, not a
  * projection. `no_go_recommended` is a completed scoping verdict, not an error.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 
 export const RESEARCH_CHARTER_SCHEMA = "evok.research-charter/v1";
 

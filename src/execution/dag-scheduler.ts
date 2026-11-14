@@ -2,7 +2,7 @@
  * Team DAG scheduler and MissionQueue. Physical home: `src/execution/`
  * (ET-A4 / #124). JoinPolicy type is imported from mission branch-recovery.
  */
-import type { JoinPolicy } from "../branch-recovery";
+import type { JoinPolicy } from "../mission/branch-recovery";
 
 export type DagTaskStatus =
   | "QUEUED"
@@ -1026,4 +1026,4 @@ export class MissionQueue<T = unknown> {
 }
 
 export { DAGScheduler as DagScheduler };
-export type { JoinPolicy } from "../branch-recovery";
+export type { JoinPolicy } from "../mission/branch-recovery";

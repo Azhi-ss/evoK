@@ -8,7 +8,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
-import { createMemorySlice } from "./memory-slice";
+import { createMemorySlice } from "../memory";
 import { createChildMetering } from "./pi-child-metering";
 import { dispatchPiChild } from "./pi-child-dispatch";
 import { assembleRoleContext } from "./role-context";

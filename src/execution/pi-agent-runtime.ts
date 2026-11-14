@@ -5,7 +5,7 @@
 import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { TaskContract, ToyAgentRuntime } from "../toy-harness";
+import type { TaskContract, ToyAgentRuntime } from "../search/fixtures/toy-harness";
 import {
   deepFreeze,
   digestValue,
@@ -15,8 +15,8 @@ import {
   SecretRedactor,
   type SandboxPolicy,
 } from "./security-boundary";
-import { verificationRoleContract, type VerificationRole } from "../verification-gates";
-import type { BranchRunIdentity } from "../branch-recovery";
+import { verificationRoleContract, type VerificationRole } from "../evidence/verification-gates";
+import type { BranchRunIdentity } from "../mission/branch-recovery";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -39,7 +39,7 @@ import {
   type ExecutionRequest,
   type ExecutionUsage,
 } from "./execution-protocol";
-import { validateMemorySlice, type MemorySlice } from "./memory-slice";
+import { validateMemorySlice, type MemorySlice } from "../memory";
 import { createMemoryReadTool, MEMORY_READ_TOOL, type MemoryReadRecord } from "../memory";
 import type { RuleAudienceRole } from "../competition/rule-visibility";
 import {

@@ -162,7 +162,7 @@ number. Therefore:
 - Every experiment retains configuration, model snapshot, seeds and protocol
   version, so iterations stay comparable.
 
-Related parked material: `handoffs/2026-11-11-parked-task-contract/` holds an
+Related parked material: `docs/handoffs/2026-11-11-parked-task-contract/` holds an
 unmerged earlier attempt at `measure` / `investigate` / `repair` task kinds, an
 artifact-based evaluator for non-measure tasks, and the rule that a `protocol:`
 violation is not a scientific refutation. Those two ideas belong in this design;

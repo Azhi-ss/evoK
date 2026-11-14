@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createCompetitionContract } from "../competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../competition/rule-visibility";
 import { assembleRoleContext } from "./role-context";
-import { createMemorySlice } from "./memory-slice";
+import { createMemorySlice } from "../memory";
 import { buildResearcherContext } from "./researcher-context";
 import {
   dispatchPiChild,

@@ -23,7 +23,7 @@ three internal seats.
 `bun install` at this repo root installs the `harness-opt` workspace, including `pi-subagents` 0.79.1. `bunfig.toml` keeps the hoisted linker so root packages still resolve transitive deps such as `@earendil-works/pi-ai`.
 
 - How to use: [docs/how-to-use.md](docs/how-to-use.md) — Explore → intake → review → start → research
-- Chord multi-plugin pilot (experimental; **not** a changelog promise): [docs/chord-plugins.md](docs/chord-plugins.md)
+- One Pi extension (experimental history; **not** a changelog promise): [docs/chord-plugins.md](docs/chord-plugins.md)
 - Spec: https://github.com/Azhi-ss/evoK/issues/1
 - Status: spec phase (阶段 0 契约固化)
 
@@ -223,7 +223,7 @@ Steals the **orchestration clarity** of Google Co-Scientist — Generation → R
 - Reflection/Falsifier/Critic/Challenger/Auditor outputs are persisted as structured **objections** and written back onto the card, so the next expansion or Director step reads them — never discarded with the failed candidate.
 - **Ranking/promotion consumes gates + uncleared objections + evidence refs, never score alone**: a promotion verdict is refused when the card is missing, `violated`, ungated, or carries uncleared objections.
 
-Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/search/fixtures/toy-harness.ts` (branch `claimCard` + promotion gate; flat `src/toy-harness.ts` re-exports; fixtures/tests only), `src/mission/research-loop.ts` (task `claimCard` / WORLD_MODEL admission; flat `src/research-loop.ts` re-exports).
+Implementation: `src/predict-reconcile.ts` (ClaimCard / ClaimObjection schema), `src/search/fixtures/toy-harness.ts` (branch `claimCard` + promotion gate; fixtures/tests only), `src/mission/research-loop.ts` (task `claimCard` / WORLD_MODEL admission).
 
 ## File Blueprint mission state (Ravi-style)
 

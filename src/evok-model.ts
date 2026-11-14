@@ -30,7 +30,7 @@ import {
   type OrchestraConfig,
   type OrchestraResolutionReason,
   type TierId,
-} from "./model-orchestra";
+} from "./execution/model-orchestra";
 
 export type { ModelCatalog, ModelConfig, OrchestraConfig, OrchestraResolutionReason, TierId };
 

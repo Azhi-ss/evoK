@@ -9,14 +9,14 @@ import {
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "../methodology";
+} from "../evidence/methodology";
 import { MissionDirector } from "./research-loop";
-import { runKillTestHang } from "../kill-test-hang";
-import { verificationRoleContract } from "../verification-gates";
+import { runKillTestHang } from "../evidence/kill-test-hang";
+import { verificationRoleContract } from "../evidence/verification-gates";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "../search-space-profile";
+} from "../search/search-space-profile";
 
 import { RESEARCH_TASKS as TASKS } from "../fixtures/research";
 

@@ -10,7 +10,7 @@
  * Physical home: `src/memory/` (ADR-0016). This module owns no write path to
  * Mission history.
  */
-import { deepFreeze, digestValue } from "../security-boundary";
+import { deepFreeze, digestValue } from "../execution/security-boundary";
 import {
   RUN_FAILURE_KINDS,
   RUN_OUTCOME_STATES,

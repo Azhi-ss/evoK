@@ -11,7 +11,7 @@ import {
 import { createRuleVisibilityPolicy, type RuleVisibilityPolicy } from "../competition/rule-visibility";
 import { ContextBroker, ContextBrokerError, validateBrokeredContext, type AssembleRunContextInput } from "./context-broker";
 import { probeHostInventory, type HostInventory } from "./host-inventory";
-import { createMemorySlice } from "./memory-slice";
+import { createMemorySlice } from "../memory";
 
 function contract(competitionId: string, metric: string): CompetitionContract {
   return createCompetitionContract({

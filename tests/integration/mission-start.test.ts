@@ -32,37 +32,37 @@ import {
   summarizeMission,
   type BaselineEvaluator,
   type StartAuthorization,
-} from "../../src/mission-start";
-import type { DirectorInput, MissionDirector } from "../../src/mission-director";
+} from "../../src/mission/mission-start";
+import type { DirectorInput, MissionDirector } from "../../src/mission/mission-director";
 import { InMemoryResearchLedger } from "../../src/mission/research-loop";
 import { projectInsightInbox, submitInsightDraft } from "../../src/mission/insight-inbox";
-import { saveMissionDraft, type MissionDraft } from "../../src/mission-draft";
+import { saveMissionDraft, type MissionDraft } from "../../src/mission/mission-draft";
 import { createEvokModelResolver } from "../../src/evok-model";
 import { runEvok, parseEvokArgs } from "../../src/cli/evok-cli";
 import { discoverEvokResources } from "../../src/evok-resources";
-import { SandboxBoundary, type SandboxPolicy } from "../../src/security-boundary";
-import { defaultSessionFactory, PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/pi-agent-runtime";
+import { SandboxBoundary, type SandboxPolicy } from "../../src/execution/security-boundary";
+import { defaultSessionFactory, PiAgentRuntime, type AgentRuntimeSession, type SessionModelResolver } from "../../src/execution/pi-agent-runtime";
 import { createCompetitionContract } from "../../src/competition/competition-contract";
 import { createRuleVisibilityPolicy } from "../../src/competition/rule-visibility";
 import { probeHostInventory } from "../../src/execution/host-inventory";
-import { createDelegatedResearchMemoryProvider } from "../../src/execution/research-memory-provider";
+import { createDelegatedResearchMemoryProvider } from "../../src/memory";
 import {
   RESEARCH_MEMORY_DATABASE_FILENAME,
   defaultResearchMemoryProvider,
   loadActiveResearchMemorySnapshot,
   researchMemoryStoreFor,
 } from "../../src/memory";
-import { createMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "../../src/execution/memory-slice";
+import { createMemorySlice, deriveDelegatedMemorySlice, validateMemorySlice } from "../../src/memory";
 import type { MemoryProvider, MemoryProviderRequest } from "../../src/execution/context-broker";
 import { ContextBroker, validateBrokeredContext } from "../../src/execution/context-broker";
 import { createPiSubagentsAdapter } from "../../src/execution/subagents-adapter";
 import { grantResourceLease } from "../../src/execution/resource-lease";
 import { buildResearcherContext } from "../../src/execution/researcher-context";
-import { researchMemoryDir } from "../../src/mission-start";
+import { researchMemoryDir } from "../../src/mission/mission-start";
 import { SYNTHESIS_PROPOSAL_SCHEMA } from "../../src/evidence/synthesis-proposal";
-import { retrieveResearchMemory, validateResearchMemorySnapshot } from "../../src/evidence/research-memory";
+import { retrieveResearchMemory, validateResearchMemorySnapshot } from "../../src/memory";
 import { projectDecisionAccountability } from "../../src/mission/decision-accountability";
-import type { ResumeAuthorization } from "../../src/mission-start";
+import type { ResumeAuthorization } from "../../src/mission/mission-start";
 
 const CONTROL_PROVIDER = "evok-t4-control";
 
@@ -1316,7 +1316,7 @@ describe("Memory-blind and Memory-informed Director decisions (#211)", () => {
     let decisionCalls = 0;
 
     // The REAL Pi decision adapter: its prompts are what the model actually saw.
-    const { createPiMissionDirector } = await import("../../src/mission-director");
+    const { createPiMissionDirector } = await import("../../src/mission/mission-director");
     const director = createPiMissionDirector({
       resources,
       runtimeFactory: (root) => new PiAgentRuntime({

@@ -15,7 +15,7 @@
  * `#40` or true External Submission, and is not a Promotion key.
  */
 import { isAbsolute } from "node:path";
-import type { BaselineEvaluator, BaselineMeasurement } from "../mission-start";
+import type { BaselineEvaluator, BaselineMeasurement } from "../mission/mission-start";
 import { LOCAL_JS_EXPORTS_RUNNER, localJsExportsRunner } from "./local-js-exports-runner";
 
 export const SUITE_METRIC_ID = "suite-metric" as const;

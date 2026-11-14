@@ -9,18 +9,18 @@ import {
   asKillTestPass,
   killTestOutcomeIsPass,
   type KillTestOutcome,
-} from "../hypothesis-ledger";
+} from "../evidence/hypothesis-ledger";
 import {
   createKillTestHangHook,
   killTestOutcomeBlocksBroker,
   runKillTestHang,
-} from "../kill-test-hang";
+} from "../evidence/kill-test-hang";
 import {
   LiveLlmCompetitionRuntime,
   MOCK_LLM_CANDIDATE_FILES,
   MockLlmCompetitionRuntime,
   createLlmCompetitionRuntime,
-} from "../llm-competition-runtime";
+} from "../competition/llm-competition-runtime";
 import {
   assembleLlmCompArmSetup,
   mapLlmProposalArtifact,
@@ -30,7 +30,7 @@ import {
   oofEnsembleGate,
   type MethodologyContracts,
   type MethodologyEvidence,
-} from "../methodology";
+} from "../evidence/methodology";
 import {
   DEFAULT_NEWAPI_MODEL,
   LiveLlmKeyMissingError,
@@ -46,13 +46,13 @@ import {
   DEFAULT_SEARCH_SELECTION_ID,
   SELECTION_POLICY_40,
   createDefaultSearchSelectionPort,
-} from "../search-selection-port";
+} from "../search/search-selection-port";
 import {
   SEARCH_SPACE_BINDING,
   projectHypothesisSearchSpaceRefs,
-} from "../search-space-profile";
-import type { ToyAgentRuntime } from "../toy-harness";
-import { verificationRoleContract } from "../verification-gates";
+} from "../search/search-space-profile";
+import type { ToyAgentRuntime } from "../search/fixtures/toy-harness";
+import { verificationRoleContract } from "../evidence/verification-gates";
 import {
   V1_GOLDEN_HYPOTHESIS_ID,
   V1_GOLDEN_PLAN_ID,

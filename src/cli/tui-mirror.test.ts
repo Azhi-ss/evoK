@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createEvokModelResolver } from "../evok-model";
-import { BudgetExhaustedError } from "../mission-start";
+import { BudgetExhaustedError } from "../mission/mission-start";
 import { EVOK_EXIT, EVOK_USAGE, parseEvokArgs, runEvok } from "./evok-cli";
 import {
   EVOK_TUI_MIRROR_COMMANDS,

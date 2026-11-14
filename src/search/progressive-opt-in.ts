@@ -13,7 +13,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { deepFreeze } from "../security-boundary";
+import { deepFreeze } from "../execution/security-boundary";
 import {
   DEFAULT_SEARCH_SELECTION_ID,
   PROGRESSIVE_MCGS_OPT_IN_ID,
