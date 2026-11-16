@@ -10,7 +10,7 @@ import { createMemoryBus } from "./pi/delegate";
 import { SUBAGENT_DELEGATION_CANCEL_EVENT, SUBAGENT_DELEGATION_REQUEST_EVENT, SUBAGENT_DELEGATION_UPDATE_EVENT } from "pi-subagents/delegation";
 import { guardSubagentToolCall } from "./role-guard";
 import { readStageReport, reviewRoundE2E, type E2EFinding } from "./reports";
-import { dispatchHarnessCommand, runClosedLoopDemo } from "./session";
+import { defaultRunRoot, dispatchHarnessCommand, runClosedLoopDemo } from "./session";
 import { readTokensSpent } from "./thresholds";
 
 function out(): string {
@@ -18,6 +18,13 @@ function out(): string {
 }
 
 describe("closed loop", () => {
+  test("a run is created under .harness-opt, not in packaged candidates or state directories", () => {
+    const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    expect(defaultRunRoot("/work/project")).toBe(join("/work/project", ".harness-opt"));
+    expect(existsSync(join(packageRoot, "candidates"))).toBe(false);
+    expect(existsSync(join(packageRoot, "state"))).toBe(false);
+  });
+
   test("one sample-bridge round writes every stage report and an e2e review", async () => {
     const dir = out();
     const result = await runClosedLoopDemo(dir);
