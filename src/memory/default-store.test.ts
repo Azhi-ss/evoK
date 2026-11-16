@@ -57,6 +57,24 @@ function request(runId: string): MemoryProviderRequest {
 }
 
 describe("default Research Memory store (M-c #244, single store since M-e #246)", () => {
+  test("EVOK_RESEARCH_MEMORY_STORE=file does not select a second store", async () => {
+    const previous = process.env.EVOK_RESEARCH_MEMORY_STORE;
+    process.env.EVOK_RESEARCH_MEMORY_STORE = "file";
+    try {
+      const dir = await temp();
+      const published = snapshot();
+      const store = researchMemoryStoreFor(dir);
+      await store.publish(published);
+      expect(await store.loadActive()).toBe(published.digest);
+      expect(await exists(join(dir, RESEARCH_MEMORY_DATABASE_FILENAME))).toBe(true);
+      expect(await exists(join(dir, "active.json"))).toBe(false);
+      expect(await exists(join(dir, "snapshots"))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.EVOK_RESEARCH_MEMORY_STORE;
+      else process.env.EVOK_RESEARCH_MEMORY_STORE = previous;
+    }
+  });
+
   test("the default store writes ONE database file and no file-store layout", async () => {
     const published = snapshot();
     const dir = await temp();
