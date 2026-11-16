@@ -36,6 +36,8 @@ harness-opt/                          # 我们的仓库，同时是一个 Pi 包
 ```
 package.json：{"name":"pi-harness-opt","version":"0.0.1","private":true,"type":"module","keywords":["pi-package"],"pi":{"extensions":["./extensions/harness-opt/index.ts"],"subagents":{"agents":["./agents"]}},"peerDependencies":{"@earendil-works/pi-coding-agent":"*","@earendil-works/pi-ai":"*","typebox":"*"}}
 四个角色 md：gap-finder（tools: read,grep,find,ls,contact_supervisor；defaultContext: fresh；只读 traces 归纳失败模式，不提补丁不改文件，按 outputSchema 返回 gaps）；innovator（加 write；只写 candidates/<id>/，每个补丁写清改哪个零件/为什么/预期修哪类失败，禁碰 held-out、禁跑评测、禁提交）；reviewer-gate（acceptanceRole: read-only；只读评测 JSON 和基线判 accept/reject，不写补丁救场）；runner 雏形可不建（Runner 用 bin/eval.ts 当主机命令）。
+
+Later note (2026-11-16): `state/` and `candidates/<id>/` are created inside the run directory `.harness-opt/`. This package does not ship those directories.
 固定工序：先裸脚本 workflows/round.js 跑通（gap-finder → innovator 带 typed gate `bun bin/eval.ts --cand .. --split dev` → reviewer-gate）；再固化成命名工作流资源（index.ts 里 session_start 注册 harnessopt.round，resolve() 必须同步无 I/O 只做校验+拼字符串，授权 hostCommands）。主会话一轮压成三步：harnessopt_select → subagent({workflow:'harnessopt.round',args}) → harnessopt_record。选什么/怎么评/过不过门都在我们代码里。
 三条硬线：(1) held-out 只有 `bin/eval.ts --split heldout` 能读且只在 harnessopt_submit_gate 调，agent 工具白名单没 bash；(2) `playground submit` 只在 harnessopt_submit_gate 内部，任何 agent 不给；(3) 每轮 usageBudget.tokens.hard 上限。
 

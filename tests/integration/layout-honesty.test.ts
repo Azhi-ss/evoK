@@ -112,6 +112,8 @@ const STALE_CLAIMS = [
   "plugins/evok-eval",
   "src/cli/*-plugin.ts",
   "Chord multi-plugin",
+  "file-store rollback remains",
+  "leftover flat shims",
 ] as const;
 
 describe("layout simplification stays honest", () => {
@@ -184,6 +186,30 @@ describe("layout simplification stays honest", () => {
     }
   });
 
+  test("the arena adapter imports pack modules, not a deleted flat shim", () => {
+    const files = [
+      "src/competition/auto-research-arena.ts",
+      "src/competition/auto-research-arena.test.ts",
+      "bin/evok-autoarena.ts",
+    ];
+    const flatNames = RETIRED_PATHS
+      .filter((path) => path.startsWith("src/") && path.endsWith(".ts") && !path.slice(4).includes("/"))
+      .map((path) => path.slice("src/".length, -".ts".length));
+    const violations: string[] = [];
+    for (const rel of files) {
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      for (const match of text.matchAll(/from\s+["']([^"']+)["']/g)) {
+        const spec = match[1] ?? "";
+        const name = spec.split("/").pop() ?? "";
+        if (!flatNames.includes(name)) continue;
+        const dirs = spec.split("/").slice(0, -1).filter((part) => part !== "." && part !== "..");
+        const flat = dirs.length === 0 || (dirs.length === 1 && dirs[0] === "src");
+        if (flat) violations.push(`${rel}: ${spec}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
   test("living docs do not cite retired shim or Chord seat paths as present", () => {
     const violations: string[] = [];
     for (const rel of LIVING_DOCS) {
@@ -198,14 +224,16 @@ describe("layout simplification stays honest", () => {
     expect(violations).toEqual([]);
   });
 
-  test("ADR-0013 and ADR-0016 record that the forwarding shims are gone and the file store remains", () => {
+  test("ADR-0013 and ADR-0016 record that the forwarding shims are gone and the file store does not remain", () => {
     const closeout = readFileSync(join(ROOT, "docs/adr/0013-six-pack-physical-closeout.md"), "utf8");
     const memory = readFileSync(join(ROOT, "docs/adr/0016-memory-physical-pack.md"), "utf8");
     const ownership = readFileSync(join(ROOT, "docs/adr/0007-six-pack-ownership.md"), "utf8");
     expect(closeout).toContain("Later note (2026-11-14 layout simplification)");
     expect(closeout).toContain("are deleted");
     expect(memory).toContain("Later note (2026-11-14 layout simplification)");
-    expect(memory).toContain("file-store rollback remains");
+    expect(memory).toContain("ADR-0017");
+    expect(memory).not.toContain("file-store rollback remains");
+    expect(memory).not.toContain("The old paths re-export");
     expect(ownership).toContain("Later note (2026-11-14 layout simplification)");
     for (const rel of [
       "docs/adr/0008-evidence-physical-pack.md",

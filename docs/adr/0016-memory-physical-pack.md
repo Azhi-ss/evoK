@@ -62,13 +62,17 @@ The six-pack logical map in ADR-0007 is unchanged:
   pattern, and were removed once no importer remained (M-e, #246).
 - `src/memory/index.ts` is the only public export surface. Other packages import
   from it, not from individual memory modules, so the projection cannot grow a
-  second back channel into the ledger. The old paths re-export that same entry
-  point, so an importer cannot drift onto a private module by keeping an old
-  import; the shims therefore expose a **superset** of their pre-move surface
-  (for example the evidence shim also carries `store`/`slice` names). Only the
-  old module paths could change which names they re-export, and M-e deletes them;
-  nothing new may depend on the extra names.
-- Later note (2026-11-14 layout simplification): the three forwarding files named above are deleted. Importers use `src/memory`. The file-store rollback remains (`EVOK_RESEARCH_MEMORY_STORE=file`). Deleting that store is not part of deleting the forwarding files.
+  second back channel into the ledger. While the old paths still existed they
+  re-exported that same entry point, so an importer could not drift onto a
+  private module by keeping an old import; those shims exposed a **superset** of
+  their pre-move surface (for example the evidence shim also carried
+  `store`/`slice` names). Only the old module paths could change which names they
+  re-exported. M-e deleted them; nothing new may depend on the extra names.
+- Later note (2026-11-14 layout simplification): the three forwarding files named
+  above are deleted. Importers use `src/memory`. Corrected 2026-11-16 after #246:
+  the file-store rollback does not remain.
+  [ADR-0017](0017-single-memory-store-closeout.md) deleted that store and
+  `EVOK_RESEARCH_MEMORY_STORE=file` in the same closeout.
 - `src/memory/README.md` states the authority rule in one paragraph: derived
   projection, no write authority, injection plus pinned read.
 - A physical move changes no served byte. Every snapshot, packet, Sham and slice
