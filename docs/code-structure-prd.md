@@ -176,13 +176,17 @@ Stage 1 must ship the trace-equivalence harness itself; later stages reuse it.
   `PreparedRun` boundary. It should not start before Stage 1 lands.
 - **#249 Charter** (C2 #251 in flight) adds authorization content that the
   Mission-owned snapshot must freeze; Stage 1 should read the merged charter code.
-- **#235 M-e** (shim deletion, aggregation pass) is the natural place to finish the
-  leftover flat shims, after a soak period.
+- **#235 M-e** landed in #246 (ADR-0017): the flat shims and the file store are
+  deleted. This stage plan does not reopen them.
 
 ## 8. Out of scope
 
 - Restructuring modules with **no production caller** (`dag-scheduler.ts`,
-  `team-execution.ts`). Unused code does not earn a refactor.
+  `team-execution.ts`). Unused code does not earn a refactor. Later note
+  (2026-11-16): those two files still have no Mission-mainline caller. They stay
+  because ADR-0011 and the execution pack surface lock thin default B
+  (`DEFAULT_BRANCH_WIDTH=1`, `Coordinator`, `DeterministicScheduler` constructing
+  `DAGScheduler`). A barrel export alone is not that reason.
 - Rewriting harness-opt, which is a separate workspace.
 - Any change to research semantics, evaluation metrics, or authorization rules.
 - A supervisor UI.
